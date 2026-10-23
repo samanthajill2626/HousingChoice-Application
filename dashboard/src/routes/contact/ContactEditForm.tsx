@@ -10,62 +10,47 @@
 import { useRef, useState } from 'react';
 import {
   ApiError,
-  TENANT_STATUSES,
-  TENANT_STATUS_LABELS,
-  LANDLORD_STATUSES,
-  LANDLORD_STATUS_LABELS,
   setTenantStatus,
+  statusOptionsFor,
   updateContact,
   type Address,
   type Contact,
   type ContactPatch,
+  type ContactStatusValue,
   type Relationship,
   type CustomField,
-  type TenantStatus,
   type ContactType,
   type OrgRef,
 } from '../../api/index.js';
 
-// The valid status values, per contact type. Tenants use the 7-value tenant
-// lifecycle; landlords use the 4-value lead lifecycle; everyone else uses the
-// coarse needs_review|active lifecycle.
-const NON_TENANT_STATUS_VALUES = ['needs_review', 'active'] as const;
-type NonTenantStatus = (typeof NON_TENANT_STATUS_VALUES)[number];
+// The valid status values and labels per contact type come from the ONE shared
+// mirror of the backend status model (api/types.ts statusOptionsFor, spec
+// 2026-10-23 D3) - the same list the contact page header dropdown offers. This
+// form keeps no list of its own.
 
-function isTenantStatus(v: string): v is TenantStatus {
-  return (TENANT_STATUSES as readonly string[]).includes(v);
-}
-
-function isNonTenantStatus(v: string): v is NonTenantStatus {
-  return (NON_TENANT_STATUS_VALUES as readonly string[]).includes(v);
-}
-
-function isLandlordStatus(v: string): boolean {
-  return (LANDLORD_STATUSES as readonly string[]).includes(v);
-}
-
-/** The set of valid status values for a given type. */
+/** The valid status values for a type, in dropdown order. */
 function validStatusesForType(type: ContactType): readonly string[] {
-  if (type === 'tenant') return TENANT_STATUSES;
-  if (type === 'landlord') return LANDLORD_STATUSES;
-  return NON_TENANT_STATUS_VALUES;
+  return statusOptionsFor(type).map((o) => o.value);
 }
 
-/** The status to start with (and to reset to) for a type, given the contact's
- *  stored status. Keeps the selection VALID for the type: a stored value that's
- *  off-list for the type falls back to that type's front door - tenant ?
- *  'needs_review'; landlord ? keep the stored lead value if valid, else
- *  'needs_review'; non-tenant ? keep 'active' if that's what was stored, else
- *  'needs_review'. Never surfaces an off-list value as a selectable option. */
+/** The status the field starts on for a type, given the contact's stored
+ *  status: the stored value when it is legal for the type, else the type's
+ *  front door ('needs_review'). Never surfaces an off-list value as a
+ *  selectable option. */
 function defaultStatusForType(type: ContactType, storedStatus: string): string {
-  if (type === 'tenant') {
-    return isTenantStatus(storedStatus) ? storedStatus : 'needs_review';
-  }
-  if (type === 'landlord') {
-    return isLandlordStatus(storedStatus) ? storedStatus : 'needs_review';
-  }
-  return isNonTenantStatus(storedStatus) ? storedStatus : 'needs_review';
+  return validStatusesForType(type).includes(storedStatus) ? storedStatus : 'needs_review';
 }
+
+/** The status a TYPE CHANGE moves the field to (spec 2026-10-23 D3): the new
+ *  type's first step - the same values the server writes for a type change
+ *  with no explicit status (D7). Staff may pick another before saving. */
+const FIRST_STATUS_FOR_TYPE: Readonly<Record<ContactType, ContactStatusValue>> = {
+  tenant: 'onboarding',
+  landlord: 'interested',
+  partner: 'active',
+  team_member: 'active',
+  unknown: 'needs_review',
+};
 import { Button } from '../../ui/index.js';
 import { consentAtFromDate } from '../../lib/consentCopy.js';
 import { typeChangeRefusalsFrom, type TypeChangeRefusal } from '../../lib/holdingRefusals.js';
@@ -128,31 +113,6 @@ export interface ContactEditFormProps {
   candidates?: Contact[];
 }
 
-// Non-tenant contacts use the coarse needs_review|active lifecycle.
-const NON_TENANT_STATUSES: { value: string; label: string }[] = [
-  { value: 'needs_review', label: 'Needs review' },
-  { value: 'active', label: 'Active' },
-];
-
-/** The selectable status options for a type (no off-list value ever prepended). */
-function statusOptionsForType(type: ContactType): { value: string; label: string }[] {
-  if (type === 'tenant') return TENANT_STATUS_OPTIONS;
-  if (type === 'landlord') return LANDLORD_STATUS_OPTIONS;
-  return NON_TENANT_STATUSES;
-}
-
-// Tenants use the 7-value tenant lifecycle (the status model).
-const TENANT_STATUS_OPTIONS: { value: string; label: string }[] = TENANT_STATUSES.map((s) => ({
-  value: s,
-  label: TENANT_STATUS_LABELS[s],
-}));
-
-// Landlords use the 5-value lead lifecycle (needs_review|interested|onboarding|active|parked).
-const LANDLORD_STATUS_OPTIONS: { value: string; label: string }[] = LANDLORD_STATUSES.map((s) => ({
-  value: s,
-  label: LANDLORD_STATUS_LABELS[s],
-}));
-
 function str(v: unknown): string {
   return typeof v === 'string' ? v : '';
 }
@@ -184,6 +144,14 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
   const organizationPicker = useRef<OrgPickerHandle>(null);
   const organizationText = useTypedOrgText(orgList, ORGANIZATION_KINDS, organizationPicker);
 
+  // The contact AS OPENED (plan round 2 R2P-1). Every "did the user change
+  // this?" comparison - buildPatch, onSubmit, typeChanged, initialStatus,
+  // statusType - reads `base`, never the live `contact` prop: the page
+  // re-reads the open contact on contact.updated (S2.9) and passes the new
+  // one in, and diffing a stale draft against it would write another
+  // operator's concurrent change back. Identity and display-only reads stay
+  // on the live prop.
+  const [base] = useState(contact);
   // Type + role together - a KindPicker value, kept collapsed behind "Change type"
   // (changingType) since retyping is rare. isTenant/isLandlord derive from the
   // LIVE kind so the type-specific fields swap the moment the base type changes.
@@ -202,7 +170,21 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
   const isPartner = kind.type === 'partner';
   // The live base type for status scoping (KindPicker may be momentarily null
   // mid-change; fall back to the stored type).
-  const liveType: ContactType = kind.type ?? contact.type;
+  const liveType: ContactType = kind.type ?? base.type;
+  // Spec 2026-10-23 D3: a TYPE change is measured against the STORED type - the
+  // picker left on a different base type at save time. A role-only switch
+  // inside one type and a change-and-back are not type changes. Stored = as
+  // OPENED (`base`, step 3j, plan round 2 R2P-1).
+  const typeChanged = kind.type !== null && kind.type !== base.type;
+  // The stored status as the field first shows it (an off-list stored value
+  // reads as the type's front door).
+  const initialStatus = defaultStatusForType(base.type, str(base.status));
+  // The type the Status field was last derived for (plan round 1 P1). Not
+  // liveType: the KindPicker's Other panel passes through type null, where
+  // liveType falls back to the STORED type, so a stored -> other -> Other ->
+  // stored round trip would look like no change and keep the other type's
+  // first step.
+  const [statusType, setStatusType] = useState<ContactType>(base.type);
 
   const [firstName, setFirstName] = useState(str(contact.firstName));
   const [lastName, setLastName] = useState(str(contact.lastName));
@@ -280,15 +262,20 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
     (contact.customFields ?? []).length > 0,
   );
 
-  // Changing the type re-scopes the valid status set. If the current selection
-  // isn't valid for the new type, reset it to that type's default (tenant ?
-  // 'needs_review'; non-tenant ? keep 'active' if stored else 'needs_review') so
-  // we never carry a type-invalid status (e.g. landlord 'active' ? tenant).
+  // Spec 2026-10-23 D3: a change of BASE type moves the Status field to the new
+  // type's first step (tenant Onboarding, landlord Interested, partner Active);
+  // coming back to the STORED type shows the stored status again (a
+  // change-and-back is not a change). A role-only switch inside one type
+  // (Landlord to the Property Manager preset) and the Other panel's base-less
+  // step (type null) leave the field alone. "A change of base type" is
+  // measured against statusType - the type the field was last derived for -
+  // so picking a base through Other still re-derives (plan round 1 P1).
   function handleKindChange(next: KindPickerValue): void {
     setKind(next);
     setTypeRefusals(null);
-    if (next.type !== null && !validStatusesForType(next.type).includes(status)) {
-      setStatus(defaultStatusForType(next.type, str(contact.status)));
+    if (next.type !== null && next.type !== statusType) {
+      setStatus(next.type === base.type ? initialStatus : FIRST_STATUS_FOR_TYPE[next.type]);
+      setStatusType(next.type);
     }
     // A type that is not tenant unmounts the tenant pickers, and the text typed
     // in them goes with them (an unmounted OrgPicker reports '').
@@ -305,9 +292,9 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
   }
   // Initial address parts (a structured object, or a legacy string folded into line1).
   const addrObj: Partial<Address> =
-    typeof contact.address === 'object' && contact.address !== null ? contact.address : {};
+    typeof base.address === 'object' && base.address !== null ? base.address : {};
   const initAddr = {
-    line1: str(addrObj.line1) || (typeof contact.address === 'string' ? contact.address : ''),
+    line1: str(addrObj.line1) || (typeof base.address === 'string' ? base.address : ''),
     line2: str(addrObj.line2),
     city: str(addrObj.city),
     state: str(addrObj.state),
@@ -331,49 +318,58 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
     const patch: ContactPatch = {};
     // Type + role from the KindPicker (kind.type is non-null whenever Save is
     // enabled). A cleared role sends '' (the server clears it).
-    if (kind.type !== null && kind.type !== contact.type) patch.type = kind.type;
+    if (kind.type !== null && kind.type !== base.type) patch.type = kind.type;
     const roleTrimmed = kind.role.trim();
-    if (roleTrimmed !== str(contact.role).trim()) patch.role = roleTrimmed;
+    if (roleTrimmed !== str(base.role).trim()) patch.role = roleTrimmed;
 
-    if (firstName !== str(contact.firstName)) patch.firstName = firstName;
-    if (lastName !== str(contact.lastName)) patch.lastName = lastName;
-    // For TENANTS the status (and porting) is written via setTenantStatus (which
-    // applies provenance/derivation) - NOT this plain PATCH, which would bypass
-    // it. Non-tenant status may ride the plain PATCH. Compare against the initial
-    // VALID selection (the stored value normalized to the type's valid set), so
-    // an off-list stored value doesn't masquerade as a no-op change.
-    if (!isTenant && status !== defaultStatusForType(liveType, str(contact.status))) {
+    if (firstName !== str(base.firstName)) patch.firstName = firstName;
+    if (lastName !== str(base.lastName)) patch.lastName = lastName;
+    // Status in THIS PATCH (spec 2026-10-23 D3) - only two cases:
+    //  - a type change to a NON-tenant: the shown status, ALWAYS, explicitly
+    //    (the server honors it over its own type-change default);
+    //  - a landlord with no type change, when the status changed: its park
+    //    reason rides this PATCH too, and the transition plan overwrites
+    //    park_reason on every move to parked, so the landlord status stays
+    //    here. Compared against the initial VALID selection, so an off-list
+    //    stored value does not masquerade as a no-op change.
+    // A tenant (stored or target) never sends status here - setTenantStatus
+    // applies provenance/derivation; a partner, team member or unknown contact
+    // with no type change sends it through setTenantStatus too (onSubmit), as
+    // the header dropdown does.
+    if (typeChanged) {
+      if (!isTenant) patch.status = status;
+    } else if (isLandlord && status !== initialStatus) {
       patch.status = status;
     }
-    if (notes !== str(contact.notes)) patch.notes = notes;
-    if (isLandlord && company !== str(contact['company'])) patch.company = company;
+    if (notes !== str(base.notes)) patch.notes = notes;
+    if (isLandlord && company !== str(base['company'])) patch.company = company;
 
     // Landlord onboarding deal terms + approval criteria — dirty-tracked, only the
     // changed fields ride the PATCH (the server SET-merges). (Preferences +
     // expected rent moved to the UNIT, 2026-07-10.)
     if (isLandlord) {
-      if (contractStatus !== str(contact.contract_status) && contractStatus !== '') {
+      if (contractStatus !== str(base.contract_status) && contractStatus !== '') {
         patch.contract_status = contractStatus === 'signed' ? 'signed' : 'unsigned';
       }
-      if (registeredLandlord !== (contact.registered_landlord === true)) {
+      if (registeredLandlord !== (base.registered_landlord === true)) {
         patch.registered_landlord = registeredLandlord;
       }
-      if (rtaWithin48h !== (contact.rta_within_48h === true)) {
+      if (rtaWithin48h !== (base.rta_within_48h === true)) {
         patch.rta_within_48h = rtaWithin48h;
       }
-      if (passInspection !== (contact.pass_inspection_first_try === true)) {
+      if (passInspection !== (base.pass_inspection_first_try === true)) {
         patch.pass_inspection_first_try = passInspection;
       }
-      if (incomeIncludesVoucher !== (contact.income_includes_voucher === true)) {
+      if (incomeIncludesVoucher !== (base.income_includes_voucher === true)) {
         patch.income_includes_voucher = incomeIncludesVoucher;
       }
-      if (parkReason !== str(contact.park_reason)) patch.park_reason = parkReason;
+      if (parkReason !== str(base.park_reason)) patch.park_reason = parkReason;
       // D9: only the req_ keys that changed - and, on the save that CHECKS One
       // month's rent, req_deposit null (D1; buildRequirementPatch adds it) - by
       // the same helper the property forms use, so the two cannot drift.
       // Gated on the LIVE kind: a contact retyped away from landlord sends no
       // req_ key (the server refuses them).
-      const req = buildRequirementPatch(requirementFormValuesFromLandlord(contact), requirements);
+      const req = buildRequirementPatch(requirementFormValuesFromLandlord(base), requirements);
       // Defensive: the amount inputs' min={0} stops a bad amount at native
       // validation first; ok: false is pinned in requirementForm.test.ts (S5 Task 5.3).
       if (!req.ok) return { error: req.error };
@@ -382,16 +378,16 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
 
     // Relationships - only send if the normalized form changed.
     const normRel = normalizeRelationships(relRows);
-    const initRel = normalizeRelationships(contact.relationships ?? []);
+    const initRel = normalizeRelationships(base.relationships ?? []);
     if (JSON.stringify(normRel) !== JSON.stringify(initRel)) patch.relationships = normRel;
 
     // Custom fields - only send if the normalized form changed.
     const normCf = normalizeCustomFields(cfRows);
-    const initCf = normalizeCustomFields(contact.customFields ?? []);
+    const initCf = normalizeCustomFields(base.customFields ?? []);
     if (JSON.stringify(normCf) !== JSON.stringify(initCf)) patch.customFields = normCf;
 
     if (isTenant) {
-      const initialVoucher = typeof contact.voucherSize === 'number' ? String(contact.voucherSize) : '';
+      const initialVoucher = typeof base.voucherSize === 'number' ? String(base.voucherSize) : '';
       if (voucher !== initialVoucher) {
         if (voucher === '') {
           // Leave voucher untouched rather than send a blank (the server expects a
@@ -407,7 +403,7 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
       // Voucher expiration: dirty-tracked on the YYYY-MM-DD date part. A cleared
       // value sends null (the server retires the voucher deadline); a set value is
       // canonicalized to an ISO instant.
-      const initialVoucherExp = str(contact.voucher_expiration_date).slice(0, 10);
+      const initialVoucherExp = str(base.voucher_expiration_date).slice(0, 10);
       if (voucherExpiration !== initialVoucherExp) {
         patch.voucher_expiration_date =
           voucherExpiration.trim() === '' ? null : consentAtFromDate(voucherExpiration.trim());
@@ -426,16 +422,16 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
       // on the list is never refused for being unchanged (D5). Typed text Save
       // committed (R1-ADV-FE-1) is an exact list name too, so a name equal to
       // the stored one stays off the wire.
-      if (org.housingAuthority !== str(contact.housingAuthority)) {
+      if (org.housingAuthority !== str(base.housingAuthority)) {
         patch.housingAuthority = org.housingAuthority;
       }
-      if (org.agency !== str(contact.agency)) {
+      if (org.agency !== str(base.agency)) {
         patch.agency = org.agency;
       }
-      if (pets !== str(contact['pets'])) patch.pets = pets;
-      if (evictions !== str(contact['evictions'])) patch.evictions = evictions;
-      if (tenure !== str(contact['tenure'])) patch.tenure = tenure;
-      if (lifEligible !== (contact['lifEligible'] === true)) patch.lifEligible = lifEligible;
+      if (pets !== str(base['pets'])) patch.pets = pets;
+      if (evictions !== str(base['evictions'])) patch.evictions = evictions;
+      if (tenure !== str(base['tenure'])) patch.tenure = tenure;
+      if (lifEligible !== (base['lifEligible'] === true)) patch.lifEligible = lifEligible;
       // Address: if ANY part changed, send the whole object (the server keeps only
       // the non-empty parts).
       if (
@@ -452,7 +448,7 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
     // chip ('' - the server REMOVEs it) or committed typed text, so the
     // comparison is exact and an untouched value - on the list or not - never
     // reaches the wire (D5).
-    if (isPartner && org.organization !== str(contact.organization)) {
+    if (isPartner && org.organization !== str(base.organization)) {
       patch.organization = org.organization;
     }
     return patch;
@@ -512,15 +508,25 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
       setError(result.error);
       return;
     }
-    // For a tenant, a status OR porting change is a SEPARATE write through the
-    // transition service (NOT the plain PATCH). Detect either, comparing status
-    // against the initial VALID tenant selection (a legacy off-list value was
-    // normalized to 'needs_review' on load).
-    const initialStatus = defaultStatusForType(liveType, str(contact.status));
-    const tenantStatusChanged =
-      isTenant && (status !== initialStatus || porting !== (contact.porting === true));
+    // The status write that does NOT ride the PATCH goes through the transition
+    // service (setTenantStatus serves every type; spec 2026-10-23 D3):
+    //  - a tenant with no type change: a status or porting change (unchanged);
+    //  - a type change TO tenant: the PATCH never carries a tenant status and
+    //    the server auto-advances to Onboarding, so only a different shown
+    //    status (or a porting change - porting is only writable here) needs
+    //    this second write; the default case writes ONE milestone, not two;
+    //  - a partner, team member or unknown contact with no type change: a
+    //    status change, exactly as the header dropdown writes it.
+    // Compared against the initial VALID selection (a legacy off-list value
+    // was normalized to 'needs_review' on load).
+    const portingChanged = porting !== (base.porting === true);
+    const statusTransition = typeChanged
+      ? isTenant && (status !== 'onboarding' || portingChanged)
+      : isTenant
+        ? status !== initialStatus || portingChanged
+        : !isLandlord && status !== initialStatus;
 
-    if (Object.keys(result).length === 0 && !tenantStatusChanged) {
+    if (Object.keys(result).length === 0 && !statusTransition) {
       onClose(); // nothing changed
       return;
     }
@@ -533,17 +539,19 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
       if (Object.keys(result).length > 0) {
         updated = await updateContact(contact.contactId, result);
       }
-      // Tenant lifecycle status + porting go through setTenantStatus so
-      // provenance/derivation apply. The returned contact supersedes the PATCH's.
-      // toStatus is GUARANTEED valid here (the selection is kept in the tenant
-      // set), but narrow defensively - never cast an unchecked value, and fall
-      // back to the front door if somehow off-list.
-      if (tenantStatusChanged) {
-        const toStatus: TenantStatus = isTenantStatus(status) ? status : 'needs_review';
+      // The transition-service write (see statusTransition above), AFTER the
+      // PATCH so a type change lands first. The returned contact supersedes the
+      // PATCH's. toStatus is kept in the live type's list by the select, but
+      // narrow defensively - never send an unchecked value; fall back to the
+      // front door if somehow off-list. Porting rides only a tenant's write.
+      if (statusTransition) {
+        const toStatus = (
+          validStatusesForType(liveType).includes(status) ? status : 'needs_review'
+        ) as ContactStatusValue;
         updated = await setTenantStatus(contact.contactId, {
           toStatus,
           source: 'manual',
-          porting,
+          ...(isTenant && { porting }),
         });
       }
       onSaved(updated);
@@ -573,19 +581,21 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
 
   // The current saved kind, shown in the collapsed summary: role (custom kind) +
   // its base record type, else just the base type label.
-  const savedRole = str(contact.role).trim();
+  const savedRole = str(base.role).trim();
   const currentKindLabel = savedRole
-    ? `${savedRole} - ${CONTACT_TYPE_LABEL[contact.type]}`
-    : CONTACT_TYPE_LABEL[contact.type];
+    ? `${savedRole} - ${CONTACT_TYPE_LABEL[base.type]}`
+    : CONTACT_TYPE_LABEL[base.type];
   // Save is blocked only while a type change is mid-flight with no base picked
   // (KindPicker "Other" before choosing Tenant/Landlord ? kind.type null).
   const canSave = !saving && kind.type !== null;
 
-  // Status options for the live type - ALWAYS just that type's valid set (no
-  // off-list value is ever prepended). The selected `status` is guaranteed to be
-  // a member (seeded valid; re-derived on type change), so the select never shows
-  // nor submits an off-list/type-invalid value.
-  const statusOptions = statusOptionsForType(liveType);
+  // Status options for the type the field was last derived for - EXACTLY the
+  // header dropdown's list (statusOptionsFor, spec 2026-10-23 D3); no off-list
+  // value is ever prepended. statusType, not liveType (plan round 2 R2P-3):
+  // during the Other panel's base-less step liveType falls back to the stored
+  // type while the field may hold another type's value. statusType equals
+  // kind.type whenever kind.type is non-null.
+  const statusOptions = statusOptionsFor(statusType);
 
   return (
     <Modal
@@ -636,7 +646,7 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
               value={kind}
               onChange={handleKindChange}
               roleSuggestions={vocab.roles}
-              offerCaseworker={isCaseworkerContact(contact)}
+              offerCaseworker={isCaseworkerContact(base)}
             />
             {/* A refused type change (409 type_change_refused, spec
                 2026-10-12 D2): what blocks it, beside the picker. A type

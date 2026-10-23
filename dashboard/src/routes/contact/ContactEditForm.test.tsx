@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { ApiError, type Contact, type OrgEntry } from '../../api/index.js';
+import { ApiError, statusOptionsFor, type Contact, type ContactType, type OrgEntry } from '../../api/index.js';
 import { MemoryRouter } from 'react-router-dom';
 import { TYPE_CHANGE_LANDLORD_SENTENCE } from '../../lib/holdingRefusals.js';
 
@@ -268,8 +268,9 @@ describe('ContactEditForm', () => {
 
   it('changing the Type swaps the type-specific fields and PATCHes { type }', async () => {
     const user = userEvent.setup();
-    // A tenant on 'needs_review' resolves to the SAME default for a landlord, so
-    // the type switch sends only { type } (no incidental status delta).
+    // Spec 2026-10-23 D3: a type change moves the Status field to the new
+    // type's first step (landlord Interested), and a non-tenant target's PATCH
+    // carries that shown status explicitly.
     const stable = { ...TENANT, status: 'needs_review' };
     updateContact.mockResolvedValue({ ...stable, type: 'landlord' });
     render(<ContactEditForm contact={stable} onClose={vi.fn()} onSaved={vi.fn()} />);
@@ -287,7 +288,7 @@ describe('ContactEditForm', () => {
     expect(screen.getByLabelText(/^Company$/i)).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
-    expect(updateContact).toHaveBeenCalledWith('k1', { type: 'landlord' });
+    expect(updateContact).toHaveBeenCalledWith('k1', { type: 'landlord', status: 'interested' });
   });
 
   it('editing Unknown to Property Manager sends the full landlord and role pair', async () => {
@@ -298,7 +299,11 @@ describe('ContactEditForm', () => {
     await user.click(screen.getByRole('button', { name: /Change type/i }));
     await user.click(screen.getByRole('button', { name: 'Property Manager' }));
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
-    expect(updateContact).toHaveBeenCalledWith('u9', { type: 'landlord', role: 'Property Manager' });
+    expect(updateContact).toHaveBeenCalledWith('u9', {
+      type: 'landlord',
+      role: 'Property Manager',
+      status: 'interested',
+    });
   });
 
   it('editing a stored Property Manager to plain Landlord clears only the role', async () => {
@@ -440,30 +445,27 @@ describe('ContactEditForm', () => {
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith(updated));
   });
 
-  it('changing type landlord→tenant resets the status to a valid tenant value (never submits "active" as a tenant status)', async () => {
+  it('changing type landlord to tenant shows Onboarding and saves ONE milestone - no follow-up setTenantStatus (spec 2026-10-23 D3)', async () => {
     const user = userEvent.setup();
-    // LANDLORD.status === 'active' (valid for a non-tenant). Switching to tenant
-    // must reset the selection to a valid tenant status.
-    setTenantStatus.mockResolvedValue({ ...LANDLORD, type: 'tenant', status: 'needs_review' });
-    updateContact.mockResolvedValue({ ...LANDLORD, type: 'tenant' });
-    render(<ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={vi.fn()} />);
+    const onSaved = vi.fn();
+    const retyped = { ...LANDLORD, type: 'tenant' as const, status: 'onboarding' };
+    updateContact.mockResolvedValue(retyped);
+    render(<ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={onSaved} />);
 
     await user.click(screen.getByRole('button', { name: /Change type/i }));
     await user.click(screen.getByRole('button', { name: 'Tenant' }));
 
-    // The status select now offers tenant statuses and the selection is valid.
-    const select = screen.getByRole('combobox', { name: /Status/i }) as HTMLSelectElement;
+    // The tenant list, on the tenant's first step - never the landlord's 'active'.
+    const select = screen.getByRole('combobox', { name: /^Status$/ }) as HTMLSelectElement;
     expect(within(select).getAllByRole('option')).toHaveLength(7);
-    expect(select.value).toBe('needs_review');
-    expect((within(select).queryAllByRole('option') as HTMLOptionElement[]).map((o) => o.value)).not.toContain(
-      'active',
-    );
+    expect(select.value).toBe('onboarding');
 
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
-    // A tenant status write (if any) never carries 'active'.
-    for (const call of setTenantStatus.mock.calls) {
-      expect((call[1] as { toStatus: string }).toStatus).not.toBe('active');
-    }
+    // The PATCH never carries a tenant status: the server's own auto-advance
+    // writes Onboarding, which is what the field shows, so there is no second write.
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('L1', { type: 'tenant' }));
+    expect(setTenantStatus).not.toHaveBeenCalled();
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(retyped));
   });
 
   // --- Landlord onboarding inputs (Task 4b) ---------------------------------
@@ -1585,5 +1587,313 @@ describe('ContactEditForm - landlord Requirements / Qualifications', () => {
     const patch = updateContact.mock.calls[0]![1] as Record<string, unknown>;
     expect(patch['type']).toBe('tenant');
     expect(Object.keys(patch).filter((k) => k.startsWith('req_'))).toEqual([]);
+  });
+});
+
+// Spec 2026-10-23 D1/D3: the Status field offers exactly the header's list for
+// every type, shows an Inactive caseworker as Inactive, writes a partner /
+// team member / unknown status change the way the header does, and follows
+// the type-change rules (measured against the STORED type).
+describe('ContactEditForm - one status list per type and the type-change rules (spec 2026-10-23 D1, D3)', () => {
+  const INACTIVE_CASEWORKER: Contact = {
+    contactId: 'p1',
+    type: 'partner',
+    role: 'Caseworker',
+    status: 'inactive',
+    firstName: 'Renee',
+    lastName: 'Carter',
+    phone: '+14045550123',
+  };
+  const INACTIVE_PARTNER: Contact = {
+    contactId: 'p2',
+    type: 'partner',
+    status: 'inactive',
+    firstName: 'Pat',
+    lastName: 'Moss',
+    phone: '+14045550125',
+  };
+  const TEAM_MEMBER: Contact = {
+    contactId: 'tm1',
+    type: 'team_member',
+    status: 'active',
+    firstName: 'Sam',
+    lastName: 'Lee',
+    phone: '+14045550124',
+  };
+  const UNKNOWN_REVIEW: Contact = { contactId: 'u9', type: 'unknown', status: 'needs_review', phone: '+15550100001' };
+  const UNKNOWN_INACTIVE: Contact = { ...UNKNOWN_REVIEW, status: 'inactive' };
+
+  // EXACT 'Status' name: a landlord's dialog also has "Contract status".
+  const statusSelect = (): HTMLSelectElement => screen.getByRole('combobox', { name: /^Status$/ }) as HTMLSelectElement;
+  const optionPairs = (): Array<[string, string]> =>
+    within(statusSelect())
+      .getAllByRole('option')
+      .map((o) => [(o as HTMLOptionElement).value, o.textContent ?? '']);
+  const save = (): HTMLElement => screen.getByRole('button', { name: /^Save$/i });
+
+  const D1: Array<[ContactType, Array<[string, string]>]> = [
+    [
+      'tenant',
+      [
+        ['needs_review', 'Needs review'],
+        ['onboarding', 'Onboarding'],
+        ['searching', 'Searching'],
+        ['placing', 'Placing'],
+        ['placed', 'Placed'],
+        ['on_hold', 'On hold'],
+        ['inactive', 'Inactive'],
+      ],
+    ],
+    [
+      'landlord',
+      [
+        ['needs_review', 'Needs review'],
+        ['interested', 'Interested'],
+        ['onboarding', 'Onboarding'],
+        ['active', 'Active'],
+        ['parked', 'Parked'],
+      ],
+    ],
+    ['partner', [['needs_review', 'Needs review'], ['active', 'Active'], ['inactive', 'Inactive']]],
+    ['team_member', [['needs_review', 'Needs review'], ['active', 'Active'], ['inactive', 'Inactive']]],
+    ['unknown', [['needs_review', 'Needs review'], ['inactive', 'Inactive']]],
+  ];
+
+  it.each(D1)('a %s offers exactly its D1 list - the same list the header dropdown offers', (type, pairs) => {
+    render(
+      <ContactEditForm
+        contact={{ contactId: 'c1', type, status: 'needs_review', phone: '+14045550100' }}
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+    );
+    expect(optionPairs()).toEqual(pairs);
+    expect(optionPairs()).toEqual(statusOptionsFor(type).map((o) => [o.value, o.label]));
+  });
+
+  it('a legacy (unknown, active) contact shows Needs review - Active is not an unknown status', () => {
+    render(<ContactEditForm contact={{ ...UNKNOWN_REVIEW, status: 'active' }} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(statusSelect().value).toBe('needs_review');
+    expect(optionPairs().map(([value]) => value)).not.toContain('active');
+  });
+
+  it('DISPLAYS an Inactive caseworker as Inactive', () => {
+    render(<ContactEditForm contact={INACTIVE_CASEWORKER} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(statusSelect().value).toBe('inactive');
+    expect(within(statusSelect()).getByRole('option', { name: 'Inactive' })).toHaveProperty('selected', true);
+  });
+
+  it('an Inactive caseworker stays Inactive across an unrelated-field save: no status write', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...INACTIVE_CASEWORKER, firstName: 'Rene' });
+    render(<ContactEditForm contact={INACTIVE_CASEWORKER} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.clear(screen.getByLabelText(/First name/i));
+    await user.type(screen.getByLabelText(/First name/i), 'Rene');
+    await user.click(save());
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('p1', { firstName: 'Rene' }));
+    expect(setTenantStatus).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a caseworker', INACTIVE_CASEWORKER, 'active'],
+    ['a team member', TEAM_MEMBER, 'inactive'],
+    ['an unknown contact', UNKNOWN_REVIEW, 'inactive'],
+  ] as const)(
+    'with no type change, %s status change goes through the transition service, as the header does',
+    async (_label, contact, toStatus) => {
+      const user = userEvent.setup();
+      const onSaved = vi.fn();
+      const updated = { ...contact, status: toStatus };
+      setTenantStatus.mockResolvedValue(updated);
+      render(<ContactEditForm contact={contact} onClose={vi.fn()} onSaved={onSaved} />);
+      await user.selectOptions(statusSelect(), toStatus);
+      await user.click(save());
+      await waitFor(() =>
+        expect(setTenantStatus).toHaveBeenCalledWith(contact.contactId, { toStatus, source: 'manual' }),
+      );
+      // Never the plain PATCH (no other field changed, so no PATCH at all).
+      expect(updateContact).not.toHaveBeenCalled();
+      await waitFor(() => expect(onSaved).toHaveBeenCalledWith(updated));
+    },
+  );
+
+  it('a type change from an Inactive partner to tenant shows Onboarding and writes it once', async () => {
+    const user = userEvent.setup();
+    const onSaved = vi.fn();
+    const retyped = { ...INACTIVE_PARTNER, type: 'tenant' as const, status: 'onboarding' };
+    updateContact.mockResolvedValue(retyped);
+    render(<ContactEditForm contact={INACTIVE_PARTNER} onClose={vi.fn()} onSaved={onSaved} />);
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    await user.click(screen.getByRole('button', { name: 'Tenant' }));
+    expect(statusSelect().value).toBe('onboarding');
+    await user.click(save());
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('p2', { type: 'tenant' }));
+    expect(setTenantStatus).not.toHaveBeenCalled();
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(retyped));
+  });
+
+  it('a type change to tenant with another status picked: the PATCH, then ONE setTenantStatus with that status', async () => {
+    const user = userEvent.setup();
+    const onSaved = vi.fn();
+    updateContact.mockResolvedValue({ ...UNKNOWN_INACTIVE, type: 'tenant', status: 'onboarding' });
+    const searching = { ...UNKNOWN_INACTIVE, type: 'tenant' as const, status: 'searching' };
+    setTenantStatus.mockResolvedValue(searching);
+    render(<ContactEditForm contact={UNKNOWN_INACTIVE} onClose={vi.fn()} onSaved={onSaved} />);
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    await user.click(screen.getByRole('button', { name: 'Tenant' }));
+    expect(statusSelect().value).toBe('onboarding');
+    await user.selectOptions(statusSelect(), 'searching');
+    await user.click(save());
+    await waitFor(() =>
+      expect(setTenantStatus).toHaveBeenCalledWith('u9', { toStatus: 'searching', source: 'manual', porting: false }),
+    );
+    expect(updateContact).toHaveBeenCalledWith('u9', { type: 'tenant' });
+    expect(setTenantStatus).toHaveBeenCalledTimes(1);
+    expect(updateContact.mock.invocationCallOrder[0]!).toBeLessThan(setTenantStatus.mock.invocationCallOrder[0]!);
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(searching));
+  });
+
+  it('a type change from an Inactive unknown contact to partner shows Active and the PATCH carries it', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...UNKNOWN_INACTIVE, type: 'partner', status: 'active' });
+    render(<ContactEditForm contact={UNKNOWN_INACTIVE} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    await user.click(screen.getByRole('button', { name: 'Partner' }));
+    expect(statusSelect().value).toBe('active');
+    await user.click(save());
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('u9', { type: 'partner', status: 'active' }));
+    expect(setTenantStatus).not.toHaveBeenCalled();
+  });
+
+  it('on a type change staff may pick another status first: the PATCH carries the shown one', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...UNKNOWN_INACTIVE, type: 'landlord', status: 'parked' });
+    render(<ContactEditForm contact={UNKNOWN_INACTIVE} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    await user.click(screen.getByRole('button', { name: 'Landlord' }));
+    expect(statusSelect().value).toBe('interested');
+    await user.selectOptions(statusSelect(), 'parked');
+    await user.click(save());
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('u9', { type: 'landlord', status: 'parked' }));
+    expect(setTenantStatus).not.toHaveBeenCalled();
+  });
+
+  it('(PIN) a role-only switch (Landlord to the Property Manager preset) keeps the stored status and writes none', async () => {
+    const user = userEvent.setup();
+    const onboarding: Contact = { ...LANDLORD, status: 'onboarding' };
+    updateContact.mockResolvedValue({ ...onboarding, role: 'Property Manager' });
+    render(<ContactEditForm contact={onboarding} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    await user.click(screen.getByRole('button', { name: 'Property Manager' }));
+    expect(statusSelect().value).toBe('onboarding');
+    await user.click(save());
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('L1', { role: 'Property Manager' }));
+    expect(setTenantStatus).not.toHaveBeenCalled();
+  });
+
+  it('a change-and-back (tenant to landlord to tenant) is not a type change: the stored status shows and none is written', async () => {
+    const user = userEvent.setup();
+    const searching: Contact = { ...TENANT, status: 'searching' };
+    updateContact.mockResolvedValue({ ...searching, firstName: 'Tash' });
+    render(<ContactEditForm contact={searching} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    await user.click(screen.getByRole('button', { name: 'Landlord' }));
+    expect(statusSelect().value).toBe('interested');
+    await user.click(screen.getByRole('button', { name: 'Tenant' }));
+    expect(statusSelect().value).toBe('searching');
+    await user.clear(screen.getByLabelText(/First name/i));
+    await user.type(screen.getByLabelText(/First name/i), 'Tash');
+    await user.click(save());
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('k1', { firstName: 'Tash' }));
+    expect(setTenantStatus).not.toHaveBeenCalled();
+  });
+
+  // Plan round 1 P1: the KindPicker's Other panel passes through type null on
+  // the way to a base; the field must still come back to the stored status.
+  it('a change-and-back through Other (tenant to landlord to Other to tenant) shows the stored status and writes none', async () => {
+    const user = userEvent.setup();
+    const searching: Contact = { ...TENANT, status: 'searching' };
+    updateContact.mockResolvedValue({ ...searching, firstName: 'Tash' });
+    render(<ContactEditForm contact={searching} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    await user.click(screen.getByRole('button', { name: 'Landlord' }));
+    expect(statusSelect().value).toBe('interested');
+    await user.click(screen.getByRole('button', { name: 'Other' }));
+    await user.click(screen.getByRole('radio', { name: /Tenant/i }));
+    expect(statusSelect().value).toBe('searching');
+    await user.clear(screen.getByLabelText(/First name/i));
+    await user.type(screen.getByLabelText(/First name/i), 'Tash');
+    await user.click(save());
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('k1', { firstName: 'Tash' }));
+    expect(setTenantStatus).not.toHaveBeenCalled();
+  });
+
+  it('a Parked landlord through Tenant and Other back to Landlord stays Parked and writes no status', async () => {
+    const user = userEvent.setup();
+    const parked: Contact = { ...LANDLORD, status: 'parked', park_reason: 'Declined the program' };
+    updateContact.mockResolvedValue({ ...parked, firstName: 'Jim' });
+    render(<ContactEditForm contact={parked} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    await user.click(screen.getByRole('button', { name: 'Tenant' }));
+    expect(statusSelect().value).toBe('onboarding');
+    await user.click(screen.getByRole('button', { name: 'Other' }));
+    await user.click(screen.getByRole('radio', { name: /Landlord/i }));
+    expect(statusSelect().value).toBe('parked');
+    await user.clear(screen.getByLabelText(/First name/i));
+    await user.type(screen.getByLabelText(/First name/i), 'Jim');
+    await user.click(save());
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('L1', { firstName: 'Jim' }));
+    expect(setTenantStatus).not.toHaveBeenCalled();
+  });
+
+  // Plan round 2 R2P-1: the page re-reads the open contact on contact.updated
+  // (S2.9) and passes the new one in; the form must diff against the contact
+  // as OPENED, or a save writes another operator's change back.
+  it('a contact prop changed under the open form is never written back: the PATCH carries only the edited field', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    const onSaved = vi.fn();
+    updateContact.mockResolvedValue({ ...TEAM_MEMBER, firstName: 'Samuel' });
+    const { rerender } = render(<ContactEditForm contact={TEAM_MEMBER} onClose={onClose} onSaved={onSaved} />);
+    // Another operator re-types the contact, marks it Inactive and edits its
+    // last name; the live re-read hands the form the new contact.
+    rerender(
+      <ContactEditForm
+        contact={{ ...TEAM_MEMBER, type: 'partner', status: 'inactive', lastName: 'Leigh' }}
+        onClose={onClose}
+        onSaved={onSaved}
+      />,
+    );
+    await user.clear(screen.getByLabelText(/First name/i));
+    await user.type(screen.getByLabelText(/First name/i), 'Samuel');
+    await user.click(save());
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('tm1', { firstName: 'Samuel' }));
+    expect(setTenantStatus).not.toHaveBeenCalled();
+  });
+
+  it('(PIN) a Parked landlord keeps its park reason across an unrelated-field save', async () => {
+    const user = userEvent.setup();
+    const parked: Contact = { ...LANDLORD, status: 'parked', park_reason: 'Declined the program' };
+    updateContact.mockResolvedValue({ ...parked, firstName: 'Jim' });
+    render(<ContactEditForm contact={parked} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(statusSelect().value).toBe('parked');
+    await user.clear(screen.getByLabelText(/First name/i));
+    await user.type(screen.getByLabelText(/First name/i), 'Jim');
+    await user.click(save());
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('L1', { firstName: 'Jim' }));
+    expect(setTenantStatus).not.toHaveBeenCalled();
+  });
+
+  it('(PIN) a landlord moved to Parked saves status and park reason in ONE PATCH - never the transition (it would overwrite park_reason)', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...LANDLORD, status: 'parked', park_reason: 'Not a fit' });
+    render(<ContactEditForm contact={{ ...LANDLORD, status: 'interested' }} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.selectOptions(statusSelect(), 'parked');
+    await user.type(screen.getByLabelText(/^Park reason$/i), 'Not a fit');
+    await user.click(save());
+    await waitFor(() =>
+      expect(updateContact).toHaveBeenCalledWith('L1', { status: 'parked', park_reason: 'Not a fit' }),
+    );
+    expect(setTenantStatus).not.toHaveBeenCalled();
   });
 });

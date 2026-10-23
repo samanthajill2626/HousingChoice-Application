@@ -560,7 +560,11 @@ export function useInbox(
 
   useEffect(() => clearPendingRefetch, [clearPendingRefetch]);
 
-  useEventStream({ onConversationUpdated: scheduleRefetch });
+  // contact.updated (unknown-inactive spec D2, AR3): a status or type change
+  // re-reads the head so a row's Inactive tag and triage chip update without a
+  // reload. A header status change writes no thread, so no
+  // conversation.updated arrives for it.
+  useEventStream({ onConversationUpdated: scheduleRefetch, onContactUpdated: scheduleRefetch });
 
   // --- Optimistic mutations (the patches are mirrored in pendingRef) --------
   const setPatch = useCallback((key: string, patch: Pending) => {

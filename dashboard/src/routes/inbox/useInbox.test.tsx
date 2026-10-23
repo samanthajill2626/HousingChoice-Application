@@ -311,6 +311,20 @@ describe('useInbox', () => {
     await waitFor(() => expect(getInbox).toHaveBeenCalledTimes(2));
   });
 
+  it('refetches (coalesced) the current page on an SSE contact.updated (a header status change writes no thread)', async () => {
+    // unknown-inactive spec D2 / AR3: the row's Inactive tag and triage chip
+    // must update without a reload, and no conversation.updated arrives for
+    // a status-only change.
+    getInbox.mockResolvedValue(pageOf([mkRow()]));
+    render(<Probe filter="all" />);
+    await waitFor(() => expect(getInbox).toHaveBeenCalledTimes(1));
+    act(() => {
+      sse.onContactUpdated?.({ contactId: 'c1' });
+      sse.onContactUpdated?.({ contactId: 'c1' });
+    });
+    await waitFor(() => expect(getInbox).toHaveBeenCalledTimes(2));
+  });
+
   it('keeps an optimistic mark-read visible across an interleaved refetch that still shows it unread', async () => {
     getInbox.mockResolvedValue(pageOf([mkRow({ contactId: 'c1', unreadCount: 2 })]));
     let releaseRead: () => void = () => {};

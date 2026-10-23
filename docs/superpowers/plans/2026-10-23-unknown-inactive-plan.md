@@ -9,7 +9,7 @@
   `docs/superpowers/reviews/2026-10-23-unknown-inactive/`.
 - Spec review: 2 rounds -
   `docs/superpowers/reviews/2026-10-23-unknown-inactive/design-review/adjudications.md`.
-- Status: PLAN v2 (2026-10-23), plan review round 1 applied (P1-P15); round 2 next. Sections 0-4 are
+- Status: PLAN v3 (2026-10-23), plan review rounds 1-2 applied; round 3 next. Sections 0-4 are
   BINDING and written by the planner; slice sections 5-10 are opus section
   drafts assembled verbatim. Section 4 (planner rulings AR1-AR24) wins over
   any slice text it contradicts. "Plan section N" always means this file's
@@ -167,6 +167,11 @@
   check-only; S1 records any (unknown, active) they create.
 - W7 Rollout (planner and human, NOT the builder): re-count (unknown, active)
   on dev and prod just before deploy; any found move only on Cameron's go.
+- W8 Today/Inbox live drop (plan round 2 R2P-4): it rests on one debounced
+  refetch over eventually consistent reads - the GSI at
+  `app/src/routes/today.ts:868` and the GetItem behind the AR8 skip; the same
+  pattern as `conversation.updated`. DynamoDB Local is always consistent, so
+  the e2e cannot see it. Recorded in the S2 report; no mechanism change.
 
 ## 4. Planner rulings (binding; win over slice text)
 
@@ -2998,6 +3003,17 @@ describe('statusTransition - conditional type write + contact.updated (AR3, AR4)
     expect(notified).toEqual([{ contactId: 'uk-1' }]);
   });
 
+  it('reads the contact strongly consistent - the audit from, the milestone and its label come from that read (plan round 2 R2P-2)', async () => {
+    // The edit form sends this right after a type-change PATCH (S4.4); a stale
+    // read would audit the old `from` and label the milestone by the old type.
+    await world.contactsRepo.create({ contactId: 'uk-4', type: 'unknown', status: 'needs_review' });
+    const getById = vi.spyOn(world.contactsRepo, 'getById');
+    await svc.setTenantStatus('uk-4', { toStatus: 'inactive', source: 'manual', expectedType: 'unknown' });
+    // The first read is the setter's own (the guard's re-read runs only on a
+    // refused write).
+    expect(getById).toHaveBeenNthCalledWith(1, 'uk-4', { consistentRead: true });
+  });
+
   it('a contact re-typed since the caller checked is ContactTypeChangedError: nothing written, audited, timelined or emitted', async () => {
     // The caller validated `inactive` against `unknown`; a concurrent writer
     // has since made the contact a landlord, for whom `inactive` is illegal.
@@ -3069,7 +3085,9 @@ fails `promise resolved "{...status: 'inactive'...}" instead of rejecting`
 (today the setter writes (landlord, inactive)); "deleted under the write"
 fails because the raw ConditionalCheckFailedException propagates (`expected
 ConditionalCheckFailedException to be an instance of EntityNotFoundError`);
-"EVERY successful call" fails on `notified`. The two (PIN) cases pass.
+"EVERY successful call" fails on `notified`; "reads the contact strongly
+consistent" fails: the first `getById` call is `('uk-4')` with no options
+(plan round 2 R2P-2). The two (PIN) cases pass.
 
 Step 3 - implementation in `app/src/services/statusTransition.ts`.
 
@@ -3192,6 +3210,22 @@ Replacement:
         }
         throw err;
       }
+```
+
+Edit G (plan round 2 R2P-2: the setter's own read is strongly consistent;
+ASCII line, unique in the file at ~611). Current text:
+
+```ts
+      const contact = await contactsRepo.getById(contactId);
+```
+
+Replacement:
+
+```ts
+      // Strongly consistent (plan round 2 R2P-2): the audit `from`, the
+      // milestone decision and its label map all come from this read, and the
+      // edit form calls this right after a type-change PATCH.
+      const contact = await contactsRepo.getById(contactId, { consistentRead: true });
 ```
 
 Edit F (the emit). Current text (inside `setTenantStatus`):
@@ -4274,6 +4308,13 @@ Step 3 - write
   it, the inbox does not), the derived tenant status
   (`services/statusTransition.ts` deriveTenantStatus) and the import. Report
   them; file nothing (AR14).
+- W8 (plan round 2 R2P-4): the Today/Inbox drop-without-reload rests on one
+  debounced refetch (`useToday.ts:39`, 300 ms) over eventually consistent
+  reads - the `(unknown, needs_review)` GSI at `app/src/routes/today.ts:868`
+  and the default GetItem behind the AR8 skip - the same pattern as
+  `conversation.updated`; DynamoDB Local is always consistent, so the e2e
+  cannot see a stale read. A known prod-only residual risk; no mechanism
+  change.
 - Untrimmed input paths: none. `toStatus`, `status` and `type` are fixed keys
   validated against allowlists; `contactId` is a path id.
 - Anything the tree held that this plan got wrong.
@@ -6715,6 +6756,10 @@ The rules this task implements (plan section 1 D3):
   field was last derived for, never against `liveType` - the KindPicker's
   Other panel passes through `type: null`, where `liveType` falls back to the
   stored type (plan round 1 P1);
+- every "did the user change this?" comparison reads `base`, the contact AS
+  OPENED (`const [base] = useState(contact)`), never the live `contact`
+  prop, which S2.9's re-read swaps under an open form (plan round 2 R2P-1,
+  step 3j);
 - save, no type change: tenant unchanged (`setTenantStatus` on a status or
   porting change); landlord unchanged (status in the PATCH, with park
   reason); partner / team_member / unknown: a status change through
@@ -7083,6 +7128,31 @@ describe('ContactEditForm - one status list per type and the type-change rules (
     expect(setTenantStatus).not.toHaveBeenCalled();
   });
 
+  // Plan round 2 R2P-1: the page re-reads the open contact on contact.updated
+  // (S2.9) and passes the new one in; the form must diff against the contact
+  // as OPENED, or a save writes another operator's change back.
+  it('a contact prop changed under the open form is never written back: the PATCH carries only the edited field', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    const onSaved = vi.fn();
+    updateContact.mockResolvedValue({ ...TEAM_MEMBER, firstName: 'Samuel' });
+    const { rerender } = render(<ContactEditForm contact={TEAM_MEMBER} onClose={onClose} onSaved={onSaved} />);
+    // Another operator re-types the contact, marks it Inactive and edits its
+    // last name; the live re-read hands the form the new contact.
+    rerender(
+      <ContactEditForm
+        contact={{ ...TEAM_MEMBER, type: 'partner', status: 'inactive', lastName: 'Leigh' }}
+        onClose={onClose}
+        onSaved={onSaved}
+      />,
+    );
+    await user.clear(screen.getByLabelText(/First name/i));
+    await user.type(screen.getByLabelText(/First name/i), 'Samuel');
+    await user.click(save());
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('tm1', { firstName: 'Samuel' }));
+    expect(setTenantStatus).not.toHaveBeenCalled();
+  });
+
   it('(PIN) a Parked landlord keeps its park reason across an unrelated-field save', async () => {
     const user = userEvent.setup();
     const parked: Contact = { ...LANDLORD, status: 'parked', park_reason: 'Declined the program' };
@@ -7135,7 +7205,11 @@ Expected failures, each for the stated reason:
   be 'interested'` for the tenant, `... to be 'onboarding'` for the Parked
   landlord). Both also go red against a `handleKindChange` that compares
   `next.type` with `liveType` (the v1 draft): the field stays `interested` /
-  `onboarding` after the base pick.
+  `onboarding` after the base pick;
+- the prop-changed-under-the-form case (plan round 2 R2P-1): the PATCH also
+  carries `type: 'team_member'`, `lastName: 'Lee'` and a `status` (the form
+  diffs its draft against the LIVE prop), so the exact
+  `{ firstName: 'Samuel' }` expectation fails.
 The (PIN) cases and the unrelated-field save pass. Every pre-existing case
 not edited in 1b-1d stays green.
 
@@ -7305,20 +7379,21 @@ Replacement:
 ```
   // The live base type for status scoping (KindPicker may be momentarily null
   // mid-change; fall back to the stored type).
-  const liveType: ContactType = kind.type ?? contact.type;
+  const liveType: ContactType = kind.type ?? base.type;
   // Spec 2026-10-23 D3: a TYPE change is measured against the STORED type - the
   // picker left on a different base type at save time. A role-only switch
-  // inside one type and a change-and-back are not type changes.
-  const typeChanged = kind.type !== null && kind.type !== contact.type;
+  // inside one type and a change-and-back are not type changes. Stored = as
+  // OPENED (`base`, step 3j, plan round 2 R2P-1).
+  const typeChanged = kind.type !== null && kind.type !== base.type;
   // The stored status as the field first shows it (an off-list stored value
   // reads as the type's front door).
-  const initialStatus = defaultStatusForType(contact.type, str(contact.status));
+  const initialStatus = defaultStatusForType(base.type, str(base.status));
   // The type the Status field was last derived for (plan round 1 P1). Not
   // liveType: the KindPicker's Other panel passes through type null, where
   // liveType falls back to the STORED type, so a stored -> other -> Other ->
   // stored round trip would look like no change and keep the other type's
   // first step.
-  const [statusType, setStatusType] = useState<ContactType>(contact.type);
+  const [statusType, setStatusType] = useState<ContactType>(base.type);
 ```
 
 3e. `handleKindChange`. Current text:
@@ -7351,7 +7426,7 @@ Replacement:
     setKind(next);
     setTypeRefusals(null);
     if (next.type !== null && next.type !== statusType) {
-      setStatus(next.type === contact.type ? initialStatus : FIRST_STATUS_FOR_TYPE[next.type]);
+      setStatus(next.type === base.type ? initialStatus : FIRST_STATUS_FOR_TYPE[next.type]);
       setStatusType(next.type);
     }
 ```
@@ -7419,7 +7494,7 @@ Replacement:
     //    status change, exactly as the header dropdown writes it.
     // Compared against the initial VALID selection (a legacy off-list value
     // was normalized to 'needs_review' on load).
-    const portingChanged = porting !== (contact.porting === true);
+    const portingChanged = porting !== (base.porting === true);
     const statusTransition = typeChanged
       ? isTenant && (status !== 'onboarding' || portingChanged)
       : isTenant
@@ -7480,12 +7555,120 @@ Replacement:
 Replacement:
 
 ```
-  // Status options for the live type - EXACTLY the header dropdown's list
-  // (statusOptionsFor, spec 2026-10-23 D3); no off-list value is ever
-  // prepended. The selected `status` is kept a member (seeded valid; moved on
-  // a type change), so the select never shows nor submits a type-invalid value.
-  const statusOptions = statusOptionsFor(liveType);
+  // Status options for the type the field was last derived for - EXACTLY the
+  // header dropdown's list (statusOptionsFor, spec 2026-10-23 D3); no off-list
+  // value is ever prepended. statusType, not liveType (plan round 2 R2P-3):
+  // during the Other panel's base-less step liveType falls back to the stored
+  // type while the field may hold another type's value. statusType equals
+  // kind.type whenever kind.type is non-null.
+  const statusOptions = statusOptionsFor(statusType);
 ```
+
+3j. Diff against the contact AS OPENED (plan round 2 R2P-1). The page
+re-reads the open contact on `contact.updated` (S2.9) and passes the new one
+in (`ContactDetail.tsx:1341-1349`); the form's drafts are seeded once, so
+diffing them against the live prop writes another operator's concurrent
+change back. 3d, 3e and 3g above already read `base`; 3f's replacement has
+no `contact` read. Apply 3j after 3a-3i.
+
+Declare the snapshot above the `kind` state (ASCII line). Current text:
+
+```
+  // Type + role together - a KindPicker value, kept collapsed behind "Change type"
+```
+
+Replacement:
+
+```
+  // The contact AS OPENED (plan round 2 R2P-1). Every "did the user change
+  // this?" comparison - buildPatch, onSubmit, typeChanged, initialStatus,
+  // statusType - reads `base`, never the live `contact` prop: the page
+  // re-reads the open contact on contact.updated (S2.9) and passes the new
+  // one in, and diffing a stale draft against it would write another
+  // operator's concurrent change back. Identity and display-only reads stay
+  // on the live prop.
+  const [base] = useState(contact);
+  // Type + role together - a KindPicker value, kept collapsed behind "Change type"
+```
+
+Then, in `buildPatch` (main ~334-458), one Edit per line. Each old and new
+is ONE whole line of the file (all ASCII, each unique in the file), shown
+with the file's indentation:
+
+- old `    if (kind.type !== null && kind.type !== contact.type) patch.type = kind.type;`
+  new `    if (kind.type !== null && kind.type !== base.type) patch.type = kind.type;`
+- old `    if (roleTrimmed !== str(contact.role).trim()) patch.role = roleTrimmed;`
+  new `    if (roleTrimmed !== str(base.role).trim()) patch.role = roleTrimmed;`
+- old `    if (firstName !== str(contact.firstName)) patch.firstName = firstName;`
+  new `    if (firstName !== str(base.firstName)) patch.firstName = firstName;`
+- old `    if (lastName !== str(contact.lastName)) patch.lastName = lastName;`
+  new `    if (lastName !== str(base.lastName)) patch.lastName = lastName;`
+- old `    if (notes !== str(contact.notes)) patch.notes = notes;`
+  new `    if (notes !== str(base.notes)) patch.notes = notes;`
+- old `    if (isLandlord && company !== str(contact['company'])) patch.company = company;`
+  new `    if (isLandlord && company !== str(base['company'])) patch.company = company;`
+- old `      if (contractStatus !== str(contact.contract_status) && contractStatus !== '') {`
+  new `      if (contractStatus !== str(base.contract_status) && contractStatus !== '') {`
+- old `      if (registeredLandlord !== (contact.registered_landlord === true)) {`
+  new `      if (registeredLandlord !== (base.registered_landlord === true)) {`
+- old `      if (rtaWithin48h !== (contact.rta_within_48h === true)) {`
+  new `      if (rtaWithin48h !== (base.rta_within_48h === true)) {`
+- old `      if (passInspection !== (contact.pass_inspection_first_try === true)) {`
+  new `      if (passInspection !== (base.pass_inspection_first_try === true)) {`
+- old `      if (incomeIncludesVoucher !== (contact.income_includes_voucher === true)) {`
+  new `      if (incomeIncludesVoucher !== (base.income_includes_voucher === true)) {`
+- old `      if (parkReason !== str(contact.park_reason)) patch.park_reason = parkReason;`
+  new `      if (parkReason !== str(base.park_reason)) patch.park_reason = parkReason;`
+- old `      const req = buildRequirementPatch(requirementFormValuesFromLandlord(contact), requirements);`
+  new `      const req = buildRequirementPatch(requirementFormValuesFromLandlord(base), requirements);`
+- old `    const initRel = normalizeRelationships(contact.relationships ?? []);`
+  new `    const initRel = normalizeRelationships(base.relationships ?? []);`
+- old `    const initCf = normalizeCustomFields(contact.customFields ?? []);`
+  new `    const initCf = normalizeCustomFields(base.customFields ?? []);`
+- old `      const initialVoucher = typeof contact.voucherSize === 'number' ? String(contact.voucherSize) : '';`
+  new `      const initialVoucher = typeof base.voucherSize === 'number' ? String(base.voucherSize) : '';`
+- old `      const initialVoucherExp = str(contact.voucher_expiration_date).slice(0, 10);`
+  new `      const initialVoucherExp = str(base.voucher_expiration_date).slice(0, 10);`
+- old `      if (org.housingAuthority !== str(contact.housingAuthority)) {`
+  new `      if (org.housingAuthority !== str(base.housingAuthority)) {`
+- old `      if (org.agency !== str(contact.agency)) {`
+  new `      if (org.agency !== str(base.agency)) {`
+- old `      if (pets !== str(contact['pets'])) patch.pets = pets;`
+  new `      if (pets !== str(base['pets'])) patch.pets = pets;`
+- old `      if (evictions !== str(contact['evictions'])) patch.evictions = evictions;`
+  new `      if (evictions !== str(base['evictions'])) patch.evictions = evictions;`
+- old `      if (tenure !== str(contact['tenure'])) patch.tenure = tenure;`
+  new `      if (tenure !== str(base['tenure'])) patch.tenure = tenure;`
+- old `      if (lifEligible !== (contact['lifEligible'] === true)) patch.lifEligible = lifEligible;`
+  new `      if (lifEligible !== (base['lifEligible'] === true)) patch.lifEligible = lifEligible;`
+- old `    if (isPartner && org.organization !== str(contact.organization)) {`
+  new `    if (isPartner && org.organization !== str(base.organization)) {`
+
+And the initial address parts (~307-310): `buildPatch` diffs the address
+against them, and they are recomputed on every render (they also seed the
+address state at mount):
+
+- old `    typeof contact.address === 'object' && contact.address !== null ? contact.address : {};`
+  new `    typeof base.address === 'object' && base.address !== null ? base.address : {};`
+- old `    line1: str(addrObj.line1) || (typeof contact.address === 'string' ? contact.address : ''),`
+  new `    line1: str(addrObj.line1) || (typeof base.address === 'string' ? base.address : ''),`
+
+`onSubmit`'s change detection is 3g's replacement (`initialStatus` from 3d;
+`portingChanged` reads `base.porting`). The reads that STAY on the live
+prop - none of them feeds a diff:
+- the `useState` seeds (~190-282, the `requirementFormValuesFromLandlord(contact)`
+  seed at ~244 included): read once at mount, when `contact` IS `base`;
+- `contact.contactId` in the `updateContact` and `setTenantStatus` calls:
+  identity, the same id on every re-read;
+- `let updated: Contact = contact;`: an initial value every write path
+  overwrites before `onSaved`;
+- `savedRole` / `currentKindLabel` (~576-579): the collapsed summary of the
+  saved kind, display only (it shows the latest stored kind).
+
+Check: `grep -n "contact[.[]" dashboard/src/routes/contact/ContactEditForm.tsx`
+prints only the `useState` seed lines (~191-280), the two `contact.contactId`
+calls, the `savedRole` / `currentKindLabel` lines and the `contact.updated`
+mention in the `base` comment above.
 
 After the edits, `grep -n "TENANT_STATUS\|LANDLORD_STATUS\|NON_TENANT\|TenantStatus\|isTenantStatus\|statusOptionsForType\|tenantStatusChanged" dashboard/src/routes/contact/ContactEditForm.tsx | grep -v setTenantStatus`
 prints nothing (the kept `setTenantStatus` import, calls and comments are

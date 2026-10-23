@@ -4,7 +4,7 @@
 > three core entities move through the HousingChoice process. It is **not** a dated
 > spec and must **not** be stamped HISTORICAL — expect tweaks and additions over time.
 > When the model changes, edit this file in place (like its sibling
-> [GLOSSARY.md](GLOSSARY.md)). Last substantive update: **2026-10-12**.
+> [GLOSSARY.md](GLOSSARY.md)). Last substantive update: **2026-10-23**.
 >
 > Naming follows the glossary: the dwelling is a **`unit`** in code/data, shown as
 > **home** to tenants and **property** to landlords/staff. The workflow record is a
@@ -213,6 +213,80 @@ Transitions are **manual** via the status menu (no enforced transition graph, no
 derivation from `contract_status` or from units added) - the menu must stay free to
 correct a mis-set status. Landlord statuses take no part in placement/property
 derivation (see section 7).
+
+### 5b. Partner, team member and unknown statuses
+
+Every other contact type carries a short list on the same `status` field
+(type-scoped like the landlord list: `statusAllowlistFor` in
+`app/src/lib/statusModel.ts` is the one list every writer and reader checks, and
+the dashboard mirrors it as `statusOptionsFor` in `dashboard/src/api/types.ts`,
+pinned by a mirror test).
+
+| Type | Statuses (dropdown order) |
+|---|---|
+| partner (a caseworker or other partner) | Needs review, Active, Inactive |
+| team_member | Needs review, Active, Inactive |
+| unknown | Needs review, Inactive |
+
+- **`Needs review`** - the same front door as above. An unknown contact that is
+  Needs review shows on Today's Needs you now as a "New unknown contact" and
+  carries the inbox "Needs triage" chip.
+- **`Active`** - a partner or team member staff work with. An unknown contact has
+  no `Active` (removed 2026-10-23): it is either waiting for review or set aside.
+- **`Inactive`** - set aside without being deleted. For an unknown contact it is
+  how staff clear it from Needs review WITHOUT choosing a type; staff can still
+  classify it later from its "Type unknown" card (the card reads "Needs triage"
+  only while the contact is Needs review).
+
+Moves are **manual**, through ONE header dropdown on the contact page that every
+live contact type now has (tenant and landlord included); the Edit contact details
+Status field offers exactly the same choices for the contact's type. A type
+change with no explicit status starts the new type's first step: tenant
+`Onboarding`, landlord `Interested`, partner `Active`, and - from `Inactive` -
+team member `Active` and unknown `Needs review`. A save or PATCH that keeps the
+contact's current type is not a type change: it moves no status on its own.
+`(unknown, active)` is refused by every status writer (the importer's broader
+type-rule gap is filed as `docs/issues/import-bypasses-contact-type-rules.md`).
+
+#### What Inactive means - the same for every type
+
+Cameron, 2026-10-23: an Inactive unknown contact is not treated differently from a
+contact of another type with the same named status. Tenant, partner, team member
+and unknown all have `Inactive`, and on each it means:
+
+1. **Not chased.** It drops out of the Follow up worklist and the listing-send
+   recipient rows (`isEligibleRecipient`, `app/src/lib/listingSendOutcome.ts`).
+   `Placed` stays a tenant-only exclusion (only tenants have it).
+2. **Blasts unchanged** - they read Onboarding and Searching tenants only.
+3. **Still a normal contact** - on the Contacts lists, in search, in its threads
+   and in the inbox, where its texts and calls show unread when unread and its
+   row carries a small muted "Inactive" tag (and no "Needs triage" chip). Nothing
+   is deleted. An inbound text or call never moves it back to Needs review.
+4. **The same muted status color.**
+5. **The same timeline wording** - a status change reads "Status -> <label>"
+   (the UI renders an arrow), labeled from the type the contact has AFTER the
+   change.
+
+On the inbox Unknown tab, Needs review rows sort above Inactive rows, each newest
+message first; every other tab stays newest first. Contacts > Unknown likewise
+lists its Needs review contacts before its Inactive ones.
+
+Two differences remain, on purpose:
+
+- The Tenants view hides Inactive tenants by default; the other Contacts views have
+  no status filter (`docs/issues/contacts-status-filter-tenants-only.md`).
+- An Inactive tenant's or partner's unread text still shows in Today's Unreplied,
+  while an Inactive unknown contact's or team member's unread text does NOT show
+  in Needs you now (a team member's 1:1 threads are unknown threads, so the same
+  rule covers them) - it shows only in the inbox.
+
+Automatic texts (tour reminders, group text rosters, the missed-call auto-text,
+placement nudges, hand-picked share recipients) check no status for any type, and
+were left that way.
+
+A landlord's **`Parked`** is the landlord's own retired status, not `Inactive`:
+every rule above keys on the literal `inactive`, so none of them touches a Parked
+landlord.
 
 ---
 

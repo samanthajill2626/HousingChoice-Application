@@ -2,16 +2,15 @@
 
 ## STATE
 
-- Phase: DESIGN - spec rev 1 committed @752b9234; adversarial spec review
-  round 1 running (two opus reviewers, outputs design-review/spec-r1-a.md and
-  spec-r1-b.md).
+- Phase: DESIGN - SPEC GATE. Spec rev 3 committed @540ae640 after review
+  round 1 (2 reviewers, 21 findings) and terminal round 2 (11 findings).
+  Waiting on Cameron's approval and his answers to the five gate calls listed
+  in design-review/adjudications.md.
 - Launch mode: not chosen yet.
 - Worktree: `W:\tmp\unknown-inactive`, branch `feat/unknown-inactive`, cut from
   main @916258ae. Issue `contacts-status-filter-tenants-only` committed @0957ed39.
-- NEXT STEP: adjudicate round 1 into design-review/adjudications.md, revise the
-  spec, re-review with the stronger reviewer continued, then the spec gate.
-  At the gate, flag the planner's own calls: D7 team_member/unknown first-step
-  rule, D8 "Type unknown" card title, D9 Inactive tag on every type's row.
+- NEXT STEP: on approval - update tracker #30 (Approach + Notes, third person),
+  offer compaction gate A, then write the implementation plan.
 
 ## What Cameron asked for
 

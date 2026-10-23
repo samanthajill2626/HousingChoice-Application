@@ -26,6 +26,7 @@ import {
   ApiError,
   checkOrgText,
   deleteContact,
+  getContact,
   markInboxRead,
   markInboxUnread,
   restoreContact,
@@ -37,16 +38,12 @@ import {
   suggestionResolutionErrorMessage,
   updateContact,
   useEventStream,
-  LANDLORD_STATUSES,
-  LANDLORD_STATUS_LABELS,
-  TENANT_STATUSES,
-  TENANT_STATUS_LABELS,
+  statusOptionsFor,
   type AiRunCompletedEvent,
   type Contact,
+  type ContactStatusValue,
   type ConversationUpdatedEvent,
-  type LandlordStatus,
   type OrgCheckResult,
-  type TenantStatus,
 } from '../../api/index.js';
 import {
   Button,
@@ -138,6 +135,13 @@ export const MARK_READ_ERROR = 'Could not mark read - try again';
  *  hidden-but-actually-available action is worse than an honest refusal. */
 export const MARK_UNREAD_NO_THREAD =
   'No thread to mark unread yet - if this contact has messages, try again.';
+
+/** The header status pill's 409 contact_type_changed (plan ruling AR4): the
+ *  contact was re-typed between this page's read and the pick, so the route
+ *  wrote nothing. The page re-reads the contact, so the pill already offers
+ *  the new type's statuses when this shows. Exported for the test. */
+export const CONTACT_TYPE_CHANGED_STATUS_COPY =
+  "This contact's type just changed, so its status list did too. Pick the status again.";
 
 /** The Delete dialog's handoff sentence for a non-tenant contact
  *  (primary-contact-integrity spec 7.6), word for word. The server hands each
@@ -247,7 +251,7 @@ export function ContactDetail(): React.JSX.Element {
   // Bumped on a contact change: a check answer for contact A that lands on
   // contact B's page is dropped (the pressGenerationRef idiom).
   const reviewGenerationRef = useRef(0);
-  // The header's interactive status pill (tenant/landlord lifecycle change).
+  // The header's interactive status pill (every live type, spec 2026-10-23 D2).
   const [statusBusy, setStatusBusy] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
@@ -940,18 +944,37 @@ export function ContactDetail(): React.JSX.Element {
     setStatusError(null);
     void setTenantStatus(contact.contactId, {
       // StatusMenu is stringly-typed; the value came from the type-scoped option
-      // list (TENANT_STATUSES / LANDLORD_STATUSES), so the union cast is exact.
-      toStatus: toStatus as TenantStatus | LandlordStatus,
+      // list (statusOptionsFor, spec 2026-10-23 D2), so the union cast is exact.
+      toStatus: toStatus as ContactStatusValue,
       source: 'manual',
     })
       .then((updated) => {
         setContact(updated);
-        // The transition wrote a contact_status_changed milestone; no SSE event
-        // covers it, so pull the timeline now — otherwise the pin only appears
-        // when some unrelated message event triggers a refetch.
+        // The transition wrote a contact_status_changed milestone; pull the
+        // timeline now rather than wait on the echoed contact.updated (which
+        // also refetches it, unknown-inactive OR-4), so the pin appears even
+        // when the event stream is down.
         timeline.refetch();
       })
-      .catch(() => setStatusError("Couldn't update the status - please try again."))
+      .catch((err: unknown) => {
+        if (err instanceof ApiError && err.status === 409 && err.code === 'contact_type_changed') {
+          // Plan rulings AR4/AR9: someone re-typed the contact between this
+          // page's read and the pick, so the route wrote nothing. Say so, and
+          // re-read the contact so the pill offers the new type's statuses
+          // (setContact is bound to this contactId, so a late answer after
+          // navigating away is a no-op).
+          setStatusError(CONTACT_TYPE_CHANGED_STATUS_COPY);
+          // Consistent (planner ruling PR-3, plan round 1 P2): the re-type
+          // landed a moment ago and an eventually consistent GET could miss it.
+          void getContact(contact.contactId, undefined, { consistent: true })
+            .then((fresh) => setContact(fresh))
+            .catch(() => {
+              /* best-effort: the message already asks staff to try again */
+            });
+          return;
+        }
+        setStatusError("Couldn't update the status - please try again.");
+      })
       .finally(() => setStatusBusy(false));
   };
 
@@ -1000,23 +1023,15 @@ export function ContactDetail(): React.JSX.Element {
           <div className={styles.nameRow}>
             <span className={styles.name}>{name}</span>
             <span className={`${styles.pill} ${pill.cls}`}>{pill.label}</span>
-            {/* Tenant/landlord lifecycle status: an interactive pill that shows AND
-                changes it (same pattern as the property/placement headers). Other
-                types (and deleted contacts) keep the display-only badge. */}
-            {contact.status && !deleted && contact.type === 'tenant' ? (
+            {/* The lifecycle status: an interactive pill that shows AND changes
+                it (same pattern as the property/placement headers), for EVERY
+                live type with that type's own statuses (spec 2026-10-23 D2 - one
+                way to move anyone through statuses). A deleted contact keeps
+                the display-only badge. */}
+            {contact.status && !deleted ? (
               <StatusMenu
                 value={contact.status}
-                options={TENANT_STATUSES.map((s) => ({ value: s, label: TENANT_STATUS_LABELS[s] }))}
-                onChange={onChangeStatus}
-                tone={contactStatusTone(contact.type, contact.status)}
-                disabled={statusBusy}
-                label="Contact status"
-                error={statusError}
-              />
-            ) : contact.status && !deleted && contact.type === 'landlord' ? (
-              <StatusMenu
-                value={contact.status}
-                options={LANDLORD_STATUSES.map((s) => ({ value: s, label: LANDLORD_STATUS_LABELS[s] }))}
+                options={statusOptionsFor(contact.type)}
                 onChange={onChangeStatus}
                 tone={contactStatusTone(contact.type, contact.status)}
                 disabled={statusBusy}

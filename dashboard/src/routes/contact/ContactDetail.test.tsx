@@ -165,6 +165,7 @@ vi.mock('../../api/index.js', async () => {
 });
 
 import {
+  CONTACT_TYPE_CHANGED_STATUS_COPY,
   ContactDetail,
   MARK_UNREAD_NO_THREAD,
   RUN_INDICATOR_TIMEOUT_MS,
@@ -510,13 +511,80 @@ describe('ContactDetail', () => {
     expect(screen.getByRole('button', { name: 'Contact status: Searching' })).toBeInTheDocument();
   });
 
-  it('an untriaged (unknown) contact keeps the display-only status badge — no pill', async () => {
-    getContact.mockResolvedValue(UNKNOWN);
+  // Spec 2026-10-23 D2: ONE header dropdown for every live type, listing that
+  // type's D1 statuses, through the same transition endpoint and source the
+  // tenant and landlord pill use. team_member renders the tenant page, but its
+  // dropdown lists the team member statuses.
+  const HEADER_PARTNER: Contact = {
+    contactId: 'p1',
+    type: 'partner',
+    firstName: 'Renee',
+    lastName: 'Carter',
+    status: 'active',
+    phone: '+14045550123',
+    organization: 'Hope Atlanta',
+  };
+  const HEADER_TEAM_MEMBER: Contact = { ...TENANT, type: 'team_member', status: 'active' };
+
+  it.each([
+    ['partner', HEADER_PARTNER, 'Active', ['Needs review', 'Active', 'Inactive']],
+    ['team_member', HEADER_TEAM_MEMBER, 'Active', ['Needs review', 'Active', 'Inactive']],
+    ['unknown', UNKNOWN, 'Needs review', ['Needs review', 'Inactive']],
+  ] as const)(
+    '%s status pill: lists exactly its own statuses and changes it via the transition service',
+    async (_type, contact, current, labels) => {
+      const { default: userEvent } = await import('@testing-library/user-event');
+      const user = userEvent.setup();
+      getContact.mockResolvedValue(contact);
+      setTenantStatus.mockResolvedValue({ ...contact, status: 'inactive' });
+      renderAt(contact.contactId);
+
+      await user.click(await screen.findByRole('button', { name: `Contact status: ${current}` }));
+      const menu = screen.getByRole('menu', { name: 'Contact status' });
+      // Each item is [check mark span][label text]; the text node is the label.
+      const items = within(menu)
+        .getAllByRole('menuitemradio')
+        .map((el) => el.lastChild?.textContent ?? '');
+      expect(items).toEqual(labels);
+      // Tenant-only values never leak in (team_member renders the tenant page).
+      expect(within(menu).queryByRole('menuitemradio', { name: 'Searching' })).toBeNull();
+
+      await user.click(within(menu).getByRole('menuitemradio', { name: 'Inactive' }));
+      expect(setTenantStatus).toHaveBeenCalledWith(contact.contactId, { toStatus: 'inactive', source: 'manual' });
+      await screen.findByRole('button', { name: 'Contact status: Inactive' });
+      expect(updateContact).not.toHaveBeenCalled();
+    },
+  );
+
+  it('(PIN) a soft-deleted unknown contact keeps the display-only status badge - no pill', async () => {
+    getContact.mockResolvedValue({ ...UNKNOWN, status: 'inactive', deleted_at: '2026-10-01T00:00:00.000Z' });
     renderAt('u9');
-    await waitFor(() => expect(screen.getByText('Unknown')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText('Inactive').length).toBeGreaterThanOrEqual(1));
     expect(screen.queryByRole('button', { name: /Contact status/i })).not.toBeInTheDocument();
-    // The status still reads (display badge in the header + the Details row).
-    expect(screen.getAllByText('Needs review').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('a 409 contact_type_changed shows the inline error and re-reads the contact (AR4, AR9)', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(UNKNOWN);
+    setTenantStatus.mockRejectedValue(
+      new ApiError(409, 'contact_type_changed', 'contact_type_changed', { error: 'contact_type_changed' }),
+    );
+    renderAt('u9');
+    const pill = await screen.findByRole('button', { name: 'Contact status: Needs review' });
+
+    // Staff B made the contact a tenant between this page's read and the pick.
+    getContact.mockResolvedValue({ ...UNKNOWN, type: 'tenant', status: 'onboarding' });
+    const readsBefore = getContact.mock.calls.length;
+    await user.click(pill);
+    await user.click(screen.getByRole('menuitemradio', { name: 'Inactive' }));
+
+    expect(await screen.findByText(CONTACT_TYPE_CHANGED_STATUS_COPY)).toBeInTheDocument();
+    await waitFor(() => expect(getContact.mock.calls.length).toBeGreaterThan(readsBefore));
+    // Plan round 1 P2: the re-read must see the re-type that just landed.
+    expect(getContact).toHaveBeenLastCalledWith('u9', undefined, { consistent: true });
+    // The pill now offers the re-typed contact's statuses, on its stored value.
+    await screen.findByRole('button', { name: 'Contact status: Onboarding' });
   });
 
   it('renders the landlord file (Properties card) for a landlord', async () => {

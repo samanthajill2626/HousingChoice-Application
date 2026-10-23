@@ -53,7 +53,6 @@ import type {
   InboxPage,
   InboxUnreadCount,
   InspectionOutcome,
-  LandlordStatus,
   ListingSendRow,
   ListingStatus,
   LostReason,
@@ -75,7 +74,7 @@ import type {
   SystemErrorsResult,
   SystemFlags,
   SystemTraceResult,
-  TenantStatus,
+  ContactStatusValue,
   TodayResponse,
   TransitionSource,
   Tour,
@@ -471,13 +470,15 @@ export async function clearPlacementFollowUp(placementId: string): Promise<void>
  *  status through the transition service (applies provenance/derivation -
  *  NEVER use a plain contact PATCH for lifecycle status). Despite the historic
  *  name, the route serves ALL contact types: it validates `toStatus` against
- *  the STORED contact's own type-scoped allowlist (tenant lifecycle vs the
- *  landlord lead lifecycle), so the input type is the union. Returns the
- *  updated contact (unwrapped from { contact }). */
+ *  the STORED contact's own type-scoped allowlist (tenant lifecycle, the
+ *  landlord lead lifecycle, partner / team member, unknown), so the input type
+ *  is the union of all four. A 409 { error: 'contact_type_changed' } means the
+ *  type changed since the route's own read and nothing was written. Returns
+ *  the updated contact (unwrapped from { contact }). */
 export async function setTenantStatus(
   contactId: string,
   input: {
-    toStatus: TenantStatus | LandlordStatus;
+    toStatus: ContactStatusValue;
     source: TransitionSource;
     reason?: string;
     porting?: boolean;

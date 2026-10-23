@@ -11,13 +11,14 @@
   from six opus drafts). Plan review CLOSED after 3 rounds (2 reviewers in
   round 1, reviewer A continued; 15 + 5 + 3 findings, all accepted or
   noted). Mission block: `mission-block.md` in this folder.
-- AT THE LAUNCH GATE (text-alone question, per Cameron's AskUserQuestion
-  rule): AUTO / MANUAL / Revise, plus the P9/AR21 planner call (Contacts
-  list non-tenant rows: plain-text status, no new badge) - default stands
-  unless he picks badges, in which case revise S4.2 before dispatch.
-- Launch mode: not chosen yet. On a Go: compaction gate B (confirm
-  registration with --show, prove replay, start watcher, offer), then
-  dispatch abt:build-orchestrator with mission-block.md verbatim.
+- LAUNCH GATE ANSWERED 2026-10-23 17:52 (Cameron: "auto, 55 minute
+  watchdog timer."): AUTO dispatch; planner watchdog checkpoints every 55
+  minutes (his pick over the 30-minute default; 55 is the cache ceiling).
+  He did not answer the P9/AR21 question, so the default stands: Contacts
+  list non-tenant rows keep plain-text status, no new badge.
+- Launch mode: AUTO. Gate B: registration confirmed (--show, persist,
+  expires 2026-10-30), replay proven (9 human turns, last = the launch
+  pick), watcher started, compaction offered.
 - Worktree: `W:\tmp\unknown-inactive`, branch `feat/unknown-inactive`, cut from
   main @916258ae. Issue `contacts-status-filter-tenants-only` committed @0957ed39.
   No node_modules yet (plan section 0 has the builder run `npm ci`).

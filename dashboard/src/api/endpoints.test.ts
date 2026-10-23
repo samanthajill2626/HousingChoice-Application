@@ -344,6 +344,15 @@ it('setTenantStatus PATCHes tenant-status and unwraps { contact }', async () => 
   expect(c).toEqual({ contactId: 'c1', status: 'searching' });
 });
 
+it('setTenantStatus sends the expectedType it is given - the type the caller built its status list from (code review R1 FW1-1)', async () => {
+  vi.mocked(request).mockResolvedValueOnce({ contact: { contactId: 'u9', status: 'inactive' } });
+  await setTenantStatus('u9', { toStatus: 'inactive', source: 'manual', expectedType: 'unknown' });
+  expect(request).toHaveBeenCalledWith('/api/contacts/u9/tenant-status', {
+    method: 'PATCH',
+    body: { toStatus: 'inactive', source: 'manual', expectedType: 'unknown' },
+  });
+});
+
 it('setListingStatus PATCHes listing-status and unwraps { unit }', async () => {
   vi.mocked(request).mockResolvedValueOnce({ unit: { unitId: 'u1', status: 'off_market' } });
   const u = await setListingStatus('u1', { toStatus: 'off_market', source: 'manual' });

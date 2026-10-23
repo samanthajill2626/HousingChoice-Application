@@ -435,7 +435,9 @@ describe('ContactDetail', () => {
     await user.click(screen.getByRole('menuitemradio', { name: 'On hold' }));
     // The change goes through the transition service (NEVER a plain PATCH), and
     // the returned contact is applied in place — the pill re-labels.
-    expect(setTenantStatus).toHaveBeenCalledWith('k1', { toStatus: 'on_hold', source: 'manual' });
+    // expectedType: the type the menu's options were built from (code review
+    // R1 FW1-1), so a contact re-typed since this page read it is a 409.
+    expect(setTenantStatus).toHaveBeenCalledWith('k1', { toStatus: 'on_hold', source: 'manual', expectedType: 'tenant' });
     await screen.findByRole('button', { name: 'Contact status: On hold' });
     expect(updateContact).not.toHaveBeenCalled();
 
@@ -476,7 +478,7 @@ describe('ContactDetail', () => {
 
     // The landlord value rides the SAME transition-service endpoint (it is
     // type-scoped server-side), never a plain contact PATCH.
-    expect(setTenantStatus).toHaveBeenCalledWith('L1', { toStatus: 'parked', source: 'manual' });
+    expect(setTenantStatus).toHaveBeenCalledWith('L1', { toStatus: 'parked', source: 'manual', expectedType: 'landlord' });
     await screen.findByRole('button', { name: 'Contact status: Parked' });
     expect(updateContact).not.toHaveBeenCalled();
   });
@@ -551,7 +553,11 @@ describe('ContactDetail', () => {
       expect(within(menu).queryByRole('menuitemradio', { name: 'Searching' })).toBeNull();
 
       await user.click(within(menu).getByRole('menuitemradio', { name: 'Inactive' }));
-      expect(setTenantStatus).toHaveBeenCalledWith(contact.contactId, { toStatus: 'inactive', source: 'manual' });
+      expect(setTenantStatus).toHaveBeenCalledWith(contact.contactId, {
+        toStatus: 'inactive',
+        source: 'manual',
+        expectedType: contact.type,
+      });
       await screen.findByRole('button', { name: 'Contact status: Inactive' });
       expect(updateContact).not.toHaveBeenCalled();
     },
@@ -581,6 +587,8 @@ describe('ContactDetail', () => {
     await user.click(screen.getByRole('menuitemradio', { name: 'Inactive' }));
 
     expect(await screen.findByText(CONTACT_TYPE_CHANGED_STATUS_COPY)).toBeInTheDocument();
+    // The pick named the type this page's options were built from (FW1-1).
+    expect(setTenantStatus).toHaveBeenCalledWith('u9', { toStatus: 'inactive', source: 'manual', expectedType: 'unknown' });
     await waitFor(() => expect(getContact.mock.calls.length).toBeGreaterThan(readsBefore));
     // Plan round 1 P2: the re-read must see the re-type that just landed.
     expect(getContact).toHaveBeenLastCalledWith('u9', undefined, { consistent: true });

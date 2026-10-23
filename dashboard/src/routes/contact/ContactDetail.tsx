@@ -947,6 +947,10 @@ export function ContactDetail(): React.JSX.Element {
       // list (statusOptionsFor, spec 2026-10-23 D2), so the union cast is exact.
       toStatus: toStatus as ContactStatusValue,
       source: 'manual',
+      // The type the options were built from (statusOptionsFor(contact.type)
+      // below; code review R1 FW1-1), so the route refuses a pick from a list
+      // the contact's stored type no longer has.
+      expectedType: contact.type,
     })
       .then((updated) => {
         setContact(updated);
@@ -958,11 +962,13 @@ export function ContactDetail(): React.JSX.Element {
       })
       .catch((err: unknown) => {
         if (err instanceof ApiError && err.status === 409 && err.code === 'contact_type_changed') {
-          // Plan rulings AR4/AR9: someone re-typed the contact between this
-          // page's read and the pick, so the route wrote nothing. Say so, and
-          // re-read the contact so the pill offers the new type's statuses
-          // (setContact is bound to this contactId, so a late answer after
-          // navigating away is a no-op).
+          // Plan rulings AR4/AR9 + code review R1 FW1-1: someone re-typed the
+          // contact after this page read it - the route found a stored type
+          // other than the expectedType sent above, or the type changed
+          // between the route's check and its write - so nothing was written.
+          // Say so, and re-read the contact so the pill offers the new type's
+          // statuses (setContact is bound to this contactId, so a late answer
+          // after navigating away is a no-op).
           setStatusError(CONTACT_TYPE_CHANGED_STATUS_COPY);
           // Consistent (planner ruling PR-3, plan round 1 P2): the re-type
           // landed a moment ago and an eventually consistent GET could miss it.

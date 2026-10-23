@@ -27,7 +27,7 @@ vi.mock('./useContactVocabulary.js', () => ({
   useContactVocabulary: () => ({ roles: [], relationshipRoles: [], fieldLabels: [] }),
 }));
 
-import { ContactEditForm } from './ContactEditForm.js';
+import { CONTACT_TYPE_CHANGED_SAVE_COPY, ContactEditForm } from './ContactEditForm.js';
 
 const TENANT: Contact = {
   contactId: 'k1',
@@ -376,6 +376,8 @@ describe('ContactEditForm', () => {
       expect(setTenantStatus).toHaveBeenCalledWith('k1', {
         toStatus: 'placing',
         source: 'manual',
+        // The type the Status list was built for (code review R1 FW1-1).
+        expectedType: 'tenant',
         porting: false,
       }),
     );
@@ -395,6 +397,7 @@ describe('ContactEditForm', () => {
       expect(setTenantStatus).toHaveBeenCalledWith('k1', {
         toStatus: 'searching',
         source: 'manual',
+        expectedType: 'tenant',
         porting: true,
       }),
     );
@@ -1709,7 +1712,11 @@ describe('ContactEditForm - one status list per type and the type-change rules (
       await user.selectOptions(statusSelect(), toStatus);
       await user.click(save());
       await waitFor(() =>
-        expect(setTenantStatus).toHaveBeenCalledWith(contact.contactId, { toStatus, source: 'manual' }),
+        expect(setTenantStatus).toHaveBeenCalledWith(contact.contactId, {
+          toStatus,
+          source: 'manual',
+          expectedType: contact.type,
+        }),
       );
       // Never the plain PATCH (no other field changed, so no PATCH at all).
       expect(updateContact).not.toHaveBeenCalled();
@@ -1744,8 +1751,14 @@ describe('ContactEditForm - one status list per type and the type-change rules (
     expect(statusSelect().value).toBe('onboarding');
     await user.selectOptions(statusSelect(), 'searching');
     await user.click(save());
+    // The follow-up names the type the field was derived for: the NEW one.
     await waitFor(() =>
-      expect(setTenantStatus).toHaveBeenCalledWith('u9', { toStatus: 'searching', source: 'manual', porting: false }),
+      expect(setTenantStatus).toHaveBeenCalledWith('u9', {
+        toStatus: 'searching',
+        source: 'manual',
+        expectedType: 'tenant',
+        porting: false,
+      }),
     );
     expect(updateContact).toHaveBeenCalledWith('u9', { type: 'tenant' });
     expect(setTenantStatus).toHaveBeenCalledTimes(1);
@@ -1870,6 +1883,74 @@ describe('ContactEditForm - one status list per type and the type-change rules (
     await waitFor(() => expect(updateContact).toHaveBeenCalledWith('tm1', { firstName: 'Samuel' }));
     expect(setTenantStatus).not.toHaveBeenCalled();
   });
+
+  // Code review R1 FW1-1 (ADV-1): the form's Status list is the OPENED type's
+  // for as long as it stays open, so its status write names that type and the
+  // route 409s it when a colleague re-typed the contact meanwhile - never a
+  // status from the old list written onto the new type.
+  it('the form re-rendered with a re-typed contact still names the OPENED type on its status write', async () => {
+    const user = userEvent.setup();
+    setTenantStatus.mockResolvedValue({ ...UNKNOWN_REVIEW, status: 'inactive' });
+    const { rerender } = render(<ContactEditForm contact={UNKNOWN_REVIEW} onClose={vi.fn()} onSaved={vi.fn()} />);
+    // A colleague's "Mark as Tenant" landed; the page's live re-read hands
+    // the open form the tenant. Its Status list stays the unknown list.
+    rerender(
+      <ContactEditForm
+        contact={{ ...UNKNOWN_REVIEW, type: 'tenant', status: 'onboarding' }}
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+    );
+    expect(optionPairs().map(([value]) => value)).toEqual(['needs_review', 'inactive']);
+    await user.selectOptions(statusSelect(), 'inactive');
+    await user.click(save());
+    await waitFor(() =>
+      expect(setTenantStatus).toHaveBeenCalledWith('u9', {
+        toStatus: 'inactive',
+        source: 'manual',
+        expectedType: 'unknown',
+      }),
+    );
+    expect(updateContact).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['with a field edit (the field PATCH lands first)', true],
+    ['with the status alone (no field PATCH)', false],
+  ] as const)(
+    'a 409 contact_type_changed on the status write, %s: says so, never the generic error, and keeps the form open on its draft',
+    async (_label, editName) => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      const onSaved = vi.fn();
+      updateContact.mockResolvedValue({ ...TEAM_MEMBER, type: 'partner', firstName: 'Samuel' });
+      setTenantStatus.mockRejectedValue(
+        new ApiError(409, 'contact_type_changed', 'contact_type_changed', { error: 'contact_type_changed' }),
+      );
+      render(<ContactEditForm contact={TEAM_MEMBER} onClose={onClose} onSaved={onSaved} />);
+      if (editName) {
+        await user.clear(screen.getByLabelText(/First name/i));
+        await user.type(screen.getByLabelText(/First name/i), 'Samuel');
+      }
+      await user.selectOptions(statusSelect(), 'inactive');
+      await user.click(save());
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(CONTACT_TYPE_CHANGED_SAVE_COPY);
+      expect(setTenantStatus).toHaveBeenCalledWith('tm1', {
+        toStatus: 'inactive',
+        source: 'manual',
+        expectedType: 'team_member',
+      });
+      expect(updateContact).toHaveBeenCalledTimes(editName ? 1 : 0);
+      expect(screen.queryByText("Couldn't save - please try again.")).toBeNull();
+      // The draft stays, as for every other save error.
+      expect(onSaved).not.toHaveBeenCalled();
+      expect(onClose).not.toHaveBeenCalled();
+      expect(screen.getByLabelText(/First name/i)).toHaveValue(editName ? 'Samuel' : 'Sam');
+      expect(statusSelect().value).toBe('inactive');
+      expect(save()).toBeEnabled();
+    },
+  );
 
   it('(PIN) a Parked landlord keeps its park reason across an unrelated-field save', async () => {
     const user = userEvent.setup();

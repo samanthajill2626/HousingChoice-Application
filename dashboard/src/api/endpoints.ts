@@ -472,9 +472,12 @@ export async function clearPlacementFollowUp(placementId: string): Promise<void>
  *  name, the route serves ALL contact types: it validates `toStatus` against
  *  the STORED contact's own type-scoped allowlist (tenant lifecycle, the
  *  landlord lead lifecycle, partner / team member, unknown), so the input type
- *  is the union of all four. A 409 { error: 'contact_type_changed' } means the
- *  type changed since the route's own read and nothing was written. Returns
- *  the updated contact (unwrapped from { contact }). */
+ *  is the union of all four. `expectedType` is the type the caller built its
+ *  status list from (code review R1 FW1-1); the route answers 409
+ *  { error: 'contact_type_changed' } when the stored type is no longer that
+ *  type, or when the type changed between the route's own read and its write,
+ *  and nothing was written. Returns the updated contact (unwrapped from
+ *  { contact }). */
 export async function setTenantStatus(
   contactId: string,
   input: {
@@ -482,6 +485,7 @@ export async function setTenantStatus(
     source: TransitionSource;
     reason?: string;
     porting?: boolean;
+    expectedType?: ContactType;
   },
 ): Promise<Contact> {
   const res = await request<{ contact: Contact }>(
@@ -493,6 +497,7 @@ export async function setTenantStatus(
         source: input.source,
         ...(input.reason !== undefined && { reason: input.reason }),
         ...(input.porting !== undefined && { porting: input.porting }),
+        ...(input.expectedType !== undefined && { expectedType: input.expectedType }),
       },
     },
   );

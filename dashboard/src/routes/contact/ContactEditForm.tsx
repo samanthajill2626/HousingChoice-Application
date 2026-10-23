@@ -106,6 +106,16 @@ export const CASEWORKER_USE_CONVERSION = 'To make this contact a caseworker, use
 export const DEPOSIT_CONFLICT_COPY =
   "A deposit can be one month's rent or a fixed amount, not both. Reload the landlord and try again.";
 
+/** Code review R1 FW1-1: the save's status write answered 409
+ *  contact_type_changed - a colleague re-typed the contact while this form
+ *  was open, and the Status list it offers is the OPENED type's, so the route
+ *  wrote no status. It claims nothing about the other fields: a field PATCH
+ *  that ran first may have saved them, or there was none. A retry from this
+ *  form would send the old type again, so the copy sends staff to a fresh
+ *  read. */
+export const CONTACT_TYPE_CHANGED_SAVE_COPY =
+  "This contact's type changed while you were editing, so its status was not saved. Reload the contact to pick a status for its new type.";
+
 export interface ContactEditFormProps {
   contact: Contact;
   onClose: () => void;
@@ -551,6 +561,11 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
         updated = await setTenantStatus(contact.contactId, {
           toStatus,
           source: 'manual',
+          // Code review R1 FW1-1: the type the Status list was built for
+          // (statusType equals kind.type whenever Save is enabled; `base`'s
+          // type unless the picker changed it). A contact re-typed since the
+          // form opened is a 409, never a status from the old list.
+          expectedType: statusType,
           ...(isTenant && { porting }),
         });
       }
@@ -568,6 +583,10 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
         // AR32: say why, and keep the form open with what staff typed - never
         // the generic save error below.
         setError(DEPOSIT_CONFLICT_COPY);
+      } else if (err instanceof ApiError && err.status === 409 && err.code === 'contact_type_changed') {
+        // FW1-1: the status write found the contact re-typed since this form
+        // opened, so it wrote nothing. Say so; keep the draft.
+        setError(CONTACT_TYPE_CHANGED_SAVE_COPY);
       } else {
         // A type change that would orphan open records (spec 2026-10-12 D2):
         // keep the draft and show what blocks it beside the kind picker.

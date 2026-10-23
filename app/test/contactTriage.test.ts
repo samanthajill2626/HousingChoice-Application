@@ -1353,3 +1353,76 @@ describe('PATCH /api/contacts/:contactId - type change from Inactive and same-ty
     expect(statusMilestones(world)).toEqual([`Status ${ARROW} Needs review`]);
   });
 });
+
+// Code review R1 FW1-3 (ADV-2): a type-only PATCH whose new type KEEPS the
+// stored status (the normalize fallback's keep path: a team_member or unknown
+// target) writes no status, so it is fenced on the status it read. A status
+// write landing between that read and the PATCH's write is then the 409
+// contact_changed - never the new type combined with a status no check saw,
+// such as (unknown, active) or (team_member, parked).
+describe('PATCH /api/contacts/:contactId - a re-type that keeps the stored status is fenced on it (FW1-3)', () => {
+  type World = ReturnType<typeof makeWebhookHarness>['world'];
+  function seedKeep(world: World, type: ContactItem['type']): void {
+    world.contacts.push({
+      contactId: 'c-keep',
+      type,
+      status: 'needs_review',
+      phone: '+15550107811',
+      created_at: '2026-06-12T10:00:00.000Z',
+    } as ContactItem);
+  }
+  function send(app: import('express').Express, path: string, body: Record<string, unknown>) {
+    return request(app)
+      .patch(path)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send(body);
+  }
+  const storedKeep = (world: World) => world.contacts.find((c) => c.contactId === 'c-keep');
+
+  // [stored type (status needs_review), PATCH target, the concurrent status]
+  const RACES = [
+    ['team_member', 'unknown', 'active'],
+    ['landlord', 'team_member', 'parked'],
+  ] as const;
+
+  for (const [from, to, raced] of RACES) {
+    it(`a status write to ${raced} landing between a ${from} -> ${to} PATCH's read and its write is 409 contact_changed: (${to}, ${raced}) is never stored`, async () => {
+      const { app, world } = makeWebhookHarness();
+      seedKeep(world, from);
+      const notified: unknown[] = [];
+      world.events.on('contact.updated', (payload) => notified.push(payload));
+      const realUpdate = world.contactsRepo.update.bind(world.contactsRepo);
+      let racedOnce = false;
+      vi.spyOn(world.contactsRepo, 'update').mockImplementation(async (id, patch, opts) => {
+        if (!racedOnce && id === 'c-keep' && 'type' in patch) {
+          racedOnce = true;
+          // The header dropdown's write lands first; it is legal for the
+          // STORED type.
+          const header = await send(app, '/api/contacts/c-keep/tenant-status', { toStatus: raced, source: 'manual' });
+          expect(header.status).toBe(200);
+        }
+        return realUpdate(id, patch, opts);
+      });
+
+      const res = await send(app, '/api/contacts/c-keep', { type: to });
+
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe('contact_changed');
+      expect(res.body.contact).toMatchObject({ contactId: 'c-keep', type: from, status: raced });
+      expect(storedKeep(world)).toMatchObject({ type: from, status: raced });
+      // Only the status write is recorded: no PATCH audit, no PATCH emit.
+      expect(world.auditEvents.filter((e) => e.event_type === 'contact_updated')).toEqual([]);
+      expect(notified).toEqual([{ contactId: 'c-keep' }]);
+    });
+
+    it(`(PIN) the same ${from} -> ${to} PATCH with no concurrent write keeps Needs review: 200`, async () => {
+      const { app, world } = makeWebhookHarness();
+      seedKeep(world, from);
+      const res = await send(app, '/api/contacts/c-keep', { type: to });
+      expect(res.status).toBe(200);
+      expect(res.body.contact).toMatchObject({ type: to, status: 'needs_review' });
+      expect(storedKeep(world)).toMatchObject({ type: to, status: 'needs_review' });
+    });
+  }
+});

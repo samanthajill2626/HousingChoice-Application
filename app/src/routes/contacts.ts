@@ -1659,6 +1659,9 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     const classificationGuard = changesClassification
       ? { attr: 'classification_revision', value: stored?.classification_revision ?? null }
       : undefined;
+    // The stored status as read, captured NOW for the same reason (code review
+    // R1 FW1-3): a re-type below that KEEPS it is fenced on it.
+    const statusAsRead: ExpectClause[] = stored !== undefined ? guardAsRead(stored, 'status') : [];
     // LANDLORD REQUIREMENTS (code review OR-30): the landlord-only 400 and the
     // deposit_conflict 400 below are decided on this read, so the write is
     // guarded on what they read, captured NOW for the same reason as above:
@@ -1784,6 +1787,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     //   - unknown -> 'needs_review' (back to the front door)  [reachable]
     //   - team_member -> 'active' (no lifecycle)              [reachable]
     //   - tenant -> 'onboarding', landlord -> 'interested'    [defensive only]
+    const keptStatusGuards: ExpectClause[] = [];
     if (isContactType(newType) && convType === undefined && !('status' in parsed.patch)) {
       if (!stored) {
         res.status(404).json({ error: 'contact_not_found' });
@@ -1807,6 +1811,16 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
                 ? 'interested'
                 : 'active';
         parsed.changedFields.push('status');
+      } else if (newType !== stored.type) {
+        // Code review R1 FW1-3 (ADV-2): the re-type KEEPS the stored status
+        // (legal for the new type, not inactive) and this write carries no
+        // status, so it is fenced on the status as read. Otherwise a status
+        // write landing between the read above and the write below combines
+        // with the new type into a pair no check allowed, such as
+        // (unknown, active) or (team_member, parked). A lost guard is the 409
+        // contact_changed below. classificationGuard does not cover it: a
+        // status write leaves classification_revision alone.
+        keptStatusGuards.push(...statusAsRead);
       }
     }
 
@@ -1972,6 +1986,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       ...(classificationGuard !== undefined ? [classificationGuard] : []),
       ...requirementGuards,
       ...statusTypeGuards,
+      ...keptStatusGuards,
       ...(staffNotesGuard !== undefined ? [staffNotesGuard] : []),
     ];
 
@@ -1987,10 +2002,10 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
         // A guarded write fails the same way for "gone" and "stale": re-read
         // (consistent) to tell them apart and return the CURRENT contact.
         // A conflict on ANOTHER guard (the classification, a requirement
-        // guard, the status-only type guard) must not claim that an unchanged
-        // note is stale merely because this request also supplied a note
-        // expectation: with any other guard present, the note is stale only
-        // when its stamp actually moved.
+        // guard, the status-only type guard, the kept-status guard) must not
+        // claim that an unchanged note is stale merely because this request
+        // also supplied a note expectation: with any other guard present, the
+        // note is stale only when its stamp actually moved.
         if (guards.length > 0) {
           const current = await contacts.getById(contactId, { consistentRead: true });
           if (current) {

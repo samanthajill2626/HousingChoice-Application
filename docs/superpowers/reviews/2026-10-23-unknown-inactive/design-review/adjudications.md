@@ -99,3 +99,22 @@ Round 1 changed decisions (P1, P2, P3, P12), so round 2 runs. Continued
 reviewer: A (more accepted unique findings), handed B's report.
 Note: commit bce89000's message names AR15-AR24, but those rulings landed
 in 3d6e9ec9 (an Edit had failed); the plan text is what counts.
+
+## Plan round 2 (plan v2 @43e971f5) - continued reviewer A
+
+Report: `plan-r2-a.md` (5 items; A also read B's round-1 report). Checked in
+the code: ContactEditForm.tsx:334-339 diffs the draft against the LIVE
+`contact` prop; ContactDetail.tsx:1341-1349 passes the live contact;
+useContact.ts:60-68 already re-reads on `suggestion.updated`, so the hazard
+exists today and S2.9 widens it to every status change;
+services/statusTransition.ts:611 reads the contact eventually consistently.
+
+| # | Finding | Ruling | Decision changed? |
+|---|---|---|---|
+| R2P-1 | An open edit form diffs against the live prop; a `contact.updated` re-read swaps it, so saving an unrelated field writes back another operator's concurrent status/type/field change. | ACCEPT - ContactEditForm diffs against a BASE snapshot taken when the form opens (`const [base] = useState(contact)`); every comparison in buildPatch/onSubmit, `typeChanged`, `initialStatus` and the statusType seed reads `base`, never the live prop. Test: rerender with a changed contact prop mid-edit, save an unrelated field -> the PATCH carries only that field and no setTenantStatus runs. | YES (mechanism) |
+| R2P-2 | P12 half-applied: setTenantStatus re-reads eventually consistently and takes audit `from`, the milestone decision and the label map from it. | ACCEPT - `contactsRepo.getById(contactId, { consistentRead: true })` in setTenantStatus; test asserts the option. | YES (small) |
+| R2P-3 | Status options still built from `liveType`; during the Other step the select shows another type's list. | ACCEPT - options from `statusOptionsFor(statusType)`. | no |
+| R2P-4 | Today/Inbox drop-without-reload rests on one debounced refetch over eventually consistent reads; DynamoDB Local hides it. | ACCEPT as watch item W8 (same pattern as conversation.updated); S2 report records it. No mechanism change. | no |
+| R2P-5 | Concedes P9; no adjudication contested; the round-1 fixes check out. | NOTED. | - |
+
+Round 2 changed decisions (R2P-1, R2P-2), so round 3 runs with A.

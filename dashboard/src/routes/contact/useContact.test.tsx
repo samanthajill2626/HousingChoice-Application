@@ -7,16 +7,22 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Contact } from '../../api/index.js';
+import type { Contact, EventStreamHandlers } from '../../api/index.js';
 
 const getContact = vi.fn();
 const updateContact = vi.fn();
+// The page's only useEventStream caller is useContact, so last-writer-wins
+// capture is exact here.
+let sse: EventStreamHandlers = {};
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
     ...actual,
     getContact: (...a: unknown[]) => getContact(...a),
     updateContact: (...a: unknown[]) => updateContact(...a),
+    useEventStream: (h: EventStreamHandlers) => {
+      sse = h;
+    },
   };
 });
 
@@ -46,6 +52,7 @@ function Page({ contactId }: { contactId: string }): React.JSX.Element {
 }
 
 beforeEach(() => {
+  sse = {};
   getContact.mockReset();
   updateContact.mockReset();
   getContact.mockImplementation((id: string) => Promise.resolve(id === 'A' ? A : B));
@@ -102,5 +109,80 @@ describe('useContact - setContact is bound to its contact', () => {
     await user.click(screen.getByRole('button', { name: 'Save' }));
     expect(await screen.findByText('note B - updated')).toBeInTheDocument();
     expect(getContact).toHaveBeenCalledTimes(1);
+  });
+});
+
+// unknown-inactive spec D2 / AR3: a status or type change made elsewhere (the
+// edit form, another tab, another operator) re-reads the open contact in
+// place - no spinner, no reload.
+describe('useContact - live re-read on contact.updated', () => {
+  it('re-reads the open contact in place when contact.updated names it', async () => {
+    render(<Page contactId="B" />);
+    expect(await screen.findByRole('heading', { name: 'Ben' })).toBeInTheDocument();
+    expect(getContact).toHaveBeenCalledTimes(1);
+
+    getContact.mockResolvedValue({ ...B, firstName: 'Benjamin' });
+    act(() => {
+      sse.onContactUpdated?.({ contactId: 'B' });
+    });
+    expect(await screen.findByRole('heading', { name: 'Benjamin' })).toBeInTheDocument();
+    expect(getContact).toHaveBeenCalledTimes(2);
+    // Plan round 1 P2: the re-read follows a write by moments, so it is a
+    // consistent read (getContact's `consistent`, planner ruling PR-3).
+    expect(getContact).toHaveBeenLastCalledWith('B', undefined, { consistent: true });
+    expect(screen.queryByText('page loading')).not.toBeInTheDocument();
+  });
+
+  it('(PIN) ignores contact.updated for another contact', async () => {
+    render(<Page contactId="B" />);
+    expect(await screen.findByRole('heading', { name: 'Ben' })).toBeInTheDocument();
+    await act(async () => {
+      sse.onContactUpdated?.({ contactId: 'A' });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(getContact).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('heading', { name: 'Ben' })).toBeInTheDocument();
+  });
+
+  it('the latest re-read wins: an earlier re-read answering LAST never overwrites a newer one (WORKLIST OR-5)', async () => {
+    // A type change to tenant whose shown status is not Onboarding emits
+    // contact.updated twice (the PATCH, then setTenantStatus). Two consistent
+    // GETs answering out of order must not leave the intermediate contact on
+    // screen.
+    render(<Page contactId="B" />);
+    expect(await screen.findByRole('heading', { name: 'Ben' })).toBeInTheDocument();
+    let releaseFirst: ((c: Contact) => void) | undefined;
+    let releaseSecond: ((c: Contact) => void) | undefined;
+    getContact
+      .mockImplementationOnce(
+        () =>
+          new Promise<Contact>((resolve) => {
+            releaseFirst = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<Contact>((resolve) => {
+            releaseSecond = resolve;
+          }),
+      );
+    act(() => {
+      sse.onContactUpdated?.({ contactId: 'B' });
+      sse.onContactUpdated?.({ contactId: 'B' });
+    });
+    expect(getContact).toHaveBeenCalledTimes(3);
+
+    // The newer re-read answers first and lands...
+    await act(async () => {
+      releaseSecond!({ ...B, firstName: 'Final' });
+    });
+    expect(await screen.findByRole('heading', { name: 'Final' })).toBeInTheDocument();
+    // ...then the older one answers late and is dropped.
+    await act(async () => {
+      releaseFirst!({ ...B, firstName: 'Intermediate' });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(screen.getByRole('heading', { name: 'Final' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Intermediate' })).not.toBeInTheDocument();
   });
 });

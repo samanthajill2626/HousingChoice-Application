@@ -1,7 +1,7 @@
 // useContact — fetches a single contact (GET /api/contacts/:id) for the detail
 // page header + file. getContact exists today (legacy Contact, single phone);
 // C1's phones[] is handled downstream by contactPhones(). Loading/error/ready.
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { getContact, useEventStream, type Contact } from '../../api/index.js';
 
 export interface ContactState {
@@ -57,17 +57,37 @@ export function useContact(contactId: string): ContactState {
   // run may have DIRECT-written fields - re-fetch in the background and swap
   // the committed state. Deliberately no status flip: the page keeps rendering
   // the current contact until the fresh one lands (no spinner, no reload).
+  // contact.updated (unknown-inactive spec D2, AR3) re-reads the same way: a
+  // status or type change made elsewhere (the edit form, another tab or
+  // operator) lands without a reload. Both events name the contact; only the
+  // open one is re-read. The event follows its write by moments, so the
+  // re-read is CONSISTENT (planner ruling PR-3, plan round 1 P2) - an
+  // eventually consistent GET could hand back the pre-write contact and
+  // overwrite the fresh one.
+  //
+  // LATEST WINS (unknown-inactive WORKLIST OR-5): every re-read takes the next
+  // sequence number and a response that is no longer the latest is dropped.
+  // A type change to tenant whose shown status is not Onboarding emits
+  // contact.updated twice (the PATCH, then setTenantStatus); two GETs
+  // answering out of order would otherwise leave the intermediate contact on
+  // screen. The initial-load fetch above is not part of the sequence.
+  const refetchSeqRef = useRef(0);
+  const refetchInPlace = (eventContactId: string): void => {
+    if (eventContactId !== contactId) return;
+    refetchSeqRef.current += 1;
+    const seq = refetchSeqRef.current;
+    void getContact(contactId, undefined, { consistent: true })
+      .then((contact) => {
+        if (seq !== refetchSeqRef.current) return;
+        setState((prev) => (prev.forId === contactId ? { status: 'ready', contact, forId: contactId } : prev));
+      })
+      .catch(() => {
+        /* best-effort: keep the current contact on a fetch hiccup */
+      });
+  };
   useEventStream({
-    onSuggestionUpdated: (event) => {
-      if (event.contactId !== contactId) return;
-      void getContact(contactId)
-        .then((contact) => {
-          setState((prev) => (prev.forId === contactId ? { status: 'ready', contact, forId: contactId } : prev));
-        })
-        .catch(() => {
-          /* best-effort: keep the current contact on a fetch hiccup */
-        });
-    },
+    onSuggestionUpdated: (event) => refetchInPlace(event.contactId),
+    onContactUpdated: (event) => refetchInPlace(event.contactId),
   });
 
   // The committed state is for the previous id → the new fetch is in flight.

@@ -639,9 +639,10 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   `app/src/lib/listingSendOutcome.ts` - never `SendOutcome`, which is the
   Twilio send-failure vocabulary.
 
-- **waiting on a reply** (last-heard-from, 2026-10-12) - a send at No reply
-  yet or Replied whose recipient can be texted (not deleted, not opted out,
-  not unreachable, has a phone, and not an inactive or placed tenant) and has
+- **waiting on a reply** (last-heard-from, 2026-10-12; updated 2026-10-23) - a
+  send at No reply yet or Replied whose recipient can be texted (not deleted,
+  not opted out, not unreachable, has a phone, not **Inactive** - any contact
+  type since 2026-10-23, tenants only before - and not a placed tenant) and has
   been quiet for 24 hours since the later of the send and their last heard
   from, within 14 days of the send (`FOLLOW_UP_QUIET_MS`,
   `FOLLOW_UP_LOOKBACK_MS`). Listed on Matching's "Follow up" tab, grouped by
@@ -694,13 +695,37 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   counted share entry is the flyer entry (see **send outcome**). A sign-up
   does not move **last heard from**; a later inbound from the person does,
   so the pair then reads Replied and is back on Follow up once quiet
-  (unknown contacts included). The unread thread also shows on Today: a
+  (unknown contacts included; never an **Inactive** contact, see **waiting
+  on a reply**). The unread thread also shows on Today: a
   tenant's, landlord's or partner's under Unreplied as "<name> -
   Unreplied", an existing unknown contact's under Needs you now as a "New
-  unknown contact". When the contact had no thread on that phone, the
+  unknown contact" (not when that contact is **Inactive**: its thread then
+  shows only in the inbox). When the contact had no thread on that phone, the
   sign-up creates one with no message, so its inbox row is bold with a
   blank preview and, as the contact's newest conversation, heads that
   contact's row.
+
+- **Inactive** (contact status; unknown-inactive, 2026-10-23) - the status
+  that sets a contact aside WITHOUT deleting it, on every contact type that
+  has it: tenant, partner (a caseworker or other partner), team member and
+  unknown (code `inactive`, label "Inactive"). It means the same thing on
+  each (Cameron, 2026-10-23): the contact is not chased (no **waiting on a
+  reply** row, not a listing-send recipient - `isEligibleRecipient`,
+  `app/src/lib/listingSendOutcome.ts`) but stays on the Contacts lists, in
+  search and in the inbox, where its texts and calls still show unread and
+  its row carries a small muted "Inactive" tag and no "Needs triage" chip.
+  An inbound text or call never moves it back to Needs review. An unknown
+  contact or team member marked Inactive leaves Today's Needs you now (a
+  team member's 1:1 threads are unknown threads too; the unread texts show
+  only in the inbox), and an Inactive unknown contact sorts below the Needs
+  review ones on the inbox Unknown tab and on Contacts > Unknown; an
+  Inactive tenant's or partner's unread text still shows under Unreplied.
+  Staff set it from the contact page header dropdown or the Edit contact
+  details Status field, which offer the same choices for every type; an
+  unknown contact has no "Active" (Needs review or Inactive only). NOT a
+  landlord's "Parked" (the landlord's own retired status, which needs a
+  reason), which none of these rules touch. Full rules:
+  [STATUS-MODEL.md](STATUS-MODEL.md) section 5b.
 
 ---
 

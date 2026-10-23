@@ -35,11 +35,12 @@ import { isCaseworker } from '../lib/caseworkers.js';
 import {
   LANDLORD_STATUS_LABELS,
   LANDLORD_STATUSES,
-  NON_TENANT_STATUSES,
+  PARTNER_STATUSES,
   statusAllowlistFor,
   TENANT_STATUS_LABELS,
   TENANT_STATUSES,
   TERMINAL_STAGES,
+  UNKNOWN_STATUSES,
 } from '../lib/statusModel.js';
 import { createPlacementsRepo, type PlacementsRepo } from '../repos/placementsRepo.js';
 import {
@@ -420,11 +421,12 @@ const LANDLORD_BOOLEAN_FIELDS = [
 // defaults DO live on the contact, as the 15 `req_` keys parsed by
 // lib/requirements.ts - never these bare names.)
 
-// The type-scoped status allowlist (a TENANT's §5 lifecycle, a LANDLORD's lead
-// lifecycle, else needs_review|active) is centralized in lib/statusModel.ts
-// (statusAllowlistFor) so BOTH status-setting paths — this generic PATCH and the
-// /tenant-status transition route — share ONE source of truth. NON_TENANT_STATUSES
-// (needs_review|active) is imported for the "no explicit type" fallback union.
+// The type-scoped status allowlist (a TENANT's section 5 lifecycle, a LANDLORD's
+// lead lifecycle, PARTNER_STATUSES for partner/team_member, UNKNOWN_STATUSES for
+// unknown) is centralized in lib/statusModel.ts (statusAllowlistFor) so BOTH
+// status-setting paths - this generic PATCH and the /tenant-status transition
+// route - share ONE source of truth. The four per-type lists are imported for
+// the "no explicit type" fallback union.
 
 // --- M1.5 list pagination + cursor -----------------------------------------
 const DEFAULT_PAGE_LIMIT = 50;
@@ -625,7 +627,7 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     const patchType = patch['type'];
     const allow = isContactType(patchType)
       ? statusAllowlistFor(patchType)
-      : ([...TENANT_STATUSES, ...LANDLORD_STATUSES, ...NON_TENANT_STATUSES] as readonly string[]);
+      : ([...TENANT_STATUSES, ...LANDLORD_STATUSES, ...PARTNER_STATUSES, ...UNKNOWN_STATUSES] as readonly string[]);
     if (typeof v !== 'string' || !allow.includes(v)) {
       return { error: `status must be one of: ${allow.join(', ')}` };
     }
@@ -1122,8 +1124,8 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     const rawStatus = req.query['status'];
     let status: string | undefined;
     if (typeof rawStatus === 'string' && rawStatus.length > 0) {
-      // Type-scoped allowlist (status-model unification): a tenant-typed filter
-      // accepts the §5 lifecycle values; other types accept needs_review|active.
+      // Type-scoped allowlist (statusAllowlistFor): each type accepts only its
+      // own statuses, so type=unknown&status=active is a 400 (tracker #30, D6).
       const allow = statusAllowlistFor(rawType);
       if (!allow.includes(rawStatus)) {
         res.status(400).json({ error: `status must be one of: ${allow.join(', ')}` });
@@ -1715,7 +1717,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // the front door); landlord -> 'interested' (a freshly identified landlord is a
     // LEAD; 'active' means their properties are onboarded -
     // landlord-status-onboarding design D1); partner -> 'active' (partner has no
-    // rich lifecycle - NON_TENANT_STATUSES needs_review|active - so a resolved
+    // rich lifecycle - PARTNER_STATUSES needs_review|active|inactive - so a resolved
     // partner is simply off the front door). We do NOT stamp status_source -
     // leaving provenance unset keeps the tenant lifecycle DERIVABLE by the first
     // placement transition (a 'manual' pin would block it: the create-pin

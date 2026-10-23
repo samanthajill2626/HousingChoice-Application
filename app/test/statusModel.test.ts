@@ -16,6 +16,12 @@ import {
   LANDLORD_STATUSES,
   LANDLORD_STATUS_LABELS,
   LISTING_OVERRIDE_STATES,
+  PARTNER_STATUSES,
+  PARTNER_STATUS_LABELS,
+  statusAllowlistFor,
+  statusLabelFor,
+  UNKNOWN_STATUSES,
+  UNKNOWN_STATUS_LABELS,
   LISTING_STATUSES,
   LOST_REASON_CATEGORIES,
   phaseForStage,
@@ -250,5 +256,61 @@ describe('statusModel — phaseForStage helper', () => {
     expect(phaseForStage('awaiting_hap_contract')).toBe('Contract');
     expect(phaseForStage('send_application')).toBe('Application');
     expect(phaseForStage('bogus')).toBeUndefined();
+  });
+});
+
+// Tracker #30 (spec 2026-10-23-unknown-inactive D1): every contact type has
+// an Inactive status, and an unknown contact has no Active.
+describe('statusModel - per-type contact status lists (D1)', () => {
+  it('each type allows exactly its D1 list, in dropdown order', () => {
+    expect([...statusAllowlistFor('tenant')]).toEqual([
+      'needs_review', 'onboarding', 'searching', 'placing', 'placed', 'on_hold', 'inactive',
+    ]);
+    expect([...statusAllowlistFor('landlord')]).toEqual([
+      'needs_review', 'interested', 'onboarding', 'active', 'parked',
+    ]);
+    expect([...statusAllowlistFor('partner')]).toEqual(['needs_review', 'active', 'inactive']);
+    expect([...statusAllowlistFor('team_member')]).toEqual(['needs_review', 'active', 'inactive']);
+    expect([...statusAllowlistFor('unknown')]).toEqual(['needs_review', 'inactive']);
+  });
+
+  it('an unknown contact can never be active', () => {
+    expect(statusAllowlistFor('unknown')).not.toContain('active');
+  });
+
+  it('returns the exported lists themselves - one source of truth', () => {
+    expect(statusAllowlistFor('partner')).toBe(PARTNER_STATUSES);
+    expect(statusAllowlistFor('team_member')).toBe(PARTNER_STATUSES);
+    expect(statusAllowlistFor('unknown')).toBe(UNKNOWN_STATUSES);
+    expect(statusAllowlistFor(undefined)).toBe(PARTNER_STATUSES);
+  });
+
+  it('the non-tenant label maps are Needs review / Active / Inactive, one label per listed status', () => {
+    expect(PARTNER_STATUS_LABELS).toEqual({
+      needs_review: 'Needs review',
+      active: 'Active',
+      inactive: 'Inactive',
+    });
+    expect(UNKNOWN_STATUS_LABELS).toEqual({ needs_review: 'Needs review', inactive: 'Inactive' });
+    expect(Object.keys(PARTNER_STATUS_LABELS)).toEqual([...PARTNER_STATUSES]);
+    expect(Object.keys(UNKNOWN_STATUS_LABELS)).toEqual([...UNKNOWN_STATUSES]);
+    // (PIN) the landlord map is unchanged.
+    expect(Object.keys(LANDLORD_STATUS_LABELS)).toEqual([...LANDLORD_STATUSES]);
+  });
+
+  it('statusLabelFor reads the label map of the given type', () => {
+    expect(statusLabelFor('tenant', 'on_hold')).toBe('On hold');
+    expect(statusLabelFor('landlord', 'interested')).toBe('Interested');
+    expect(statusLabelFor('partner', 'active')).toBe('Active');
+    expect(statusLabelFor('team_member', 'inactive')).toBe('Inactive');
+    expect(statusLabelFor('unknown', 'needs_review')).toBe('Needs review');
+    expect(statusLabelFor('unknown', 'inactive')).toBe('Inactive');
+  });
+
+  it('statusLabelFor falls back to the raw status when the type has no such status', () => {
+    expect(statusLabelFor('unknown', 'active')).toBe('active');
+    expect(statusLabelFor('tenant', 'parked')).toBe('parked');
+    // An inherited object key is not a label.
+    expect(statusLabelFor('partner', 'constructor')).toBe('constructor');
   });
 });

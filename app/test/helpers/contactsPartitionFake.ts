@@ -52,10 +52,11 @@
 //      finding HIGH-1; rationale corrected 2026-08-26, rework review B4).
 //      Returning items in SEED-ARRAY order made the partition's most
 //      consequential property INEXPRESSIBLE. Within `type='unknown'` the only
-//      legal statuses are 'needs_review' and 'active' (NON_TENANT_STATUSES,
-//      lib/statusModel.ts:194) and 'active' < 'needs_review' lexicographically,
-//      so an UN-NARROWED Query returns EVERY 'active' unknown before ANY
-//      'needs_review' one. That is what made the deleted result cap and page
+//      legal statuses are 'needs_review' and 'inactive' (UNKNOWN_STATUSES,
+//      lib/statusModel.ts; 'active' until tracker #30, 2026-10-23), and both
+//      'active' and 'inactive' sort before 'needs_review', so an UN-NARROWED
+//      Query returns EVERY reviewed unknown before ANY 'needs_review' one.
+//      That is what made the deleted result cap and page
 //      budget cut STATUS-FIRST and starve the status meaning "nobody has looked
 //      at this yet" - and no test in the suite could state it until this fake
 //      modelled the sort.

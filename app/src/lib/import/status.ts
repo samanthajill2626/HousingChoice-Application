@@ -60,7 +60,8 @@ export function deriveStatus(input: StatusInput): string {
   // A handshake in her book means she is working with them (spec §3.4).
   if (type === 'landlord') return 'active';
 
-  // partner (incl. caseworkers) and team_member have no lifecycle: needs_review | active.
+  // partner (incl. caseworkers) and team_member have no lifecycle (PARTNER_STATUSES);
+  // the import never derives inactive - setting a contact aside is a staff decision.
   if (type === 'partner' || type === 'team_member') return 'active';
 
   // `unknown` never claims more than it knows — this IS the triage queue.

@@ -44,12 +44,7 @@ import { tableName } from '../config.js';
 import { normalizeToE164 } from '../phone.js';
 import { KINDS_FOR_FIELD, resolveOrgText, type OrgEntry } from '../orgNames.js';
 import { buildStartingEntries } from '../orgStartingList.js';
-import {
-  LANDLORD_STATUSES,
-  NON_TENANT_STATUSES,
-  TENANT_STATUSES,
-  type TransitionSource,
-} from '../statusModel.js';
+import { statusAllowlistFor, type TransitionSource } from '../statusModel.js';
 import { createContactsRepo, type ContactType } from '../../repos/contactsRepo.js';
 import { attributeInbound, normalizeInstant, type HeardFromLookup, type HeardFromRow, type HeardFromThread } from '../heardFrom.js';
 import { GROUP_TEXT_STATUS } from '../../repos/conversationsRepo.js';
@@ -972,12 +967,9 @@ function resolvePerson(
   // column ("Delete", "?") stored verbatim would poison the GSI partition. The
   // interpreter clears those upstream; this is the belt-and-braces for a
   // hand-edited workbook that never went through interpretation.
-  const validStatuses: readonly string[] =
-    type === 'tenant'
-      ? TENANT_STATUSES
-      : type === 'landlord'
-        ? LANDLORD_STATUSES
-        : NON_TENANT_STATUSES;
+  // statusAllowlistFor is the ONE per-type list (lib/statusModel.ts), so an
+  // (unknown, active) row falls back like any other illegal pair (tracker #30).
+  const validStatuses: readonly string[] = statusAllowlistFor(type);
   const rawStatus = (row?.status ?? '').trim();
   let status: string;
   if (rawStatus && validStatuses.includes(rawStatus)) {

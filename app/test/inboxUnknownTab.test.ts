@@ -150,7 +150,7 @@ function makeDeps(
 /** One unknown contact plus its open 1:1 thread. */
 function queueContact(
   id: string,
-  status: 'needs_review' | 'active',
+  status: 'needs_review' | 'inactive',
   phoneTail: number,
   lastActivityAt: string,
 ): { contact: ContactItem; conversation: ConversationItem } {
@@ -170,8 +170,8 @@ describe('filter=unknown - the contact-side read', () => {
     // THE STARVED FIXTURE (spec section 6): many open conversations, few
     // matches. Under the original pager this cost one findByPhone per
     // conversation. TWO listByType calls now, not one: the read issues a
-    // bounded Query per STATUS BLOCK (needs_review, then active) so a
-    // (unknown, active) contact stays covered - coverage class f - while the
+    // bounded Query per STATUS BLOCK (needs_review, then inactive) so a
+    // (unknown, inactive) contact stays covered - coverage class f - while the
     // untriaged block is drained first.
     const contacts: ContactItem[] = [{ contactId: 'c-unk', type: 'unknown', status: 'needs_review', phone: '+15550002000' }];
     const conversations: ConversationItem[] = [
@@ -209,9 +209,9 @@ describe('filter=unknown - the contact-side read', () => {
       queueContact('c-n1', 'needs_review', 11, '2026-06-12T02:00:00.000Z'),
       queueContact('c-n2', 'needs_review', 12, '2026-06-12T03:00:00.000Z'),
       queueContact('c-n3', 'needs_review', 13, '2026-06-12T04:00:00.000Z'),
-      queueContact('c-a0', 'active', 14, '2026-06-12T05:00:00.000Z'),
-      queueContact('c-a1', 'active', 15, '2026-06-12T06:00:00.000Z'),
-      queueContact('c-a2', 'active', 16, '2026-06-12T07:00:00.000Z'),
+      queueContact('c-a0', 'inactive',14, '2026-06-12T05:00:00.000Z'),
+      queueContact('c-a1', 'inactive',15, '2026-06-12T06:00:00.000Z'),
+      queueContact('c-a2', 'inactive',16, '2026-06-12T07:00:00.000Z'),
     ];
     const seed: Seed = {
       contacts: seeds.map((s) => s.contact),
@@ -342,11 +342,27 @@ describe('filter=unknown - the contact-side read', () => {
     // direction is covered by "a page that fills mints a cursor that resumes
     // EXACTLY after the last row it served".
     const honest = Buffer.from(
-      JSON.stringify({ q: 1, b: 1, k: { type: 'unknown', status: 'active', contactId: 'c-x' } }),
+      JSON.stringify({ q: 1, b: 1, k: { type: 'unknown', status: 'inactive', contactId: 'c-x' } }),
       'utf8',
     ).toString('base64url');
     await expect(
       aggregateInbox({ filter: 'unknown', limit: 25, cursor: honest }, deps),
+    ).resolves.toMatchObject({ rows: [] });
+    // A PRE-DEPLOY cursor (unknown-inactive spec D9): minted INSIDE the removed
+    // `active` block, it no longer agrees with block 1 (`inactive`), so it is a
+    // 400 - once; reloading the inbox recovers. Never a wrong-partition Query.
+    const preDeploy = Buffer.from(
+      JSON.stringify({ q: 1, b: 1, k: { type: 'unknown', status: 'active', contactId: 'c-x' } }),
+      'utf8',
+    ).toString('base64url');
+    await expect(
+      aggregateInbox({ filter: 'unknown', limit: 25, cursor: preDeploy }, deps),
+    ).rejects.toBeInstanceOf(InboxBadRequestError);
+    // ...while a pre-deploy cursor at the START of block 1 (no `k`, minted on a
+    // roll-over) resumes at the first page of the inactive block - the right place.
+    const preDeployBlockStart = Buffer.from(JSON.stringify({ q: 1, b: 1 }), 'utf8').toString('base64url');
+    await expect(
+      aggregateInbox({ filter: 'unknown', limit: 25, cursor: preDeployBlockStart }, deps),
     ).resolves.toMatchObject({ rows: [] });
     // ...with or without a deferral marker.
     const honestDeferred = Buffer.from(
@@ -670,13 +686,13 @@ describe('filter=unknown - the contact-side read', () => {
   it('a page-head failure AFTER A BLOCK ROLL-OVER does not strand the whole later block', async () => {
     // F1, the second unbounded shape. Page 1 fills inside `needs_review`, so
     // page 2 resumes at a position whose first CONSUMED row is the first row of
-    // the `active` block. Before F1 that page came back empty with the cursor it
-    // was sent and every remaining `active` row was unreachable from the UI.
+    // the `inactive` block. Before F1 that page came back empty with the cursor
+    // it was sent and every remaining later-block row was unreachable from the UI.
     const seeds = [
       queueContact('c-r1', 'needs_review', 95, '2026-06-12T01:00:00.000Z'),
       queueContact('c-r2', 'needs_review', 96, '2026-06-12T02:00:00.000Z'),
-      queueContact('c-r3-broken', 'active', 97, '2026-06-12T03:00:00.000Z'),
-      queueContact('c-r4', 'active', 98, '2026-06-12T04:00:00.000Z'),
+      queueContact('c-r3-broken', 'inactive',97, '2026-06-12T03:00:00.000Z'),
+      queueContact('c-r4', 'inactive',98, '2026-06-12T04:00:00.000Z'),
     ];
     const seed: Seed = {
       contacts: seeds.map((s) => s.contact),
@@ -918,7 +934,7 @@ describe('filter=unknown - the contact-side read', () => {
     // re-admits deleted contacts to this queue, this pin catches it in the
     // middle of the list rather than at an edge.
     //
-    // NOTE what this does NOT say: c-new is `active` and c-old is
+    // NOTE what this does NOT say: c-new is `inactive` and c-old is
     // `needs_review`, so they come from DIFFERENT blocks and the read order is
     // c-old first. The per-PAGE sort is what puts c-new on top, and it applies
     // only because both fit on one page. Across a page boundary the untriaged
@@ -926,7 +942,7 @@ describe('filter=unknown - the contact-side read', () => {
     const seed: Seed = {
       contacts: [
         { contactId: 'c-old', type: 'unknown', status: 'needs_review', phone: '+15550002600' },
-        { contactId: 'c-new', type: 'unknown', status: 'active', phone: '+15550002601' },
+        { contactId: 'c-new', type: 'unknown', status: 'inactive', phone: '+15550002601' },
         { contactId: 'c-mid', type: 'unknown', status: 'needs_review', phone: '+15550002602', deleted_at: '2026-06-10T00:00:00.000Z' },
       ],
       conversations: [

@@ -78,7 +78,7 @@
 //   forever, so a roster member who later texts in would be silently dropped -
 //   class a. And the exclusion buys nothing here: a threadless stub yields no
 //   open thread and therefore no row anyway.
-import { NON_TENANT_STATUSES } from './statusModel.js';
+import { UNKNOWN_STATUSES } from './statusModel.js';
 import type { ContactItem, ContactsRepo, ContactType } from '../repos/contactsRepo.js';
 
 /** Rows fetched per block Query while filling a page. */
@@ -154,13 +154,13 @@ export const UNKNOWN_QUEUE_TYPES: readonly ContactType[] = (
 
 /**
  * The statuses a `type='unknown'` contact may legally carry. Taken from
- * NON_TENANT_STATUSES, which is what `statusAllowlistFor('unknown')` returns -
+ * UNKNOWN_STATUSES, which is what `statusAllowlistFor('unknown')` returns -
  * ONE source of truth, so a new legal status cannot appear in the allowlist and
  * be missing here. test/unknownQueue.test.ts pins the two against each other at
  * runtime as well, because the type alias alone would not catch a change made
  * only inside statusAllowlistFor.
  */
-type UnknownQueueStatus = (typeof NON_TENANT_STATUSES)[number];
+type UnknownQueueStatus = (typeof UNKNOWN_STATUSES)[number];
 
 /**
  * QUEUE ORDER, and the one place it is decided (human ruling 2026-08-26).
@@ -178,7 +178,7 @@ type UnknownQueueStatus = (typeof NON_TENANT_STATUSES)[number];
  */
 export const UNKNOWN_QUEUE_STATUS_ORDER = {
   needs_review: 0,
-  active: 1,
+  inactive: 1,
 } as const satisfies Record<UnknownQueueStatus, number>;
 
 /** One (type, status) partition of the queue, read as a unit. */

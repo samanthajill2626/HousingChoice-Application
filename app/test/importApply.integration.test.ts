@@ -515,6 +515,29 @@ describe.skipIf(!reachable)('import:apply', () => {
     await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
   });
 
+  it('a row retyped to unknown never stores active - it lands needs_review with a warning (tracker #30, D6)', async () => {
+    // The generated workbook pre-fills the landlord's status ("active"). Active
+    // is not an unknown status (UNKNOWN_STATUSES), so the per-type guard must
+    // refuse it exactly as it refuses any status illegal for the type.
+    const review = cleanReview();
+    const row = [...review.contacts.values()].find((r) => r.phone === PHONES.landlord)!;
+    row.type = 'unknown';
+
+    const report = await runApply({ doc, plan, review, importedAt, env: testEnv });
+
+    const item = await doc.send(
+      new GetCommand({
+        TableName: table('contacts'),
+        Key: { contactId: contactIdForPhone(PHONES.landlord) },
+      }),
+    );
+    expect(item.Item).toMatchObject({ type: 'unknown', status: 'needs_review' });
+    expect(report.warnings.some((w) => w.includes('not a legal unknown status'))).toBe(true);
+
+    // Restore the fixture shape for the tests that follow.
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+  });
+
   it('excludes a dropped person and skips their thread', async () => {
     const review = cleanReview();
     const row = [...review.contacts.values()].find((r) => r.phone === PHONES.orphan)!;

@@ -134,8 +134,8 @@ const INSPECTION_OUTCOME_SET: ReadonlySet<string> = new Set(INSPECTION_OUTCOMES)
 
 // --- Tenant lifecycle (coarse; §5) ------------------------------------------
 // These are the values a TENANT contact's single `status` field holds (the one
-// type-scoped lifecycle, NOT a second field — see contactsRepo.ContactItem.status
-// and STATUS-MODEL.md §5). Non-tenant contacts use needs_review|active instead.
+// type-scoped lifecycle, NOT a second field - see contactsRepo.ContactItem.status
+// and STATUS-MODEL.md section 5). Other types: PARTNER_STATUSES / UNKNOWN_STATUSES.
 // `porting` is a SEPARATE boolean flag on the tenant, never a status value.
 export const TENANT_STATUSES = [
   'needs_review',
@@ -186,25 +186,68 @@ export const LANDLORD_STATUS_LABELS: Readonly<Record<LandlordStatus, string>> = 
   parked: 'Parked',
 };
 
-/**
- * Status allowlist for contact types WITHOUT a lifecycle (team_member/unknown):
- * the simple `needs_review` (auto-capture stub) → `active` (resolved). Tenant and
- * landlord have their own richer lifecycles above; see {@link statusAllowlistFor}.
- */
-export const NON_TENANT_STATUSES = ['needs_review', 'active'] as const;
+// --- Partner and team_member statuses (type=partner | team_member) ---------
+// No rich lifecycle: `needs_review` is the auto-capture/triage front door,
+// `active` a resolved contact, `inactive` a contact set aside. Inactive means
+// the same thing for EVERY type that has it (tracker #30, spec D4): not chased
+// by the Follow up worklist or listing sends, still shown on the Contacts list,
+// in the inbox, in search and on its threads. (`partner` is a "caseworker" or
+// "partner" in staff copy - documentation/GLOSSARY.md.)
+export const PARTNER_STATUSES = ['needs_review', 'active', 'inactive'] as const;
+
+export type PartnerStatus = (typeof PARTNER_STATUSES)[number];
+
+export const PARTNER_STATUS_LABELS: Readonly<Record<PartnerStatus, string>> = {
+  needs_review: 'Needs review',
+  active: 'Active',
+  inactive: 'Inactive',
+};
+
+// --- Unknown-contact statuses (type=unknown) --------------------------------
+// An unknown contact is either waiting for review (`needs_review`: the triage
+// queue and Today's Needs you now) or set aside without a type (`inactive`).
+// There is NO `active` (Cameron, 2026-10-23): every writer validates through
+// statusAllowlistFor, so every writer refuses (unknown, active).
+export const UNKNOWN_STATUSES = ['needs_review', 'inactive'] as const;
+
+export type UnknownStatus = (typeof UNKNOWN_STATUSES)[number];
+
+export const UNKNOWN_STATUS_LABELS: Readonly<Record<UnknownStatus, string>> = {
+  needs_review: 'Needs review',
+  inactive: 'Inactive',
+};
 
 /**
- * The single source of truth for the type-scoped status allowlist. A TENANT
- * carries its §5 lifecycle (TENANT_STATUSES); a LANDLORD carries the lead
- * lifecycle (LANDLORD_STATUSES); every other type (team_member/unknown) carries
- * the simple needs_review|active. Used by BOTH status-setting paths (the generic
- * contact PATCH and the `/tenant-status` transition route) so a landlord can
- * never be pushed into a tenant-only state.
+ * The single source of truth for the type-scoped status allowlist, in dropdown
+ * order: tenant -> TENANT_STATUSES, landlord -> LANDLORD_STATUSES, unknown ->
+ * UNKNOWN_STATUSES, any other type (partner, team_member) -> PARTNER_STATUSES.
+ * Every status writer (create, the contact PATCH, the `/tenant-status`
+ * transition route, the AI status accept, the import) and the list read
+ * validate against it, so no path stores a pair its type does not allow.
  */
 export function statusAllowlistFor(type: string | undefined): readonly string[] {
   if (type === 'tenant') return TENANT_STATUSES;
   if (type === 'landlord') return LANDLORD_STATUSES;
-  return NON_TENANT_STATUSES;
+  if (type === 'unknown') return UNKNOWN_STATUSES;
+  return PARTNER_STATUSES;
+}
+
+/**
+ * The display label of `status` on a contact of `type`, from that type's label
+ * map (the same branching as {@link statusAllowlistFor}); the raw status when
+ * the type has no such status. The ONE label picker for the contact timeline's
+ * status entries - never humanize a key at a call site.
+ */
+export function statusLabelFor(type: string | undefined, status: string): string {
+  const labels: Readonly<Record<string, string>> =
+    type === 'tenant'
+      ? TENANT_STATUS_LABELS
+      : type === 'landlord'
+        ? LANDLORD_STATUS_LABELS
+        : type === 'unknown'
+          ? UNKNOWN_STATUS_LABELS
+          : PARTNER_STATUS_LABELS;
+  return Object.prototype.hasOwnProperty.call(labels, status) ? (labels[status] ?? status) : status;
 }
 
 // --- Property lifecycle (coarse, mostly derived; §6) -------------------------

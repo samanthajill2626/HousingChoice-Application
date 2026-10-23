@@ -95,10 +95,12 @@ describe('listByTypeFromContacts', () => {
   it('rule 6 - status ascending is REAL service behaviour; the contactId tie-break is this FAKE\'S OWN convention', () => {
     // THE STATUS HALF IS PRODUCTION. The Query sets no ScanIndexForward
     // (contactsRepo.ts:1009-1020), so it is ascending on `status`. Within
-    // type='unknown' the legal statuses are 'needs_review' and 'active', and
-    // 'active' < 'needs_review' - so every active row precedes every
-    // needs_review one. The seed below is in the OPPOSITE order on purpose: a
-    // fake returning seed order passes nothing here.
+    // type='unknown' the legal statuses are 'needs_review' and 'inactive'
+    // (tracker #30; 'active' until 2026-10-23), and both 'inactive' and the
+    // 'active' this seed still uses sort before 'needs_review' - so every
+    // reviewed row precedes every needs_review one and the pin stays valid. The
+    // seed below is in the OPPOSITE order on purpose: a fake returning seed
+    // order passes nothing here.
     //
     // THE contactId HALF IS NOT. Positions 2 and 4 below assert a tie-break the
     // real service does not produce: four same-status items c1..c4 through a

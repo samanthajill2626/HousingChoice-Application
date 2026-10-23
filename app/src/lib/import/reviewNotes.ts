@@ -18,8 +18,9 @@
 
 import {
   LANDLORD_STATUSES,
-  NON_TENANT_STATUSES,
+  PARTNER_STATUSES,
   TENANT_STATUSES,
+  UNKNOWN_STATUSES,
 } from '../statusModel.js';
 import type { CsvRow } from './csv.js';
 
@@ -169,7 +170,8 @@ export function interpretReviewNotes(
 const VALID_STATUSES: ReadonlySet<string> = new Set([
   ...TENANT_STATUSES,
   ...LANDLORD_STATUSES,
-  ...NON_TENANT_STATUSES,
+  ...PARTNER_STATUSES,
+  ...UNKNOWN_STATUSES,
 ]);
 
 /** The seeded Airtable Tours demo people (+1 404-555-01xx) - never real. */

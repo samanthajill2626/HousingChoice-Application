@@ -43,10 +43,10 @@ function makeDeps(seed: ContactItem[]) {
 const WIDE = { want: 100, budget: 1000, pageSize: 100 };
 
 describe('readUnknownQueue', () => {
-  it('reads the blocks in QUEUE ORDER - needs_review first, active second - and narrows on nothing else', async () => {
+  it('reads the blocks in QUEUE ORDER - needs_review first, inactive second - and narrows on nothing else', async () => {
     const { deps, calls } = makeDeps([
       unk(1),
-      unk(2, { status: 'active' }), // class f: still on the tab, just read later
+      unk(2, { status: 'inactive' }), // class f: still on the tab, just read later
       unk(3, { origin: 'group_detection' }), // class a: a stub who may have texted
       { contactId: 'c-ten', type: 'tenant', phone: '+15550009000', status: 'active' },
     ]);
@@ -85,8 +85,8 @@ describe('readUnknownQueue', () => {
     const seed = [
       unk(1),
       unk(2),
-      unk(3, { status: 'active' }),
-      unk(4, { status: 'active' }),
+      unk(3, { status: 'inactive' }),
+      unk(4, { status: 'inactive' }),
     ];
     const { deps, calls } = makeDeps(seed);
     const read = await readUnknownQueue(deps, { want: 2, budget: 1000, pageSize: 10 });
@@ -120,12 +120,12 @@ describe('readUnknownQueue', () => {
     // FOUR Queries on the needs_review block, not three: page 3 returns the
     // last two live rows AT the Limit, so the service hands back a key and page
     // 4 is the empty read that proves the block ended (the LEK rule,
-    // unreadIndexFake.ts:104-116). Plus ONE on the empty `active` block.
+    // unreadIndexFake.ts:104-116). Plus ONE on the empty `inactive` block.
     expect(read.queries).toBe(5);
   });
 
   it('ROLLS OVER between blocks: an exhausted block advances the position, and only the LAST block ending stops paging', async () => {
-    const { deps } = makeDeps([unk(1), unk(2), unk(3, { status: 'active' })]);
+    const { deps } = makeDeps([unk(1), unk(2), unk(3, { status: 'inactive' })]);
     // pageSize 1 + want 1 stops INSIDE block 0 with the block un-exhausted.
     const first = await readUnknownQueue(deps, { want: 1, budget: 1000, pageSize: 1 });
     expect(first.rows.map((r) => r.contact.contactId)).toEqual(['c-unk-001']);
@@ -147,8 +147,8 @@ describe('readUnknownQueue', () => {
   it('an exhausted block that fills `want` exactly hands back the NEXT block, not undefined', async () => {
     // The boundary case that decides whether the reviewed block is reachable at
     // all: block 0 drains at the same moment `want` is met. Reporting
-    // exhaustion here would strand every `active` row behind a null cursor.
-    const { deps } = makeDeps([unk(1), unk(2, { status: 'active' })]);
+    // exhaustion here would strand every `inactive` row behind a null cursor.
+    const { deps } = makeDeps([unk(1), unk(2, { status: 'inactive' })]);
     const read = await readUnknownQueue(deps, { want: 1, budget: 1000, pageSize: 1 });
     expect(read.rows.map((r) => r.contact.contactId)).toEqual(['c-unk-001']);
     expect(read.next).toBeDefined();
@@ -197,7 +197,7 @@ describe('readUnknownQueue', () => {
     const read = await readUnknownQueue(deps, { want: 10, budget: 1000, pageSize: 2 });
     expect(read.rows).toEqual([]);
     // Two full pages (2 + 2) plus the empty proving read on needs_review, plus
-    // the empty `active` block: 4 examined rows charged, none returned.
+    // the empty `inactive` block: 4 examined rows charged, none returned.
     expect(read.scanned).toBe(4);
   });
 
@@ -272,7 +272,7 @@ describe('readUnknownQueue', () => {
 
   it('the block statuses ARE statusAllowlistFor("unknown") - the two cannot drift', () => {
     // The type alias on UNKNOWN_QUEUE_STATUS_ORDER pins it to
-    // NON_TENANT_STATUSES at COMPILE time, which is the same array
+    // UNKNOWN_STATUSES at COMPILE time, which is the same array
     // statusAllowlistFor returns for `unknown`. This is the RUNTIME half: a
     // change made inside statusAllowlistFor (a special case for `unknown`, say)
     // would not move the alias, and a status legal for a contact but absent
@@ -281,6 +281,8 @@ describe('readUnknownQueue', () => {
     expect(blockStatuses).toEqual([...statusAllowlistFor('unknown')].sort());
     // And the ORDER decision covers exactly those, untriaged first.
     expect(Object.keys(UNKNOWN_QUEUE_STATUS_ORDER).sort()).toEqual(blockStatuses);
-    expect(UNKNOWN_QUEUE_BLOCKS.map((b) => b.status)).toEqual(['needs_review', 'active']);
+    // unknown-inactive spec D9 (2026-10-23): needs_review, then inactive. The
+    // `active` block is gone with `active` itself (spec D1).
+    expect(UNKNOWN_QUEUE_BLOCKS.map((b) => b.status)).toEqual(['needs_review', 'inactive']);
   });
 });

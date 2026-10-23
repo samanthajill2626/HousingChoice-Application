@@ -163,7 +163,7 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
     expect(res.body.contact.role).toBeUndefined();
   });
 
-  it('setting type=partner propagates -> partner_1to1 and auto-advances to active (a resolved NON_TENANT identity)', async () => {
+  it('setting type=partner propagates -> partner_1to1 and auto-advances to active (a resolved partner identity)', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnknownContactAndThread(world);
     const res = await request(app)
@@ -175,7 +175,7 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
     expect(res.body.contact.type).toBe('partner');
     // PROPAGATION: the linked thread's type flips to partner_1to1.
     expect(world.conversations.get('conv-triage-1')?.type).toBe('partner_1to1');
-    // partner has NO rich lifecycle (NON_TENANT_STATUSES: needs_review|active);
+    // partner has NO rich lifecycle (PARTNER_STATUSES: needs_review|active|inactive);
     // resolving identity clears the needs_review front door -> 'active' (a valid
     // partner status; NEVER the landlord 'interested', which would be invalid).
     expect(res.body.contact.status).toBe('active');
@@ -541,9 +541,10 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
       .patch('/api/contacts/contact-triage-1')
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
-      .send({ status: 'active' });
+      .send({ status: 'inactive' });
+    // Tracker #30: an unknown contact's statuses are needs_review | inactive.
     expect(ok.status).toBe(200);
-    expect(ok.body.contact.status).toBe('active');
+    expect(ok.body.contact.status).toBe('inactive');
 
     // An arbitrary status that would pollute the byTypeStatus GSI is refused.
     const bad = await request(app)
@@ -553,7 +554,7 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
       .send({ status: 'totally_made_up' });
     expect(bad.status).toBe(400);
     // The stored status was NOT changed to the bogus value.
-    expect(world.contacts.find((c) => c.contactId === 'contact-triage-1')?.status).toBe('active');
+    expect(world.contacts.find((c) => c.contactId === 'contact-triage-1')?.status).toBe('inactive');
   });
 
   it('400s validation failures', async () => {
@@ -1014,6 +1015,67 @@ describe('PATCH /api/contacts/:id - pointer rows are not contacts', () => {
       expect(res.status).toBe(404);
       expect(res.body).toEqual({ error: 'contact_not_found' });
       expect(world.contacts.find((c) => c.contactId === pointer.contactId)).toEqual(pointer);
+    });
+  }
+});
+
+// Tracker #30 (D1/D6): the contact PATCH validates status against the type's
+// own list - against the BODY's type when it carries one, else the STORED
+// type. (unknown, active) is refused; Inactive is legal for partner,
+// team_member and unknown.
+describe('PATCH /api/contacts/:contactId - per-type status lists (tracker #30)', () => {
+  type World = ReturnType<typeof makeWebhookHarness>['world'];
+  function seedTyped(world: World, contactId: string, type: ContactItem['type'], status: string): void {
+    world.contacts.push({
+      contactId,
+      type,
+      status,
+      phone: '+15550107901',
+      created_at: '2026-06-12T10:00:00.000Z',
+    } as ContactItem);
+  }
+  function patchContact(app: import('express').Express, contactId: string, body: Record<string, unknown>) {
+    return request(app)
+      .patch(`/api/contacts/${contactId}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send(body);
+  }
+
+  it('400s a status-only PATCH of active on an unknown contact and writes nothing', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedTyped(world, 'c-unk', 'unknown', 'needs_review');
+    const res = await patchContact(app, 'c-unk', { status: 'active' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('status must be one of: needs_review, inactive');
+    expect(world.contacts.find((c) => c.contactId === 'c-unk')?.status).toBe('needs_review');
+    expect(world.auditEvents.filter((e) => e.event_type === 'contact_updated')).toEqual([]);
+  });
+
+  it('400s {type: unknown, status: active} in one body and writes nothing', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedTyped(world, 'c-ten', 'tenant', 'searching');
+    const res = await patchContact(app, 'c-ten', { type: 'unknown', status: 'active' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('status must be one of: needs_review, inactive');
+    expect(world.contacts.find((c) => c.contactId === 'c-ten')).toMatchObject({
+      type: 'tenant',
+      status: 'searching',
+    });
+  });
+
+  for (const [type, from] of [
+    ['unknown', 'needs_review'],
+    ['partner', 'active'],
+    ['team_member', 'active'],
+  ] as const) {
+    it(`a status-only PATCH moves a ${type} to inactive`, async () => {
+      const { app, world } = makeWebhookHarness();
+      seedTyped(world, 'c-off', type, from);
+      const res = await patchContact(app, 'c-off', { status: 'inactive' });
+      expect(res.status).toBe(200);
+      expect(res.body.contact.status).toBe('inactive');
+      expect(world.contacts.find((c) => c.contactId === 'c-off')?.status).toBe('inactive');
     });
   }
 });

@@ -482,7 +482,7 @@ describe.skipIf(!reachable)('Inbox feed integration against DynamoDB Local (thro
       await contacts.createIfAbsent({
         contactId,
         type: 'unknown',
-        status: untriaged.includes(contactId) ? 'needs_review' : 'active',
+        status: untriaged.includes(contactId) ? 'needs_review' : 'inactive',
         phone,
       });
       await seedConv({

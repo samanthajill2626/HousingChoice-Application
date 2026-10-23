@@ -594,3 +594,63 @@ describe('server-owned contact fields (caseworkers spec D21, D22)', () => {
     expect(res.status).toBe(400);
   });
 });
+
+// Tracker #30 (D1/D6): the list read and an explicit-status create validate
+// against the type's own list - (unknown, active) is refused, Inactive is
+// legal for partner, team_member and unknown.
+describe('per-type status lists on the list read and the create (tracker #30)', () => {
+  it('400s a list read of type=unknown&status=active', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app)
+      .get('/api/contacts?type=unknown&status=active')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('status must be one of: needs_review, inactive');
+  });
+
+  it('lists (unknown, inactive) and (partner, inactive)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, { contactId: 'c-unk-off', type: 'unknown', status: 'inactive' });
+    seedContact(world, { contactId: 'c-unk-new', type: 'unknown', status: 'needs_review' });
+    seedContact(world, { contactId: 'c-cw-off', type: 'partner', status: 'inactive' });
+    const unknowns = await request(app)
+      .get('/api/contacts?type=unknown&status=inactive')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(unknowns.status).toBe(200);
+    expect(unknowns.body.contacts.map((c: ContactItem) => c.contactId)).toEqual(['c-unk-off']);
+    const partners = await request(app)
+      .get('/api/contacts?type=partner&status=inactive')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(partners.status).toBe(200);
+    expect(partners.body.contacts.map((c: ContactItem) => c.contactId)).toEqual(['c-cw-off']);
+  });
+
+  it('400s a create of (unknown, active) and writes nothing', async () => {
+    const { app, world } = makeWebhookHarness();
+    const before = world.contacts.length;
+    const res = await request(app)
+      .post('/api/contacts')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'unknown', firstName: 'Una', status: 'active' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('status must be one of: needs_review, inactive');
+    expect(world.contacts.length).toBe(before);
+  });
+
+  for (const type of ['partner', 'team_member', 'unknown'] as const) {
+    it(`creates a ${type} with an explicit inactive status`, async () => {
+      const { app } = makeWebhookHarness();
+      const res = await request(app)
+        .post('/api/contacts')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ type, firstName: 'Ina', lastName: 'Off', status: 'inactive' });
+      expect(res.status).toBe(201);
+      expect(res.body.contact.status).toBe('inactive');
+    });
+  }
+});

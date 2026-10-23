@@ -116,12 +116,16 @@ describe('filter=unknown parity, class by class (design section 3)', () => {
     });
   });
 
-  it('class f: a (type=unknown, status=active) contact is a triage row (must survive the flip)', async () => {
+  // FLIP (unknown-inactive, 2026-10-23): class f was (unknown, active). `active`
+  // is no longer legal for an unknown contact (spec D1) and its block is gone;
+  // the reviewed-but-untyped class is now (unknown, inactive), read in the
+  // second block - still on the tab.
+  it('class f: a (type=unknown, status=inactive) contact is a triage row (must survive the flip)', async () => {
     const page = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps({
-      contacts: [{ contactId: 'c-active', type: 'unknown', status: 'active', phone: '+15550001002' }],
-      conversations: [conv({ conversationId: 'cv-active', participant_phone: '+15550001002', last_activity_at: '2026-06-12T09:00:00.000Z' })],
+      contacts: [{ contactId: 'c-inactive', type: 'unknown', status: 'inactive', phone: '+15550001002' }],
+      conversations: [conv({ conversationId: 'cv-inactive', participant_phone: '+15550001002', last_activity_at: '2026-06-12T09:00:00.000Z' })],
     }));
-    expect(page.rows.map((r) => r.contactId)).toEqual(['c-active']);
+    expect(page.rows.map((r) => r.contactId)).toEqual(['c-inactive']);
   });
 
   it('class a: a group-detection stub who later TEXTED is a triage row (must survive the flip - excludeOrigin must NOT be copied)', async () => {

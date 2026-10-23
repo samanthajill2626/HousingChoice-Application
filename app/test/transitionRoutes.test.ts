@@ -280,6 +280,33 @@ describe('status-model transition routes', () => {
     });
   });
 
+  // Tracker #30 (D1/D6): the route validates toStatus against the stored
+  // type's list. S1 pins the allowlist only; the write's source, audit,
+  // timeline label, 409 and notify are pinned by S2.
+  describe('PATCH /api/contacts/:contactId/tenant-status - non-tenant lists (tracker #30, D1/D6)', () => {
+    it('REJECTS active for an unknown contact with 400 and writes nothing', async () => {
+      await world.contactsRepo.create({ contactId: 'unk-1', type: 'unknown', status: 'needs_review' });
+      const res = await authedPatch('/api/contacts/unk-1/tenant-status', { toStatus: 'active', source: 'manual' });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('toStatus must be one of: needs_review, inactive');
+      expect((await world.contactsRepo.getById('unk-1'))!.status).toBe('needs_review');
+    });
+
+    it('accepts inactive for a partner, a team member and an unknown contact', async () => {
+      for (const [contactId, type, from] of [
+        ['p-1', 'partner', 'active'],
+        ['tm-1', 'team_member', 'active'],
+        ['unk-2', 'unknown', 'needs_review'],
+      ] as const) {
+        await world.contactsRepo.create({ contactId, type, status: from });
+        const res = await authedPatch(`/api/contacts/${contactId}/tenant-status`, { toStatus: 'inactive', source: 'manual' });
+        expect(res.status, type).toBe(200);
+        expect(res.body.contact.status, type).toBe('inactive');
+        expect((await world.contactsRepo.getById(contactId))!.status, type).toBe('inactive');
+      }
+    });
+  });
+
   describe('PATCH /api/units/:unitId/listing-status', () => {
     it('sets the listing status (happy path); 400 bad; 404 unknown', async () => {
       const res = await authedPatch('/api/units/unit-1/listing-status', { toStatus: 'on_hold', source: 'manual' });

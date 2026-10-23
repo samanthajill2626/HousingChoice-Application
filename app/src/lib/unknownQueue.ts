@@ -48,28 +48,36 @@
 //   NOW COPIED, and this is the reworked half - `status` NARROWING. The reader
 //   issues one bounded Query PER STATUS BLOCK, in the order
 //   UNKNOWN_QUEUE_BLOCKS declares. COVERAGE DOES NOT NARROW: every legal status
-//   is a block and every block is read, so a live (unknown, active) contact -
-//   coverage class f - is still on the tab exactly as before. Only the ORDER
-//   changed. The old file said "NOT COPIED - status: 'needs_review'" because
-//   narrowing to ONE status would have dropped class f; narrowing to a
-//   PARTITION OF ALL of them drops nothing.
+//   is a block and every block is read, so a live (unknown, inactive) contact -
+//   coverage class f - is on the tab exactly like an untriaged one, just read
+//   later. Only the ORDER changed. The old file said "NOT COPIED - status:
+//   'needs_review'" because narrowing to ONE status would have dropped class f;
+//   narrowing to a PARTITION OF ALL of them drops nothing.
 //
-//   WHAT MANUFACTURES (unknown, active) AT ALL (round-2 finding N3): the
-//   STATUS-ONLY triage PATCH. PATCH /api/contacts/:id handles
-//   `'status' in patch && !('type' in patch)` and re-validates against
-//   statusAllowlistFor(stored.type), which for `unknown` is
-//   ['needs_review','active'] - and the dashboard's edit form reaches it. An
-//   operator can therefore mark an unknown contact `active` while it stays
-//   type='unknown': it leaves Today's triage block (which DOES narrow on
-//   needs_review) but it NEVER leaves this queue. Only a RE-TYPE - to ANY other
-//   ContactType, team_member included - or a SOFT-DELETE drains a row. It is
-//   also the only UI-REACHABLE manufacturer: POST /api/contacts defaults an
-//   `unknown` create to status 'active' but that is API-ONLY (KindPicker,
-//   dashboard/src/routes/contact/KindPicker.tsx, offers no `unknown` segment),
-//   which is why both deployed environments measure ZERO (unknown, active)
-//   today. Under the OLD reader that population was a starvation hazard,
-//   because `active` sorted first and crowded out the front door. Under this
+//   THE SECOND BLOCK IS `inactive`, NOT `active` (unknown-inactive spec D1/D9,
+//   docs/superpowers/specs/2026-10-23-unknown-inactive-design.md, approved by
+//   Cameron 2026-10-23). `active` is no longer legal for an unknown contact:
+//   statusAllowlistFor('unknown') is ['needs_review', 'inactive'] and every
+//   writer refuses (unknown, active), so its block is gone. Staff mark an
+//   unknown contact Inactive WITHOUT choosing a type - from the contact page
+//   header or the edit form; both validate against
+//   statusAllowlistFor(stored.type). The contact leaves Today's Needs you now
+//   (the triage pass reads only needs_review, and the unread pass skips an
+//   Inactive contact's unknown_1to1 thread) but it NEVER leaves this queue:
+//   only a RE-TYPE - to ANY other ContactType, team_member included - or a
+//   SOFT-DELETE drains a row. The read-only count on 2026-10-23 found ZERO
+//   (unknown, active) contacts on dev and on prod, so no stored row is
+//   stranded by the removed block (the rollout re-counts just before deploy).
+//   Under the pre-rework reader the reviewed population was a starvation
+//   hazard, because it sorted first and crowded out the front door. Under this
 //   one it is simply the SECOND block, read after the untriaged one is drained.
+//
+//   AN OLD CURSOR. `b` is an ordinal into the DERIVED block list, so a
+//   pre-deploy cursor resuming INSIDE the removed `active` block (b=1,
+//   k.status='active') no longer agrees with block 1 (`inactive`) and
+//   inbox.ts's decodeUnknownCursor answers 400 - once; reloading the inbox
+//   recovers. A cursor at the START of block 1 (no `k`) resumes at the first
+//   page of the inactive block, which is the right place.
 //
 //   NOT COPIED - `excludeOrigin: GROUP_DETECTION_ORIGIN`: today.ts can afford
 //   that exclusion ONLY because it is a two-source union ("a real unknown
@@ -169,7 +177,8 @@ type UnknownQueueStatus = (typeof UNKNOWN_STATUSES)[number];
  * yet, so it is the front door and it is drained before a single already-
  * reviewed row is read. That is what makes starvation structurally impossible
  * rather than merely unlikely: the untriaged block is EXHAUSTED before the
- * `active` block's first Query is issued.
+ * `inactive` block's first Query is issued (the `active` block it replaced was
+ * removed 2026-10-23 with `active` itself, unknown-inactive spec D1/D9).
  *
  * `satisfies Record<UnknownQueueStatus, number>` is the guard, in the same
  * load-bearing style as UNKNOWN_TAB_TYPE_DECISIONS above: a newly-legal status
@@ -197,7 +206,7 @@ export interface UnknownQueueBlock {
  * it lands, THIS constant and the Query inside `readUnknownQueue` are what
  * change - the inbox branch that consumes rows, mints cursors, resolves threads
  * and hydrates a page does not have to be rewritten around it. Keep it that
- * way: anything that hard-codes "needs_review then active" outside this file
+ * way: anything that hard-codes "needs_review then inactive" outside this file
  * un-does the isolation.
  *
  * Derived from BOTH maps above (types x status order), never hand-listed.

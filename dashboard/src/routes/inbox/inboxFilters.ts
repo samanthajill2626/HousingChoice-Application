@@ -75,9 +75,10 @@ export function emptyCopy(filter: InboxFilter): { title: string; body: string } 
       // with no contact record has nothing to return - coverage class (e),
       // "accepted as lost", and those threads stay on All - and a `team_member`
       // is excluded by ruling, class (c). "Untriaged" was wrong on a third axis:
-      // an unknown contact already moved to `status: 'active'` is still on this
-      // tab (class f), because what puts it here is being UNIDENTIFIED, not
-      // being unreviewed.
+      // an unknown contact already marked `status: 'inactive'` is still on this
+      // tab (class f; it was `active` before tracker #30, 2026-10-23, which
+      // removed `active` for unknown - needs_review rows first, then inactive),
+      // because what puts it here is being UNIDENTIFIED, not being unreviewed.
       //
       // The TITLE is a cross-workspace contract - pinned by the perf route
       // contract (e2e/performance/routes.ts, routes.test.ts) and by

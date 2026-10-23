@@ -1813,9 +1813,10 @@ export async function aggregateInbox(
   //
   // THIS READ IS PAGED AND UNBOUNDED (human ruling 2026-08-26). It issues one
   // bounded Query per STATUS BLOCK, in the order UNKNOWN_QUEUE_BLOCKS declares
-  // - `needs_review` first, then `active` - and pages with the index's own
+  // - `needs_review` first, then `inactive` (the `active` block was removed
+  // 2026-10-23, unknown-inactive spec D9) - and pages with the index's own
   // cursor, rolling from one block to the next when a block exhausts. Coverage
-  // is UNCHANGED: both blocks are read, so a live (unknown, active) contact,
+  // is UNCHANGED: both blocks are read, so a live (unknown, inactive) contact,
   // coverage class f, is still on the tab. Only the ORDER changed, and the
   // trade it buys is stated plainly at the per-page sort below.
   //
@@ -2019,17 +2020,18 @@ export async function aggregateInbox(
         // `status` IS this index's range key - so an operator's status write
         // moves a contact from one BLOCK to another mid-walk:
         //
-        //   * 'needs_review' -> 'active' is the COMMON action (triage, from the
-        //     dashboard's edit form). The row leaves the block behind the
-        //     cursor and joins a block not yet read, so it ships on TWO pages.
-        //     The dashboard keys the wire row by contactId (useInbox `rowKey`
-        //     -> `c:<contactId>`), and its appendPage dedupes a loaded page by
-        //     that key, so the second copy is DROPPED: the stale page-one copy
-        //     (still showing Needs triage) silently wins until the next head
-        //     read.
-        //   * 'active' -> 'needs_review' (un-triage) is the RARE one and moves
-        //     the row backward into a block already read, so it ships on NO
-        //     page. INVISIBLE, and no guard here can see it.
+        //   * 'needs_review' -> 'inactive' is the COMMON action (marking an
+        //     unknown contact Inactive from the contact page header or the
+        //     edit form; before 2026-10-23 it was 'needs_review' -> 'active').
+        //     The row leaves the block behind the cursor and joins a block not
+        //     yet read, so it ships on TWO pages. The dashboard keys the wire
+        //     row by contactId (useInbox `rowKey` -> `c:<contactId>`), and its
+        //     appendPage dedupes a loaded page by that key, so the second copy
+        //     is DROPPED: the stale page-one copy (still showing Needs triage)
+        //     silently wins until the next head read.
+        //   * 'inactive' -> 'needs_review' (un-triage) is the RARE one and
+        //     moves the row backward into a block already read, so it ships on
+        //     NO page. INVISIBLE, and no guard here can see it.
         //
         // THE THRESHOLD IS THE REQUEST `limit` (100 from the dashboard,
         // useInbox), NOT UNKNOWN_QUEUE_PAGE_SIZE - a queue only has to exceed
@@ -2283,31 +2285,33 @@ export async function aggregateInbox(
     //
     // WHAT THE BLOCK ORDER ACTUALLY GOVERNS IS FETCH ORDER - which rows you
     // RETRIEVE first, and in what order they cross the wire. The untriaged
-    // block is drained before the reviewed one is touched, so a walk reaches
-    // every `needs_review` row before any `active` one, and that is what makes
-    // starvation structurally impossible. This sort then makes each page read
-    // naturally top-to-bottom. Page 2 can contain a row NEWER than anything on
-    // page 1, which is exactly what "page in queue order" means and what the
-    // 2026-08-26 ruling chose: a triage queue's job is that nothing rots
-    // unseen, and recency is what the All and Unread tabs are for.
+    // block is drained before the Inactive one is touched, so a walk reaches
+    // every `needs_review` row before any `inactive` one, and that is what
+    // makes starvation structurally impossible: no amount of Inactive backlog
+    // can delay an untriaged row's retrieval. This sort then makes each page
+    // read naturally top-to-bottom. Page 2 can contain a row NEWER than
+    // anything on page 1, which is exactly what "page in queue order" means.
     //
-    // IT IS NOT THE ORDER THE OPERATOR SEES, and this comment used to claim it
-    // was ("the TOTAL order across pages is QUEUE order"). Corrected 2026-08-26
-    // (rework review B1a): the dashboard accumulates every page into one array
-    // and sorts the WHOLE accumulation newest-first, with no filter gate
-    // (dashboard/src/routes/inbox/useInbox.ts, `sortByActivity` over `visible`)
-    // - so the moment the operator clicks Load more, page 2's reviewed rows can
-    // sit above page 1's untriaged ones on screen. Untriaged-first is a
-    // property of the FETCH, and of any single page, not of the rendered list.
-    // RULED 2026-08-26: LEAVE IT. The client keeps re-sorting the accumulation
-    // for every filter, this branch included. So what the operator SEES is
-    // "newest of whatever has been fetched so far", and what untriaged-first
-    // buys is FETCH PRIORITY - the untriaged block is drained before a single
-    // Query is spent on the reviewed one, so no amount of reviewed backlog can
-    // delay an untriaged row's retrieval. That is the property the ruling
-    // wanted; the display order was never the point. Do NOT "fix" either side
-    // unilaterally on the theory that the two sorts disagree - they answer
-    // different questions, and this one is settled.
+    // IT IS NOT THE ORDER THE OPERATOR SEES: the dashboard accumulates every
+    // page into one array and sorts the accumulation itself
+    // (dashboard/src/routes/inbox/useInbox.ts, sortForFilter), so this
+    // per-page order never reaches the screen as such.
+    //
+    // SUPERSEDED 2026-10-23. The 2026-08-26 ruling recorded here ("RULED
+    // 2026-08-26: LEAVE IT" - the client re-sorted the whole accumulation
+    // newest-first for every filter, this one included, and "Do NOT 'fix'
+    // either side") is replaced by Cameron's decision for tracker #30
+    // (unknown-inactive spec D9,
+    // docs/superpowers/specs/2026-10-23-unknown-inactive-design.md): on the
+    // Unknown tab "it should be ordered by needs review first and then by
+    // newest message", and "let's not do sorting server- and database-side
+    // for now ... we can do that browser-side." So the DASHBOARD, on the
+    // Unknown tab only, sorts every loaded row Needs review first, then
+    // Inactive, each newest message first (`compareUnknownTabRows`,
+    // dashboard/src/routes/inbox/inboxListMerge.ts); every other tab keeps
+    // newest-first. THIS server sort is deliberately UNCHANGED - per page,
+    // newest first, with fetch priority from the block order - because the
+    // decision keeps ordering browser-side. Do not add a status sort here.
     //
     // Global newest-first is not impossible, it is just not free: `ContactItem`
     // carries no activity attribute, so ordering the whole queue means

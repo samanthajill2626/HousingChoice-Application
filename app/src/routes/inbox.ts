@@ -997,6 +997,15 @@ export async function aggregateInbox(
         // exhaustive over InboxFilter with no `default:`, so deleting the arm
         // is a type error - and re-adding a `default:` is exactly how a new
         // filter ships as a silent no-op.
+        //
+        // AND NO LONGER THE TAB'S RULE since unknown-inactive D9 (2026-10-23):
+        // an Inactive unknown contact's row IS on the Unknown tab with
+        // `needsTriage` false (buildContactRow below), so a routing change
+        // that sent the tab back through this filter would drop every
+        // Inactive unknown row, visible only as `drops.filtered`. Rewrite this
+        // arm BEFORE anything makes it reachable - and not as `row.role ===
+        // 'unknown'` alone: a team member's row has that role too, and the
+        // tab is built from the type='unknown' contacts only.
         return row.needsTriage;
       case 'groups':
         return row.kind === 'group_text';
@@ -1091,10 +1100,14 @@ export async function aggregateInbox(
     }
 
     // A type='unknown' contact IS an untriaged inbound (it just already has a
-    // record) - so it needs triage, and it is what the "unknown" filter serves.
-    // Keying `needsTriage` off the ROLE (not "no contact record") is what makes
-    // BOTH a contact-backed unknown and a contactless number carry the flag,
-    // which is still what the `all` and `unread` rows render from.
+    // record) - so it needs triage, unless it is Inactive (unknown-inactive
+    // D9, 2026-10-23: set aside without a type, it carries the `inactive` tag
+    // instead). It is what the "unknown" filter serves EITHER way, so
+    // `needsTriage` is no longer that filter's rule (see the `case 'unknown'`
+    // arm of passesFilter). Keying `needsTriage` off the ROLE (not "no contact
+    // record") is what makes BOTH a contact-backed unknown and a contactless
+    // number carry the flag, which is still what the `all` and `unread` rows
+    // render from.
     //
     // The two are NO LONGER equivalent on the unknown TAB, though: since the
     // 2026-08-25 contact-side read that tab is built from the (type='unknown')

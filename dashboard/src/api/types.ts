@@ -2127,8 +2127,13 @@ export interface SuggestionUpdatedEvent {
 }
 
 /** GET /api/events 'contact.updated' payload (unknown-inactive spec D2, ruling
- *  AR3). A contact's status or type changed - through the status transition
- *  route (the header dropdown) or the contact PATCH (the edit form). Today and
+ *  AR3). A contact's status or type changed. Three emitters, as
+ *  app/src/lib/events.ts names them: the status transition route (every
+ *  successful setTenantStatus - the header dropdown, the edit form's status
+ *  save when it changes no type, and its status write after a type change to
+ *  tenant); the contact PATCH when it changed `status` or `type` (the edit
+ *  form's type changes, a landlord's status with its park reason, the unknown
+ *  card's Mark as actions); and the caseworker conversion's commit. Today and
  *  the inbox refetch on it; the contact page re-reads the contact when
  *  `contactId` is the one it shows. Mirrors app/src/lib/events.ts
  *  ContactUpdatedEvent. ID-only - NO PII. */

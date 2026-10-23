@@ -310,14 +310,16 @@ export function ContactDetail(): React.JSX.Element {
   // server's tenant-only rule (spec 2026-10-12 D1). When the loaded contact
   // stops being typed tenant while the review is open, the review closes, so
   // that path cannot write onto the re-typed contact (final review A5, fix
-  // wave FWF-4). The page learns of someone else's type change only through
-  // useContact's suggestion.updated re-read. The caseworker conversion emits
-  // one (it supersedes the pending suggestions), so a conversion closes the
-  // review. A generic contacts-PATCH re-type usually emits none (only when it
-  // drains a pending type suggestion), so after one the review can stay open
-  // and its close-name pick still sends the plain PATCH (final review round 2
-  // R2-2). Reset during render (React's "adjust state when a prop changes"),
-  // so no frame shows the review over a non-tenant.
+  // wave FWF-4). The page learns of someone else's type change through
+  // useContact's re-reads: suggestion.updated (the caseworker conversion
+  // supersedes the pending suggestions) and, since tracker #30
+  // (unknown-inactive), contact.updated, which a contacts-PATCH re-type and
+  // the caseworker conversion both emit - so either closes the review once
+  // its event lands. Until then (the event can be late, or the stream down)
+  // the review stays open over the re-typed contact and its close-name pick
+  // still sends the plain PATCH (final review round 2 R2-2). Reset during
+  // render (React's "adjust state when a prop changes"), so no frame shows
+  // the review over a non-tenant.
   // TODO(ha-review-close-name-patch-unfenced): the server-side fence closes
   // the plain re-type case.
   if (haReview !== null && contact !== null && contact.type !== 'tenant') setHaReview(null);

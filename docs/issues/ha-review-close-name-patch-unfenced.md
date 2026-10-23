@@ -64,3 +64,15 @@ page read (the client sends the revision it rendered, and the PATCH
 conditions its write on it, as the accept fence does). Both change the
 contacts-PATCH contract, so each needs a spec ruling and its own tests
 before it is built.
+
+**Update (2026-10-23, tracker #30).** The unknown-inactive branch changed the
+re-read the plain re-type case rests on: a contacts PATCH that changes `type`
+or `status` now emits an ID-only `contact.updated`
+(`app/src/routes/contacts.ts:2227`), so does the caseworker conversion's
+commit (`app/src/services/caseworkerConversion.ts:575`), and `useContact`
+re-reads the open contact on it with a consistent GET
+(`dashboard/src/routes/contact/useContact.ts:75-90`). So the review now
+closes after a generic re-type or a conversion once that event reaches the
+page. The server-side fence above is still owed: the event stream can be
+down, the pick can land in the window before the event arrives, and API
+callers other than the dashboard are not covered at all.

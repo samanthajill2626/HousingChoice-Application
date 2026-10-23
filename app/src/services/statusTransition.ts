@@ -21,9 +21,8 @@ import {
   isLostReasonCategory,
   isPlacementStage,
   isTenantOverrideStatus,
-  LANDLORD_STATUS_LABELS,
   STAGE_LABELS,
-  TENANT_STATUS_LABELS,
+  statusLabelFor,
   TERMINAL_STAGES,
   type InspectionOutcome,
   type LandlordStatus,
@@ -147,12 +146,6 @@ export interface ContactStatusTransitionPlan {
   activity?: { type: 'contact_status_changed'; label: string };
 }
 
-function contactStatusLabel(contactType: string | undefined, status: string): string {
-  return (contactType === 'landlord'
-    ? (LANDLORD_STATUS_LABELS as Record<string, string>)[status]
-    : (TENANT_STATUS_LABELS as Record<string, string>)[status]) ?? status;
-}
-
 /** Pure semantic plan shared by ordinary status changes and suggestion recovery. */
 export function buildContactStatusTransitionPlan(
   contact: ContactItem,
@@ -175,7 +168,7 @@ export function buildContactStatusTransitionPlan(
     ...(contact.status !== toStatus && {
       activity: {
         type: 'contact_status_changed' as const,
-        label: `Status \u2192 ${contactStatusLabel(contact.type, toStatus)}`,
+        label: `Status \u2192 ${statusLabelFor(contact.type, toStatus)}`,
       },
     }),
   };
@@ -282,7 +275,7 @@ export function createStatusTransitionService(
   async function recordStatusMilestone(contactId: string, contactType: string | undefined, to: string): Promise<void> {
     await recordStatusActivity(contactId, {
       type: 'contact_status_changed',
-      label: `Status \u2192 ${contactStatusLabel(contactType, to)}`,
+      label: `Status \u2192 ${statusLabelFor(contactType, to)}`,
     });
   }
 
@@ -627,7 +620,7 @@ export function createStatusTransitionService(
         throw new StatusTransitionCommittedError(err);
       }
       // Contact-timeline milestone on a REAL status change (explicit path). The
-      // type-keyed label map picks LANDLORD_STATUS_LABELS vs TENANT_STATUS_LABELS.
+      // label comes from statusLabelFor(contact.type, ...) (lib/statusModel.ts).
       if (plan.activity !== undefined) await recordStatusActivity(contactId, plan.activity);
       mergeContext({ contactId });
       log.info({ contactId, from, to: toStatus, source, ...(actor !== undefined && { actor }) }, 'tenant status set');

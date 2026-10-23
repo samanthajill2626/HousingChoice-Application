@@ -1003,3 +1003,19 @@ describe('dismiss (D19, D22)', () => {
     expect(stored(world)).not.toHaveProperty('caseworker_review');
   });
 });
+
+// Tracker #30 (D7): the conversion still writes Active - from Inactive too -
+// and labels its milestone by the NEW type (partner).
+describe('make from an Inactive contact (tracker #30)', () => {
+  for (const type of ['unknown', 'tenant', 'partner'] as const) {
+    it(`(PIN) an Inactive ${type} becomes an Active caseworker with one "Status -> Active" milestone`, async () => {
+      const { world, service } = setup();
+      seed(world, { type, status: 'inactive' });
+      await service.make(ID, { actor: ACTOR });
+      expect(stored(world)).toMatchObject({ type: 'partner', role: 'Caseworker', status: 'active' });
+      const arrow = String.fromCharCode(0x2192);
+      expect(world.activityEvents.filter((e) => e.type === 'contact_status_changed').map((e) => e.label))
+        .toEqual([`Status ${arrow} Active`]);
+    });
+  }
+});

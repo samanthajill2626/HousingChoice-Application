@@ -1174,3 +1174,30 @@ describe('statusTransition - D5 relay close-nag arm on terminal moves (AF-1/CF-1
     expect(updated.stage).toBe('lost'); // the transition still committed
   });
 });
+
+// Tracker #30 (D4.5): the status milestone reads the label map of the
+// contact's own type - a partner or team member moving to active reads
+// "Active", not the raw key the tenant map used to fall back to.
+describe('contact status semantic plan - labels by type (tracker #30)', () => {
+  it('labels each type from its own map', () => {
+    const arrow = String.fromCharCode(0x2192);
+    const cases = [
+      [{ type: 'partner', status: 'needs_review' }, 'active', 'Active'],
+      [{ type: 'team_member', status: 'needs_review' }, 'active', 'Active'],
+      [{ type: 'team_member', status: 'active' }, 'inactive', 'Inactive'],
+      [{ type: 'unknown', status: 'needs_review' }, 'inactive', 'Inactive'],
+      [{ type: 'landlord', status: 'needs_review' }, 'interested', 'Interested'],
+      [{ type: 'tenant', status: 'onboarding' }, 'on_hold', 'On hold'],
+    ] as const;
+    for (const [contact, toStatus, label] of cases) {
+      const plan = buildContactStatusTransitionPlan(
+        { contactId: 'c-plan', created_at: '2026-01-01T00:00:00.000Z', ...contact },
+        { toStatus, source: 'manual' },
+      );
+      expect(plan.activity, `${contact.type} -> ${toStatus}`).toEqual({
+        type: 'contact_status_changed',
+        label: `Status ${arrow} ${label}`,
+      });
+    }
+  });
+});

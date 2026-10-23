@@ -12,6 +12,7 @@ import { conversationsForContact } from '../lib/contactThreads.js';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { CASEWORKER_ROLE } from './extraction/contactKinds.js';
 import { isCaseworker, type PossibleSignal } from '../lib/caseworkers.js';
+import { statusLabelFor } from '../lib/statusModel.js';
 import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
@@ -407,11 +408,15 @@ export function createCaseworkerConversionService(
     } catch (err) {
       log.error({ err, contactId }, 'caseworker conversion: audit failed after the commit (make again repairs)');
     }
-    // R1-F12: labelled by the NEW type (partner -> "Active"); the PATCH's own
-    // milestone keeps labelling by the stored type.
+    // R1-F12: labelled by the NEW type (partner -> "Active"), as the contact
+    // PATCH's own milestone is since tracker #30 (D4.5).
     if (!ctx.repair && ctx.priorStatus !== 'active') {
       try {
-        await activityEvents.record({ contactId, type: 'contact_status_changed', label: `Status ${ARROW} Active` });
+        await activityEvents.record({
+          contactId,
+          type: 'contact_status_changed',
+          label: `Status ${ARROW} ${statusLabelFor('partner', 'active')}`,
+        });
       } catch (err) {
         log.error({ err, contactId }, 'caseworker conversion: status milestone failed after the commit');
       }

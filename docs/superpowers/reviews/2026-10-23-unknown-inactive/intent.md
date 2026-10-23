@@ -2,20 +2,26 @@
 
 ## STATE
 
-- Phase: DESIGN - spec APPROVED (rev 3 @540ae640; Cameron 2026-10-23: "I
+- Phase: PLAN. Spec APPROVED (rev 3 @540ae640; Cameron 2026-10-23: "I
   agree with all of these five calls. These look good. The spec looks good,
-  so let's continue."). Tracker #30 Approach rewritten + Oct 23 note added
-  (Google Docs connector, verified). Compaction gate A offered.
+  so let's continue."). Tracker #30 updated. Compaction gate A taken
+  2026-10-23 16:25 (301k -> 30k).
+- Plan: `docs/superpowers/plans/2026-10-23-unknown-inactive-plan.md`. The
+  planner wrote binding sections 0-4 (rulings AR1-AR14: a new
+  `contact.updated` event, conditional transition write -> 409
+  contact_type_changed, `inactive?: boolean` inbox wire field, a
+  browser-side Unknown-tab comparator). Six opus drafters write slices
+  S1-S6 (+S7) to `.superpowers/sdd/plan-drafts/S<n>.md` (gitignored run
+  state).
 - Launch mode: not chosen yet.
 - Worktree: `W:\tmp\unknown-inactive`, branch `feat/unknown-inactive`, cut from
   main @916258ae. Issue `contacts-status-filter-tenants-only` committed @0957ed39.
-- NEXT STEP: write the implementation plan to
-  `docs/superpowers/plans/2026-10-23-unknown-inactive-plan.md` (TDD,
-  zero-context builder; enumerate every writer AND reader from spec section 4
-  as a task or watch item), then adversarial plan review (two opus reviewers,
-  design-review-briefs.md PLAN brief), then mission block + launch gate.
-  Surface map from the read-only research is reproduced in the spec section 4;
-  the reviewers' round reports under design-review/ cite the rest by file:line.
+  No node_modules yet (plan section 0 has the builder run `npm ci`).
+- NEXT STEP: assemble the drafts into plan sections 5-11 (section 4 wins on
+  conflicts; fold drafter contradictions into rulings), commit, then
+  adversarial plan review (two opus reviewers, design-review-briefs.md PLAN
+  brief, given spec + plan), adjudicate into adjudications.md, then mission
+  block + launch gate (AUTO / MANUAL / Revise) and compaction gate B.
 - Spec gate calls Cameron APPROVED: D7 team_member -> Active / unknown -> Needs
   review from Inactive; D8 "Type unknown"; D9 Inactive tag on every type's
   row; AI extraction keeps running for Inactive; same-type PATCH never resets

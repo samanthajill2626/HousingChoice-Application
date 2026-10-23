@@ -9,7 +9,7 @@
   `docs/superpowers/reviews/2026-10-23-unknown-inactive/`.
 - Spec review: 2 rounds -
   `docs/superpowers/reviews/2026-10-23-unknown-inactive/design-review/adjudications.md`.
-- Status: PLAN v1 DRAFT (2026-10-23), before plan review. Sections 0-4 are
+- Status: PLAN v2 (2026-10-23), plan review round 1 applied (P1-P15); round 2 next. Sections 0-4 are
   BINDING and written by the planner; slice sections 5-10 are opus section
   drafts assembled verbatim. Section 4 (planner rulings AR1-AR24) wins over
   any slice text it contradicts. "Plan section N" always means this file's
@@ -155,7 +155,9 @@
   record in S6 when that fallback runs. It is NOT changed.
 - W4 Inbound writers must not reset status: `contactCapture.ts`,
   `groupMembers.ts`, `groupConvert.ts`, `routes/public.ts`, the Twilio text
-  and voice webhooks. Proved by the S3 inbound tests; any writer found that
+  and voice webhooks, `services/inboundEmail.ts` and `routes/unmatchedEmail.ts`
+  (checked 2026-10-23: neither writes contact status). Proved by the S3
+  inbound tests; any writer found that
   DOES touch an existing contact's status is a STOP-and-report.
 - W5 `services/audienceResolution.ts` and `jobs/extraction.ts`: unchanged.
   Record that extraction's status pass-through cannot make the AI propose
@@ -282,16 +284,21 @@ from these, these win):
   own in that handler, S1.3 names it `priorType` and S2.5 reuses it instead
   of declaring a second one.
 - AR17 Fixture flips forced by the block-order change (every commit stays
-  green). S1.1 changes `UNKNOWN_QUEUE_STATUS_ORDER` and flips the
-  (unknown, active) fixtures it lists in its step 1f
-  (`unknownQueue.test.ts`, `inboxUnknownTab.test.ts`,
-  `inboxUnknownParity.test.ts`). S1.1 ALSO applies S3.4 Step 5 (the
-  `app/test/inbox.integration.test.ts` flip) and adds that file to its
-  RED/GREEN commands and its commit. In S3.4: Step 1 becomes a GREEN state
-  check (the four files pass on S1's tree); in Steps 2-5 the builder applies
-  only edits whose OLD text is still present (an edit S1.1 already made is
-  done - skip it) and every NEW test case those steps add. Steps 6-9 run as
-  written.
+  green; rewritten in plan round 1, P3). S1.1 changes
+  `UNKNOWN_QUEUE_STATUS_ORDER`, so S1.1 owns every test edit in the four
+  Unknown-tab files: its step 1f IS S3.4 Steps 2-5 (the
+  `unknownQueue.test.ts`, `inboxUnknownTab.test.ts`,
+  `inboxUnknownParity.test.ts` and `inbox.integration.test.ts` flips, their
+  comment edits and the pre-deploy cursor pins), applied verbatim on the
+  ORIGINAL text in place of S1.1's own former step 1f. All four files are in
+  S1.1's Files list, its RED and GREEN commands and its commit; S1.1's RED
+  expectations for them are the failure list S3.4 Step 1 used to carry. In
+  `app/src/lib/unknownQueue.ts` S1.1 step 3f makes only the import, the type
+  alias (with its `Taken from` docblock line) and the order object; the
+  two docblock lines S3.4 Step 6 Edits C and D rewrite are S3.4's. S3.4 has
+  no Step 1 and no Steps 2-5 of its own (a pointer remains); it is a
+  comment-only task, exempt from the RED rule and verified by its GREEN run.
+  S3.4 Steps 6-9 run as written.
 - AR18 Other (unknown, active) fixtures (`followUps.test.ts`,
   `listingSendsApi.test.ts`, `unitsApiActivity.test.ts`, and any other a
   slice did not name) stay unchanged unless they fail. One that fails moves
@@ -306,6 +313,8 @@ from these, these win):
 - AR21 Contacts list rows for non-tenant types show their type's status
   LABEL as plain text, as those rows do today; no new toned badge there. The
   D4.4 muted tone applies wherever a status badge already renders.
+  Planner call put to Cameron at the launch gate; if he picks badges, the
+  planner revises S4.2.
 - AR22 `routes/contacts.ts` timeline label: the literal arrow at ~2135 is
   replaced by an ASCII-source constant (`String.fromCharCode(0x2192)`), as
   S1.3 drafts; the rendered text is unchanged.
@@ -373,7 +382,11 @@ seed `(unknown, active)` as the second block then go red:
 `app/test/inboxUnknownParity.test.ts:119-124`. S1.1 flips exactly those
 fixture values from `active` to `inactive` (listed verbatim in S1.1) so S1
 ends green. S3 must NOT redo them; S3 owns every other comment and behavior in
-those files (list in "Cross-slice notes").
+those files (list in "Cross-slice notes"). AMENDED by AR17 (plan round 1
+P3): S1.1 step 1f now applies S3.4 Steps 2-5 whole - every flip, comment
+edit and pre-deploy cursor pin in the four test files, plus
+`app/test/inbox.integration.test.ts` - so S3 owns no edit in those four test
+files.
 
 No other ruling conflicts with the code. AR10 is implementable exactly as
 written (S1.3).
@@ -411,8 +424,9 @@ written (S1.3).
   `app/src/lib/unknownQueue.ts` header lines 16-71 (the class-f history that
   names `(unknown, active)`); `app/src/routes/inbox.ts:2022, 2030` (flip
   comments); `app/test/inboxUnknownTab.test.ts:170-175` comment "(needs_review,
-  then active)"; `app/test/unknownQueue.test.ts:122` comment "Plus ONE on the
-  empty `active` block"; `app/test/contactsPartitionFake.test.ts:96-130`
+  then active)" and `app/test/unknownQueue.test.ts:122` comment "Plus ONE on
+  the empty `active` block" (both now made by S1.1 step 1f, AR17);
+  `app/test/contactsPartitionFake.test.ts:96-130`
   (generic sort pin with `active` fixtures - still valid, comment names the old
   pair); reader fixtures that seed `(unknown, active)` directly and still pass
   (`followUps.test.ts:212-213, 385`, `listingSendsApi.test.ts:595, 637-639,
@@ -439,14 +453,16 @@ Files:
 - `app/src/routes/contacts.ts` (imports, triage parse union, three comments)
 - `app/src/lib/import/apply.ts`, `app/src/lib/import/reviewNotes.ts`,
   `app/src/lib/import/status.ts` (comment)
-- `app/src/lib/unknownQueue.ts` (import, type alias, order map, 3 comment
-  words - nothing else)
+- `app/src/lib/unknownQueue.ts` (import, type alias with its `Taken from`
+  docblock line, order map - nothing else; AR17)
 - `app/src/repos/contactsRepo.ts` (comment)
 - `app/test/helpers/contactsPartitionFake.ts` (comment)
 - Tests: `app/test/statusModel.test.ts`, `app/test/contactsCrud.test.ts`,
   `app/test/contactTriage.test.ts`, `app/test/transitionRoutes.test.ts`,
   `app/test/importApply.integration.test.ts`, `app/test/unknownQueue.test.ts`,
-  `app/test/inboxUnknownTab.test.ts`, `app/test/inboxUnknownParity.test.ts`
+  `app/test/inboxUnknownTab.test.ts`, `app/test/inboxUnknownParity.test.ts`,
+  `app/test/inbox.integration.test.ts` (the last four via S3.4 Steps 2-5,
+  AR17)
 
 #### Step 1 - failing tests
 
@@ -792,70 +808,259 @@ new:
   it('excludes a dropped person and skips their thread', async () => {
 ```
 
-1f. Fixture flips forced by the order-map change (C3). These are the ONLY
-edits S1 makes in these three files.
+1f. Apply S3.4 Steps 2-5 (plan section 7) here, verbatim, in place of this
+step (AR17, plan round 1 P3). Their text was MOVED here from S3.4, which
+keeps a one-line pointer; the "S3.4 Step N" labels below are S3.4's
+original numbering. They are the fixture flips forced by the order-map
+change (C3), their comment edits and the pre-deploy cursor pins (the
+cursor rationale stays in S3.4's preamble). S1.1 runs first, so every
+anchor is the ORIGINAL main text. These are the ONLY edits S1 makes in
+these four test files.
 
-`app/test/unknownQueue.test.ts`:
-- Edit with `replace_all: true`: old `{ status: 'active' }` -> new
-  `{ status: 'inactive' }` (exactly 5 occurrences: lines ~49, 88, 89, 128,
-  151; the tenant fixture on line ~51 reads `status: 'active' }` after a
-  comma and does not match).
-- Edit: old `  it('reads the blocks in QUEUE ORDER - needs_review first, active second - and narrows on nothing else', async () => {`
-  -> new `  it('reads the blocks in QUEUE ORDER - needs_review first, inactive second - and narrows on nothing else', async () => {`
-- Edit: old `    // NON_TENANT_STATUSES at COMPILE time, which is the same array` -> new
-  `    // UNKNOWN_STATUSES at COMPILE time, which is the same array`
-- Edit: old
-  `    expect(UNKNOWN_QUEUE_BLOCKS.map((b) => b.status)).toEqual(['needs_review', 'active']);`
-  -> new
-  `    expect(UNKNOWN_QUEUE_BLOCKS.map((b) => b.status)).toEqual(['needs_review', 'inactive']);`
+S3.4 Step 2 - flip `app/test/unknownQueue.test.ts`.
 
-`app/test/inboxUnknownTab.test.ts`:
-- Edit: old `  status: 'needs_review' | 'active',` -> new `  status: 'needs_review' | 'inactive',`
-- Edit with `replace_all: true`: old `', 'active', ` -> new `', 'inactive', `
-  (exactly 5 occurrences: the `queueContact('c-a0'|'c-a1'|'c-a2'|'c-r3-broken'|'c-r4', 'active', ...)` calls, lines ~212-214, 678-679).
-- Edit (the "honest cursor", block 1 is now the inactive block): old
-  `      JSON.stringify({ q: 1, b: 1, k: { type: 'unknown', status: 'active', contactId: 'c-x' } }),`
-  -> new
-  `      JSON.stringify({ q: 1, b: 1, k: { type: 'unknown', status: 'inactive', contactId: 'c-x' } }),`
-  (Leave line ~323 `{ q: 1, b: 0, k: { type: 'unknown', status: 'active', contactId: 'a1' } }`:
-  it is a TAMPERED cursor and `active` still contradicts block 0.)
-- Edit: old `        { contactId: 'c-new', type: 'unknown', status: 'active', phone: '+15550002601' },`
-  -> new `        { contactId: 'c-new', type: 'unknown', status: 'inactive', phone: '+15550002601' },`
-- Edit (the backticks are literal characters in the file), shown below this
-  list as block N1.
+Edit A: replace
 
-Block N1, old:
+```ts
+  it('reads the blocks in QUEUE ORDER - needs_review first, active second - and narrows on nothing else', async () => {
+```
+
+with
+
+```ts
+  it('reads the blocks in QUEUE ORDER - needs_review first, inactive second - and narrows on nothing else', async () => {
+```
+
+Edit B (replace_all): `{ status: 'active' })` -> `{ status: 'inactive' })`.
+Exactly five occurrences, all `unk(n, { status: 'active' })` calls (~49, ~88,
+~89, ~128, ~151). The tenant fixture at ~51
+(`{ contactId: 'c-ten', type: 'tenant', phone: '+15550009000', status: 'active' },`)
+does not match the pattern and stays. Check:
+`grep -c "status: 'inactive' })" W:/tmp/unknown-inactive/app/test/unknownQueue.test.ts`
+prints 5, and `grep -n "unk([0-9]*, { status: 'active' })" ...` prints nothing.
+
+Edit C: replace
+
+```ts
+    // unreadIndexFake.ts:104-116). Plus ONE on the empty `active` block.
+```
+
+with
+
+```ts
+    // unreadIndexFake.ts:104-116). Plus ONE on the empty `inactive` block.
+```
+
+Edit D: replace
+
+```ts
+    // exhaustion here would strand every `active` row behind a null cursor.
+```
+
+with
+
+```ts
+    // exhaustion here would strand every `inactive` row behind a null cursor.
+```
+
+Edit E: replace the current text (~273-285):
+
+```ts
+  it('the block statuses ARE statusAllowlistFor("unknown") - the two cannot drift', () => {
+    // The type alias on UNKNOWN_QUEUE_STATUS_ORDER pins it to
+    // NON_TENANT_STATUSES at COMPILE time, which is the same array
+    // statusAllowlistFor returns for `unknown`. This is the RUNTIME half: a
+    // change made inside statusAllowlistFor (a special case for `unknown`, say)
+    // would not move the alias, and a status legal for a contact but absent
+    // from the blocks is a contact that silently never appears on the tab.
+    const blockStatuses = [...new Set(UNKNOWN_QUEUE_BLOCKS.map((b) => String(b.status)))].sort();
+    expect(blockStatuses).toEqual([...statusAllowlistFor('unknown')].sort());
+    // And the ORDER decision covers exactly those, untriaged first.
+    expect(Object.keys(UNKNOWN_QUEUE_STATUS_ORDER).sort()).toEqual(blockStatuses);
+    expect(UNKNOWN_QUEUE_BLOCKS.map((b) => b.status)).toEqual(['needs_review', 'active']);
+  });
+```
+
+with:
+
+```ts
+  it('the block statuses ARE statusAllowlistFor("unknown") - the two cannot drift', () => {
+    // The type alias on UNKNOWN_QUEUE_STATUS_ORDER pins it to
+    // UNKNOWN_STATUSES at COMPILE time, which is the same array
+    // statusAllowlistFor returns for `unknown`. This is the RUNTIME half: a
+    // change made inside statusAllowlistFor (a special case for `unknown`, say)
+    // would not move the alias, and a status legal for a contact but absent
+    // from the blocks is a contact that silently never appears on the tab.
+    const blockStatuses = [...new Set(UNKNOWN_QUEUE_BLOCKS.map((b) => String(b.status)))].sort();
+    expect(blockStatuses).toEqual([...statusAllowlistFor('unknown')].sort());
+    // And the ORDER decision covers exactly those, untriaged first.
+    expect(Object.keys(UNKNOWN_QUEUE_STATUS_ORDER).sort()).toEqual(blockStatuses);
+    // unknown-inactive spec D9 (2026-10-23): needs_review, then inactive. The
+    // `active` block is gone with `active` itself (spec D1).
+    expect(UNKNOWN_QUEUE_BLOCKS.map((b) => b.status)).toEqual(['needs_review', 'inactive']);
+  });
+```
+
+The two historical comments at ~55 and ~79 (`'active' < 'needs_review'`,
+describing the pre-rework un-narrowed Query) stay as written: they describe
+the old defect, not the current blocks.
+
+S3.4 Step 3 - flip `app/test/inboxUnknownTab.test.ts`.
+
+Edit A: in `queueContact`, replace `  status: 'needs_review' | 'active',` with
+`  status: 'needs_review' | 'inactive',`.
+
+Edit B (replace_all): `, 'active', ` -> `, 'inactive', `. Exactly five
+occurrences, all `queueContact(...)` calls (~212-214 `c-a0`..`c-a2`, ~678-679
+`c-r3-broken`, `c-r4`). Check with
+`grep -c "queueContact('c-[a-z0-9-]*', 'inactive'" W:/tmp/unknown-inactive/app/test/inboxUnknownTab.test.ts`
+printing 5.
+
+Edit C: replace
+
+```ts
+    // bounded Query per STATUS BLOCK (needs_review, then active) so a
+    // (unknown, active) contact stays covered - coverage class f - while the
+```
+
+with
+
+```ts
+    // bounded Query per STATUS BLOCK (needs_review, then inactive) so a
+    // (unknown, inactive) contact stays covered - coverage class f - while the
+```
+
+Edit D: replace
+
+```ts
+    // the `active` block. Before F1 that page came back empty with the cursor it
+    // was sent and every remaining `active` row was unreachable from the UI.
+```
+
+with
+
+```ts
+    // the `inactive` block. Before F1 that page came back empty with the cursor
+    // it was sent and every remaining later-block row was unreachable from the UI.
+```
+
+Edit E: replace
+
 ```ts
     // NOTE what this does NOT say: c-new is `active` and c-old is
 ```
-Block N1, new:
+
+with
+
 ```ts
     // NOTE what this does NOT say: c-new is `inactive` and c-old is
 ```
 
-`app/test/inboxUnknownParity.test.ts` - Edit:
+and replace
 
-old:
+```ts
+        { contactId: 'c-new', type: 'unknown', status: 'active', phone: '+15550002601' },
+```
+
+with
+
+```ts
+        { contactId: 'c-new', type: 'unknown', status: 'inactive', phone: '+15550002601' },
+```
+
+(This test pins the SERVER's per-page newest-first sort, which stays: the
+Unknown-tab Needs-review-first order is the dashboard's, S5.)
+
+Edit F (the pre-deploy cursor, D9): replace the current text (~344-350):
+
+```ts
+    const honest = Buffer.from(
+      JSON.stringify({ q: 1, b: 1, k: { type: 'unknown', status: 'active', contactId: 'c-x' } }),
+      'utf8',
+    ).toString('base64url');
+    await expect(
+      aggregateInbox({ filter: 'unknown', limit: 25, cursor: honest }, deps),
+    ).resolves.toMatchObject({ rows: [] });
+```
+
+with:
+
+```ts
+    const honest = Buffer.from(
+      JSON.stringify({ q: 1, b: 1, k: { type: 'unknown', status: 'inactive', contactId: 'c-x' } }),
+      'utf8',
+    ).toString('base64url');
+    await expect(
+      aggregateInbox({ filter: 'unknown', limit: 25, cursor: honest }, deps),
+    ).resolves.toMatchObject({ rows: [] });
+    // A PRE-DEPLOY cursor (unknown-inactive spec D9): minted INSIDE the removed
+    // `active` block, it no longer agrees with block 1 (`inactive`), so it is a
+    // 400 - once; reloading the inbox recovers. Never a wrong-partition Query.
+    const preDeploy = Buffer.from(
+      JSON.stringify({ q: 1, b: 1, k: { type: 'unknown', status: 'active', contactId: 'c-x' } }),
+      'utf8',
+    ).toString('base64url');
+    await expect(
+      aggregateInbox({ filter: 'unknown', limit: 25, cursor: preDeploy }, deps),
+    ).rejects.toBeInstanceOf(InboxBadRequestError);
+    // ...while a pre-deploy cursor at the START of block 1 (no `k`, minted on a
+    // roll-over) resumes at the first page of the inactive block - the right place.
+    const preDeployBlockStart = Buffer.from(JSON.stringify({ q: 1, b: 1 }), 'utf8').toString('base64url');
+    await expect(
+      aggregateInbox({ filter: 'unknown', limit: 25, cursor: preDeployBlockStart }, deps),
+    ).resolves.toMatchObject({ rows: [] });
+```
+
+The tamper case `'k.status contradicting the block'` at ~323
+(`{ q: 1, b: 0, k: { type: 'unknown', status: 'active', contactId: 'a1' } }`)
+stays: it is still a contradiction with block 0.
+
+S3.4 Step 4 - flip `app/test/inboxUnknownParity.test.ts` class f. Replace:
+
 ```ts
   it('class f: a (type=unknown, status=active) contact is a triage row (must survive the flip)', async () => {
     const page = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps({
       contacts: [{ contactId: 'c-active', type: 'unknown', status: 'active', phone: '+15550001002' }],
+      conversations: [conv({ conversationId: 'cv-active', participant_phone: '+15550001002', last_activity_at: '2026-06-12T09:00:00.000Z' })],
+    }));
+    expect(page.rows.map((r) => r.contactId)).toEqual(['c-active']);
+  });
 ```
-new:
+
+with:
+
 ```ts
+  // FLIP (unknown-inactive, 2026-10-23): class f was (unknown, active). `active`
+  // is no longer legal for an unknown contact (spec D1) and its block is gone;
+  // the reviewed-but-untyped class is now (unknown, inactive), read in the
+  // second block - still on the tab.
   it('class f: a (type=unknown, status=inactive) contact is a triage row (must survive the flip)', async () => {
     const page = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps({
-      contacts: [{ contactId: 'c-active', type: 'unknown', status: 'inactive', phone: '+15550001002' }],
+      contacts: [{ contactId: 'c-inactive', type: 'unknown', status: 'inactive', phone: '+15550001002' }],
+      conversations: [conv({ conversationId: 'cv-inactive', participant_phone: '+15550001002', last_activity_at: '2026-06-12T09:00:00.000Z' })],
+    }));
+    expect(page.rows.map((r) => r.contactId)).toEqual(['c-inactive']);
+  });
 ```
-(The contactId `c-active` and the expectation `['c-active']` stay - renaming
-ids is churn.)
+
+S3.4 Step 5 - flip `app/test/inbox.integration.test.ts`. Replace
+
+```ts
+        status: untriaged.includes(contactId) ? 'needs_review' : 'active',
+```
+
+with
+
+```ts
+        status: untriaged.includes(contactId) ? 'needs_review' : 'inactive',
+```
 
 #### Step 2 - RED
 
 Needs DynamoDB Local up (`npm run db:start` STARTS it; never restart it).
 
 ```
-cd W:/tmp/unknown-inactive/app; npx vitest run test/statusModel.test.ts test/contactsCrud.test.ts test/contactTriage.test.ts test/transitionRoutes.test.ts test/importApply.integration.test.ts test/unknownQueue.test.ts test/inboxUnknownTab.test.ts test/inboxUnknownParity.test.ts
+cd W:/tmp/unknown-inactive/app; npx vitest run test/statusModel.test.ts test/contactsCrud.test.ts test/contactTriage.test.ts test/transitionRoutes.test.ts test/importApply.integration.test.ts test/unknownQueue.test.ts test/inboxUnknownTab.test.ts test/inboxUnknownParity.test.ts test/inbox.integration.test.ts
 ```
 Expected failures, and why:
 - statusModel.test.ts: `TypeError: statusLabelFor is not a function`; the
@@ -868,9 +1073,23 @@ Expected failures, and why:
   inactive" cases are 400 not 200; the two (unknown, active) refusals are 200.
 - transitionRoutes.test.ts: unknown -> active is 200; -> inactive is 400.
 - importApply.integration.test.ts: the row stores `status: 'active'`.
-- unknownQueue / inboxUnknownTab / inboxUnknownParity: the `inactive` rows are
-  never queried (the blocks are still needs_review / active), so row lists,
-  walks and the block-status pin fail.
+- The four Unknown-tab files (step 1f = S3.4 Steps 2-5; the list S3.4 Step 1
+  used to carry, AR17) - every one because a flipped fixture seeds
+  (unknown, inactive), which no block reads yet (the blocks are still
+  needs_review / active), or because a test names the new block:
+  - unknownQueue.test.ts: `reads the blocks in QUEUE ORDER ...` (no
+    `c-unk-002`), `ROLLS OVER between blocks ...` (no `c-unk-003`),
+    `an exhausted block that fills want exactly ...` (no `c-unk-002`),
+    `the block statuses ARE statusAllowlistFor("unknown") ...` (blocks are
+    `['needs_review', 'active']`).
+  - inboxUnknownTab.test.ts: `THE FULL WALK ...` (no `c-a*`),
+    `rejects a FOREIGN cursor ...` (the "honest" `b:1` cursor now carries
+    `inactive` and is rejected), `a page-head failure AFTER A BLOCK
+    ROLL-OVER ...` (no `c-r4`), `sorts the triage rows on ONE page ...` (no
+    `c-new`).
+  - inboxUnknownParity.test.ts: `class f: ...` (rows `[]`).
+  - inbox.integration.test.ts: `filter=unknown pages the REAL byTypeStatus
+    index across a block boundary ...` (the reviewed rows missing).
 Every other case in those files stays green.
 
 #### Step 3 - implementation
@@ -1146,7 +1365,9 @@ new:
   // the import never derives inactive - setting a contact aside is a staff decision.
 ```
 
-3f. `app/src/lib/unknownQueue.ts` - ONLY these edits (S3 owns the rest).
+3f. `app/src/lib/unknownQueue.ts` - ONLY these edits (S3 owns the rest; the
+two docblock lines naming the `active` block are S3.4 Step 6 Edits C and D,
+AR17).
 
 Edit: old `import { NON_TENANT_STATUSES } from './statusModel.js';` -> new
 `import { UNKNOWN_STATUSES } from './statusModel.js';`
@@ -1166,17 +1387,6 @@ new:
 Edit: old `type UnknownQueueStatus = (typeof NON_TENANT_STATUSES)[number];` -> new
 `type UnknownQueueStatus = (typeof UNKNOWN_STATUSES)[number];`
 
-Edit (the backticks are literal characters in the file):
-
-old:
-```ts
- * `active` block's first Query is issued.
-```
-new:
-```ts
- * `inactive` block's first Query is issued.
-```
-
 Edit:
 
 old:
@@ -1193,8 +1403,6 @@ export const UNKNOWN_QUEUE_STATUS_ORDER = {
   inactive: 1,
 } as const satisfies Record<UnknownQueueStatus, number>;
 ```
-Edit: old ` * way: anything that hard-codes "needs_review then active" outside this file`
--> new ` * way: anything that hard-codes "needs_review then inactive" outside this file`
 
 3g. `app/src/repos/contactsRepo.ts` (comment, ~123-124, both lines ASCII). Edit:
 
@@ -1236,7 +1444,7 @@ new:
 #### Step 4 - GREEN
 
 ```
-cd W:/tmp/unknown-inactive/app; npx vitest run test/statusModel.test.ts test/contactsCrud.test.ts test/contactTriage.test.ts test/transitionRoutes.test.ts test/importApply.integration.test.ts test/unknownQueue.test.ts test/inboxUnknownTab.test.ts test/inboxUnknownParity.test.ts test/importReviewNotes.test.ts test/contactsPartitionFake.test.ts test/suggestionReclassification.test.ts
+cd W:/tmp/unknown-inactive/app; npx vitest run test/statusModel.test.ts test/contactsCrud.test.ts test/contactTriage.test.ts test/transitionRoutes.test.ts test/importApply.integration.test.ts test/unknownQueue.test.ts test/inboxUnknownTab.test.ts test/inboxUnknownParity.test.ts test/inbox.integration.test.ts test/importReviewNotes.test.ts test/contactsPartitionFake.test.ts test/suggestionReclassification.test.ts
 ```
 Expect all green. Then the compile check (bare):
 ```
@@ -1263,7 +1471,7 @@ ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/unknown-inactive
 (The `ls` must report "No such file or directory"; in PowerShell use
 `Test-Path` and expect `False`.)
 ```
-git -C W:/tmp/unknown-inactive add app/src/lib/statusModel.ts app/src/routes/contacts.ts app/src/lib/import/apply.ts app/src/lib/import/reviewNotes.ts app/src/lib/import/status.ts app/src/lib/unknownQueue.ts app/src/repos/contactsRepo.ts app/test/helpers/contactsPartitionFake.ts app/test/statusModel.test.ts app/test/contactsCrud.test.ts app/test/contactTriage.test.ts app/test/transitionRoutes.test.ts app/test/importApply.integration.test.ts app/test/unknownQueue.test.ts app/test/inboxUnknownTab.test.ts app/test/inboxUnknownParity.test.ts
+git -C W:/tmp/unknown-inactive add app/src/lib/statusModel.ts app/src/routes/contacts.ts app/src/lib/import/apply.ts app/src/lib/import/reviewNotes.ts app/src/lib/import/status.ts app/src/lib/unknownQueue.ts app/src/repos/contactsRepo.ts app/test/helpers/contactsPartitionFake.ts app/test/statusModel.test.ts app/test/contactsCrud.test.ts app/test/contactTriage.test.ts app/test/transitionRoutes.test.ts app/test/importApply.integration.test.ts app/test/unknownQueue.test.ts app/test/inboxUnknownTab.test.ts app/test/inboxUnknownParity.test.ts app/test/inbox.integration.test.ts
 git -C W:/tmp/unknown-inactive commit -m "feat(status): per-type contact status lists - Inactive for every type, no Active for unknown (tracker #30 S1.1)" -m "Replaces NON_TENANT_STATUSES with PARTNER_STATUSES (partner, team_member) and UNKNOWN_STATUSES; adds statusLabelFor. Every allowlist path follows: PATCH, create, list read, transition route, import. Unknown-tab block order is now needs_review then inactive." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
@@ -1277,8 +1485,11 @@ review") and the D6 AI-accept path.
 Files:
 - `app/src/routes/contacts.ts` (create default + its comment)
 - `app/src/routes/unmatchedEmail.ts` (comment only - see C1)
+- `app/scripts/measure-unread-contact-coverage.ts` (comment only, ~661-666;
+  plan round 1 P13)
 - Tests: `app/test/contactsCrud.test.ts`,
   `app/test/suggestionReclassification.test.ts`
+- Read only: `e2e/tests/dashboard-next/ai-run-log.spec.ts` (AR19 record, end of Step 3)
 
 #### Step 1 - failing tests
 
@@ -1408,6 +1619,39 @@ new:
     // (tracker #30, D6).
 ```
 
+`app/scripts/measure-unread-contact-coverage.ts` (~661-666, comment only, all
+ASCII lines; plan round 1 P13 - it still describes an unknown create
+defaulting to `active`). Edit:
+
+old:
+```ts
+  // `--no-status-narrow` prices the read the design ACTUALLY proposes. Draft 4's
+  // requirement 1 queries type=unknown with NO status filter, because a contact
+  // created as `unknown` defaults to status 'active' rather than 'needs_review'
+  // - so narrowing on needs_review measures a strictly SMALLER partition than
+  // the one that would be read. Every figure published before this flag existed
+  // priced the narrowed shape.
+```
+new:
+```ts
+  // `--no-status-narrow` prices the read the design ACTUALLY proposes. Draft 4's
+  // requirement 1 queries type=unknown with NO status filter, because a contact
+  // created as `unknown` USED TO default to status 'active' rather than
+  // 'needs_review' - so narrowing on needs_review measures a strictly SMALLER
+  // partition than the one that would be read. Since tracker #30 (2026-10-23)
+  // an unknown create defaults to needs_review and the partition's other legal
+  // status is 'inactive' (UNKNOWN_STATUSES), not 'active'. Every figure
+  // published before this flag existed priced the narrowed shape.
+```
+
+AR19 record (record only, no edit). Read
+`e2e/tests/dashboard-next/ai-run-log.spec.ts` ~66-70 (`createUnknown` posts
+`{ firstName, type: "unknown" }` with no status, so after this task the
+contact is needs_review, not active) and every assertion that uses a contact
+it creates. Record in the S1 report whether any assertion depends on that
+contact's status, citing `file:line`. Do not edit the spec; S6.1 re-runs it
+as a pin.
+
 #### Step 4 - GREEN
 
 ```
@@ -1423,7 +1667,7 @@ there).
 cd W:/tmp/unknown-inactive; git diff -U0 | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
 git -C W:/tmp/unknown-inactive status
 ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/unknown-inactive/MERGE_HEAD"
-git -C W:/tmp/unknown-inactive add app/src/routes/contacts.ts app/src/routes/unmatchedEmail.ts app/test/contactsCrud.test.ts app/test/suggestionReclassification.test.ts
+git -C W:/tmp/unknown-inactive add app/src/routes/contacts.ts app/src/routes/unmatchedEmail.ts app/scripts/measure-unread-contact-coverage.ts app/test/contactsCrud.test.ts app/test/suggestionReclassification.test.ts
 git -C W:/tmp/unknown-inactive commit -m "feat(contacts): an unknown create with no status defaults to needs_review (tracker #30 S1.2)" -m "Pins: partner/team_member still default to active; an AI status suggestion of active on an unknown contact stays a 409 suggestion_contact_not_tenant; unmatched email cannot create an unknown contact." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 (ASCII count `0`; MERGE_HEAD absent.)
@@ -1565,14 +1809,19 @@ describe('PATCH /api/contacts/:contactId - type change from Inactive and same-ty
     expect(statusMilestones(world)).toEqual([`Status ${ARROW} Active`]);
   });
 
-  it('labels a tenant re-typed to landlord "Status -> Interested"', async () => {
+  it('(PIN) labels a tenant re-typed to landlord "Status -> Interested"', async () => {
+    // Green before this task IN THE HARNESS ONLY: the fake's getById returns the
+    // LIVE contact object and update mutates it in place, so the old label code
+    // already reads the new type. The production defect (the real repo returns
+    // a copy) is real; the RED for label-by-new-type is the unknown -> partner
+    // case above and the unknown re-type case below.
     const { app, world } = makeWebhookHarness();
     seedD7(world, { type: 'tenant', status: 'onboarding' });
     await patchD7(app, { type: 'landlord' }).expect(200);
     expect(statusMilestones(world)).toEqual([`Status ${ARROW} Interested`]);
   });
 
-  it('(PIN) labels an Inactive tenant re-typed to unknown "Status -> Needs review"', async () => {
+  it('labels an Inactive tenant re-typed to unknown "Status -> Needs review"', async () => {
     const { app, world } = makeWebhookHarness();
     seedD7(world, { type: 'tenant', status: 'inactive' });
     await patchD7(app, { type: 'unknown' }).expect(200);
@@ -1597,8 +1846,16 @@ and unknown, so the normalize fallback KEEPS it):
 - the Property Manager case: status `interested`;
 - the unknown -> partner label: `Status -> active` (raw key - the stored type
   `unknown` picked the TENANT map, which has no `active`);
-- the tenant -> landlord label: `Status -> interested` (same reason).
-The PIN and (guard) cases pass.
+- the Inactive tenant -> unknown label: no milestone at all (`[]`) - after
+  S1.1 `inactive` is legal for unknown, so the unguarded normalize fallback
+  keeps it and writes no status (the same behavior as the
+  `tenant -> unknown -> needs_review` row above).
+The PIN and (guard) cases pass. The tenant -> landlord label is a (PIN) in
+the harness: `getById` in `app/test/helpers/twilioWebhookHarness.ts:2280-2282`
+returns the LIVE contact object and `update` mutates it in place
+(`:2455-2458`), so the old label code already sees `type: 'landlord'` and
+prints "Interested". The real repo returns a copy, so the production defect
+stands; it is fixed by the same Step 3 edit.
 
 #### Step 3 - implementation (all in `app/src/routes/contacts.ts`)
 
@@ -2211,7 +2468,12 @@ Write `W:/tmp/unknown-inactive/docs/superpowers/reviews/2026-10-23-unknown-inact
   pinned by `unmatchedEmailRoutes.test.ts`), C2 (the literal arrow in
   `contacts.ts` and the `STATUS_ARROW` constant), C3 (the fixture flips made in
   `unknownQueue.test.ts`, `inboxUnknownTab.test.ts`, `inboxUnknownParity.test.ts`
-  and what S3 still owns there).
+  and `inbox.integration.test.ts` - S3.4 Steps 2-5 run in S1.1, AR17 - and
+  what S3 still owns there).
+- AR19 (S1.2 Step 3): whether any assertion in
+  `e2e/tests/dashboard-next/ai-run-log.spec.ts` depends on the status of the
+  unknown contact it creates (~66-70), now needs_review instead of active,
+  citing `file:line`.
 - W6: the check-only result for `lean.ts`, `cast.ts`, `live.ts`, `matrix.ts`
   (no (unknown, active); lean byte-stable; the only offender was
   `performance.ts`, now fixed).
@@ -3016,6 +3278,9 @@ Replacement:
     // type the route's check read; every success notifies open pages.
     describe('every contact type: Inactive, the conditional write, contact.updated', () => {
       let notified: unknown[];
+      // Built, never written as an escape: the Edit/Write tools decode
+      // backslash-u escapes (plan section 5; caseworkerConversion.test.ts:593).
+      const ARROW = String.fromCharCode(0x2192);
 
       beforeEach(async () => {
         await world.contactsRepo.create({ contactId: 'pt-1', type: 'partner', status: 'active' });
@@ -3049,7 +3314,7 @@ Replacement:
           );
           // The partner map labels partner + team_member; the unknown map
           // labels unknown (S1 statusLabelFor). Both read "Inactive".
-          expect(timeline.map((e) => e.label), contactId).toEqual(['Status \u2192 Inactive']);
+          expect(timeline.map((e) => e.label), contactId).toEqual([`Status ${ARROW} Inactive`]);
         }
       });
 
@@ -3064,6 +3329,17 @@ Replacement:
         expect((await authedPatch('/api/contacts/uk-1/tenant-status', { toStatus: 'searching', source: 'manual' })).status).toBe(400);
         expect((await authedPatch('/api/contacts/c-ghost/tenant-status', { toStatus: 'inactive', source: 'manual' })).status).toBe(404);
         expect(notified).toEqual([]);
+      });
+
+      it('the route check reads the stored contact strongly consistent (plan round 1 P12)', async () => {
+        // The edit form follows a type-change PATCH at once with this route
+        // (S4.4); an eventually consistent check read could still see the old
+        // type and 400 or 409 a status the PATCH already made legal.
+        const getById = vi.spyOn(world.contactsRepo, 'getById');
+        const res = await authedPatch('/api/contacts/uk-1/tenant-status', { toStatus: 'inactive', source: 'manual' });
+        expect(res.status).toBe(200);
+        // The first read of the request is the route's check read.
+        expect(getById).toHaveBeenNthCalledWith(1, 'uk-1', { consistentRead: true });
       });
 
       it('a re-type landing between the route check and the write is 409 contact_type_changed and writes nothing', async () => {
@@ -3102,12 +3378,8 @@ Replacement:
   });
 ```
 
-After the edit, confirm the label escape survived as six ASCII characters
-(plan section 0):
-
-```
-grep -n 'u2192' W:/tmp/unknown-inactive/app/test/transitionRoutes.test.ts
-```
+The test builds the arrow with `String.fromCharCode(0x2192)` (plan section 5),
+so no escape is written and nothing needs a post-edit check.
 
 Step 2 - RED.
 
@@ -3117,9 +3389,11 @@ cd W:/tmp/unknown-inactive/app; npx vitest run test/transitionRoutes.test.ts
 
 Expected: "a re-type landing between ..." fails `expected 200 to be 409` -
 the route does not pass `expectedType` yet, so the setter guards on the type
-IT read (already `landlord`) and stores (landlord, inactive). The other three
-new cases pass (the accept case is green since S1; the emit case is green
-since S2.3; the refusal case is a PIN). If the accept case fails with
+IT read (already `landlord`) and stores (landlord, inactive). "the route
+check reads the stored contact strongly consistent" fails: the first
+`getById` call is `('uk-1')` with no options. The other three new cases pass
+(the accept case is green since S1; the emit case is green since S2.3; the
+refusal case is a PIN). If the accept case fails with
 `expected 400 to be 200`, S1's allowlists are missing - stop and report.
 
 Step 3 - implementation in `app/src/routes/statusTransition.ts`.
@@ -3174,6 +3448,21 @@ Replacement:
         // check above read, so a concurrent re-type is a 409, never an
         // illegal (type, status) pair.
         expectedType: stored.type,
+```
+
+Edit E (plan round 1 P12: the check read is strongly consistent; ASCII
+line). Current text:
+
+```ts
+    const stored = await contacts.getById(contactId);
+```
+
+Replacement:
+
+```ts
+    // Strongly consistent (plan round 1 P12): the edit form sends this right
+    // after a type-change PATCH, and a stale type would 400 or 409 it.
+    const stored = await contacts.getById(contactId, { consistentRead: true });
 ```
 
 Edit D (the 409 mapping). Current text:
@@ -3841,6 +4130,9 @@ describe('useContact - live re-read on contact.updated', () => {
     });
     expect(await screen.findByRole('heading', { name: 'Benjamin' })).toBeInTheDocument();
     expect(getContact).toHaveBeenCalledTimes(2);
+    // Plan round 1 P2: the re-read follows a write by moments, so it is a
+    // consistent read (getContact's `consistent`, planner ruling PR-3).
+    expect(getContact).toHaveBeenLastCalledWith('B', undefined, { consistent: true });
     expect(screen.queryByText('page loading')).not.toBeInTheDocument();
   });
 
@@ -3891,10 +4183,13 @@ Replacement:
   // contact.updated (unknown-inactive spec D2, AR3) re-reads the same way: a
   // status or type change made elsewhere (the edit form, another tab or
   // operator) lands without a reload. Both events name the contact; only the
-  // open one is re-read.
+  // open one is re-read. The event follows its write by moments, so the
+  // re-read is CONSISTENT (planner ruling PR-3, plan round 1 P2) - an
+  // eventually consistent GET could hand back the pre-write contact and
+  // overwrite the fresh one.
   const refetchInPlace = (eventContactId: string): void => {
     if (eventContactId !== contactId) return;
-    void getContact(contactId)
+    void getContact(contactId, undefined, { consistent: true })
       .then((contact) => {
         setState((prev) => (prev.forId === contactId ? { status: 'ready', contact, forId: contactId } : prev));
       })
@@ -3937,13 +4232,7 @@ git -C W:/tmp/unknown-inactive diff -U0 916258ae -- <FILE> | grep '^+' | tr -d '
 
 prints 0. (`statusTransition.ts`, `api.ts`, `contacts.ts`, `events.ts`,
 `EventStreamProvider.tsx` and several tests already carry non-ASCII on
-untouched lines; only ADDED lines are checked.) And:
-
-```
-grep -n 'u2192' W:/tmp/unknown-inactive/app/test/transitionRoutes.test.ts
-```
-
-shows the six-character escape, not a literal arrow.
+untouched lines; only ADDED lines are checked.)
 
 Step 2 - typecheck the two workspaces S2 touched (vitest strips types):
 
@@ -4061,7 +4350,7 @@ None with AR1-AR14. Two precision notes the planner should know:
    `app/test/inboxUnknownTab.test.ts`, `app/test/inboxUnknownParity.test.ts`
    (class f), `app/test/inbox.integration.test.ts` (~485). S3.4 owns those
    flips. S1 must not "fix" them a different way, and no gate may run between
-   S1 and S3.4 expecting them green.
+   S1 and S3.4 expecting them green. SUPERSEDED by AR17 (plan round 1 P3)
 
 ### S3.1 Start-of-slice checks (W1, and S1 landed)
 
@@ -4472,13 +4761,15 @@ git -C W:/tmp/unknown-inactive commit -m "feat(today): an Inactive contact's unk
 
 ### S3.4 Unknown-tab blocks: needs_review, then inactive (D9) - tests, comments, the pre-deploy cursor
 
+A comment-only task (AR17, plan round 1 P3): exempt from the RED rule,
+verified by its GREEN run (Step 8). Its test edits (the former Steps 1-5) run
+inside S1.1.
+
 Files:
 - `app/src/lib/unknownQueue.ts` (comments only; S1 owns the import, type and order object)
 - `app/src/routes/inbox.ts` (comments only)
-- `app/test/unknownQueue.test.ts` (edit)
-- `app/test/inboxUnknownTab.test.ts` (edit)
-- `app/test/inboxUnknownParity.test.ts` (edit)
-- `app/test/inbox.integration.test.ts` (edit)
+- `dashboard/src/routes/inbox/inboxFilters.ts` (comment only, Step 7 Edit D;
+  plan round 1 P13)
 
 The pre-deploy cursor, stated (spec D9): the decoder needs NO code change.
 `b` is an ordinal into `UNKNOWN_QUEUE_BLOCKS`, which is still two blocks long,
@@ -4490,269 +4781,9 @@ contactId}}`; `decodeUnknownCursor` (`app/src/routes/inbox.ts` ~493-497,
 recovers. A pre-deploy cursor at the START of block 1 (`{q:1, b:1}`, no `k`,
 minted on a roll-over) resumes at the first page of the `inactive` block,
 which is the right place. Block-0 cursors (`needs_review`) are unaffected.
-S3.4 pins all three.
+S3.4 Step 3 Edit F pins all three; it runs inside S1.1 (AR17).
 
-Step 1 - RED (state check: S1's order change already broke the old
-expectations). Run:
-
-```
-cd W:/tmp/unknown-inactive/app; npx vitest run test/unknownQueue.test.ts test/inboxUnknownTab.test.ts test/inboxUnknownParity.test.ts test/inbox.integration.test.ts
-```
-
-Expected failures - every one because a fixture seeds (unknown, active),
-which no block reads now, or because a test names the old block:
-- unknownQueue.test.ts: `reads the blocks in QUEUE ORDER ...` (no
-  `c-unk-002`), `ROLLS OVER between blocks ...` (no `c-unk-003`),
-  `an exhausted block that fills want exactly ...` (no `c-unk-002`),
-  `the block statuses ARE statusAllowlistFor("unknown") ...` (blocks are
-  `['needs_review', 'inactive']`).
-- inboxUnknownTab.test.ts: `THE FULL WALK ...` (no `c-a*`),
-  `rejects a FOREIGN cursor ...` (the "honest" `b:1` `active` cursor now
-  rejects), `a page-head failure AFTER A BLOCK ROLL-OVER ...` (no `c-r4`),
-  `sorts the triage rows on ONE page ...` (no `c-new`).
-- inboxUnknownParity.test.ts: `class f: ...` (rows `[]`).
-- inbox.integration.test.ts: `filter=unknown pages the REAL byTypeStatus
-  index across a block boundary ...` (the reviewed rows missing).
-If none of these fail, S1's order change is not in the tree: STOP (S3.1 Step
-2 should have caught it).
-
-Step 2 - flip `app/test/unknownQueue.test.ts`.
-
-Edit A: replace
-
-```ts
-  it('reads the blocks in QUEUE ORDER - needs_review first, active second - and narrows on nothing else', async () => {
-```
-
-with
-
-```ts
-  it('reads the blocks in QUEUE ORDER - needs_review first, inactive second - and narrows on nothing else', async () => {
-```
-
-Edit B (replace_all): `{ status: 'active' })` -> `{ status: 'inactive' })`.
-Exactly five occurrences, all `unk(n, { status: 'active' })` calls (~49, ~88,
-~89, ~128, ~151). The tenant fixture at ~51
-(`{ contactId: 'c-ten', type: 'tenant', phone: '+15550009000', status: 'active' },`)
-does not match the pattern and stays. Check:
-`grep -c "status: 'inactive' })" W:/tmp/unknown-inactive/app/test/unknownQueue.test.ts`
-prints 5, and `grep -n "unk([0-9]*, { status: 'active' })" ...` prints nothing.
-
-Edit C: replace
-
-```ts
-    // unreadIndexFake.ts:104-116). Plus ONE on the empty `active` block.
-```
-
-with
-
-```ts
-    // unreadIndexFake.ts:104-116). Plus ONE on the empty `inactive` block.
-```
-
-Edit D: replace
-
-```ts
-    // exhaustion here would strand every `active` row behind a null cursor.
-```
-
-with
-
-```ts
-    // exhaustion here would strand every `inactive` row behind a null cursor.
-```
-
-Edit E: replace the current text (~273-285):
-
-```ts
-  it('the block statuses ARE statusAllowlistFor("unknown") - the two cannot drift', () => {
-    // The type alias on UNKNOWN_QUEUE_STATUS_ORDER pins it to
-    // NON_TENANT_STATUSES at COMPILE time, which is the same array
-    // statusAllowlistFor returns for `unknown`. This is the RUNTIME half: a
-    // change made inside statusAllowlistFor (a special case for `unknown`, say)
-    // would not move the alias, and a status legal for a contact but absent
-    // from the blocks is a contact that silently never appears on the tab.
-    const blockStatuses = [...new Set(UNKNOWN_QUEUE_BLOCKS.map((b) => String(b.status)))].sort();
-    expect(blockStatuses).toEqual([...statusAllowlistFor('unknown')].sort());
-    // And the ORDER decision covers exactly those, untriaged first.
-    expect(Object.keys(UNKNOWN_QUEUE_STATUS_ORDER).sort()).toEqual(blockStatuses);
-    expect(UNKNOWN_QUEUE_BLOCKS.map((b) => b.status)).toEqual(['needs_review', 'active']);
-  });
-```
-
-with:
-
-```ts
-  it('the block statuses ARE statusAllowlistFor("unknown") - the two cannot drift', () => {
-    // The type alias on UNKNOWN_QUEUE_STATUS_ORDER pins it to
-    // UNKNOWN_STATUSES at COMPILE time, which is the same array
-    // statusAllowlistFor returns for `unknown`. This is the RUNTIME half: a
-    // change made inside statusAllowlistFor (a special case for `unknown`, say)
-    // would not move the alias, and a status legal for a contact but absent
-    // from the blocks is a contact that silently never appears on the tab.
-    const blockStatuses = [...new Set(UNKNOWN_QUEUE_BLOCKS.map((b) => String(b.status)))].sort();
-    expect(blockStatuses).toEqual([...statusAllowlistFor('unknown')].sort());
-    // And the ORDER decision covers exactly those, untriaged first.
-    expect(Object.keys(UNKNOWN_QUEUE_STATUS_ORDER).sort()).toEqual(blockStatuses);
-    // unknown-inactive spec D9 (2026-10-23): needs_review, then inactive. The
-    // `active` block is gone with `active` itself (spec D1).
-    expect(UNKNOWN_QUEUE_BLOCKS.map((b) => b.status)).toEqual(['needs_review', 'inactive']);
-  });
-```
-
-The two historical comments at ~55 and ~79 (`'active' < 'needs_review'`,
-describing the pre-rework un-narrowed Query) stay as written: they describe
-the old defect, not the current blocks.
-
-Step 3 - flip `app/test/inboxUnknownTab.test.ts`.
-
-Edit A: in `queueContact`, replace `  status: 'needs_review' | 'active',` with
-`  status: 'needs_review' | 'inactive',`.
-
-Edit B (replace_all): `, 'active', ` -> `, 'inactive', `. Exactly five
-occurrences, all `queueContact(...)` calls (~212-214 `c-a0`..`c-a2`, ~678-679
-`c-r3-broken`, `c-r4`). Check with
-`grep -c "queueContact('c-[a-z0-9-]*', 'inactive'" W:/tmp/unknown-inactive/app/test/inboxUnknownTab.test.ts`
-printing 5.
-
-Edit C: replace
-
-```ts
-    // bounded Query per STATUS BLOCK (needs_review, then active) so a
-    // (unknown, active) contact stays covered - coverage class f - while the
-```
-
-with
-
-```ts
-    // bounded Query per STATUS BLOCK (needs_review, then inactive) so a
-    // (unknown, inactive) contact stays covered - coverage class f - while the
-```
-
-Edit D: replace
-
-```ts
-    // the `active` block. Before F1 that page came back empty with the cursor it
-    // was sent and every remaining `active` row was unreachable from the UI.
-```
-
-with
-
-```ts
-    // the `inactive` block. Before F1 that page came back empty with the cursor
-    // it was sent and every remaining later-block row was unreachable from the UI.
-```
-
-Edit E: replace
-
-```ts
-    // NOTE what this does NOT say: c-new is `active` and c-old is
-```
-
-with
-
-```ts
-    // NOTE what this does NOT say: c-new is `inactive` and c-old is
-```
-
-and replace
-
-```ts
-        { contactId: 'c-new', type: 'unknown', status: 'active', phone: '+15550002601' },
-```
-
-with
-
-```ts
-        { contactId: 'c-new', type: 'unknown', status: 'inactive', phone: '+15550002601' },
-```
-
-(This test pins the SERVER's per-page newest-first sort, which stays: the
-Unknown-tab Needs-review-first order is the dashboard's, S5.)
-
-Edit F (the pre-deploy cursor, D9): replace the current text (~344-350):
-
-```ts
-    const honest = Buffer.from(
-      JSON.stringify({ q: 1, b: 1, k: { type: 'unknown', status: 'active', contactId: 'c-x' } }),
-      'utf8',
-    ).toString('base64url');
-    await expect(
-      aggregateInbox({ filter: 'unknown', limit: 25, cursor: honest }, deps),
-    ).resolves.toMatchObject({ rows: [] });
-```
-
-with:
-
-```ts
-    const honest = Buffer.from(
-      JSON.stringify({ q: 1, b: 1, k: { type: 'unknown', status: 'inactive', contactId: 'c-x' } }),
-      'utf8',
-    ).toString('base64url');
-    await expect(
-      aggregateInbox({ filter: 'unknown', limit: 25, cursor: honest }, deps),
-    ).resolves.toMatchObject({ rows: [] });
-    // A PRE-DEPLOY cursor (unknown-inactive spec D9): minted INSIDE the removed
-    // `active` block, it no longer agrees with block 1 (`inactive`), so it is a
-    // 400 - once; reloading the inbox recovers. Never a wrong-partition Query.
-    const preDeploy = Buffer.from(
-      JSON.stringify({ q: 1, b: 1, k: { type: 'unknown', status: 'active', contactId: 'c-x' } }),
-      'utf8',
-    ).toString('base64url');
-    await expect(
-      aggregateInbox({ filter: 'unknown', limit: 25, cursor: preDeploy }, deps),
-    ).rejects.toBeInstanceOf(InboxBadRequestError);
-    // ...while a pre-deploy cursor at the START of block 1 (no `k`, minted on a
-    // roll-over) resumes at the first page of the inactive block - the right place.
-    const preDeployBlockStart = Buffer.from(JSON.stringify({ q: 1, b: 1 }), 'utf8').toString('base64url');
-    await expect(
-      aggregateInbox({ filter: 'unknown', limit: 25, cursor: preDeployBlockStart }, deps),
-    ).resolves.toMatchObject({ rows: [] });
-```
-
-The tamper case `'k.status contradicting the block'` at ~323
-(`{ q: 1, b: 0, k: { type: 'unknown', status: 'active', contactId: 'a1' } }`)
-stays: it is still a contradiction with block 0.
-
-Step 4 - flip `app/test/inboxUnknownParity.test.ts` class f. Replace:
-
-```ts
-  it('class f: a (type=unknown, status=active) contact is a triage row (must survive the flip)', async () => {
-    const page = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps({
-      contacts: [{ contactId: 'c-active', type: 'unknown', status: 'active', phone: '+15550001002' }],
-      conversations: [conv({ conversationId: 'cv-active', participant_phone: '+15550001002', last_activity_at: '2026-06-12T09:00:00.000Z' })],
-    }));
-    expect(page.rows.map((r) => r.contactId)).toEqual(['c-active']);
-  });
-```
-
-with:
-
-```ts
-  // FLIP (unknown-inactive, 2026-10-23): class f was (unknown, active). `active`
-  // is no longer legal for an unknown contact (spec D1) and its block is gone;
-  // the reviewed-but-untyped class is now (unknown, inactive), read in the
-  // second block - still on the tab.
-  it('class f: a (type=unknown, status=inactive) contact is a triage row (must survive the flip)', async () => {
-    const page = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps({
-      contacts: [{ contactId: 'c-inactive', type: 'unknown', status: 'inactive', phone: '+15550001002' }],
-      conversations: [conv({ conversationId: 'cv-inactive', participant_phone: '+15550001002', last_activity_at: '2026-06-12T09:00:00.000Z' })],
-    }));
-    expect(page.rows.map((r) => r.contactId)).toEqual(['c-inactive']);
-  });
-```
-
-Step 5 - flip `app/test/inbox.integration.test.ts`. Replace
-
-```ts
-        status: untriaged.includes(contactId) ? 'needs_review' : 'active',
-```
-
-with
-
-```ts
-        status: untriaged.includes(contactId) ? 'needs_review' : 'inactive',
-```
+Steps 2-5 run inside S1.1 (AR17).
 
 Step 6 - comments in `app/src/lib/unknownQueue.ts` (no code change). First
 re-read lines 1-212: S1 changed the import, the type alias and the order
@@ -4844,7 +4875,7 @@ with
  * UNKNOWN_STATUSES, which is what `statusAllowlistFor('unknown')` returns -
 ```
 
-(If S1 already made this edit, leave it.)
+(S1.1 step 3f makes this edit; if it is already in the tree, leave it.)
 
 Edit C: in the `UNKNOWN_QUEUE_STATUS_ORDER` docblock, replace
 
@@ -5015,24 +5046,51 @@ The paragraph that follows (`    // Global newest-first is not impossible, it is
 `    // it lands, UNKNOWN_QUEUE_BLOCKS is the one thing that has to change.`) and
 the `unknownRows.sort(...)` call stay exactly as they are.
 
-ASCII check on the edited pre-existing files (inbox.ts carries non-ASCII
-elsewhere):
+Edit D (plan round 1 P13): `dashboard/src/routes/inbox/inboxFilters.ts`, the
+`case 'unknown':` comment in `emptyCopy` (~78-80, all ASCII lines), which
+still describes an unknown contact moved to `active`. Replace
+
+```ts
+      // is excluded by ruling, class (c). "Untriaged" was wrong on a third axis:
+      // an unknown contact already moved to `status: 'active'` is still on this
+      // tab (class f), because what puts it here is being UNIDENTIFIED, not
+      // being unreviewed.
+```
+
+with
+
+```ts
+      // is excluded by ruling, class (c). "Untriaged" was wrong on a third axis:
+      // an unknown contact already marked `status: 'inactive'` is still on this
+      // tab (class f; it was `active` before tracker #30, 2026-10-23, which
+      // removed `active` for unknown - needs_review rows first, then inactive),
+      // because what puts it here is being UNIDENTIFIED, not being unreviewed.
+```
+
+ASCII check on the edited pre-existing files (inbox.ts and inboxFilters.ts
+carry non-ASCII elsewhere):
 
 ```
-git -C W:/tmp/unknown-inactive diff -U0 -- app/src/routes/inbox.ts app/src/lib/unknownQueue.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git -C W:/tmp/unknown-inactive diff -U0 -- app/src/routes/inbox.ts app/src/lib/unknownQueue.ts dashboard/src/routes/inbox/inboxFilters.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
 ```
 
 prints 0.
 
-Step 8 - GREEN: the Step 1 command; all four files pass (the integration
-file needs DynamoDB Local).
+Step 8 - GREEN (the task's verification; comment-only, so no RED, AR17):
+
+```
+cd W:/tmp/unknown-inactive/app; npx vitest run test/unknownQueue.test.ts test/inboxUnknownTab.test.ts test/inboxUnknownParity.test.ts test/inbox.integration.test.ts
+cd W:/tmp/unknown-inactive/dashboard; npx vitest run src/routes/inbox
+```
+
+All pass (the integration file needs DynamoDB Local).
 
 Step 9 - commit:
 
 ```
 git -C W:/tmp/unknown-inactive status
-git -C W:/tmp/unknown-inactive add app/src/lib/unknownQueue.ts app/src/routes/inbox.ts app/test/unknownQueue.test.ts app/test/inboxUnknownTab.test.ts app/test/inboxUnknownParity.test.ts app/test/inbox.integration.test.ts
-git -C W:/tmp/unknown-inactive commit -m "feat(inbox): Unknown-tab blocks are needs_review then inactive (unknown-inactive D9)" -m "Flips the (unknown, active) fixtures to inactive, pins the pre-deploy cursor (400 inside the removed block, block-start resumes), and records Cameron's 2026-10-23 supersession of the 2026-08-26 LEAVE IT ruling." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/unknown-inactive add app/src/lib/unknownQueue.ts app/src/routes/inbox.ts dashboard/src/routes/inbox/inboxFilters.ts
+git -C W:/tmp/unknown-inactive commit -m "docs(inbox): Unknown-tab block comments name needs_review then inactive (unknown-inactive D9)" -m "Comment-only: the block order, the pre-deploy cursor, and Cameron's 2026-10-23 supersession of the 2026-08-26 LEAVE IT ruling. The fixture flips and cursor pins landed in S1.1 (AR17)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ### S3.5 Inbox rows: `inactive: true`, no triage chip (D9, AR5) + inbound no-reset (W4)
@@ -5503,8 +5561,8 @@ Step 3 (W5). Record in the slice report, after re-reading the cited lines:
 - `app/scripts/measure-unread-contact-coverage.ts` (spec section 4, check
   only): `--no-status-narrow` reads the whole `type=unknown` partition, so it
   still counts Inactive rows for the W2 trigger; its comment at ~661-664
-  about the `active` create default is S1's D6 surface, not S3's - record
-  it for the planner, do not edit it here.
+  about the `active` create default is S1's D6 surface, not S3's - S1.2
+  rewrites it (plan round 1 P13); do not edit it here.
 
 Step 4 - commit:
 
@@ -5524,9 +5582,9 @@ Write `docs/superpowers/reviews/2026-10-23-unknown-inactive/slices/S3-report.md`
   an existing contact's status (or the STOP, if one does).
 - W5 (S3.6 Step 3): audienceResolution and extraction unchanged, and why the
   AI cannot land `active` on an unknown contact; the measure-script comment
-  left for the planner.
-- The pre-deploy cursor behavior pinned in S3.4 (400 inside the removed
-  block, block-start resumes).
+  (rewritten by S1.2, plan round 1 P13).
+- The pre-deploy cursor behavior pinned by S3.4 Step 3 Edit F, run in S1.1
+  (AR17) (400 inside the removed block, block-start resumes).
 - Whether `l-parked` was kept in the S3.2 followUps case.
 - Anything the tree held that this section got wrong (anchor text that
   differed, a fixture that broke for another reason).
@@ -5570,7 +5628,8 @@ Cross-slice notes for the planner:
   and must name the comparator `compareUnknownTabRows` in
   `dashboard/src/routes/inbox/inboxListMerge.ts` - the server comment
   rewritten in S3.4 cites that name.
-- S1 vs S3.4: see Contradictions 2 (four test files red between S1 and S3.4).
+- S1 vs S3.4: Contradictions 2 is SUPERSEDED by AR17 - S1.1 makes the four
+  test files' edits, so none is red between S1 and S3.4.
 - `app/src/routes/inbox.ts` is touched by S3 only (comments in S3.4, code in
   S3.5); `app/src/lib/unknownQueue.ts` by S1 (code) and S3.4 (comments).
 
@@ -6336,6 +6395,8 @@ inside `describe('ContactDetail', ...)`, directly before
 
     expect(await screen.findByText(CONTACT_TYPE_CHANGED_STATUS_COPY)).toBeInTheDocument();
     await waitFor(() => expect(getContact.mock.calls.length).toBeGreaterThan(readsBefore));
+    // Plan round 1 P2: the re-read must see the re-type that just landed.
+    expect(getContact).toHaveBeenLastCalledWith('u9', undefined, { consistent: true });
     // The pill now offers the re-typed contact's statuses, on its stored value.
     await screen.findByRole('button', { name: 'Contact status: Onboarding' });
   });
@@ -6384,8 +6445,9 @@ Replacement:
 
 (At main @916258ae `LandlordStatus` and `TenantStatus` are used in
 endpoints.ts only by the `setTenantStatus` input type edited next; after that
-edit, `grep -n "TenantStatus\|LandlordStatus" dashboard/src/api/endpoints.ts`
-prints nothing, so no unused import is left for gate 5.)
+edit, `grep -n "TenantStatus\|LandlordStatus" dashboard/src/api/endpoints.ts | grep -v setTenantStatus`
+prints nothing (the function name `setTenantStatus` itself stays and is
+excluded), so no unused import is left for gate 5.)
 
 Then current text:
 
@@ -6539,7 +6601,9 @@ Replacement:
           // (setContact is bound to this contactId, so a late answer after
           // navigating away is a no-op).
           setStatusError(CONTACT_TYPE_CHANGED_STATUS_COPY);
-          void getContact(contact.contactId)
+          // Consistent (planner ruling PR-3, plan round 1 P2): the re-type
+          // landed a moment ago and an eventually consistent GET could miss it.
+          void getContact(contact.contactId, undefined, { consistent: true })
             .then((fresh) => setContact(fresh))
             .catch(() => {
               /* best-effort: the message already asks staff to try again */
@@ -6604,8 +6668,9 @@ Replacement:
             ) : null}
 ```
 
-After the edits, `grep -n "TENANT_STATUS\|LANDLORD_STATUS\|TenantStatus\|LandlordStatus" dashboard/src/routes/contact/ContactDetail.tsx`
-prints nothing (no unused import left for gate 5).
+After the edits, `grep -n "TENANT_STATUS\|LANDLORD_STATUS\|TenantStatus\|LandlordStatus" dashboard/src/routes/contact/ContactDetail.tsx | grep -v setTenantStatus`
+prints nothing (no unused import left for gate 5; the kept `setTenantStatus`
+import, call and comment are excluded).
 
 Step 4 - GREEN: the Step 2 command; the whole file passes (the tenant and
 landlord pill cases at ~413-480 are PINs of AR9's "tenant/landlord behavior
@@ -6646,6 +6711,10 @@ The rules this task implements (plan section 1 D3):
   time; a change of base type in the picker moves the field to the new
   type's first step (`FIRST_STATUS_FOR_TYPE`), and coming back to the stored
   type shows the stored status again; a role-only switch leaves the field;
+  "a change of base type" is measured against `statusType`, the type the
+  field was last derived for, never against `liveType` - the KindPicker's
+  Other panel passes through `type: null`, where `liveType` falls back to the
+  stored type (plan round 1 P1);
 - save, no type change: tenant unchanged (`setTenantStatus` on a status or
   porting change); landlord unchanged (status in the PATCH, with park
   reason); partner / team_member / unknown: a status change through
@@ -6976,6 +7045,44 @@ describe('ContactEditForm - one status list per type and the type-change rules (
     expect(setTenantStatus).not.toHaveBeenCalled();
   });
 
+  // Plan round 1 P1: the KindPicker's Other panel passes through type null on
+  // the way to a base; the field must still come back to the stored status.
+  it('a change-and-back through Other (tenant to landlord to Other to tenant) shows the stored status and writes none', async () => {
+    const user = userEvent.setup();
+    const searching: Contact = { ...TENANT, status: 'searching' };
+    updateContact.mockResolvedValue({ ...searching, firstName: 'Tash' });
+    render(<ContactEditForm contact={searching} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    await user.click(screen.getByRole('button', { name: 'Landlord' }));
+    expect(statusSelect().value).toBe('interested');
+    await user.click(screen.getByRole('button', { name: 'Other' }));
+    await user.click(screen.getByRole('radio', { name: /Tenant/i }));
+    expect(statusSelect().value).toBe('searching');
+    await user.clear(screen.getByLabelText(/First name/i));
+    await user.type(screen.getByLabelText(/First name/i), 'Tash');
+    await user.click(save());
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('k1', { firstName: 'Tash' }));
+    expect(setTenantStatus).not.toHaveBeenCalled();
+  });
+
+  it('a Parked landlord through Tenant and Other back to Landlord stays Parked and writes no status', async () => {
+    const user = userEvent.setup();
+    const parked: Contact = { ...LANDLORD, status: 'parked', park_reason: 'Declined the program' };
+    updateContact.mockResolvedValue({ ...parked, firstName: 'Jim' });
+    render(<ContactEditForm contact={parked} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    await user.click(screen.getByRole('button', { name: 'Tenant' }));
+    expect(statusSelect().value).toBe('onboarding');
+    await user.click(screen.getByRole('button', { name: 'Other' }));
+    await user.click(screen.getByRole('radio', { name: /Landlord/i }));
+    expect(statusSelect().value).toBe('parked');
+    await user.clear(screen.getByLabelText(/First name/i));
+    await user.type(screen.getByLabelText(/First name/i), 'Jim');
+    await user.click(save());
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('L1', { firstName: 'Jim' }));
+    expect(setTenantStatus).not.toHaveBeenCalled();
+  });
+
   it('(PIN) a Parked landlord keeps its park reason across an unrelated-field save', async () => {
     const user = userEvent.setup();
     const parked: Contact = { ...LANDLORD, status: 'parked', park_reason: 'Declined the program' };
@@ -7022,7 +7129,13 @@ Expected failures, each for the stated reason:
   step (`expected 'needs_review' to be 'onboarding' / 'interested' /
   'active'`), and the edited 1b/1c/1d expectations;
 - change-and-back: the field shows `needs_review` after coming back, and a
-  `setTenantStatus` is sent.
+  `setTenantStatus` is sent;
+- the two change-and-back cases through Other (plan round 1 P1): the field
+  does not move to the other type's first step (`expected 'needs_review' to
+  be 'interested'` for the tenant, `... to be 'onboarding'` for the Parked
+  landlord). Both also go red against a `handleKindChange` that compares
+  `next.type` with `liveType` (the v1 draft): the field stays `interested` /
+  `onboarding` after the base pick.
 The (PIN) cases and the unrelated-field save pass. Every pre-existing case
 not edited in 1b-1d stays green.
 
@@ -7200,6 +7313,12 @@ Replacement:
   // The stored status as the field first shows it (an off-list stored value
   // reads as the type's front door).
   const initialStatus = defaultStatusForType(contact.type, str(contact.status));
+  // The type the Status field was last derived for (plan round 1 P1). Not
+  // liveType: the KindPicker's Other panel passes through type null, where
+  // liveType falls back to the STORED type, so a stored -> other -> Other ->
+  // stored round trip would look like no change and keep the other type's
+  // first step.
+  const [statusType, setStatusType] = useState<ContactType>(contact.type);
 ```
 
 3e. `handleKindChange`. Current text:
@@ -7225,13 +7344,15 @@ Replacement:
   // coming back to the STORED type shows the stored status again (a
   // change-and-back is not a change). A role-only switch inside one type
   // (Landlord to the Property Manager preset) and the Other panel's base-less
-  // step (type null) leave the field alone, so it never carries a
-  // type-invalid status.
+  // step (type null) leave the field alone. "A change of base type" is
+  // measured against statusType - the type the field was last derived for -
+  // so picking a base through Other still re-derives (plan round 1 P1).
   function handleKindChange(next: KindPickerValue): void {
     setKind(next);
     setTypeRefusals(null);
-    if (next.type !== null && next.type !== liveType) {
+    if (next.type !== null && next.type !== statusType) {
       setStatus(next.type === contact.type ? initialStatus : FIRST_STATUS_FOR_TYPE[next.type]);
+      setStatusType(next.type);
     }
 ```
 
@@ -7366,8 +7487,9 @@ Replacement:
   const statusOptions = statusOptionsFor(liveType);
 ```
 
-After the edits, `grep -n "TENANT_STATUS\|LANDLORD_STATUS\|NON_TENANT\|TenantStatus\|isTenantStatus\|statusOptionsForType\|tenantStatusChanged" dashboard/src/routes/contact/ContactEditForm.tsx`
-prints nothing.
+After the edits, `grep -n "TENANT_STATUS\|LANDLORD_STATUS\|NON_TENANT\|TenantStatus\|isTenantStatus\|statusOptionsForType\|tenantStatusChanged" dashboard/src/routes/contact/ContactEditForm.tsx | grep -v setTenantStatus`
+prints nothing (the kept `setTenantStatus` import, calls and comments are
+excluded).
 
 Step 4 - GREEN: the Step 2 command; the whole file passes. Then the page
 suite, which renders this form:
@@ -7793,7 +7915,7 @@ Step 2 - run RED:
 cd W:/tmp/unknown-inactive/dashboard; npx vitest run src/routes/inbox/InboxRow.test.tsx src/routes/inbox/InboxRow.styles.test.ts
 ```
 
-Expected: four InboxRow cases fail with `Unable to find an element with the
+Expected: three InboxRow cases fail with `Unable to find an element with the
 text: Inactive` (the first, third and fourth new cases; the fourth passes its
 `Needs triage` assertion and fails on `getByText('Inactive')`). The
 "renders NO Inactive tag" case and the Mark unread case are PINs and pass.

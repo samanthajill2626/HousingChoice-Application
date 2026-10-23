@@ -1,12 +1,14 @@
 // Inbox - the entity-centric communications hub (design:
 // 2026-06-17-inbox-design). One row per contact (or untriaged unknown number,
-// or group thread), newest-activity-first, with All (default) / Unread /
-// Unknown / Groups filters. Opening a row navigates to its page AND marks its
-// comms read (optimistic). Degrades to an honest pending state while the feed
-// 404s with no rows on screen. State-sync lives in useInbox; this file owns
-// the URL (filter + limit), the DOM the auto-load observer needs (the sentinel
-// and the scroll container), the refresh-failure banner, and the scroll
-// restore after a navigation (spec 5.1/5.2/5.7/5.8).
+// or group thread), with All (default) / Unread / Unknown / Groups filters.
+// Every tab lists newest-activity-first except Unknown, which lists the Needs
+// review rows first, then the Inactive ones, each newest first (useInbox
+// sortForFilter; unknown-inactive spec D9). Opening a row navigates to its
+// page AND marks its comms read (optimistic). Degrades to an honest pending
+// state while the feed 404s with no rows on screen. State-sync lives in
+// useInbox; this file owns the URL (filter + limit), the DOM the auto-load
+// observer needs (the sentinel and the scroll container), the refresh-failure
+// banner, and the scroll restore after a navigation (spec 5.1/5.2/5.7/5.8).
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link, useNavigationType, useSearchParams } from 'react-router-dom';
 import type { InboxFilter } from '../../api/index.js';

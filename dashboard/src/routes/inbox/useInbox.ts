@@ -39,6 +39,8 @@ import { contactClearKey, conversationClearKey, phoneClearKey } from '../../app/
 import {
   appendPage,
   baseOf,
+  compareByActivity,
+  compareUnknownTabRows,
   emptyListState,
   mergeHeadRead,
   patchUnread,
@@ -145,11 +147,33 @@ function countGroupRows(rows: InboxRowData[]): number {
   return rows.filter((r) => r.kind === 'group_text').length;
 }
 
-/** Newest-activity-first, matching the server's inbox ordering. */
-function sortByActivity(rows: InboxRowData[]): InboxRowData[] {
-  return [...rows].sort(
-    (a, b) => new Date(b.lastActivityAt).getTime() - new Date(a.lastActivityAt).getTime(),
-  );
+/** The render order of the loaded rows.
+ *
+ *  Every tab but Unknown: newest activity first, matching the server's inbox
+ *  ordering (compareByActivity, inboxListMerge.ts).
+ *
+ *  The Unknown tab ONLY: Needs review rows first, then Inactive rows, each
+ *  newest message first (compareUnknownTabRows, spec 2026-10-23 D9, ruling
+ *  AR6). This SUPERSEDES the 2026-08-26 ruling recorded in
+ *  app/src/routes/inbox.ts at the Unknown branch's per-page sort ("RULED
+ *  2026-08-26: LEAVE IT ... Do NOT 'fix' either side"), under which this
+ *  helper re-sorted EVERY filter newest-first with no filter gate, so the
+ *  operator never saw the server's untriaged-first block order once Load more
+ *  ran. Superseded by Cameron, 2026-10-23: "it should be ordered by needs
+ *  review first and then by newest message", and "let's not do sorting
+ *  server- and database-side for now ... we can do that browser-side". So the
+ *  order is a property of the LOADED rows: the server's block order
+ *  (needs_review, then inactive) still decides which rows arrive first, and a
+ *  global order across unloaded pages stays filed as
+ *  docs/issues/denormalize-contact-last-activity-for-ordered-paging.md.
+ *
+ *  It runs at RENDER over head ++ tail, so every commit - a head read
+ *  (initial, retry, SSE reconcile), a Load more page, a store restore - comes
+ *  out in this order; the store itself keeps server order (snapshotOf). The
+ *  sort is stable, so rows with equal instants keep the list's order on every
+ *  tab. */
+function sortForFilter(rows: InboxRowData[], filter: InboxFilter): InboxRowData[] {
+  return [...rows].sort(filter === 'unknown' ? compareUnknownTabRows : compareByActivity);
 }
 
 /** Overlay the in-flight optimistic patches (keyed by rowKey) on a row list. */
@@ -719,7 +743,7 @@ export function useInbox(
   // On the Unread filter a row optimistically marked read drops out immediately,
   // so the list (and the "all caught up" empty state) stay in sync with the action.
   const visible = filter === 'unread' ? patched.filter((r) => r.unreadCount > 0) : patched;
-  const rows = sortByActivity(visible);
+  const rows = sortForFilter(visible, filter);
 
   return {
     status,

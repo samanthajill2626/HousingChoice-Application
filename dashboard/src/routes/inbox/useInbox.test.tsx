@@ -1442,3 +1442,62 @@ describe('useInbox + Inbox - the scroll root after an error with rows (R2-3)', (
     expect(loadInboxList(KEY)?.scrollTop).toBe(250);
   });
 });
+
+// Spec 2026-10-23 D9 / ruling AR6, superseding the 2026-08-26 "LEAVE IT"
+// ruling: on the Unknown tab the LOADED rows render Needs review first, then
+// Inactive, each newest message first; every other tab stays newest-first.
+// Every Inactive fixture is NEWER than a Needs review one, so the old global
+// newest-first sort interleaves them and fails each Unknown case.
+describe('useInbox - Unknown tab order (spec D9, AR6)', () => {
+  const nrNew = mkRow({ contactId: 'nr-new', role: 'unknown', needsTriage: true, lastActivityAt: '2026-06-18T10:00:00.000Z' });
+  const nrOld = mkRow({ contactId: 'nr-old', role: 'unknown', needsTriage: true, lastActivityAt: '2026-06-10T10:00:00.000Z' });
+  const inNew = mkRow({ contactId: 'in-new', role: 'unknown', inactive: true, lastActivityAt: '2026-06-20T10:00:00.000Z' });
+  const inOld = mkRow({ contactId: 'in-old', role: 'unknown', inactive: true, lastActivityAt: '2026-06-15T10:00:00.000Z' });
+  const order = (): string | null => screen.getByTestId('ids').textContent;
+
+  it('Unknown tab: loaded rows are Needs review first, then Inactive, each newest first', async () => {
+    getInbox.mockResolvedValue(pageOf([inOld, nrOld, inNew, nrNew]));
+    render(<Probe filter="unknown" />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    expect(order()).toBe('c:nr-new,c:nr-old,c:in-new,c:in-old');
+  });
+
+  it('Unknown tab: the order holds after Load more appends newer Inactive rows', async () => {
+    getInbox
+      .mockResolvedValueOnce(pageOf([nrNew, nrOld], 'CUR'))
+      .mockResolvedValueOnce(pageOf([inNew, inOld], null));
+    render(<Probe filter="unknown" />);
+    await waitFor(() => expect(screen.getByTestId('hasMore')).toHaveTextContent('true'));
+    expect(order()).toBe('c:nr-new,c:nr-old');
+    act(() => screen.getByRole('button', { name: 'more' }).click());
+    await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('4'));
+    expect(order()).toBe('c:nr-new,c:nr-old,c:in-new,c:in-old');
+  });
+
+  it('Unknown tab: a row that flips to Inactive moves below the Needs review rows on the next head read', async () => {
+    const flipBefore = mkRow({ contactId: 'flip', role: 'unknown', needsTriage: true, lastActivityAt: '2026-06-20T10:00:00.000Z' });
+    const flipAfter = mkRow({ contactId: 'flip', role: 'unknown', needsTriage: false, inactive: true, lastActivityAt: '2026-06-20T10:00:00.000Z' });
+    const stay = mkRow({ contactId: 'stay', role: 'unknown', needsTriage: true, lastActivityAt: '2026-06-10T10:00:00.000Z' });
+    getInbox
+      .mockResolvedValueOnce(pageOf([flipBefore, stay]))
+      .mockResolvedValueOnce(pageOf([stay, flipAfter]));
+    render(<Probe filter="unknown" />);
+    await waitFor(() => expect(order()).toBe('c:flip,c:stay'));
+    act(() => {
+      sse.onConversationUpdated?.({
+        conversationId: 'x', last_activity_at: '2026-06-20T10:00:00.000Z', unread_count: 0,
+        type: 'unknown_1to1', participant_display_name: null,
+      });
+    });
+    await waitFor(() => expect(getInbox).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(order()).toBe('c:stay,c:flip'));
+  });
+
+  // (PIN) Every other tab keeps newest-first, Inactive rows included.
+  it.each(['all', 'unread'] as const)('(PIN) %s tab: the same rows stay newest-first', async (filter) => {
+    getInbox.mockResolvedValue(pageOf([inOld, nrOld, inNew, nrNew]));
+    render(<Probe filter={filter} />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    expect(order()).toBe('c:in-new,c:nr-new,c:in-old,c:nr-old');
+  });
+});

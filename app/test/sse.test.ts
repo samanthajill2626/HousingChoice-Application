@@ -176,6 +176,20 @@ describe('GET /api/events — stream mechanics', () => {
     expect(client.received()).toContain(`data: ${JSON.stringify(payload)}`);
   });
 
+  it('forwards contact.updated frames (the Today / inbox / contact page live path)', async () => {
+    // unknown-inactive ruling AR3. Registration is hand-written per event in
+    // the SSE route, so only this test catches a missing one.
+    const { app, world } = makeWebhookHarness();
+    const port = await startServer(app);
+    const client = await connectSse(port);
+    await client.waitFor(': connected');
+
+    world.events.emit('contact.updated', { contactId: 'c-sse-1' });
+
+    await client.waitFor('event: contact.updated');
+    expect(client.received()).toContain(`data: ${JSON.stringify({ contactId: 'c-sse-1' })}`);
+  });
+
   it('sends heartbeat as an observable named event (not a comment) on the configured interval', async () => {
     const { app } = makeWebhookHarness({ sseHeartbeatMs: 20 });
     const port = await startServer(app);
@@ -201,6 +215,9 @@ describe('GET /api/events — stream mechanics', () => {
     // name asserts 1 === 2 and fails for a reason that has nothing to do with
     // the cleanup under test - which is why this one carries its own baseline.
     const aiRunBaseline = world.events.listenerCount('ai_run.completed');
+    // contact.updated is not recorded by the harness either (unknown-inactive
+    // keeps it out of world.emitted), so it carries its own baseline too.
+    const contactUpdatedBaseline = world.events.listenerCount('contact.updated');
 
     const client = await connectSse(port);
     await client.waitFor(': connected');
@@ -211,6 +228,7 @@ describe('GET /api/events — stream mechanics', () => {
     expect(world.events.listenerCount('broadcast.updated')).toBe(baseline + 1);
     expect(world.events.listenerCount('placement.updated')).toBe(baseline + 1);
     expect(world.events.listenerCount('ai_run.completed')).toBe(aiRunBaseline + 1);
+    expect(world.events.listenerCount('contact.updated')).toBe(contactUpdatedBaseline + 1);
 
     client.abort();
     const deadline = Date.now() + 3_000;
@@ -226,6 +244,8 @@ describe('GET /api/events — stream mechanics', () => {
     // having drained conversation.updated proves every other off() ran too.
     // A deleted events.off('ai_run.completed', ...) fails HERE, not silently.
     expect(world.events.listenerCount('ai_run.completed')).toBe(aiRunBaseline);
+    // A deleted events.off('contact.updated', ...) fails HERE.
+    expect(world.events.listenerCount('contact.updated')).toBe(contactUpdatedBaseline);
   });
 });
 

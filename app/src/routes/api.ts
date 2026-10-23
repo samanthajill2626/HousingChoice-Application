@@ -56,6 +56,7 @@ import {
   type ScheduledUpdatedEvent,
   type TourUpdatedEvent,
   type SuggestionUpdatedEvent,
+  type ContactUpdatedEvent,
   type UnmatchedEmailUpdatedEvent,
   type AiRunCompletedEvent,
 } from '../lib/events.js';
@@ -2748,6 +2749,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     const onSuggestionUpdated = (payload: SuggestionUpdatedEvent): void => {
       writeEvent('suggestion.updated', payload);
     };
+    const onContactUpdated = (payload: ContactUpdatedEvent): void => {
+      writeEvent('contact.updated', payload);
+    };
     const onUnmatchedEmailUpdated = (payload: UnmatchedEmailUpdatedEvent): void => {
       writeEvent('unmatched_email.updated', payload);
     };
@@ -2761,6 +2765,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     events.on('scheduled.updated', onScheduledUpdated);
     events.on('tour.updated', onTourUpdated);
     events.on('suggestion.updated', onSuggestionUpdated);
+    events.on('contact.updated', onContactUpdated);
     events.on('unmatched_email.updated', onUnmatchedEmailUpdated);
     events.on('ai_run.completed', onAiRunCompleted);
 
@@ -2794,6 +2799,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       events.off('scheduled.updated', onScheduledUpdated);
       events.off('tour.updated', onTourUpdated);
       events.off('suggestion.updated', onSuggestionUpdated);
+      events.off('contact.updated', onContactUpdated);
       events.off('unmatched_email.updated', onUnmatchedEmailUpdated);
       events.off('ai_run.completed', onAiRunCompleted);
       runWithContext(ctx, () => {

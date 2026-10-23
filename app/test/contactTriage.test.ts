@@ -58,6 +58,72 @@ describe('GET /api/contacts/:contactId', () => {
   });
 });
 
+// unknown-inactive spec D2, ruling AR3: the PATCH emits ONE ID-only
+// contact.updated when it changed `status` or `type` - whether or not a
+// linked thread was touched - and none otherwise. The harness does not
+// record this event in world.emitted (that list is asserted exactly above
+// and below), so each case subscribes its own listener.
+describe('PATCH /api/contacts/:contactId - contact.updated (AR3)', () => {
+  function recordContactUpdated(world: ReturnType<typeof createFakeWorld>): unknown[] {
+    const seen: unknown[] = [];
+    world.events.on('contact.updated', (payload) => seen.push(payload));
+    return seen;
+  }
+  function patchContact(app: Parameters<typeof request>[0], contactId: string, body: object) {
+    return request(app)
+      .patch(`/api/contacts/${contactId}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send(body);
+  }
+
+  it('emits once when the PATCH changes the type (unknown -> landlord)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnknownContactAndThread(world);
+    const seen = recordContactUpdated(world);
+    const res = await patchContact(app, 'contact-triage-1', { type: 'landlord' });
+    expect(res.status).toBe(200);
+    expect(seen).toEqual([{ contactId: 'contact-triage-1' }]);
+  });
+
+  it('emits once when a status-only PATCH changes the status (an unknown marked Inactive)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnknownContactAndThread(world);
+    const seen = recordContactUpdated(world);
+    const res = await patchContact(app, 'contact-triage-1', { status: 'inactive' });
+    expect(res.status).toBe(200);
+    expect(res.body.contact.status).toBe('inactive');
+    expect(seen).toEqual([{ contactId: 'contact-triage-1' }]);
+  });
+
+  it('emits once when the type changes and the status is kept (unknown -> team_member keeps needs_review)', async () => {
+    // No status is written (needs_review is legal for team_member), so only
+    // the TYPE snapshot can see the change - and the fake repo mutates the
+    // live stored object on write, which is why the route snapshots it first.
+    const { app, world } = makeWebhookHarness();
+    seedUnknownContactAndThread(world);
+    const seen = recordContactUpdated(world);
+    const res = await patchContact(app, 'contact-triage-1', { type: 'team_member' });
+    expect(res.status).toBe(200);
+    expect(res.body.contact).toMatchObject({ type: 'team_member', status: 'needs_review' });
+    expect(seen).toEqual([{ contactId: 'contact-triage-1' }]);
+  });
+
+  it('(PIN) emits nothing for a name-only edit, a status echo, a type echo or a refused PATCH', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnknownContactAndThread(world);
+    const seen = recordContactUpdated(world);
+    expect((await patchContact(app, 'contact-triage-1', { firstName: 'Keisha' })).status).toBe(200);
+    // The name still denormalizes onto the thread as before.
+    expect(world.emitted.some((e) => e.event === 'conversation.updated')).toBe(true);
+    expect((await patchContact(app, 'contact-triage-1', { status: 'needs_review' })).status).toBe(200);
+    expect((await patchContact(app, 'contact-triage-1', { type: 'unknown' })).status).toBe(200);
+    // searching is a tenant status: refused for an unknown, nothing written.
+    expect((await patchContact(app, 'contact-triage-1', { status: 'searching' })).status).toBe(400);
+    expect(seen).toEqual([]);
+  });
+});
+
 describe('PATCH /api/contacts/:contactId — triage', () => {
   it('setting type=tenant propagates the unknown_1to1 thread → tenant_1to1, auto-advances status, denormalizes the name, emits, and audits', async () => {
     const { app, world } = makeWebhookHarness();

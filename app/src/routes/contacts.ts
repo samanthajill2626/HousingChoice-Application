@@ -1643,6 +1643,9 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       return;
     }
     const priorStatus = typeof stored?.status === 'string' ? stored.status : undefined;
+    // The prior TYPE as a primitive too, for the contact.updated emit below
+    // (unknown-inactive ruling AR3) - the same live-object hazard as above.
+    const priorType = typeof stored?.type === 'string' ? stored.type : undefined;
     // Fence the merged-kind validation against the exact revision read here.
     // Capture it before another write can mutate a repository's live object;
     // absent and numeric zero are distinct DynamoDB conditions.
@@ -2169,6 +2172,22 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       { contactId, fields: parsed.changedFields, propagatedConversations, actor: req.user?.userId },
       'contact triaged',
     );
+
+    // LIVE NOTIFY (unknown-inactive spec D2, ruling AR3): one ID-only
+    // contact.updated when this PATCH changed the status or the type, so an
+    // open Today page drops or adds the row and an open inbox re-renders its
+    // tag and chip. The conversation.updated emits above cover only linked
+    // threads that flipped type or carry a name - an unnamed or threadless
+    // contact gets none - so this fires whether or not a thread was touched.
+    // The status value is the one actually written (an auto-advance or a
+    // normalize included); a same-value echo emits nothing.
+    const statusChanged =
+      typeof parsed.patch['status'] === 'string' && parsed.patch['status'] !== priorStatus;
+    const typeChanged =
+      typeof parsed.patch['type'] === 'string' && parsed.patch['type'] !== priorType;
+    if (statusChanged || typeChanged) {
+      events.emit('contact.updated', { contactId });
+    }
 
     // Best-effort vocabulary write: collect tokens from this patch.
     // Never fails the response.

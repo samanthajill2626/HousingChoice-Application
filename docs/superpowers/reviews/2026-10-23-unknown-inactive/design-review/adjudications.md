@@ -1,0 +1,43 @@
+# unknown-inactive - design review adjudications
+
+Planner adjudications. A finding is a claim: ACCEPT (spec edited) / REJECT
+(reason given) / DEFER (filed). Load-bearing claims about existing behavior
+were checked in the code before acceptance.
+
+## Spec round 1 (rev 1 @752b9234) - two opus reviewers, independent
+
+Reports: `spec-r1-a.md` (A, 15 findings), `spec-r1-b.md` (B, 15 findings).
+Merged: 21 distinct findings. 19 ACCEPT, 1 ACCEPT-as-wording (the rest of
+its proposal rejected), 1 DEFER-as-watch-item.
+
+| # | Finding (reviewer refs) | Ruling | Decision changed? |
+|---|---|---|---|
+| M1 | D5 check sits after the 100-row unread cap; Inactive threads that stay unread starve Needs you now and Unreplied (A1, B1). Verified today.ts:704-752: the deleted-contact check was moved ahead of the cap for exactly this (A9). | ACCEPT - D5 check runs in the collect loop, beside the deleted check, reusing the memoized contact read. | YES (mechanism) |
+| M2 | D3 would route landlord edits through the transition route, whose plan writes park_reason = reason ?? null on every move to parked (verified services/statusTransition.ts:164); the form PATCHes the reason first, so it is wiped (B2). | ACCEPT - D3's save-path change applies to partner, team_member and unknown only; tenant and landlord save paths unchanged. | YES |
+| M3 | "Treated exactly as an Inactive tenant" is false: the Tenants view hides Inactive by default; tenant unread shows in Unreplied (A15, B3). | ACCEPT - D4 now lists exactly what is shared and names the two differences and why (filed issue; Cameron's Today direction). | no (precision) |
+| M4 | team_member threads are unknown_1to1 (verified contacts.ts:537-543) and role falls through to 'unknown' (verified inbox.ts:602-609): a "Needs review only" rule would drop Active team members from Today and change their chip (A10, B4). | ACCEPT - both rules become "skip when the contact is Inactive"; everything else, team members included, keeps today's behavior. | YES |
+| M5 | Parked is called the landlord's inactive status but every rule keys on the literal `inactive` (A7, B5). | ACCEPT - D1 says Parked is the landlord's own status and behaves exactly as today; the Inactive rules key on `inactive` only. | no (precision) |
+| M6 | Goal 4 claims same-name-same-meaning for every status; only delivered for Inactive (B6). | ACCEPT - Goal 4 narrowed to Inactive, which is what Cameron's words address. | no |
+| M7 | D9's Unknown-tab sort overturns the recorded 2026-08-26 "LEAVE IT" ruling (inbox.ts:2282-2309) without naming it (B7). Verified. | ACCEPT - D9 names the ruling, supersedes it with Cameron's 2026-10-23 words, and lists the comments to update. | no (record) |
+| M8 | The zero count is a snapshot; staff can still make (unknown, active) from the edit form until deploy, and such a row would vanish from the Unknown tab (B8). | ACCEPT - rollout re-counts just before deploy; any found are moved to Needs review only on Cameron's go. | YES (rollout step) |
+| M9 | An inbound still triggers AI extraction for unknown contacts at any status (jobs/extraction.ts:457), and its suggestions land in Today's AI suggestions group, so "does not put it back on Today" fails (A6, B9). | ACCEPT the wording; REJECT suppressing extraction. A type suggestion from a returning contact ("I'm a tenant") is useful, it is not Needs review, and #31 owns where AI suggestions sit. The promise becomes "does not put it back in Needs review / Needs you now". | no |
+| M10 | "Today's Needs review list" does not exist; both sources render under Needs you now as "New unknown contact" (A5, B10). | ACCEPT - spec names the real surface. | no |
+| M11 | On a retype-plus-status save, which type's label map labels the timeline entry is undefined; the PATCH uses the stored type, the conversion the new one (A8, B11). | ACCEPT - the NEW type's label map wins, everywhere. | no (precision) |
+| M12 | D3 misdescribes the form defect: an untouched off-list status is never sent, so it does not flip on save; the form DISPLAYS Needs review. The planned test passes on old code (A12, B12). | ACCEPT - defect restated as a display bug; test 7 asserts the displayed value and that changing another field and saving keeps Inactive. | no |
+| M13 | D7's team_member/unknown arms are API-only (KindPicker offers neither); a tenant-target retype save is PATCH then setTenantStatus, not "the plain PATCH" (A3, A11, B13). | ACCEPT - descriptions corrected; the arm stays (API callers exist) and gains a newType !== stored.type guard so a same-type PATCH never resets status. | no (precision) |
+| M14 | The transition route emits no SSE event (verified services/statusTransition.ts:605-637 appends audit only); the PATCH emits conversation.updated for linked threads (contacts.ts:2081-2094). Moving status changes to the route leaves open Today/Inbox stale (A4, B14). | ACCEPT - a status change through the transition route notifies open Today and Inbox pages the same way a PATCH does; the plan picks the event. | YES (new surface) |
+| M15 | The form's Status selection on a type change is unspecified: retyping from Inactive leaves Inactive selected while the server writes Onboarding/Active, or shows Needs review while the server writes Interested (A2). | ACCEPT - on a type change the Status field moves to the new type's first step, and whatever is shown is what is saved; staff may change it before saving. | YES |
+| M16 | D6 claims a 400 on writers that do not return one: a status-suggestion accept on a non-tenant is a 409 before the allowlist; the import falls back with a warning (A9). | ACCEPT - D6 says "refused" per path with each path's real response. | no |
+| M17 | Missing surfaces: unmatchedEmail.ts:455-466 duplicate create default; dashboard buildToday.ts:287 fallback; contactsPartitionFake.ts:53-60; which list the statusAllowlistFor fallthrough returns (A13, B14). | ACCEPT - added to section 4; fallthrough returns the partner/team_member list for any other type (unknown handled explicitly). | no |
+| M18 | D2 widens a check-then-write race in the transition route (statusTransition.ts:268-278, then an unconditional write): a concurrent retype can store an illegal pair such as (landlord, inactive) (B15). | ACCEPT - the transition write is conditioned on the stored type being unchanged; a mismatch is a 409 and writes nothing. | YES (small) |
+| M19 | Inactive unknowns pile up in the unknown partition and needs_review -> inactive becomes the common mid-walk flip, edging toward the reopen trigger of unknown-queue-status-flip-duplicates-across-pages (A14). | DEFER as a watch item: the dashboard drops already-loaded rows by rowKey on Load more (inboxListMerge.ts:145-159), so a flip duplicates nothing on screen; a flip can still skip a row across pages. Plan re-reads the issue's reopen trigger; spec notes it. | no |
+| M20 | No SSE on a header change keeps a stale tag/chip in another open tab (B14 second half). | Folded into M14. | - |
+| M21 | Retype same-type guard (A11 second half). | Folded into M13. | - |
+
+Round 1 changed decisions (M1, M2, M4, M8, M14, M15, M18), so round 2 runs.
+Continued reviewer: B (more accepted unique findings: M2, M4, M7, M8, M18),
+handed A's report.
+
+Planner's own calls to put to Cameron at the spec gate (not reviewer
+findings): D7 team_member -> Active / unknown -> Needs review from Inactive;
+D8 card title "Type unknown"; D9 Inactive tag on every type's inbox row.

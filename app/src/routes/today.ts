@@ -755,17 +755,25 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         // otherwise spend the TODAY_UNREAD_CAP slots and empty Needs you now
         // AND Unreplied. The rule is "skip Inactive", NOT "keep only
         // needs_review": team_member threads are `unknown_1to1` too and an
-        // Active team member keeps today's row. It is limited to
-        // `unknown_1to1`: an Inactive tenant/landlord/caseworker thread still
-        // feeds Unreplied (tracker #31 owns that section). A thread whose
-        // contact cannot be resolved keeps today's behavior. NO EXTRA READ:
+        // Active team member keeps today's row. It is limited to an
+        // `unknown_1to1` thread whose OWNER is an `unknown` or `team_member`
+        // contact - the types whose own threads are unknown_1to1 (code review
+        // R2-1, fix wave 2). Any other owner keeps today's row: a tenant's or
+        // caseworker's SECOND number can keep an unknown_1to1 thread (the
+        // contacts PATCH re-types only the primary phone's and the email
+        // threads, routes/contacts.ts), and an Inactive tenant's or
+        // caseworker's unread text is not hidden - its typed threads feed
+        // Unreplied (tracker #31 owns that section). A thread whose contact
+        // cannot be resolved keeps today's behavior. NO EXTRA READ:
         // `getContact` is memoized and isDeletedContact just read this id.
-        if (
-          conv.type === 'unknown_1to1' &&
-          ownerId !== undefined &&
-          (await getContact(ownerId))?.status === 'inactive'
-        ) {
-          continue;
+        if (conv.type === 'unknown_1to1' && ownerId !== undefined) {
+          const owner = await getContact(ownerId);
+          if (
+            owner?.status === 'inactive' &&
+            (owner.type === 'unknown' || owner.type === 'team_member')
+          ) {
+            continue;
+          }
         }
         const rowKey = unreadRowKeyOf(conv);
         if (unreadRowKeys.has(rowKey)) continue;

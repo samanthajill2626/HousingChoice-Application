@@ -719,7 +719,10 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   team member's 1:1 threads are unknown threads too; the unread texts show
   only in the inbox), and an Inactive unknown contact sorts below the Needs
   review ones on the inbox Unknown tab and on Contacts > Unknown; an
-  Inactive tenant's or partner's unread text still shows under Unreplied.
+  Inactive tenant's or partner's unread text still shows on Today where it
+  would otherwise (under Unreplied, or as a "New unknown contact" row when
+  its thread is still an unknown thread, as a second number's can stay
+  after the contact is typed).
   Staff set it from the contact page header dropdown or the Edit contact
   details Status field, which offer the same choices for every type; an
   unknown contact has no "Active" (Needs review or Inactive only). NOT a

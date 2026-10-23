@@ -1043,9 +1043,10 @@ describe('today action-queue API (BE6/C7)', () => {
     });
 
     // OR-6 (build worklist): the skip keys on the THREAD type plus the
-    // contact's status, not on the contact's type, so an Inactive team member's
-    // unknown_1to1 thread leaves Needs you now too (spec D5 "skip Inactive",
-    // Goal 4: Inactive means the same thing for every type).
+    // contact's status, and an Inactive team member's unknown_1to1 thread
+    // leaves Needs you now too (spec D5 "skip Inactive", Goal 4: Inactive means
+    // the same thing for every type). Since FW2-1 the owner's type must also
+    // be unknown or team_member (the cases at the end of this block).
     it('RED: an unread unknown_1to1 thread from an INACTIVE team member is NOT in needs_you_now', async () => {
       world.contacts.push({ contactId: 'c-team-off', type: 'team_member', status: 'inactive', firstName: 'Tea', lastName: 'Gone', phone: '+15550360005' });
       unknownThread('conv-team-off', 'c-team-off', '+15550360005', -30_000);
@@ -1106,6 +1107,74 @@ describe('today action-queue API (BE6/C7)', () => {
       const items = await getItems();
       expect(newUnknownRefIds(items)).toEqual(['c-live-nr', 'c-live-team']);
       expect(items.filter((i) => i.group === 'unreplied').map((i) => i.refId)).toEqual(['c-live-ten']);
+    });
+
+    // FW2-1 (code review R2-1): the skip also keys on the OWNER's type - only
+    // an `unknown` or `team_member` owner, the types whose own threads are
+    // unknown_1to1. The contacts PATCH re-types only the primary phone's and
+    // the email threads (routes/contacts.ts, the linked-thread gather), so a
+    // tenant's or caseworker's SECOND number can keep an unknown_1to1 thread.
+    // Before this branch its unread text showed on Today as a "New unknown
+    // contact" row; an Inactive tenant's or caseworker's unread text is not
+    // hidden (spec D4).
+    const authedPatch = (path: string, body: object) =>
+      request(app).patch(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE).send(body);
+
+    it('RED: an INACTIVE TENANT\'s unread unknown_1to1 thread (a second number triage never re-typed) is emitted exactly as before', async () => {
+      // The reviewer's probe flow, through the real routes: an unknown contact
+      // with two numbers and a thread on each, the SECOND one unread.
+      world.contacts.push({
+        contactId: 'c-two',
+        type: 'unknown',
+        status: 'needs_review',
+        phone: '+15550360101',
+        phones: [
+          { phone: '+15550360101', primary: true },
+          { phone: '+15550360102', primary: false },
+        ],
+      });
+      seedConversation({
+        conversationId: 'conv-p1',
+        participant_phone: '+15550360101',
+        participants: [{ contactId: 'c-two', phone: '+15550360101' }],
+        status: 'open',
+        last_activity_at: iso(-60_000),
+        type: 'unknown_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 0,
+      } as ConversationItem);
+      unknownThread('conv-p2', 'c-two', '+15550360102', -30_000);
+
+      expect((await authedPatch('/api/contacts/c-two', { type: 'tenant' })).status).toBe(200);
+      expect(world.conversations.get('conv-p1')?.type).toBe('tenant_1to1');
+      expect(world.conversations.get('conv-p2')?.type).toBe('unknown_1to1');
+      const before = (await getItems()).filter((i) => i.group === 'needs_you_now');
+      expect(before).toEqual([
+        expect.objectContaining({ refType: 'contact', refId: 'c-two', why: 'New unknown contact', attention: true }),
+      ]);
+
+      const toInactive = await authedPatch('/api/contacts/c-two/tenant-status', {
+        toStatus: 'inactive',
+        source: 'manual',
+        expectedType: 'tenant',
+      });
+      expect(toInactive.status).toBe(200);
+      expect((await world.contactsRepo.getById('c-two'))?.status).toBe('inactive');
+
+      // The status write alone changes nothing on Today for this thread.
+      const after = (await getItems()).filter((i) => i.group === 'needs_you_now');
+      expect(after).toEqual(before);
+    });
+
+    it('RED: an INACTIVE CASEWORKER\'s unread unknown_1to1 thread is still in needs_you_now, the row unchanged', async () => {
+      world.contacts.push({ contactId: 'c-cw-off', type: 'partner', status: 'inactive', firstName: 'Casey', lastName: 'Worker', phone: '+15550360201' });
+      unknownThread('conv-cw-off', 'c-cw-off', '+15550360202', -30_000);
+
+      const items = await getItems();
+      expect(items.filter((i) => i.group === 'needs_you_now')).toEqual([
+        { group: 'needs_you_now', refType: 'contact', refId: 'c-cw-off', who: 'Casey Worker', why: 'New unknown contact', attention: true },
+      ]);
     });
   });
 

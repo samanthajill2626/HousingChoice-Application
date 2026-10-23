@@ -279,10 +279,13 @@ Two differences remain, on purpose:
 
 - The Tenants view hides Inactive tenants by default; the other Contacts views have
   no status filter (`docs/issues/contacts-status-filter-tenants-only.md`).
-- An Inactive tenant's or partner's unread text still shows in Today's Unreplied,
-  while an Inactive unknown contact's or team member's unread text does NOT show
-  in Needs you now (a team member's 1:1 threads are unknown threads, so the same
-  rule covers them) - it shows only in the inbox.
+- An Inactive tenant's or partner's unread text still shows on Today, exactly where
+  it would if the contact were not Inactive: in Unreplied, or as a "New unknown
+  contact" row in Needs you now when its thread is still an unknown thread (a
+  second number's thread can stay one after the contact is typed). An Inactive
+  unknown contact's or team member's unread text does NOT show in Needs you now (a
+  team member's 1:1 threads are unknown threads, so the same rule covers them) -
+  it shows only in the inbox.
 
 Automatic texts (tour reminders, group text rosters, the missed-call auto-text,
 placement nudges, hand-picked share recipients) check no status for any type, and

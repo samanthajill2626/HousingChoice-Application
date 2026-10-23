@@ -3,6 +3,8 @@ import type { InboxPage, InboxRow } from '../../api/index.js';
 import {
   appendPage,
   baseOf,
+  compareByActivity,
+  compareUnknownTabRows,
   dedupeConversations,
   emptyListState,
   mergeHeadRead,
@@ -274,5 +276,65 @@ describe('patchUnread', () => {
     const next = patchUnread(s, 'c:b', 0);
     expect(next.tail[0]?.unreadCount).toBe(0);
     expect(next.head[0]?.unreadCount).toBe(2);
+  });
+});
+
+// The newest-first comparator every tab but Unknown renders with, moved here
+// from useInbox.ts (where it was `sortByActivity`) so the Unknown-tab
+// comparator can reuse it, tie-break included.
+describe('compareByActivity', () => {
+  it('orders newest activity first; equal instants compare 0', () => {
+    const older = contact('old', '2026-06-10T10:00:00.000Z');
+    const newer = contact('new', '2026-06-20T10:00:00.000Z');
+    expect(compareByActivity(newer, older)).toBeLessThan(0);
+    expect(compareByActivity(older, newer)).toBeGreaterThan(0);
+    expect(compareByActivity(older, contact('twin', '2026-06-10T10:00:00.000Z'))).toBe(0);
+  });
+});
+
+// Spec 2026-10-23 D9 / ruling AR6: on the Unknown tab the LOADED rows render
+// Needs review first, then Inactive, each newest message first. "Inactive" is
+// the wire flag `inactive: true` (AR5); a row without it - a Needs review
+// contact or a contactless number row - is in the first group.
+describe('compareUnknownTabRows (spec D9, AR6)', () => {
+  const nrNew = contact('nr-new', '2026-06-18T10:00:00.000Z', { role: 'unknown', needsTriage: true });
+  const nrOld = contact('nr-old', '2026-06-10T10:00:00.000Z', { role: 'unknown', needsTriage: true });
+  const inNew = contact('in-new', '2026-06-20T10:00:00.000Z', { role: 'unknown', inactive: true });
+  const inOld = contact('in-old', '2026-06-15T10:00:00.000Z', { role: 'unknown', inactive: true });
+  const numberRow: InboxRow = {
+    ...contact('n', '2026-06-12T10:00:00.000Z', { needsTriage: true }),
+    kind: 'unknown',
+    contactId: undefined,
+    phone: '+15550001111',
+  };
+
+  it('a row without inactive sorts before an Inactive row, even an older one before a newer one', () => {
+    expect(compareUnknownTabRows(nrOld, inNew)).toBeLessThan(0);
+    expect(compareUnknownTabRows(inNew, nrOld)).toBeGreaterThan(0);
+  });
+
+  it('orders newest first inside each group', () => {
+    expect(compareUnknownTabRows(nrNew, nrOld)).toBeLessThan(0);
+    expect(compareUnknownTabRows(nrOld, nrNew)).toBeGreaterThan(0);
+    expect(compareUnknownTabRows(inNew, inOld)).toBeLessThan(0);
+    expect(compareUnknownTabRows(inOld, inNew)).toBeGreaterThan(0);
+  });
+
+  it('equal instants in one group compare 0, so the stable sort keeps the list order (the newest-first tie-break)', () => {
+    const x = contact('x', '2026-06-12T10:00:00.000Z', { inactive: true });
+    const y = contact('y', '2026-06-12T10:00:00.000Z', { inactive: true });
+    expect(compareUnknownTabRows(x, y)).toBe(0);
+    expect(ids([x, y].sort(compareUnknownTabRows))).toEqual(['c:x', 'c:y']);
+    expect(ids([y, x].sort(compareUnknownTabRows))).toEqual(['c:y', 'c:x']);
+  });
+
+  it('only a present true value moves a row down (inactive: false is not Inactive)', () => {
+    const notInactive = contact('f', '2026-06-01T10:00:00.000Z', { inactive: false });
+    expect(compareUnknownTabRows(notInactive, inOld)).toBeLessThan(0);
+  });
+
+  it('sorts a mixed list: Needs review rows (a contactless number row among them) newest first, then Inactive newest first', () => {
+    const sorted = [inOld, nrOld, numberRow, inNew, nrNew].sort(compareUnknownTabRows);
+    expect(ids(sorted)).toEqual(['c:nr-new', 'u:+15550001111', 'c:nr-old', 'c:in-new', 'c:in-old']);
   });
 });

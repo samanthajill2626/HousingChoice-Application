@@ -51,6 +51,28 @@ export function baseOf(state: ListState): InboxRow[] {
   return [...state.head, ...state.tail];
 }
 
+/** Newest-activity-first, matching the server's inbox ordering: the render
+ *  order of every tab but Unknown. Equal instants compare 0, so the stable
+ *  `Array.prototype.sort` keeps the list's own (head ++ tail, server) order
+ *  for ties - that IS the tie-break, and compareUnknownTabRows reuses it.
+ *  Moved here unchanged from useInbox.ts (`sortByActivity`). */
+export function compareByActivity(a: InboxRow, b: InboxRow): number {
+  return new Date(b.lastActivityAt).getTime() - new Date(a.lastActivityAt).getTime();
+}
+
+/** The Unknown tab's render order (spec 2026-10-23 D9, ruling AR6): rows
+ *  WITHOUT `inactive` (Needs review contacts and contactless number rows)
+ *  before rows with `inactive: true`, then newest activity first inside each
+ *  group with compareByActivity's tie-break. It orders the LOADED rows only;
+ *  which rows are loaded is the server's block order (needs_review, then
+ *  inactive). */
+export function compareUnknownTabRows(a: InboxRow, b: InboxRow): number {
+  const aInactive = a.inactive === true ? 1 : 0;
+  const bInactive = b.inactive === true ? 1 : 0;
+  if (aInactive !== bInactive) return aInactive - bInactive;
+  return compareByActivity(a, b);
+}
+
 function isAdditive(row: InboxRow, filter: InboxFilter): boolean {
   return filter === 'all' && (row.kind === 'relay_group' || row.kind === 'group_text');
 }

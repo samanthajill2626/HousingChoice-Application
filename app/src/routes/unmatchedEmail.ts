@@ -455,7 +455,10 @@ export function createUnmatchedEmailRouter(deps: UnmatchedEmailRouterDeps = {}):
     // "First Last" split (the KindPicker/manual-create convention: first
     // token -> firstName, remainder -> lastName) + the type-scoped status
     // default the manual-create route applies (tenant -> onboarding,
-    // landlord -> interested, else active).
+    // landlord -> interested, partner -> active). `unknown` is not a create
+    // type here (CREATE_CONTACT_TYPES), so this path never mints an unknown
+    // contact; the manual-create route defaults one to needs_review
+    // (tracker #30, D6).
     const [firstName = '', ...rest] = name.split(/\s+/);
     const lastName = rest.join(' ');
     const status = type === 'tenant' ? 'onboarding' : type === 'landlord' ? 'interested' : 'active';

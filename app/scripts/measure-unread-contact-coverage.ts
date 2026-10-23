@@ -660,10 +660,12 @@ async function auditGroupRosters(): Promise<void> {
 async function auditTriagePartition(): Promise<void> {
   // `--no-status-narrow` prices the read the design ACTUALLY proposes. Draft 4's
   // requirement 1 queries type=unknown with NO status filter, because a contact
-  // created as `unknown` defaults to status 'active' rather than 'needs_review'
-  // - so narrowing on needs_review measures a strictly SMALLER partition than
-  // the one that would be read. Every figure published before this flag existed
-  // priced the narrowed shape.
+  // created as `unknown` USED TO default to status 'active' rather than
+  // 'needs_review' - so narrowing on needs_review measures a strictly SMALLER
+  // partition than the one that would be read. Since tracker #30 (2026-10-23)
+  // an unknown create defaults to needs_review and the partition's other legal
+  // status is 'inactive' (UNKNOWN_STATUSES), not 'active'. Every figure
+  // published before this flag existed priced the narrowed shape.
   const narrow = !argv.includes('--no-status-narrow');
   const PAGE = 100;
   const MAX_PAGES = 10; // today.ts's TRIAGE_MAX_PAGES - the precedent's budget.

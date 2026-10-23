@@ -989,7 +989,8 @@ function parseCreateBody(body: unknown): CreateContactResult | { error: string }
     }
   }
 
-  // A manual create asserts identity (past the front door, not needs_review).
+  // A manual create of a known type asserts identity (past the front door, not
+  // needs_review); an unknown create does not (see the unknown arm below).
   // The default is type-scoped (status-model unification — one `status` field):
   //   - tenant → 'onboarding': the §5 lifecycle starts here once identity is
   //     asserted (the operator is making this person; they are no longer at the
@@ -997,7 +998,10 @@ function parseCreateBody(body: unknown): CreateContactResult | { error: string }
   //   - landlord -> 'interested': a day-to-day manual create is a LEAD, not an
   //     onboarded landlord ('active' means their properties are onboarded). The
   //     M1.6 import sets landlord statuses explicitly, so it is unaffected.
-  //   - other (team_member/unknown) -> 'active' (unchanged: no lifecycle).
+  //   - unknown -> 'needs_review': an unknown contact has no 'active'
+  //     (UNKNOWN_STATUSES, tracker #30); a create without a type is a contact
+  //     nobody has reviewed yet.
+  //   - other (partner/team_member) -> 'active' (unchanged: no lifecycle).
   // We deliberately DO NOT stamp status_source here. The prior tenant_status
   // behavior left provenance UNSET on create, so the first placement transition
   // could still DERIVE the lifecycle forward (Onboarding → Placing). Stamping
@@ -1007,7 +1011,13 @@ function parseCreateBody(body: unknown): CreateContactResult | { error: string }
   // pin is the transition service's job (PATCH …/tenant-status), not create.
   if (item.status === undefined) {
     item.status =
-      item.type === 'tenant' ? 'onboarding' : item.type === 'landlord' ? 'interested' : 'active';
+      item.type === 'tenant'
+        ? 'onboarding'
+        : item.type === 'landlord'
+          ? 'interested'
+          : item.type === 'unknown'
+            ? 'needs_review'
+            : 'active';
   }
 
   // A2P/CTIA consent (spec §3.3): the optional "Consent to text" section on the

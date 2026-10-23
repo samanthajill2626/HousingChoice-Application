@@ -654,3 +654,32 @@ describe('per-type status lists on the list read and the create (tracker #30)', 
     });
   }
 });
+
+// Tracker #30 (D6): an unknown create with no status is a contact nobody has
+// reviewed yet - needs_review, never active.
+describe('POST /api/contacts - the unknown create default (tracker #30)', () => {
+  it('an unknown create with no status defaults to needs_review', async () => {
+    const { app, world } = makeWebhookHarness();
+    const res = await request(app)
+      .post('/api/contacts')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'unknown', firstName: 'Una', lastName: 'Known' });
+    expect(res.status).toBe(201);
+    expect(res.body.contact.status).toBe('needs_review');
+    expect(world.contacts.find((c) => c.contactId === res.body.contact.contactId)?.status).toBe('needs_review');
+  });
+
+  for (const type of ['partner', 'team_member'] as const) {
+    it(`(PIN) a ${type} create with no status still defaults to active`, async () => {
+      const { app } = makeWebhookHarness();
+      const res = await request(app)
+        .post('/api/contacts')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ type, firstName: 'Pat', lastName: 'Default' });
+      expect(res.status).toBe(201);
+      expect(res.body.contact.status).toBe('active');
+    });
+  }
+});

@@ -690,3 +690,26 @@ describe('D1 change 6: the suggestions route notifies dashboards of a reclassifi
     expect(suggestionEmits(world)).toBe(emitsBefore);
   });
 });
+
+// Tracker #30 (D6): an AI status suggestion of active on an unknown contact is
+// refused on the accept path with that path's EXISTING response - status is a
+// tenant-only target, so the 409 fires before the type-scoped allowlist.
+describe('status accept on an unknown contact (tracker #30, D6)', () => {
+  it('(PIN) refuses a status suggestion of active on an unknown contact with 409 suggestion_contact_not_tenant and keeps the chip', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, { contactId: 'c-unk', type: 'unknown', status: 'needs_review' });
+    await seedSuggestion(world, {
+      ownerContactId: 'c-unk', target: 'status', suggestedValue: 'active', conversationId: 'conv-unk', runId: 'run-unk-status',
+    });
+    const emitsBefore = suggestionEmits(world);
+
+    const res = await accept(app, 'c-unk', 'status');
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'suggestion_contact_not_tenant' });
+    expect(await world.extractionRepo.getSuggestion('c-unk', 'status')).toBeDefined();
+    expect(journalsFor(world, 'c-unk')).toEqual([]);
+    expect(contactOf(world, 'c-unk')?.status).toBe('needs_review');
+    expect(suggestionEmits(world)).toBe(emitsBefore);
+  });
+});

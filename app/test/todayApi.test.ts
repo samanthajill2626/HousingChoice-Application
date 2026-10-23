@@ -992,6 +992,123 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(skipWarns).toHaveLength(1);
   });
 
+  // --- unknown-inactive D5 (AR8): skip an Inactive contact's unknown_1to1 thread
+  // Cameron 2026-10-23: Needs you now shows unread texts from an unknown contact
+  // that needs review; an Inactive one "just shows in the inbox". The skip is
+  // "skip Inactive", not "keep only needs_review" (team_member threads are
+  // unknown_1to1 too), it is limited to unknown_1to1 (an Inactive tenant stays
+  // in Unreplied, #31's section), and it runs ahead of the cap.
+  describe('unknown-inactive D5: an Inactive contact\'s unknown_1to1 thread', () => {
+    const unknownThread = (conversationId: string, contactId: string, phone: string, offset: number): ConversationItem =>
+      seedConversation({
+        conversationId,
+        participant_phone: phone,
+        participants: [{ contactId, phone }],
+        status: 'open',
+        last_activity_at: iso(offset),
+        type: 'unknown_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+      } as ConversationItem);
+    const newUnknownRefIds = (items: TodayItem[]): string[] =>
+      items
+        .filter((i) => i.group === 'needs_you_now' && i.why === 'New unknown contact')
+        .map((i) => i.refId)
+        .sort();
+
+    it('RED: an unread thread from an INACTIVE unknown contact is NOT in needs_you_now (nor anywhere on Today)', async () => {
+      world.contacts.push({ contactId: 'c-unk-off', type: 'unknown', status: 'inactive', phone: '+15550360001' });
+      unknownThread('conv-unk-off', 'c-unk-off', '+15550360001', -30_000);
+
+      const items = await getItems();
+      expect(newUnknownRefIds(items)).toEqual([]);
+      expect(items.map((i) => i.refId)).not.toContain('c-unk-off');
+    });
+
+    it('PIN: an unread thread from a NEEDS REVIEW unknown contact is in needs_you_now, once', async () => {
+      world.contacts.push({ contactId: 'c-unk-nr', type: 'unknown', status: 'needs_review', phone: '+15550360002' });
+      unknownThread('conv-unk-nr', 'c-unk-nr', '+15550360002', -30_000);
+
+      const items = await getItems();
+      expect(newUnknownRefIds(items)).toEqual(['c-unk-nr']);
+    });
+
+    it('PIN: an unread unknown_1to1 thread from an ACTIVE team member is still in needs_you_now (unchanged)', async () => {
+      world.contacts.push({ contactId: 'c-team-on', type: 'team_member', status: 'active', firstName: 'Tea', lastName: 'Mate', phone: '+15550360003' });
+      unknownThread('conv-team-on', 'c-team-on', '+15550360003', -30_000);
+
+      const items = await getItems();
+      expect(newUnknownRefIds(items)).toEqual(['c-team-on']);
+    });
+
+    // OR-6 (build worklist): the skip keys on the THREAD type plus the
+    // contact's status, not on the contact's type, so an Inactive team member's
+    // unknown_1to1 thread leaves Needs you now too (spec D5 "skip Inactive",
+    // Goal 4: Inactive means the same thing for every type).
+    it('RED: an unread unknown_1to1 thread from an INACTIVE team member is NOT in needs_you_now', async () => {
+      world.contacts.push({ contactId: 'c-team-off', type: 'team_member', status: 'inactive', firstName: 'Tea', lastName: 'Gone', phone: '+15550360005' });
+      unknownThread('conv-team-off', 'c-team-off', '+15550360005', -30_000);
+
+      const items = await getItems();
+      expect(newUnknownRefIds(items)).toEqual([]);
+    });
+
+    it('PIN: an INACTIVE TENANT\'s unread thread is still in unreplied (the skip is unknown_1to1 only)', async () => {
+      world.contacts.push({ contactId: 'c-ten-off', type: 'tenant', status: 'inactive', firstName: 'Ina', lastName: 'Tenant', phone: '+15550360004' });
+      seedConversation({
+        conversationId: 'conv-ten-off',
+        participant_phone: '+15550360004',
+        participant_display_name: 'Ina Tenant',
+        participants: [{ contactId: 'c-ten-off', phone: '+15550360004' }],
+        status: 'open',
+        last_activity_at: iso(-30_000),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+      } as ConversationItem);
+
+      const items = await getItems();
+      expect(items.filter((i) => i.group === 'unreplied').map((i) => i.refId)).toEqual(['c-ten-off']);
+    });
+
+    it('RED: more than TODAY_UNREAD_CAP Inactive unknown threads ahead of live work do not hide it (the skip runs BEFORE the cap)', async () => {
+      // 101 Inactive unknown threads, all NEWER than the live rows, so without
+      // a collect-loop skip they spend all 100 slots. Behind them: an Active
+      // team member's unknown_1to1 thread and a tenant's thread - neither has a
+      // second source, so the cap hides them - plus a Needs review unknown
+      // (PIN only: the contacts-triage pass would rescue it by itself).
+      for (let i = 0; i < 101; i += 1) {
+        const id = `c-off-${String(i).padStart(3, '0')}`;
+        const phone = `+1555034${String(i).padStart(4, '0')}`;
+        world.contacts.push({ contactId: id, type: 'unknown', status: 'inactive', phone });
+        unknownThread(`conv-off-${String(i).padStart(3, '0')}`, id, phone, -1_000 - i);
+      }
+      world.contacts.push({ contactId: 'c-live-team', type: 'team_member', status: 'active', firstName: 'Live', lastName: 'Team', phone: '+15550359001' });
+      unknownThread('conv-live-team', 'c-live-team', '+15550359001', -400_000);
+      world.contacts.push({ contactId: 'c-live-nr', type: 'unknown', status: 'needs_review', phone: '+15550359002' });
+      unknownThread('conv-live-nr', 'c-live-nr', '+15550359002', -400_001);
+      seedTenant('c-live-ten', 'Live', 'Tenant');
+      seedConversation({
+        conversationId: 'conv-live-ten',
+        participant_phone: '+15550359003',
+        participant_display_name: 'Live Tenant',
+        participants: [{ contactId: 'c-live-ten', phone: '+15550359003' }],
+        status: 'open',
+        last_activity_at: iso(-400_002),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+      } as ConversationItem);
+
+      const items = await getItems();
+      expect(newUnknownRefIds(items)).toEqual(['c-live-nr', 'c-live-team']);
+      expect(items.filter((i) => i.group === 'unreplied').map((i) => i.refId)).toEqual(['c-live-ten']);
+    });
+  });
+
   // --- FIX B: relay_group threads never surface in unreplied --------------------
   it('a relay_group conversation with unread does NOT appear in unreplied (a tenant_1to1 still does)', async () => {
     seedConversation({

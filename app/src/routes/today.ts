@@ -745,6 +745,28 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
           skippedDeletedContacts.add(ownerId);
           continue;
         }
+        // INACTIVE CONTACTS' UNKNOWN THREADS, ALSO BEFORE THE CAP
+        // (unknown-inactive spec D5, plan ruling AR8). Cameron 2026-10-23:
+        // Needs you now shows unread texts from an unknown contact that needs
+        // review; "If it doesn't need review, meaning we've marked it as
+        // inactive, it wouldn't show there ... It just shows in the inbox."
+        // It sits HERE, beside the deleted-contact skip and ahead of the cap,
+        // for the A9 reason above: Inactive threads that stay unread would
+        // otherwise spend the TODAY_UNREAD_CAP slots and empty Needs you now
+        // AND Unreplied. The rule is "skip Inactive", NOT "keep only
+        // needs_review": team_member threads are `unknown_1to1` too and an
+        // Active team member keeps today's row. It is limited to
+        // `unknown_1to1`: an Inactive tenant/landlord/caseworker thread still
+        // feeds Unreplied (tracker #31 owns that section). A thread whose
+        // contact cannot be resolved keeps today's behavior. NO EXTRA READ:
+        // `getContact` is memoized and isDeletedContact just read this id.
+        if (
+          conv.type === 'unknown_1to1' &&
+          ownerId !== undefined &&
+          (await getContact(ownerId))?.status === 'inactive'
+        ) {
+          continue;
+        }
         const rowKey = unreadRowKeyOf(conv);
         if (unreadRowKeys.has(rowKey)) continue;
         unreadRowKeys.add(rowKey);

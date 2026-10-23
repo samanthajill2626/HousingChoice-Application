@@ -2,16 +2,16 @@
 
 ## STATE
 
-- Phase: DESIGN - brainstorm in progress (scope agreed 2026-10-23; surface-map
-  research running read-only in the background).
+- Phase: DESIGN - spec rev 1 committed @752b9234; adversarial spec review
+  round 1 running (two opus reviewers, outputs design-review/spec-r1-a.md and
+  spec-r1-b.md).
 - Launch mode: not chosen yet.
-- In flight: one read-only Explore researcher writing
-  `scratchpad/status-surface-map.md` (planner scratchpad, not committed).
 - Worktree: `W:\tmp\unknown-inactive`, branch `feat/unknown-inactive`, cut from
   main @916258ae. Issue `contacts-status-filter-tenants-only` committed @0957ed39.
-- NEXT STEP: finish the brainstorm questions one at a time (retype-to-team-member
-  rule, Unknown tab row ordering + Inactive marker, caseworker auto-send
-  consistency once the surface map lands), then write the spec in this worktree.
+- NEXT STEP: adjudicate round 1 into design-review/adjudications.md, revise the
+  spec, re-review with the stronger reviewer continued, then the spec gate.
+  At the gate, flag the planner's own calls: D7 team_member/unknown first-step
+  rule, D8 "Type unknown" card title, D9 Inactive tag on every type's row.
 
 ## What Cameron asked for
 
@@ -62,6 +62,15 @@ Cameron, 2026-10-23 (verbatim where the wording matters):
   30." (filed: docs/issues/contacts-status-filter-tenants-only.md)
 - Approved a read-only dev/prod count of unknown contacts set to Active, and
   approved updating the tracker entry (planner proposed: after spec approval).
+
+Later on 2026-10-23, in the brainstorm:
+
+- Unknown tab rows for Inactive contacts: picked "Small Inactive tag".
+- Automatic texts (tour reminders, group rosters, missed-call auto-text,
+  placement nudges, hand-picked shares) ignore status for every type today:
+  "let's leave them as they are ... we don't want to flag that unnecessarily
+  and make it difficult, so let's allow it the way that it's already been and
+  not file an issue."
 
 ## Why
 

@@ -6,22 +6,22 @@
   agree with all of these five calls. These look good. The spec looks good,
   so let's continue."). Tracker #30 updated. Compaction gate A taken
   2026-10-23 16:25 (301k -> 30k).
-- Plan: `docs/superpowers/plans/2026-10-23-unknown-inactive-plan.md`. The
-  planner wrote binding sections 0-4 (rulings AR1-AR14: a new
-  `contact.updated` event, conditional transition write -> 409
-  contact_type_changed, `inactive?: boolean` inbox wire field, a
-  browser-side Unknown-tab comparator). Six opus drafters write slices
-  S1-S6 (+S7) to `.superpowers/sdd/plan-drafts/S<n>.md` (gitignored run
-  state).
-- Launch mode: not chosen yet.
+- Plan: `docs/superpowers/plans/2026-10-23-unknown-inactive-plan.md` v4
+  FINAL @d80ca08c (planner sections 0-4, rulings AR1-AR24; slices S1-S7
+  from six opus drafts). Plan review CLOSED after 3 rounds (2 reviewers in
+  round 1, reviewer A continued; 15 + 5 + 3 findings, all accepted or
+  noted). Mission block: `mission-block.md` in this folder.
+- AT THE LAUNCH GATE (text-alone question, per Cameron's AskUserQuestion
+  rule): AUTO / MANUAL / Revise, plus the P9/AR21 planner call (Contacts
+  list non-tenant rows: plain-text status, no new badge) - default stands
+  unless he picks badges, in which case revise S4.2 before dispatch.
+- Launch mode: not chosen yet. On a Go: compaction gate B (confirm
+  registration with --show, prove replay, start watcher, offer), then
+  dispatch abt:build-orchestrator with mission-block.md verbatim.
 - Worktree: `W:\tmp\unknown-inactive`, branch `feat/unknown-inactive`, cut from
   main @916258ae. Issue `contacts-status-filter-tenants-only` committed @0957ed39.
   No node_modules yet (plan section 0 has the builder run `npm ci`).
-- NEXT STEP: assemble the drafts into plan sections 5-11 (section 4 wins on
-  conflicts; fold drafter contradictions into rulings), commit, then
-  adversarial plan review (two opus reviewers, design-review-briefs.md PLAN
-  brief, given spec + plan), adjudicate into adjudications.md, then mission
-  block + launch gate (AUTO / MANUAL / Revise) and compaction gate B.
+- NEXT STEP: Cameron answers the launch gate; then gate B and dispatch (or MANUAL handover).
 - Spec gate calls Cameron APPROVED: D7 team_member -> Active / unknown -> Needs
   review from Inactive; D8 "Type unknown"; D9 Inactive tag on every type's
   row; AI extraction keeps running for Inactive; same-type PATCH never resets

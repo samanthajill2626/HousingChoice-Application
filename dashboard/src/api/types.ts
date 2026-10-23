@@ -3865,7 +3865,7 @@ export interface InboxRow {
   channel?: InboxChannel; // channel of the latest item — OMITTED on relay_group rows
   direction?: 'inbound' | 'outbound'; // 'outbound' -> render "You: ..." (except channel 'call', whose preview names its direction) - OMITTED on relay_group rows
   lastActivityAt: string; // ISO; sort key (newest first)
-  needsTriage: boolean; // true for untriaged unknowns; ALWAYS false for relay_group
+  needsTriage: boolean; // true for untriaged unknowns (never for an Inactive contact); ALWAYS false for relay_group
   /** Deleted-contact resurfacing (2026-08-03 spec): present/true ONLY on a
    *  soft-deleted contact row surfaced by an unread post-deletion inbound —
    *  the dashboard renders a "Deleted" chip. Absent on live contacts and

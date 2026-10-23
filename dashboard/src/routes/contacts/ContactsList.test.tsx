@@ -196,6 +196,19 @@ describe('ContactsList', () => {
     ]);
   });
 
+  it('(PIN) a non-tenant row labels its status from its own type list (spec 2026-10-23 D1)', () => {
+    state = {
+      status: 'ready',
+      contacts: [
+        { contactId: 'p1', type: 'partner', firstName: 'Renee', lastName: 'Carter', phone: '+14045550123', status: 'inactive' },
+        { contactId: 'u1', type: 'unknown', firstName: 'Una', lastName: 'Known', phone: '+14045550124', status: 'needs_review' },
+      ],
+    };
+    renderList('all');
+    expect(within(screen.getByRole('link', { name: /Renee Carter/ })).getByText('Inactive')).toBeInTheDocument();
+    expect(within(screen.getByRole('link', { name: /Una Known/ })).getByText('Needs review')).toBeInTheDocument();
+  });
+
   it('renders a row per contact with name, phone, type, and a detail link', () => {
     state = { status: 'ready', contacts: CONTACTS };
     renderList('all');

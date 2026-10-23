@@ -1,13 +1,6 @@
 // Small presentation helpers for the contact detail page — pure + tested in
 // isolation so the components stay declarative.
-import {
-  LANDLORD_STATUS_LABELS,
-  TENANT_STATUS_LABELS,
-  type Address,
-  type Contact,
-  type LandlordStatus,
-  type TenantStatus,
-} from '../../api/types.js';
+import { contactStatusLabelFor, type Address, type Contact } from '../../api/types.js';
 import { formatPhoneDisplay } from '../../lib/phone.js';
 import { isoOf } from '../../lib/time.js';
 import { contactPhones, defaultPhone } from './contactPhones.js';
@@ -123,14 +116,12 @@ export function humanize(value: string): string {
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
-/** The user-facing label for a CONTACT's status, picking the right vocabulary
- *  for the contact's type: tenants get the tenant lifecycle map, landlords the
- *  lead-lifecycle map, everything else (unknown/pm/coarse needs_review|active)
- *  humanizes. NEVER render a raw snake_case status — route it through here. */
+/** The user-facing label for a CONTACT's status, from the contact's OWN type's
+ *  label map (api/types.ts contactStatusLabelFor - tenant, landlord, partner /
+ *  team member, unknown; spec 2026-10-23 D1). An off-list or legacy value
+ *  humanizes. NEVER render a raw snake_case status - route it through here. */
 export function contactStatusLabel(type: string | undefined, status: string): string {
-  if (type === 'tenant') return TENANT_STATUS_LABELS[status as TenantStatus] ?? humanize(status);
-  if (type === 'landlord') return LANDLORD_STATUS_LABELS[status as LandlordStatus] ?? humanize(status);
-  return humanize(status);
+  return contactStatusLabelFor(type, status) ?? humanize(status);
 }
 
 /** The display name for a contact, falling back to the phone, then "Unknown".

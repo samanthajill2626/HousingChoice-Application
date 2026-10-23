@@ -110,14 +110,18 @@ export function StatusBadge({ kind, status, label: labelOverride }: StatusBadgeP
 }
 
 /** Resolve a CONTACT's status tone across every audience the contact page shows:
- *  tenant + landlord get their own lifecycle maps; every other type (unknown / pm /
- *  team_member) carries the coarse needs_review|active pair, where only the triage
- *  front door (`needs_review`) warns. Off-list values fall back to neutral. This is
- *  the single source of truth for "does this status want attention?" (tone === 'warn'). */
+ *  tenant + landlord get their own lifecycle maps; every other type (partner,
+ *  team_member, unknown) carries the short needs_review | active | inactive list
+ *  (unknown has no active), where the triage front door (`needs_review`) warns
+ *  and `inactive` is muted - the SAME muted an Inactive tenant gets (spec
+ *  2026-10-23 D4.4). Off-list values fall back to neutral. This is the single
+ *  source of truth for "does this status want attention?" (tone === 'warn'). */
 export function contactStatusTone(type: string | undefined, status: string): BadgeTone {
   if (type === 'tenant') return TENANT_TONE[status as TenantStatus] ?? 'neutral';
   if (type === 'landlord') return LANDLORD_TONE[status as LandlordStatus] ?? 'neutral';
-  return status === 'needs_review' ? 'warn' : 'neutral';
+  if (status === 'needs_review') return 'warn';
+  if (status === 'inactive') return 'muted';
+  return 'neutral';
 }
 
 /** A status pill for a CONTACT (any type) — mirrors {@link StatusBadge} but resolves

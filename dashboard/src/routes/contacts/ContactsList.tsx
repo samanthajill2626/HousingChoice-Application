@@ -11,7 +11,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { type Contact } from '../../api/index.js';
 import { Button, Spinner, StatusBadge } from '../../ui/index.js';
-import { contactDisplayName, formatPhone, humanize } from '../contact/format.js';
+import { contactDisplayName, contactStatusLabel, formatPhone } from '../contact/format.js';
 import { CONTACT_TYPE_LABEL, displayKind } from '../contact/contactProfile.js';
 import { ContactCreateForm } from '../contact/ContactCreateForm.js';
 import { compareByName, formatHeardFrom, sortByHeardFrom } from '../../lib/heardFrom.js';
@@ -94,11 +94,12 @@ export function ContactsFilterTabs({
   );
 }
 
-/** Non-tenant status label (the coarse needs_review|active lifecycle): a naive
- *  capitalize. Tenants render a StatusBadge instead (the F1 tenant-status map). */
-function statusLabel(status: string | undefined): string {
-  if (!status) return '';
-  return humanize(status);
+/** Non-tenant status label from the contact's OWN type's label map (spec
+ *  2026-10-23 D1), via the shared contactStatusLabel. Tenants render a
+ *  StatusBadge instead (the F1 tenant-status map). */
+function statusLabel(contact: Contact): string {
+  if (!contact.status) return '';
+  return contactStatusLabel(contact.type, contact.status);
 }
 
 /** An unconstrained selection - used to derive the SELECTION-INDEPENDENT
@@ -165,8 +166,8 @@ function Row({
           <span className={styles.phone}>{phone}</span>
           {contact.type === 'tenant' && contact.status ? (
             <StatusBadge kind="tenant" status={contact.status} />
-          ) : statusLabel(contact.status) ? (
-            <span className={styles.status}>{statusLabel(contact.status)}</span>
+          ) : statusLabel(contact) ? (
+            <span className={styles.status}>{statusLabel(contact)}</span>
           ) : null}
           {/* ONE text span (one accessible-name token stream, nothing hidden), the
            *  only compressible child of .meta, with the full value on `title`. */}

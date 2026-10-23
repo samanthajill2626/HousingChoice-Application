@@ -36,6 +36,13 @@ describe('contactStatusLabel', () => {
     expect(contactStatusLabel('landlord', 'onboarding')).toBe('Onboarding');
     expect(contactStatusLabel('landlord', 'parked')).toBe('Parked');
   });
+  it('(PIN) uses each type list for partner, team member and unknown (spec 2026-10-23 D1)', () => {
+    expect(contactStatusLabel('partner', 'inactive')).toBe('Inactive');
+    expect(contactStatusLabel('team_member', 'active')).toBe('Active');
+    expect(contactStatusLabel('unknown', 'inactive')).toBe('Inactive');
+    // A legacy (unknown, active) is off the unknown list: still never raw.
+    expect(contactStatusLabel('unknown', 'active')).toBe('Active');
+  });
   it('humanizes for unknown/other types and off-list values (never raw snake_case)', () => {
     expect(contactStatusLabel('unknown', 'needs_review')).toBe('Needs review');
     expect(contactStatusLabel(undefined, 'active')).toBe('Active');

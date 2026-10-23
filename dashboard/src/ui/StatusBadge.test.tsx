@@ -57,4 +57,21 @@ describe('contactStatusTone', () => {
       contactStatusTone('landlord', 'onboarding'),
     );
   });
+
+  // Spec 2026-10-23 D4.4: Inactive reads the same muted color for every type.
+  it.each(['tenant', 'partner', 'team_member', 'unknown', undefined] as const)(
+    'an Inactive %s is muted',
+    (type) => {
+      expect(contactStatusTone(type, 'inactive')).toBe('muted');
+    },
+  );
+
+  it('(PIN) the rest of the non-tenant tones are unchanged: Needs review warns, Active is neutral, Parked is muted', () => {
+    expect(contactStatusTone('partner', 'needs_review')).toBe('warn');
+    expect(contactStatusTone('unknown', 'needs_review')).toBe('warn');
+    expect(contactStatusTone('partner', 'active')).toBe('neutral');
+    expect(contactStatusTone('team_member', 'active')).toBe('neutral');
+    expect(contactStatusTone('landlord', 'parked')).toBe('muted');
+    expect(contactStatusTone('partner', 'some_legacy_value')).toBe('neutral');
+  });
 });

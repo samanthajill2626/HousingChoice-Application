@@ -1079,3 +1079,152 @@ describe('PATCH /api/contacts/:contactId - per-type status lists (tracker #30)',
     });
   }
 });
+
+// Tracker #30 (D7, AR10, AR11): a type change with no explicit status FROM
+// Inactive starts the new type's first step; both the auto-advance and the
+// normalize fallback run only on a REAL type change, so a same-type PATCH
+// never moves the status. D4.5: the status milestone is labelled by the type
+// the contact has AFTER the write.
+describe('PATCH /api/contacts/:contactId - type change from Inactive and same-type PATCH (tracker #30)', () => {
+  const ARROW = String.fromCharCode(0x2192);
+  type World = ReturnType<typeof makeWebhookHarness>['world'];
+  function seedD7(world: World, over: Partial<ContactItem>): void {
+    world.contacts.push({
+      contactId: 'c-d7',
+      type: 'tenant',
+      status: 'inactive',
+      phone: '+15550107801',
+      created_at: '2026-06-12T10:00:00.000Z',
+      ...over,
+    } as ContactItem);
+  }
+  function patchD7(app: import('express').Express, body: Record<string, unknown>) {
+    return request(app)
+      .patch('/api/contacts/c-d7')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send(body);
+  }
+  const storedD7 = (world: World) => world.contacts.find((c) => c.contactId === 'c-d7');
+  const statusMilestones = (world: World) =>
+    world.activityEvents.filter((e) => e.type === 'contact_status_changed').map((e) => e.label);
+  // The harness getById returns the LIVE contact object and update mutates it
+  // in place (helpers/twilioWebhookHarness.ts), so the PATCH's pre-write
+  // `stored` would already carry the NEW type when the milestone is labelled.
+  // The real repo returns a copy; so do these reads (the snapshotReads pattern
+  // above), which is what lets the label cases tell the new type from the
+  // stored one.
+  function copyReads(world: World) {
+    const get = world.contactsRepo.getById.bind(world.contactsRepo);
+    return vi.spyOn(world.contactsRepo, 'getById').mockImplementation(async (id, opts) =>
+      structuredClone(await get(id, opts)));
+  }
+
+  // [from type, to type, expected status, already true before this task]
+  const FROM_INACTIVE = [
+    ['tenant', 'landlord', 'interested', true],
+    ['tenant', 'partner', 'active', true],
+    ['tenant', 'team_member', 'active', false],
+    ['tenant', 'unknown', 'needs_review', false],
+    ['unknown', 'tenant', 'onboarding', true],
+    ['unknown', 'landlord', 'interested', true],
+    ['unknown', 'partner', 'active', true],
+    ['unknown', 'team_member', 'active', false],
+    ['partner', 'team_member', 'active', false],
+    ['partner', 'unknown', 'needs_review', false],
+    ['team_member', 'partner', 'active', true],
+    ['team_member', 'unknown', 'needs_review', false],
+  ] as const;
+  for (const [from, to, expected, pin] of FROM_INACTIVE) {
+    it(`${pin ? '(PIN) ' : ''}an Inactive ${from} re-typed to ${to} with no status starts at ${expected}`, async () => {
+      const { app, world } = makeWebhookHarness();
+      seedD7(world, { type: from, status: 'inactive' });
+      const res = await patchD7(app, { type: to });
+      expect(res.status).toBe(200);
+      expect(res.body.contact).toMatchObject({ type: to, status: expected });
+      expect(storedD7(world)?.status).toBe(expected);
+    });
+  }
+
+  // From a non-Inactive status: today's behavior, unchanged.
+  for (const [from, fromStatus, to, expected] of [
+    ['partner', 'active', 'team_member', 'active'],
+    ['partner', 'needs_review', 'team_member', 'needs_review'],
+    ['team_member', 'active', 'unknown', 'needs_review'],
+    ['tenant', 'placing', 'unknown', 'needs_review'],
+  ] as const) {
+    it(`(PIN) a ${fromStatus} ${from} re-typed to ${to} with no status lands ${expected}`, async () => {
+      const { app, world } = makeWebhookHarness();
+      seedD7(world, { type: from, status: fromStatus });
+      const res = await patchD7(app, { type: to });
+      expect(res.status).toBe(200);
+      expect(res.body.contact).toMatchObject({ type: to, status: expected });
+    });
+  }
+
+  it('a same-type PATCH on a Searching tenant leaves the status alone - no status write, no milestone', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedD7(world, { type: 'tenant', status: 'searching' });
+    const res = await patchD7(app, { type: 'tenant' });
+    expect(res.status).toBe(200);
+    expect(res.body.contact.status).toBe('searching');
+    expect(storedD7(world)?.status).toBe('searching');
+    expect(statusMilestones(world)).toEqual([]);
+    const audit = world.auditEvents.find((e) => e.event_type === 'contact_updated');
+    expect(audit?.payload?.['fields']).toEqual(['type']);
+  });
+
+  it('a same-type PATCH on an Inactive partner leaves it Inactive', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedD7(world, { type: 'partner', status: 'inactive' });
+    const res = await patchD7(app, { type: 'partner' });
+    expect(res.status).toBe(200);
+    expect(storedD7(world)?.status).toBe('inactive');
+    expect(statusMilestones(world)).toEqual([]);
+  });
+
+  it('a role-only switch inside one type (an Active landlord to Property Manager) keeps Active', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedD7(world, { type: 'landlord', status: 'active' });
+    const res = await patchD7(app, { type: 'landlord', role: 'Property Manager' });
+    expect(res.status).toBe(200);
+    expect(res.body.contact).toMatchObject({ type: 'landlord', role: 'Property Manager', status: 'active' });
+    expect(statusMilestones(world)).toEqual([]);
+  });
+
+  for (const type of ['unknown', 'team_member'] as const) {
+    it(`(guard) a same-type PATCH on an Inactive ${type} leaves it Inactive`, async () => {
+      // Green before this task (inactive is already legal for the type); it
+      // goes red if the D7 first-step rule is implemented without the
+      // newType !== stored.type guard.
+      const { app, world } = makeWebhookHarness();
+      seedD7(world, { type, status: 'inactive' });
+      const res = await patchD7(app, { type });
+      expect(res.status).toBe(200);
+      expect(storedD7(world)?.status).toBe('inactive');
+    });
+  }
+
+  it('labels the milestone with the NEW type: an unknown re-typed to partner reads "Status -> Active"', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedD7(world, { type: 'unknown', status: 'needs_review' });
+    copyReads(world);
+    await patchD7(app, { type: 'partner' }).expect(200);
+    expect(statusMilestones(world)).toEqual([`Status ${ARROW} Active`]);
+  });
+
+  it('labels a tenant re-typed to landlord "Status -> Interested"', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedD7(world, { type: 'tenant', status: 'onboarding' });
+    copyReads(world);
+    await patchD7(app, { type: 'landlord' }).expect(200);
+    expect(statusMilestones(world)).toEqual([`Status ${ARROW} Interested`]);
+  });
+
+  it('labels an Inactive tenant re-typed to unknown "Status -> Needs review"', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedD7(world, { type: 'tenant', status: 'inactive' });
+    await patchD7(app, { type: 'unknown' }).expect(200);
+    expect(statusMilestones(world)).toEqual([`Status ${ARROW} Needs review`]);
+  });
+});

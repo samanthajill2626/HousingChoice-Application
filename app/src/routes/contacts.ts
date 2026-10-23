@@ -33,11 +33,10 @@ import { resolveRosterNames, withLiveNames } from '../lib/participantNames.js';
 import { parseRole, parseRelationships, parseCustomFields } from '../lib/contactProfile.js';
 import { isCaseworker } from '../lib/caseworkers.js';
 import {
-  LANDLORD_STATUS_LABELS,
   LANDLORD_STATUSES,
   PARTNER_STATUSES,
   statusAllowlistFor,
-  TENANT_STATUS_LABELS,
+  statusLabelFor,
   TENANT_STATUSES,
   TERMINAL_STAGES,
   UNKNOWN_STATUSES,
@@ -427,6 +426,9 @@ const LANDLORD_BOOLEAN_FIELDS = [
 // status-setting paths - this generic PATCH and the /tenant-status transition
 // route - share ONE source of truth. The four per-type lists are imported for
 // the "no explicit type" fallback union.
+
+/** U+2192 (right arrow) for status milestones, built from its code point so this source stays ASCII. */
+const STATUS_ARROW = String.fromCharCode(0x2192);
 
 // --- M1.5 list pagination + cursor -----------------------------------------
 const DEFAULT_PAGE_LIMIT = 50;
@@ -1733,8 +1735,11 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // placement transition (a 'manual' pin would block it: the create-pin
     // regression - docs/issues/status-pin-vs-terminal-derivation.md). We never
     // auto-advance for unknown/team_member (no 1:1 identity) - and never
-    // fabricate a name to do it.
-    if (convType !== undefined && !('status' in parsed.patch)) {
+    // fabricate a name to do it. ONLY on a REAL type change (tracker #30 D7,
+    // AR11): a same-type PATCH - `{type: 'tenant'}` from a stale edit form on a
+    // Searching tenant, or a role-only switch inside one type - never moves
+    // the status.
+    if (convType !== undefined && !('status' in parsed.patch) && newType !== stored?.type) {
       parsed.patch['status'] =
         newType === 'tenant' ? 'onboarding' : newType === 'landlord' ? 'interested' : 'active';
       parsed.changedFields.push('status');
@@ -1760,7 +1765,15 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
         res.status(404).json({ error: 'contact_not_found' });
         return;
       }
-      if (!statusAllowlistFor(newType).includes(stored.status ?? '')) {
+      // Tracker #30 D7 (AR10): only on a REAL type change. FROM inactive the new
+      // type starts at its first step - team_member -> 'active', unknown ->
+      // 'needs_review', which is exactly the default mapping below - even though
+      // inactive is legal for both. Any other stored status is kept when it is
+      // legal for the new type (today's behavior).
+      if (
+        newType !== stored.type
+        && (stored.status === 'inactive' || !statusAllowlistFor(newType).includes(stored.status ?? ''))
+      ) {
         parsed.patch['status'] =
           newType === 'unknown'
             ? 'needs_review'
@@ -2139,12 +2152,14 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // handler may auto-set `status` even when the client didn't send it; the
     // `!== stored.status` diff guard suppresses a no-op milestone in that case.
     if (typeof parsed.patch.status === 'string' && stored && parsed.patch.status !== priorStatus) {
-      const labels = stored.type === 'landlord' ? LANDLORD_STATUS_LABELS : TENANT_STATUS_LABELS;
+      // Tracker #30 D4.5: labelled by the type the contact has AFTER this write
+      // (on a re-type, the NEW type's label map).
+      const labelType = isContactType(newType) ? newType : stored.type;
       try {
         await activityEvents.record({
           contactId,
           type: 'contact_status_changed',
-          label: `Status → ${(labels as Record<string, string>)[parsed.patch.status] ?? parsed.patch.status}`,
+          label: `Status ${STATUS_ARROW} ${statusLabelFor(labelType, parsed.patch.status)}`,
         });
       } catch (err) {
         log.error({ err, contactId }, 'contact_status_changed (edit) milestone record failed (best-effort)');

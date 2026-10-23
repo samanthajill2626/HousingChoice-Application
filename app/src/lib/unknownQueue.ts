@@ -58,7 +58,7 @@
 //   docs/superpowers/specs/2026-10-23-unknown-inactive-design.md, approved by
 //   Cameron 2026-10-23). `active` is no longer legal for an unknown contact:
 //   statusAllowlistFor('unknown') is ['needs_review', 'inactive'] and every
-//   writer refuses (unknown, active), so its block is gone. Staff mark an
+//   writer but one refuses (unknown, active), so its block is gone. Staff mark an
 //   unknown contact Inactive WITHOUT choosing a type - from the contact page
 //   header or the edit form; both validate against
 //   statusAllowlistFor(stored.type). The contact leaves Today's Needs you now
@@ -68,6 +68,8 @@
 //   SOFT-DELETE drains a row. The read-only count on 2026-10-23 found ZERO
 //   (unknown, active) contacts on dev and on prod, so no stored row is
 //   stranded by the removed block (the rollout re-counts just before deploy).
+//   The one writer that can still store one is a re-import that keeps a
+//   staff-set status (UNKNOWN_STATUSES in lib/statusModel.ts); no block reads it.
 //   Under the pre-rework reader the reviewed population was a starvation
 //   hazard, because it sorted first and crowded out the front door. Under this
 //   one it is simply the SECOND block, read after the untriaged one is drained.

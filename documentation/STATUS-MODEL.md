@@ -245,8 +245,12 @@ change with no explicit status starts the new type's first step: tenant
 `Onboarding`, landlord `Interested`, partner `Active`, and - from `Inactive` -
 team member `Active` and unknown `Needs review`. A save or PATCH that keeps the
 contact's current type is not a type change: it moves no status on its own.
-`(unknown, active)` is refused by every status writer (the importer's broader
-type-rule gap is filed as `docs/issues/import-bypasses-contact-type-rules.md`).
+`(unknown, active)` is refused by every status writer but one: a re-import that
+re-types a contact whose status staff set keeps that status unchecked
+(`preserveStatus`, `app/src/lib/import/apply.ts`), so it can still store
+`(unknown, active)` or another pair the new type does not allow, such as
+`(landlord, inactive)` - the same family as the importer's type-rule gaps filed
+as `docs/issues/import-bypasses-contact-type-rules.md`.
 
 #### What Inactive means - the same for every type
 

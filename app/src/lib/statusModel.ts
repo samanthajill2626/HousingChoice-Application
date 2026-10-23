@@ -206,8 +206,11 @@ export const PARTNER_STATUS_LABELS: Readonly<Record<PartnerStatus, string>> = {
 // --- Unknown-contact statuses (type=unknown) --------------------------------
 // An unknown contact is either waiting for review (`needs_review`: the triage
 // queue and Today's Needs you now) or set aside without a type (`inactive`).
-// There is NO `active` (Cameron, 2026-10-23): every writer validates through
-// statusAllowlistFor, so every writer refuses (unknown, active).
+// There is NO `active` (Cameron, 2026-10-23): every status writer validates
+// through statusAllowlistFor and refuses (unknown, active), with one
+// exception - a re-import that re-types a contact whose status staff set
+// keeps that status unchecked (lib/import/apply.ts preserveStatus), the same
+// family as the importer gaps in docs/issues/import-bypasses-contact-type-rules.md.
 export const UNKNOWN_STATUSES = ['needs_review', 'inactive'] as const;
 
 export type UnknownStatus = (typeof UNKNOWN_STATUSES)[number];
@@ -223,7 +226,10 @@ export const UNKNOWN_STATUS_LABELS: Readonly<Record<UnknownStatus, string>> = {
  * UNKNOWN_STATUSES, any other type (partner, team_member) -> PARTNER_STATUSES.
  * Every status writer (create, the contact PATCH, the `/tenant-status`
  * transition route, the AI status accept, the import) and the list read
- * validate against it, so no path stores a pair its type does not allow.
+ * validate against it, so no path stores a pair its type does not allow -
+ * except a re-import that re-types a contact whose status staff set: it keeps
+ * that status unchecked (lib/import/apply.ts preserveStatus; the same family
+ * as the importer gaps in docs/issues/import-bypasses-contact-type-rules.md).
  */
 export function statusAllowlistFor(type: string | undefined): readonly string[] {
   if (type === 'tenant') return TENANT_STATUSES;

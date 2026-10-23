@@ -297,9 +297,13 @@ export interface UnmatchedEmailUpdatedEvent {
 /**
  * A contact's status or type changed (unknown-inactive spec D2, ruling AR3).
  * Emitted by the status transition (services/statusTransition.ts
- * setTenantStatus - every successful call, the header dropdown's path), by
- * PATCH /api/contacts/:contactId when that PATCH changed `status` or `type`
- * (the edit form's path), and once by the caseworker conversion's commit
+ * setTenantStatus - every successful call: the header dropdown, the edit
+ * form's status save when it changes no type, and the form's status write
+ * after a type change to tenant when the shown status is not Onboarding or
+ * porting changed), by PATCH /api/contacts/:contactId when that PATCH changed
+ * `status` or `type` (the edit form's type changes, which carry a non-tenant
+ * target's status, and a landlord's status with its park reason; the unknown
+ * card's Mark as actions), and once by the caseworker conversion's commit
  * (services/caseworkerConversion.ts make, which changes both; code review R1
  * FW1-4). The Today page and the inbox refetch on it; the
  * contact page re-reads the contact when `contactId` is the one it shows. It

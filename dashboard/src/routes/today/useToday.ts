@@ -3,7 +3,7 @@
 // falls back to assembling the SAME TodayItem[] client-side from /api/placements +
 // /api/conversations + /api/tours (buildTodayFromSources). Subscribes to the SSE stream and
 // refetches (debounced) on placement.updated / conversation.updated /
-// suggestion.updated / tour.updated so the queue stays live. Returns a small { status, items, source } state for the view.
+// suggestion.updated / tour.updated / contact.updated so the queue stays live. Returns a small { status, items, source } state for the view.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ApiError,
@@ -150,6 +150,10 @@ export function useToday(): TodayState {
     // since the past-tours section reloads on the same event, one tour could
     // show in both sections at once.
     onTourUpdated: scheduleRefetch,
+    // unknown-inactive (spec D2, AR3): a contact marked Inactive or re-typed
+    // leaves (or joins) Needs you now. A header status change writes no
+    // thread, so contact.updated is the only signal for it.
+    onContactUpdated: scheduleRefetch,
   });
 
   return { ...state, dismissNag };

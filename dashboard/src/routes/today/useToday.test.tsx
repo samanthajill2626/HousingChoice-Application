@@ -13,6 +13,7 @@ let lastHandlers: {
   onPlacementUpdated?: () => void;
   onConversationUpdated?: () => void;
   onTourUpdated?: () => void;
+  onContactUpdated?: () => void;
 } = {};
 
 vi.mock('../../api/index.js', async () => {
@@ -173,6 +174,20 @@ describe('useToday', () => {
 
     getToday.mockResolvedValue({ ...TODAY, items: [] });
     lastHandlers.onTourUpdated?.();
+    await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('0'));
+    expect(getToday).toHaveBeenCalledTimes(2);
+  });
+
+  it('refetches when a contact.updated event arrives (a contact marked Inactive leaves Needs you now)', async () => {
+    // unknown-inactive spec D2 / AR3: a header status change writes no
+    // thread, so no conversation.updated arrives for it.
+    getToday.mockResolvedValue(TODAY);
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    expect(getToday).toHaveBeenCalledTimes(1);
+
+    getToday.mockResolvedValue({ ...TODAY, items: [] });
+    lastHandlers.onContactUpdated?.();
     await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('0'));
     expect(getToday).toHaveBeenCalledTimes(2);
   });

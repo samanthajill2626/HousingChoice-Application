@@ -19,8 +19,10 @@ narrow by status.
 This matters more once tracker #30 lands: caseworkers, team members and
 unknown contacts gain an Inactive status, and landlords already have Parked.
 Staff can set those statuses, but the Landlords, Caseworkers and Unknown views
-cannot hide or isolate them, so a contact staff have retired stays mixed in
-with the ones they are working.
+cannot hide or isolate them. On the Unknown view, Inactive contacts now list
+after the Needs review ones (tracker #30) but still show there; the
+Caseworkers view sorts by name, so a retired caseworker stays mixed in with
+the ones staff are working.
 
 Raised by Cameron 2026-10-23 during the #30 scoping and kept out of #30 on
 purpose ("that's a hole that needs an issue filed, but let's not add it in

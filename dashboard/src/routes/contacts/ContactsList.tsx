@@ -102,6 +102,16 @@ function statusLabel(contact: Contact): string {
   return contactStatusLabel(contact.type, contact.status);
 }
 
+/** The Unknown view's order (tracker #30, orchestrator ruling OR-1): the rows
+ *  whose status is not `inactive` first, then the `inactive` ones, each group in
+ *  SERVER order (Array.prototype.sort is stable). The server answers with ONE
+ *  byTypeStatus Query, ascending by status, so without this every Inactive
+ *  unknown would list ABOVE every Needs review one - the reverse of the inbox
+ *  Unknown tab's "needs review first". Keyed on the literal `inactive`. */
+function inactiveLast(rows: readonly Contact[]): Contact[] {
+  return [...rows].sort((a, b) => Number(a.status === 'inactive') - Number(b.status === 'inactive'));
+}
+
 /** An unconstrained selection - used to derive the SELECTION-INDEPENDENT
  *  authority option keys (see `validAuthorityKeys`). Status is the facet that
  *  INVERTS "empty = unconstrained", so its unconstrained value is all seven. */
@@ -265,6 +275,9 @@ export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
   const sort: TenantSort = parseSort(searchParams);
   const visible = useMemo(() => {
     const queried = q ? contacts.filter((c) => searchKey(c).includes(q)) : contacts;
+    // Unknown only (OR-1): Inactive rows last. All, Landlords and Deleted keep
+    // server order.
+    if (filter === 'unknown') return inactiveLast(queried);
     if (!isTenantView) return queried;
     const selected = applySelection(queried, selection);
     // The order lives HERE, never in useContacts (six other screens share it -
@@ -272,7 +285,7 @@ export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
     return sort === 'name'
       ? [...selected].sort(compareByName)
       : sortByHeardFrom(selected, { heardAt: (c) => c.last_heard_from_at, name: (c) => c });
-  }, [contacts, q, isTenantView, selection, sort]);
+  }, [contacts, q, filter, isTenantView, selection, sort]);
 
   // Counts are contextual (the query + the other facets), so the query predicate
   // goes IN rather than the already-filtered rows.

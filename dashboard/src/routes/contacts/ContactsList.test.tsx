@@ -209,6 +209,43 @@ describe('ContactsList', () => {
     expect(within(screen.getByRole('link', { name: /Una Known/ })).getByText('Needs review')).toBeInTheDocument();
   });
 
+  // Tracker #30 (orchestrator ruling OR-1): the server answers Contacts > Unknown
+  // with ONE byTypeStatus Query, ascending by status, so `inactive` rows arrive
+  // BEFORE `needs_review` ones. The Unknown view lists the Inactive rows LAST,
+  // each group in server order (the names are chosen so that neither a name
+  // sort nor a reversed list passes).
+  it('the Unknown view lists Inactive rows after the Needs review rows, each group in server order', () => {
+    state = {
+      status: 'ready',
+      contacts: [
+        { contactId: 'u-off-1', type: 'unknown', firstName: 'Zed', lastName: 'Off', phone: '+14045550131', status: 'inactive' },
+        { contactId: 'u-off-2', type: 'unknown', firstName: 'Abe', lastName: 'Off', phone: '+14045550132', status: 'inactive' },
+        { contactId: 'u-new-1', type: 'unknown', firstName: 'Yan', lastName: 'Review', phone: '+14045550133', status: 'needs_review' },
+        { contactId: 'u-new-2', type: 'unknown', firstName: 'Bea', lastName: 'Review', phone: '+14045550134', status: 'needs_review' },
+      ],
+    };
+    renderList('unknown');
+    const names = rowsOf('Unknown')
+      .getAllByRole('listitem')
+      .map((li: HTMLElement) => li.querySelector('a > span')?.textContent ?? '');
+    expect(names).toEqual(['Yan Review', 'Bea Review', 'Zed Off', 'Abe Off']);
+  });
+
+  it('(PIN) the All view keeps server order for an Inactive row returned first', () => {
+    state = {
+      status: 'ready',
+      contacts: [
+        { contactId: 'u-off-1', type: 'unknown', firstName: 'Zed', lastName: 'Off', phone: '+14045550131', status: 'inactive' },
+        { contactId: 'u-new-1', type: 'unknown', firstName: 'Yan', lastName: 'Review', phone: '+14045550133', status: 'needs_review' },
+      ],
+    };
+    renderList('all');
+    const names = rowsOf('Contacts')
+      .getAllByRole('listitem')
+      .map((li: HTMLElement) => li.querySelector('a > span')?.textContent ?? '');
+    expect(names).toEqual(['Zed Off', 'Yan Review']);
+  });
+
   it('renders a row per contact with name, phone, type, and a detail link', () => {
     state = { status: 'ready', contacts: CONTACTS };
     renderList('all');

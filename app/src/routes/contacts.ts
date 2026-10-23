@@ -1630,9 +1630,16 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // this read (property-requirements D2, D1).
     const requirementKeys = Object.keys(parsed.patch).filter((key) => REQUIREMENT_KEYS.has(key));
     const touchesRequirements = requirementKeys.length > 0;
+    // CONSISTENT too when the patch carries a status (unknown-inactive
+    // WORKLIST OR-3): a status-only body is checked against this read's type
+    // and its write is fenced on that type below, and the milestone and the
+    // contact.updated emit diff against the status read here.
+    const touchesStatus = 'status' in parsed.patch;
     const stored = await contacts.getById(
       contactId,
-      touchesOrgField || changesClassification || touchesRequirements ? { consistentRead: true } : undefined,
+      touchesOrgField || changesClassification || touchesRequirements || touchesStatus
+        ? { consistentRead: true }
+        : undefined,
     );
     // A phone or email pointer is an INTERNAL routing record, not a contact:
     // never write one, or a typed pointer surfaces on lists like Possible
@@ -1669,6 +1676,20 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
         );
       }
     }
+    // STATUS-ONLY (unknown-inactive WORKLIST OR-3): the type-scoped check below
+    // decides `status` against this read's type, so the write is fenced on that
+    // type, captured NOW for the same reason as above - a concurrent re-type
+    // could otherwise store a pair the check never allowed, such as
+    // (landlord, inactive). A lost guard is the 409 contact_changed below. Not
+    // added when the body changes the type (classificationGuard fences that
+    // write) or when the requirement guards already hold the same clause.
+    const statusTypeGuards: ExpectClause[] =
+      touchesStatus
+      && !('type' in parsed.patch)
+      && stored !== undefined
+      && !requirementGuards.some((guard) => guard.attr === 'type')
+        ? guardAsRead(stored, 'type')
+        : [];
 
     // The resolved 1:1 type, if triage set type=tenant|landlord this PATCH.
     const newType = parsed.patch['type'];
@@ -1950,6 +1971,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     const guards = [
       ...(classificationGuard !== undefined ? [classificationGuard] : []),
       ...requirementGuards,
+      ...statusTypeGuards,
       ...(staffNotesGuard !== undefined ? [staffNotesGuard] : []),
     ];
 
@@ -1965,9 +1987,10 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
         // A guarded write fails the same way for "gone" and "stale": re-read
         // (consistent) to tell them apart and return the CURRENT contact.
         // A conflict on ANOTHER guard (the classification, a requirement
-        // guard) must not claim that an unchanged note is stale merely because
-        // this request also supplied a note expectation: with any other guard
-        // present, the note is stale only when its stamp actually moved.
+        // guard, the status-only type guard) must not claim that an unchanged
+        // note is stale merely because this request also supplied a note
+        // expectation: with any other guard present, the note is stale only
+        // when its stamp actually moved.
         if (guards.length > 0) {
           const current = await contacts.getById(contactId, { consistentRead: true });
           if (current) {

@@ -7,7 +7,7 @@
 // the no-overwrite-of-an-unset-field merge.
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
-import type { ContactItem } from '../src/repos/contactsRepo.js';
+import { expectClausesOf, type ContactItem } from '../src/repos/contactsRepo.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
 
@@ -1144,6 +1144,65 @@ describe('PATCH /api/contacts/:contactId - per-type status lists (tracker #30)',
       expect(world.contacts.find((c) => c.contactId === 'c-off')?.status).toBe('inactive');
     });
   }
+
+  // unknown-inactive WORKLIST OR-3 (task S2.5b): a status-only PATCH checks
+  // `status` against the STORED type, so it reads that type consistently and
+  // fences its write on it - a concurrent re-type can never store a pair the
+  // check never allowed, such as (landlord, inactive). A lost guard is the
+  // existing 409 contact_changed: nothing written, audited, timelined or
+  // emitted.
+  it('a status-only PATCH reads the stored contact strongly consistent', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedTyped(world, 'c-off', 'partner', 'active');
+    const reads = vi.spyOn(world.contactsRepo, 'getById');
+    const res = await patchContact(app, 'c-off', { status: 'inactive' });
+    expect(res.status).toBe(200);
+    // The first read of the request is the handler's check read.
+    expect(reads).toHaveBeenNthCalledWith(1, 'c-off', { consistentRead: true });
+  });
+
+  it('a re-type landing between a status-only PATCH read and its write is 409 contact_changed and writes nothing', async () => {
+    // The handler checks `inactive` against `partner` (legal); a concurrent
+    // writer makes the contact a landlord right after the read, for whom
+    // `inactive` is illegal. The fake repo hands out its LIVE stored object,
+    // so the handler gets a copy and the re-type lands on the stored record.
+    const { app, world } = makeWebhookHarness();
+    seedTyped(world, 'c-off', 'partner', 'active');
+    const notified: unknown[] = [];
+    world.events.on('contact.updated', (payload) => notified.push(payload));
+    const get = world.contactsRepo.getById.bind(world.contactsRepo);
+    let reads = 0;
+    vi.spyOn(world.contactsRepo, 'getById').mockImplementation(async (id, opts) => {
+      const hit = await get(id, opts);
+      if (id !== 'c-off' || hit === undefined) return hit;
+      reads += 1;
+      if (reads !== 1) return hit;
+      const snapshot = structuredClone(hit);
+      hit.type = 'landlord';
+      return snapshot;
+    });
+
+    const res = await patchContact(app, 'c-off', { status: 'inactive' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('contact_changed');
+    expect(res.body.contact).toMatchObject({ contactId: 'c-off', type: 'landlord', status: 'active' });
+    // The concurrent writer's type stands; (landlord, inactive) was never stored.
+    expect(world.contacts.find((c) => c.contactId === 'c-off')).toMatchObject({ type: 'landlord', status: 'active' });
+    expect(world.activityEvents.filter((e) => e.type === 'contact_status_changed')).toEqual([]);
+    expect(world.auditEvents.filter((e) => e.event_type === 'contact_updated')).toEqual([]);
+    expect(notified).toEqual([]);
+  });
+
+  it('(PIN) a status + requirement PATCH on a landlord fences the stored type ONCE (the requirement guard already holds it)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedTyped(world, 'c-ll', 'landlord', 'interested');
+    const writes = vi.spyOn(world.contactsRepo, 'update');
+    const res = await patchContact(app, 'c-ll', { status: 'active', req_no_pets: true });
+    expect(res.status).toBe(200);
+    const write = writes.mock.calls.find(([, patch]) => 'req_no_pets' in patch);
+    expect(expectClausesOf(write?.[2]).filter((c) => c.attr === 'type')).toEqual([{ attr: 'type', value: 'landlord' }]);
+  });
 });
 
 // Tracker #30 (D7, AR10, AR11): a type change with no explicit status FROM

@@ -765,9 +765,10 @@ export const INSPECTION_OUTCOMES = ['pass', 'fail'] as const;
 export type InspectionOutcome = (typeof INSPECTION_OUTCOMES)[number];
 
 // --- Tenant lifecycle (coarse) ----------------------------------------------
-// The values a TENANT contact's single `status` field holds. Non-tenant
-// contacts use needs_review|active instead. `porting` is a SEPARATE boolean
-// flag on the tenant, never a status value.
+// The values a TENANT contact's single `status` field holds. Every other type
+// has its own list below (LANDLORD_STATUSES; PARTNER_STATUSES for partner and
+// team_member; UNKNOWN_STATUSES). `porting` is a SEPARATE boolean flag on the
+// tenant, never a status value.
 export const TENANT_STATUSES = [
   'needs_review',
   'onboarding',
@@ -808,6 +809,62 @@ export const LANDLORD_STATUS_LABELS: Readonly<Record<LandlordStatus, string>> = 
   active: 'Active',
   parked: 'Parked',
 };
+
+// --- Partner / team member and unknown statuses -----------------------------
+// MIRRORS app/src/lib/statusModel.ts PARTNER_STATUSES / UNKNOWN_STATUSES and
+// their label maps (spec 2026-10-23 D1; pinned by
+// routes/contact/contactStatusMirror.test.ts). A partner (caseworker) and a
+// team member carry needs_review | active | inactive; an unknown contact
+// carries needs_review | inactive - it has no Active.
+export const PARTNER_STATUSES = ['needs_review', 'active', 'inactive'] as const;
+
+export type PartnerStatus = (typeof PARTNER_STATUSES)[number];
+
+export const PARTNER_STATUS_LABELS: Readonly<Record<PartnerStatus, string>> = {
+  needs_review: 'Needs review',
+  active: 'Active',
+  inactive: 'Inactive',
+};
+
+export const UNKNOWN_STATUSES = ['needs_review', 'inactive'] as const;
+
+export type UnknownStatus = (typeof UNKNOWN_STATUSES)[number];
+
+export const UNKNOWN_STATUS_LABELS: Readonly<Record<UnknownStatus, string>> = {
+  needs_review: 'Needs review',
+  inactive: 'Inactive',
+};
+
+/** Any value a contact's single `status` field can hold, across every type. */
+export type ContactStatusValue = TenantStatus | LandlordStatus | PartnerStatus | UnknownStatus;
+
+/** The list + label map for a type - the SAME branching as the backend
+ *  statusAllowlistFor: tenant, landlord and unknown explicitly, every other
+ *  (or unset) type the partner / team member list. */
+function contactStatusListFor(type: string | undefined): {
+  values: readonly string[];
+  labels: Readonly<Record<string, string>>;
+} {
+  if (type === 'tenant') return { values: TENANT_STATUSES, labels: TENANT_STATUS_LABELS };
+  if (type === 'landlord') return { values: LANDLORD_STATUSES, labels: LANDLORD_STATUS_LABELS };
+  if (type === 'unknown') return { values: UNKNOWN_STATUSES, labels: UNKNOWN_STATUS_LABELS };
+  return { values: PARTNER_STATUSES, labels: PARTNER_STATUS_LABELS };
+}
+
+/** The selectable statuses for a contact type, in dropdown order (spec
+ *  2026-10-23 D1). THE one source for the contact page header dropdown and
+ *  the Edit contact details Status field (D3: exactly the same choices). */
+export function statusOptionsFor(type: string | undefined): { value: string; label: string }[] {
+  const { values, labels } = contactStatusListFor(type);
+  return values.map((value) => ({ value, label: labels[value] ?? value }));
+}
+
+/** The label for a status from its contact type's own map, or undefined when
+ *  the status is not on that type's list (the caller picks the fallback). */
+export function contactStatusLabelFor(type: string | undefined, status: string): string | undefined {
+  const { labels } = contactStatusListFor(type);
+  return Object.hasOwn(labels, status) ? labels[status] : undefined;
+}
 
 // --- Property lifecycle (coarse, mostly derived) -----------------------------
 export const LISTING_STATUSES = [

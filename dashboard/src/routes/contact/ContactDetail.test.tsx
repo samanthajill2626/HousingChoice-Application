@@ -439,9 +439,10 @@ describe('ContactDetail', () => {
     await screen.findByRole('button', { name: 'Contact status: On hold' });
     expect(updateContact).not.toHaveBeenCalled();
 
-    // The transition wrote a contact_status_changed milestone server-side and no
-    // SSE event covers it — the page must refetch the timeline ITSELF so the pin
-    // appears immediately (behind the hook's 300ms debounce).
+    // The transition wrote a contact_status_changed milestone server-side. No
+    // event reaches this test, so the page must refetch the timeline ITSELF (the
+    // echoed contact.updated also refetches it in production, unknown-inactive
+    // OR-4) so the pin appears immediately (behind the hook's 300ms debounce).
     await waitFor(() =>
       expect(getContactTimeline.mock.calls.length).toBeGreaterThan(fetchesBeforeChange),
     );

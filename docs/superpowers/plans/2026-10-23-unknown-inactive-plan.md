@@ -9,7 +9,7 @@
   `docs/superpowers/reviews/2026-10-23-unknown-inactive/`.
 - Spec review: 2 rounds -
   `docs/superpowers/reviews/2026-10-23-unknown-inactive/design-review/adjudications.md`.
-- Status: PLAN v3 (2026-10-23), plan review rounds 1-2 applied; round 3 next. Sections 0-4 are
+- Status: PLAN v4 FINAL (2026-10-23), plan review CLOSED after 3 rounds (round 3 terminal, precision only). Sections 0-4 are
   BINDING and written by the planner; slice sections 5-10 are opus section
   drafts assembled verbatim. Section 4 (planner rulings AR1-AR24) wins over
   any slice text it contradicts. "Plan section N" always means this file's
@@ -7662,13 +7662,27 @@ prop - none of them feeds a diff:
   identity, the same id on every re-read;
 - `let updated: Contact = contact;`: an initial value every write path
   overwrites before `onSaved`;
-- `savedRole` / `currentKindLabel` (~576-579): the collapsed summary of the
-  saved kind, display only (it shows the latest stored kind).
+The kind control reads `base` too (plan round 3 R3P-1): the collapsed
+summary and `offerCaseworker` must describe the contact the operator opened,
+or a concurrent re-type shows through and a "confirming" click writes over
+it (ruling R4-15, `KindPicker.tsx:30-33`: offerCaseworker is decided from the
+stored contact, i.e. the one this form diffs against). Three more one-line
+edits:
+- old `  const savedRole = str(contact.role).trim();`
+  new `  const savedRole = str(base.role).trim();`
+- old `    ? `${savedRole} - ${CONTACT_TYPE_LABEL[contact.type]}``
+  new `    ? `${savedRole} - ${CONTACT_TYPE_LABEL[base.type]}``
+- old `    : CONTACT_TYPE_LABEL[contact.type];`
+  new `    : CONTACT_TYPE_LABEL[base.type];`
+- old `              offerCaseworker={isCaseworkerContact(contact)}`
+  new `              offerCaseworker={isCaseworkerContact(base)}`
 
-Check: `grep -n "contact[.[]" dashboard/src/routes/contact/ContactEditForm.tsx`
-prints only the `useState` seed lines (~191-280), the two `contact.contactId`
-calls, the `savedRole` / `currentKindLabel` lines and the `contact.updated`
-mention in the `base` comment above.
+Check: `grep -n "contact[.[(]\|(contact)" dashboard/src/routes/contact/ContactEditForm.tsx`
+prints only the `useState` seed lines (~191-280, including the
+`requirementFormValuesFromLandlord(contact)` seed), the `useState(contact)`
+that creates `base`, the two `contact.contactId` calls, `let updated:
+Contact = contact;` and the `contact.updated` mention in the `base` comment
+above. Any other hit is a live read this step missed: move it to `base`.
 
 After the edits, `grep -n "TENANT_STATUS\|LANDLORD_STATUS\|NON_TENANT\|TenantStatus\|isTenantStatus\|statusOptionsForType\|tenantStatusChanged" dashboard/src/routes/contact/ContactEditForm.tsx | grep -v setTenantStatus`
 prints nothing (the kept `setTenantStatus` import, calls and comments are

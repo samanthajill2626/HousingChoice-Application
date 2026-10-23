@@ -118,3 +118,19 @@ services/statusTransition.ts:611 reads the contact eventually consistently.
 | R2P-5 | Concedes P9; no adjudication contested; the round-1 fixes check out. | NOTED. | - |
 
 Round 2 changed decisions (R2P-1, R2P-2), so round 3 runs with A.
+
+## Plan round 3 (plan v3 @34ca6c7f) - continued reviewer A
+
+Report: `plan-r3-a.md`. Checked: ContactEditForm.tsx:576-579 (collapsed kind
+summary) and :639 (`offerCaseworker={isCaseworkerContact(contact)}`) still
+read the live prop.
+
+| # | Finding | Ruling | Decision changed? |
+|---|---|---|---|
+| R3P-1 | The kind summary and `offerCaseworker` still read the live prop, so a concurrent re-type shows through and a "confirming" click overwrites it. | ACCEPT - both read `base` (S4.4 step 3j, four one-line edits); the check grep widened to catch `(contact)` calls. Completes R2P-1's mechanism; no new decision. | no (precision) |
+| R3P-2 | Concedes R2P-4; contests nothing. | NOTED. | - |
+| R3P-3 | R2P-1..3 verified against the tree (26 anchors unique, remount per open, no other diffing live reads). | NOTED. | - |
+
+Round 3 changed no decision: TERMINAL. Plan review CLOSED after 3 rounds
+(cap 4). Open for Cameron at the launch gate: P9 / AR21 (Contacts list
+non-tenant rows show plain-text status, no toned badge).

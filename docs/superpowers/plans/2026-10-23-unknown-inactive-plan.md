@@ -37,8 +37,10 @@
   statusTransition.ts, contacts.ts, inbox.ts and many dashboard files carry
   em dashes, arrows and section signs), only ADDED lines must be ASCII:
   `git diff -U0 -- FILE | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c`
-  prints 0. The existing timeline label `Status \u2192 <label>` is an
-  ESCAPE in source (ASCII bytes) and stays exactly as written.
+  prints 0. The timeline arrow: `services/statusTransition.ts` writes it as
+  the `\u2192` ESCAPE (ASCII bytes), which stays exactly as written;
+  `routes/contacts.ts` ~2135 holds a LITERAL arrow, which S1.3 replaces with
+  an ASCII-source constant (AR22).
 - Never rewrite source with PowerShell `Get-Content | -replace | Set-Content`.
   Use the Edit tool. The Edit/Write tools DECODE `\u` escapes - after any
   edit near `\u2192`, verify with `grep -n 'u2192' FILE` that the source
@@ -263,6 +265,56 @@
 - AR14 No slice edits `docs/issues/` except to update an existing issue's
   body where a slice changes the behavior it describes (the slice report
   names it); no new issue without the planner.
+
+Assembly rulings (from the six section drafts; each draft's own
+"Contradictions" block is a record of what it found - where it differs
+from these, these win):
+
+- AR15 Names across S3 and S5: S5 renames the dashboard's inline
+  `sortByActivity` to `sortForFilter` and exports `compareByActivity` and
+  `compareUnknownTabRows` from `inboxListMerge.ts`. S3's rewrite of the
+  server ruling comment in `app/src/routes/inbox.ts` (~2282-2310) cites
+  `sortForFilter` and `compareUnknownTabRows`, never `sortByActivity`.
+  The useInbox "partner comment" is the one-line JSDoc at `useInbox.ts:148`,
+  which S5.3 replaces.
+- AR16 `priorType`: S2.5 declares `const priorType` beside `priorStatus` in
+  the contact PATCH handler. If S1.3 introduces a stored-type snapshot of its
+  own in that handler, S1.3 names it `priorType` and S2.5 reuses it instead
+  of declaring a second one.
+- AR17 Fixture flips forced by the block-order change (every commit stays
+  green). S1.1 changes `UNKNOWN_QUEUE_STATUS_ORDER` and flips the
+  (unknown, active) fixtures it lists in its step 1f
+  (`unknownQueue.test.ts`, `inboxUnknownTab.test.ts`,
+  `inboxUnknownParity.test.ts`). S1.1 ALSO applies S3.4 Step 5 (the
+  `app/test/inbox.integration.test.ts` flip) and adds that file to its
+  RED/GREEN commands and its commit. In S3.4: Step 1 becomes a GREEN state
+  check (the four files pass on S1's tree); in Steps 2-5 the builder applies
+  only edits whose OLD text is still present (an edit S1.1 already made is
+  done - skip it) and every NEW test case those steps add. Steps 6-9 run as
+  written.
+- AR18 Other (unknown, active) fixtures (`followUps.test.ts`,
+  `listingSendsApi.test.ts`, `unitsApiActivity.test.ts`, and any other a
+  slice did not name) stay unchanged unless they fail. One that fails moves
+  to `needs_review`, never `inactive`, and the slice report names it.
+- AR19 `ai-run-log.spec.ts` ~66-70 (e2e) creates an unknown contact with no
+  status; after S1.2 it is needs_review, not active. S1.2 records in the S1
+  report whether anything that spec asserts depends on it; S6.1 re-runs it as
+  a pin.
+- AR20 The header dropdown's accessible name stays "Contact status" (S4.3);
+  the Inactive unknown card title is exactly "Type unknown" (S4.5); the
+  inbox tag text is exactly "Inactive" (S5.1). S6.1 selects on these.
+- AR21 Contacts list rows for non-tenant types show their type's status
+  LABEL as plain text, as those rows do today; no new toned badge there. The
+  D4.4 muted tone applies wherever a status badge already renders.
+- AR22 `routes/contacts.ts` timeline label: the literal arrow at ~2135 is
+  replaced by an ASCII-source constant (`String.fromCharCode(0x2192)`), as
+  S1.3 drafts; the rendered text is unchanged.
+- AR23 `routes/unmatchedEmail.ts`: it only creates tenant, landlord or
+  partner, and an existing test pins unknown -> 400, so spec D6's "duplicate
+  default" there is a comment-only change (S1.2), not a behavior change.
+- AR24 Edit collisions in `routes/contacts.ts`: S2.5's emit anchors on the
+  `'contact triaged'` log call (~2143); S1 must not change that call. S2.5
+  re-reads the handler after S1 and anchors on the current text.
 
 ## 5. S1 - Backend status model and contact writers
 

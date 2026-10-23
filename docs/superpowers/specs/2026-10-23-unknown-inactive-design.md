@@ -1,9 +1,12 @@
 # Inactive for every contact type - design
 
-Status: DRAFT revision 2 (2026-10-23).
+Status: DRAFT revision 3 (2026-10-23), at Cameron's spec gate.
 - Rev 2 folds in design review round 1: two reviewers, 21 merged findings,
   19 accepted, 1 accepted as wording only, 1 kept as a watch item.
-- Next: review round 2 (one continued reviewer), then Cameron's spec gate.
+- Rev 3 folds in round 2 (the continued reviewer): 11 findings, 9 accepted
+  as precision edits, 2 concessions noted. Round 2 changed no decision, so it
+  is the terminal round.
+- Next: Cameron's approval.
 
 Adjudications:
 `docs/superpowers/reviews/2026-10-23-unknown-inactive/design-review/adjudications.md`.
@@ -93,12 +96,17 @@ type (`statusAllowlistFor`, `app/src/lib/statusModel.ts`).
   the check (today the check and the write are separate, so a concurrent
   re-type could store an illegal pair such as (landlord, inactive)). A
   mismatch is a 409 and writes nothing.
-- A status change through the route notifies open Today and Inbox pages the
-  same way a contact PATCH does today (the PATCH emits `conversation.updated`
-  for linked threads, `contacts.ts:2081-2094`; the route emits nothing,
-  `services/statusTransition.ts:605-637`). The plan picks the event; the
-  observable rule is that an open Today page drops the row and an open Inbox
-  page shows the new tag/chip without a reload.
+- A status change through the route notifies open Today and Inbox pages
+  (the route emits nothing today, `services/statusTransition.ts:605-637`).
+  The contact PATCH is NOT a model to copy: it emits `conversation.updated`
+  only for linked threads that flipped type or carry a name
+  (`contacts.ts:2077-2094`), so an unnamed unknown number - the usual case -
+  and a threadless contact (still on Today's triage pass, `today.ts:845-941`)
+  would get no event. The notify fires for EVERY status change, named or not,
+  threads or not, on an event Today and Inbox already refetch on (or one they
+  are taught to). The plan picks the event; the observable rule is that an
+  open Today page drops the row and an open Inbox page shows the new tag/chip
+  without a reload.
 
 ### D3. The Edit contact details Status field matches the header
 
@@ -112,22 +120,35 @@ type (`statusAllowlistFor`, `app/src/lib/statusModel.ts`).
   is what staff see). The dashboard takes its per-type lists and labels from
   ONE shared module mirrored from the backend, with a mirror test pinning the
   two.
-- On a type change in the form, the Status field moves to the NEW type's
-  first step (tenant Onboarding, landlord Interested, partner Active,
-  team_member Active, unknown Needs review - the same values D7 writes).
-  Staff may pick another status before saving. Whatever the field shows is
-  what is saved: the form sends it as an explicit status, which the server
-  honors over its own default.
+- A TYPE change is measured against the contact's STORED type: the field
+  being edited to a different type and left there at save time. A role-only
+  switch inside one type (an Active landlord to the Property Manager preset)
+  and a change-and-back (tenant -> landlord -> tenant) are NOT type changes:
+  the Status field keeps the stored status and the save writes no status,
+  exactly as today.
+- On a type change, the Status field moves to the NEW type's first step
+  (tenant Onboarding, landlord Interested, partner Active, team_member
+  Active, unknown Needs review - the same values D7 writes). Staff may pick
+  another status before saving. Whatever the field shows at save time is the
+  status the contact ends up with, in ONE status write where the path allows:
+  - non-tenant target: the PATCH carries the shown status explicitly, which
+    the server honors over its own default.
+  - tenant target: the PATCH never carries a tenant status (the `!isTenant`
+    guard, `ContactEditForm.tsx:345`); the server auto-advances to Onboarding
+    (`contacts.ts:1723-1729`). The form calls `setTenantStatus` afterwards
+    ONLY if the shown status is not Onboarding, so the default case writes
+    one milestone, not two.
 - Save paths:
-  - tenant and landlord: unchanged (a landlord's park reason is PATCHed
-    first and must not be overwritten by a later transition, see
-    `services/statusTransition.ts:164`).
+  - tenant and landlord with no type change: unchanged. Landlord is the one
+    named exception to "the same write as the header": its form saves the
+    park reason in the PATCH, and the transition plan overwrites
+    `park_reason` on every move to parked (`services/statusTransition.ts:164`),
+    so routing the form's landlord status through the transition would wipe
+    it. The CHOICES are still identical to the header's (Goal 3).
   - partner, team_member, unknown with NO type change: a status change goes
     through the transition route, as the header does, so both places write
     the same `status_source: 'manual'`, audit event and timeline entry.
-  - any save that changes the type: unchanged path (the PATCH validates the
-    status against the NEW type; a tenant target is followed by the existing
-    `setTenantStatus` call).
+  - any save that changes the type: the PATCH path above.
 
 ### D4. What Inactive means - the same for every type
 
@@ -168,8 +189,11 @@ included. No issue is filed.
   (`today.ts:845-902`), so an Inactive unknown contact leaves it with no
   change there.
 - The unread-thread source (`today.ts:704-800`) emits a "New unknown contact"
-  row for an unread `unknown_1to1` thread. It SKIPS a thread whose contact's
-  status is `inactive`. Cameron: "Needs You Now shows unread texts from any
+  row for an unread `unknown_1to1` thread. It SKIPS an `unknown_1to1` thread
+  whose contact's status is `inactive`. The skip is limited to `unknown_1to1`:
+  the same loop feeds Unreplied (`today.ts:806-814`), and an Inactive tenant
+  or caseworker stays in Unreplied (D4's stated difference; #31 owns
+  Unreplied). Cameron: "Needs You Now shows unread texts from any
   unknown contact that needs review. If it doesn't need review, meaning we've
   marked it as inactive, it wouldn't show there ... It just shows in the
   inbox."
@@ -179,11 +203,16 @@ included. No issue is filed.
   would fill the cap and empty Needs you now and Unreplied - the A9 defect
   that loop already fixed once for deleted contacts.
 - The rule is "skip Inactive", not "keep only Needs review": team_member
-  threads are also `unknown_1to1` (`contacts.ts:537-543`) and an Active team
-  member keeps today's behavior. A thread whose contact cannot be resolved
-  keeps today's behavior.
+  threads are also `unknown_1to1` (no 1:1 type is ever propagated for
+  team_member, `contacts.ts:537-543`; inbound threads are minted
+  `unknown_1to1`, `routes/webhooks/twilio.ts:221-232`,
+  `lib/voiceMasking.ts:28-39`) and an Active team member keeps today's
+  behavior. A thread whose contact cannot be resolved keeps today's
+  behavior.
 - The dashboard's Today fallback (`dashboard/src/routes/today/buildToday.ts:287`)
-  applies the same rule if it builds that row.
+  cannot apply the rule: `ConversationSummary` carries no contact status
+  (`dashboard/src/api/types.ts:561-580`). It is left unchanged (watch item:
+  the plan confirms when that fallback runs).
 - This is the ONLY Today change. Ordering, sections, Unreplied and the AI
   suggestions group are #31's.
 
@@ -223,11 +252,15 @@ steps."
   normalize fallback keeps the stored status when it is legal for the new
   type, and under D1 Inactive is legal for both. Rule: a type change with no
   explicit status FROM Inactive sends team_member -> Active and unknown ->
-  Needs review. Any other stored status keeps today's behavior. The fallback
-  runs only when the type actually changes (newType !== stored.type), so a
-  same-type PATCH never resets a status.
-- The dashboard form always sends an explicit status on a type change (D3),
-  so this rule governs API callers.
+  Needs review. Any other stored status keeps today's behavior.
+- Same-type PATCH: BOTH the auto-advance branch (`contacts.ts:1723-1729`)
+  and the normalize fallback run only when the type actually changes
+  (newType !== stored.type). Today the auto-advance has no such guard, so
+  `{type: 'tenant'}` on a Searching tenant writes Onboarding - a stale edit
+  form can send exactly that. After this change a same-type PATCH never
+  changes the status.
+- The dashboard form follows D3 on a type change, so this rule mostly
+  governs API callers.
 
 ### D8. The unknown contact page
 
@@ -315,7 +348,10 @@ Writers of contact `status`:
 - Inbound text and call webhooks - watch item: must not reset status (D9).
 - Seeds: `app/src/lib/seed/performance.ts` (unknown alternates needs_review /
   active -> needs_review / inactive), `history.ts` (`OTHER_LINEAR` and the
-  non-tenant ladder; an Inactive non-tenant gets a trail), `cast.ts`,
+  non-tenant ladder at :215-220, :455-465 are shared by partner, team_member
+  and unknown; Inactive is a BRANCH from Needs review, not a step after
+  Active, so an unknown contact's seeded trail never passes through the
+  now-illegal Active), `cast.ts`,
   `lean.ts`, `live.ts`, `matrix.ts` (check only). The lean world stays
   byte-stable for existing specs.
 - Test fakes: `app/test/helpers/contactsPartitionFake.ts:53-60`.
@@ -372,12 +408,14 @@ Docs:
 3. Type change from Inactive with no explicit status: tenant -> Onboarding,
    landlord -> Interested, partner -> Active, caseworker conversion -> Active,
    team_member -> Active, unknown -> Needs review. From a non-Inactive legal
-   status: unchanged. Same-type PATCH: status unchanged. Timeline label uses
-   the new type.
+   status: unchanged. Same-type PATCH (`{type: 'tenant'}` on a Searching
+   tenant; `{type: 'unknown'}` on an Inactive unknown): status unchanged.
+   Timeline label uses the new type.
 4. Today: an unread unknown_1to1 thread from an Inactive unknown contact is
    NOT in Needs you now; from a Needs review one it is; from an Active team
-   member it is (unchanged); 100+ unread Inactive threads ahead of a live one
-   do not hide the live one.
+   member it is (unchanged); an Inactive tenant's unread thread is still in
+   Unreplied (unchanged); 100+ unread Inactive unknown threads ahead of a live
+   one do not hide the live one.
 5. Inbox: an Inactive unknown's unread inbound shows on All, Unread and
    Unknown; `needsTriage` false; Inactive field set (also for an Inactive
    tenant and caseworker); Unknown-tab blocks are Needs review then Inactive;
@@ -390,8 +428,10 @@ Docs:
    options equal the header's for every type; the form DISPLAYS an Inactive
    caseworker as Inactive, and changing another field and saving keeps
    Inactive; on a type change the field shows the new type's first step and
-   that value is what is sent; a landlord park reason survives an edit-form
-   save; the mirror test pins dashboard lists to backend lists; the
+   the contact ends with that status (tenant target: one milestone, no
+   follow-up `setTenantStatus` when Onboarding is kept); a role-only switch
+   and a change-and-back write no status; a landlord park reason survives an
+   edit-form save; the mirror test pins dashboard lists to backend lists; the
    Unknown-tab sort; the Inactive tag; the card title (D8).
 8. e2e (accessibility-first selectors): from the contact page header, mark an
    unknown Needs review contact Inactive; it leaves Needs you now, stays on

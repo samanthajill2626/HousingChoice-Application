@@ -41,3 +41,28 @@ handed A's report.
 Planner's own calls to put to Cameron at the spec gate (not reviewer
 findings): D7 team_member -> Active / unknown -> Needs review from Inactive;
 D8 card title "Type unknown"; D9 Inactive tag on every type's inbox row.
+
+## Spec round 2 (rev 2 @2c8a125c) - continued reviewer B
+
+Report: `spec-r2-b.md` (11 findings; B also read A's round-1 report).
+
+| # | Finding | Ruling | Decision changed? |
+|---|---|---|---|
+| R2-1 | D3's type-change default has no reference point: a role-only preset switch or a change-and-back would write a status where today nothing is written. | ACCEPT - a type change is measured against the STORED type at save time; role-only and change-and-back write no status. | no (precision) |
+| R2-2 | For a tenant target the PATCH never carries a status (`!isTenant`, ContactEditForm.tsx:345); the server auto-advances, then setTenantStatus writes again (two milestones). | ACCEPT - setTenantStatus follows only when the shown status is not Onboarding. | no (precision) |
+| R2-3 | "Notify the same way a PATCH does" is wrong: the PATCH emits only for linked threads that flipped or carry a name (contacts.ts:2077-2094); unnamed and threadless unknowns get nothing. | ACCEPT - the notify fires for every status change; the plan picks the event. Observable rule unchanged. | no (mechanism note) |
+| R2-4 | The collect loop also feeds Unreplied, so an unscoped skip hides Inactive tenants/caseworkers from Unreplied, breaking D4's stated difference. | ACCEPT - skip limited to unknown_1to1; test 4 extended. | no (precision) |
+| R2-5 | "A same-type PATCH never resets a status" is false: the auto-advance branch has no guard (contacts.ts:1723-1729). | ACCEPT - both branches gated on newType !== stored.type; test 3 names the cases. Note: this also fixes a latent reset of a Searching tenant by a stale `{type:'tenant'}`. | no (makes the stated rule true) |
+| R2-6 | The dashboard Today fallback cannot apply D5: ConversationSummary has no contact status (types.ts:561-580). | ACCEPT - fallback unchanged; watch item. | no |
+| R2-7 | Wrong citation for team_member threads being unknown_1to1. | ACCEPT - cites twilio.ts:221-232 and lib/voiceMasking.ts:28-39. | no |
+| R2-8 | history.ts ladder is shared; a linear inactive gives an unknown a seeded Active step. | ACCEPT - Inactive is a branch from Needs review. | no |
+| R2-9 | Goal 3 holds for four of five types: landlord form and header write differently. | ACCEPT - landlord named as the one exception, with the park_reason reason; the CHOICES are identical. | no |
+| R2-10 | Concedes M9; asks that "do not suppress AI for Inactive" go to Cameron as the planner's call. | ACCEPT - added to the gate calls. | no |
+| R2-11 | Concedes M19; notes the issue's reopen trigger is now a matter of time. | NOTED - watch item stands. | no |
+
+Round 2 changed no decision: TERMINAL. Precision edits folded into rev 3.
+
+Gate calls for Cameron (planner's, not his): D7 team_member -> Active /
+unknown -> Needs review from Inactive; D8 card title "Type unknown"; D9
+Inactive tag on every type's inbox row; M9 AI extraction/suggestions keep
+running for Inactive contacts; R2-5 same-type PATCH no longer resets a status.

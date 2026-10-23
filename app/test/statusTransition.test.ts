@@ -23,6 +23,7 @@ import {
   type StatusTransitionDeps,
   type StatusTransitionService,
 } from '../src/services/statusTransition.js';
+import { expectClausesOf } from '../src/repos/contactsRepo.js';
 import { soonestDeadline } from '../src/repos/placementDeadlinesRepo.js';
 import type { PlacementItem } from '../src/repos/placementsRepo.js';
 
@@ -476,10 +477,50 @@ describe('statusTransition - conditional type write + contact.updated (AR3, AR4)
     expect(notified).toEqual([]);
   });
 
-  it('(PIN) without expectedType the write is guarded on the type the setter read - direct callers keep working', async () => {
+  // Code review R1 SPEC-F1: the re-type lands AFTER the setter's own read and
+  // BEFORE its write, so only the write's own condition can refuse it - a
+  // compare against the read the setter already holds would pass it.
+  it("a re-type landing between the setter's own read and its write is refused by the write's condition: nothing written, audited, timelined or emitted", async () => {
+    await world.contactsRepo.create({ contactId: 'uk-5', type: 'unknown', status: 'needs_review' });
+    const realUpdate = world.contactsRepo.update.bind(world.contactsRepo);
+    const update = vi.spyOn(world.contactsRepo, 'update').mockImplementationOnce(async (id, patch, opts) => {
+      // A concurrent writer makes the contact a landlord, for whom
+      // `inactive` is illegal, after the setter read it as unknown.
+      await realUpdate(id, { type: 'landlord' });
+      return realUpdate(id, patch, opts);
+    });
+    await expect(
+      svc.setTenantStatus('uk-5', { toStatus: 'inactive', source: 'manual', expectedType: 'unknown' }),
+    ).rejects.toBeInstanceOf(ContactTypeChangedError);
+    expect(expectClausesOf(update.mock.calls[0]?.[2])).toEqual([{ attr: 'type', value: 'unknown' }]);
+    const stored = await world.contactsRepo.getById('uk-5');
+    expect(stored?.type).toBe('landlord'); // the concurrent writer's type stands
+    expect(stored?.status).toBe('needs_review'); // (landlord, inactive) was never stored
+    expect(stored?.status_source).toBeUndefined();
+    expect(world.auditEvents.filter((a) => a.entityKey === 'contacts#uk-5')).toEqual([]);
+    expect(world.activityEvents.filter((e) => e.contactId === 'uk-5')).toEqual([]);
+    expect(notified).toEqual([]);
+  });
+
+  it('without expectedType the write is conditioned on the type the setter read - direct callers keep working, and a re-type under the write is still refused', async () => {
     await world.contactsRepo.create({ contactId: 't-direct', type: 'tenant', status: 'onboarding' });
+    await world.contactsRepo.create({ contactId: 't-direct-2', type: 'tenant', status: 'onboarding' });
+    const realUpdate = world.contactsRepo.update.bind(world.contactsRepo);
+    const update = vi.spyOn(world.contactsRepo, 'update');
     const updated = await svc.setTenantStatus('t-direct', { toStatus: 'searching', source: 'manual' });
     expect(updated.status).toBe('searching');
+    expect(expectClausesOf(update.mock.calls[0]?.[2])).toEqual([{ attr: 'type', value: 'tenant' }]);
+
+    // A direct caller's re-type race: the setter read a tenant, a concurrent
+    // writer makes it a partner, for whom `placing` is illegal.
+    update.mockImplementationOnce(async (id, patch, opts) => {
+      await realUpdate(id, { type: 'partner' });
+      return realUpdate(id, patch, opts);
+    });
+    await expect(
+      svc.setTenantStatus('t-direct-2', { toStatus: 'placing', source: 'manual' }),
+    ).rejects.toBeInstanceOf(ContactTypeChangedError);
+    expect(await world.contactsRepo.getById('t-direct-2')).toMatchObject({ type: 'partner', status: 'onboarding' });
   });
 
   it('emits contact.updated on EVERY successful call, a same-status call included', async () => {

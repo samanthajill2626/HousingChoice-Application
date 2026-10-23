@@ -88,4 +88,19 @@ describe('POST /internal/events', () => {
     expect(res.status).toBe(204);
     expect(seen).toEqual([{ contactId: 'c-204' }]);
   });
+
+  // unknown-inactive ruling AR3: the route validates names against
+  // APP_EVENT_NAMES, so a new event crosses the bridge with no route change.
+  it('accepts and re-emits contact.updated (the bridge needs no per-event code)', async () => {
+    const { app, events } = makeApp();
+    const seen: unknown[] = [];
+    events.on('contact.updated', (p) => seen.push(p));
+    const res = await request(app)
+      .post('/internal/events')
+      .set('x-origin-verify', ORIGIN)
+      .set('x-bridge-token', TOKEN)
+      .send({ name: 'contact.updated', payload: { contactId: 'c-bridge' } });
+    expect(res.status).toBe(204);
+    expect(seen).toEqual([{ contactId: 'c-bridge' }]);
+  });
 });

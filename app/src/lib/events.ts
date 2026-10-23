@@ -294,6 +294,22 @@ export interface UnmatchedEmailUpdatedEvent {
   unmatchedId?: string;
 }
 
+/**
+ * A contact's status or type changed (unknown-inactive spec D2, ruling AR3).
+ * Emitted by the status transition (services/statusTransition.ts
+ * setTenantStatus - every successful call, the header dropdown's path) and by
+ * PATCH /api/contacts/:contactId when that PATCH changed `status` or `type`
+ * (the edit form's path). The Today page and the inbox refetch on it; the
+ * contact page re-reads the contact when `contactId` is the one it shows. It
+ * exists because the conversation.updated emits cover only linked threads
+ * that flipped type or carry a name, so an unnamed or threadless contact got
+ * no event at all. ID-only - NEVER a name, phone or status value (PII, doc
+ * section 9); consumers re-read.
+ */
+export interface ContactUpdatedEvent {
+  contactId: string;
+}
+
 export interface AppEventMap {
   'conversation.updated': ConversationUpdatedEvent;
   'message.persisted': MessagePersistedEvent;
@@ -304,6 +320,7 @@ export interface AppEventMap {
   'suggestion.updated': SuggestionUpdatedEvent;
   'unmatched_email.updated': UnmatchedEmailUpdatedEvent;
   'ai_run.completed': AiRunCompletedEvent;
+  'contact.updated': ContactUpdatedEvent;
 }
 
 export type AppEventName = keyof AppEventMap;
@@ -325,6 +342,7 @@ const ALL_APP_EVENTS: Record<AppEventName, true> = {
   'suggestion.updated': true,
   'unmatched_email.updated': true,
   'ai_run.completed': true,
+  'contact.updated': true,
 };
 export const APP_EVENT_NAMES: readonly AppEventName[] = Object.keys(
   ALL_APP_EVENTS,

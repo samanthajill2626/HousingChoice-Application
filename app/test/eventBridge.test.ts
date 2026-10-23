@@ -39,8 +39,10 @@ describe('attachEventBridge', () => {
   it('subscribes exactly one listener per AppEventMap name', () => {
     const bus = createEventBus();
     attachEventBridge(bus, { ...OPTS, logger: silentLogger(), fetchImpl: okFetch() });
-    // 9 = the 8 pre-manual-trigger events + ai_run.completed (manual-extraction-trigger 4.4b).
-    expect(APP_EVENT_NAMES).toHaveLength(9);
+    // 10 = the 8 pre-manual-trigger events + ai_run.completed (manual-extraction-trigger 4.4b)
+    // + contact.updated (unknown-inactive ruling AR3).
+    expect(APP_EVENT_NAMES).toHaveLength(10);
+    expect(APP_EVENT_NAMES).toContain('contact.updated');
     for (const name of APP_EVENT_NAMES) {
       expect(bus.listenerCount(name)).toBe(1);
     }

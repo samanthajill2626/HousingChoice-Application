@@ -1019,3 +1019,62 @@ describe('make from an Inactive contact (tracker #30)', () => {
     });
   }
 });
+
+// Code review R1 FW1-4 (ADV-3): the conversion changes the type and the status
+// in its commit, so it emits the ID-only contact.updated once after that
+// commit and BEFORE the follow-on steps - the event an open Today page and the
+// contact page in another tab refetch on (a threadless contact gets no
+// conversation.updated at all). Nothing committed, nothing emitted.
+describe('make - contact.updated after the commit (FW1-4)', () => {
+  const OPEN = { status: 'open', ai_mode: 'auto', last_activity_at: NOW, created_at: NOW };
+
+  function record(world: FakeWorld): Array<{ event: string; payload: unknown }> {
+    const seen: Array<{ event: string; payload: unknown }> = [];
+    world.events.on('contact.updated', (payload) => seen.push({ event: 'contact.updated', payload }));
+    world.events.on('conversation.updated', (payload) => seen.push({ event: 'conversation.updated', payload }));
+    return seen;
+  }
+
+  it('a threadless Needs review unknown contact made a caseworker emits exactly one contact.updated { contactId }', async () => {
+    const { world, service } = setup();
+    seed(world, { type: 'unknown', status: 'needs_review' });
+    const seen = record(world);
+    await service.make(ID, { actor: ACTOR });
+    expect(stored(world)).toMatchObject({ type: 'partner', role: 'Caseworker', status: 'active' });
+    // ID-only: exact equality proves no name, phone or status rides along.
+    expect(seen).toEqual([{ event: 'contact.updated', payload: { contactId: ID } }]);
+  });
+
+  it('emits it before the follow-on steps: ahead of the thread re-type events', async () => {
+    const { world, service } = setup();
+    seed(world, { type: 'unknown', status: 'needs_review' });
+    world.conversations.set('cv-own', { conversationId: 'cv-own', ...OPEN, type: 'unknown_1to1', participant_phone: PHONE } as never);
+    const seen = record(world);
+    await service.make(ID, { actor: ACTOR });
+    expect(seen.map((e) => e.event)).toEqual(['contact.updated', 'conversation.updated']);
+  });
+
+  it('(PIN) a refused conversion emits none: a refusal, and a guard lost under the commit', async () => {
+    const { world, service } = setup();
+    seed(world);
+    tour(world, 'tr-1', 'scheduled');
+    seed(world, { contactId: 'c-race', phone: '+15550107030', agency: 'Hope Atlanta' });
+    const seen = record(world);
+    expect((await refused(service.make(ID, { actor: ACTOR }))).code).toBe('caseworker_open_tour');
+    const original = world.contactsRepo.update.bind(world.contactsRepo);
+    world.contactsRepo.update = async (id, patch, opts) => {
+      stored(world, 'c-race')!['agency'] = 'Step Up';
+      return original(id, patch, opts);
+    };
+    expect((await refused(service.make('c-race', { actor: ACTOR }))).code).toBe('contact_changed');
+    expect(seen).toEqual([]);
+  });
+
+  it('(PIN) the repair path on a caseworker commits nothing and emits no contact.updated', async () => {
+    const { world, service } = setup();
+    seed(world, { type: 'partner', role: 'Caseworker', status: 'active' });
+    const seen = record(world);
+    await service.make(ID, { actor: ACTOR });
+    expect(seen).toEqual([]);
+  });
+});

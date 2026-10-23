@@ -566,6 +566,13 @@ export function createCaseworkerConversionService(
         { contactId, fromType: read.type, organizationSource: organization.source, actor },
         'caseworker conversion committed',
       );
+      // Code review R1 FW1-4 (ADV-3): the commit changed the type and the
+      // status, so tell open pages (the contact.updated of ruling AR3): Today
+      // drops the "New unknown contact" row of a threadless contact, which no
+      // conversation.updated reaches, and the contact page in another tab
+      // re-reads. Emitted BEFORE followOn, so no follow-on step can swallow
+      // it. ID-only.
+      events.emit('contact.updated', { contactId });
       await followOn(contactId, converted, {
         actor, repair: false, priorStatus: read.status, fields: Object.keys(patch), record, pendingTypeBefore,
       });

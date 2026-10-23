@@ -297,9 +297,11 @@ export interface UnmatchedEmailUpdatedEvent {
 /**
  * A contact's status or type changed (unknown-inactive spec D2, ruling AR3).
  * Emitted by the status transition (services/statusTransition.ts
- * setTenantStatus - every successful call, the header dropdown's path) and by
+ * setTenantStatus - every successful call, the header dropdown's path), by
  * PATCH /api/contacts/:contactId when that PATCH changed `status` or `type`
- * (the edit form's path). The Today page and the inbox refetch on it; the
+ * (the edit form's path), and once by the caseworker conversion's commit
+ * (services/caseworkerConversion.ts make, which changes both; code review R1
+ * FW1-4). The Today page and the inbox refetch on it; the
  * contact page re-reads the contact when `contactId` is the one it shows. It
  * exists because the conversation.updated emits cover only linked threads
  * that flipped type or carry a name, so an unnamed or threadless contact got

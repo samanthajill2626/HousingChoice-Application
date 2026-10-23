@@ -9,6 +9,7 @@ const getConversationMessages = vi.fn();
 let lastHandlers: {
   onMessagePersisted?: () => void;
   onConversationUpdated?: () => void;
+  onContactUpdated?: (event: { contactId: string }) => void;
 } = {};
 
 vi.mock('../../api/index.js', async () => {
@@ -230,6 +231,39 @@ describe('useContactTimeline', () => {
     lastHandlers.onMessagePersisted?.();
 
     await waitFor(() => expect(getContactTimeline).toHaveBeenCalledTimes(2));
+  });
+
+  // unknown-inactive WORKLIST OR-4: an edit-form status save (through
+  // setTenantStatus, which emits only contact.updated) or a change in another
+  // tab writes a "Status -> X" milestone and no thread, so the timeline
+  // refetches on contact.updated for its OWN contact.
+  it('refetches (after the debounce) when contact.updated names this contact', async () => {
+    getContactTimeline.mockResolvedValue(SERVER_PAGE);
+
+    render(<Probe contactId="k1" />);
+    await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('ready'));
+    expect(getContactTimeline).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      lastHandlers.onContactUpdated?.({ contactId: 'k1' });
+    });
+
+    await waitFor(() => expect(getContactTimeline).toHaveBeenCalledTimes(2));
+  });
+
+  it('(PIN) does not refetch when contact.updated names another contact', async () => {
+    getContactTimeline.mockResolvedValue(SERVER_PAGE);
+
+    render(<Probe contactId="k1" />);
+    await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('ready'));
+    expect(getContactTimeline).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      lastHandlers.onContactUpdated?.({ contactId: 'someone-else' });
+      // Past the 300 ms debounce, so a scheduled refetch would have fired.
+      await new Promise((resolve) => setTimeout(resolve, 450));
+    });
+    expect(getContactTimeline).toHaveBeenCalledTimes(1);
   });
 
   it('passes the kinds filter through to the server timeline', async () => {

@@ -542,6 +542,12 @@ export function useContactTimeline(contactId: string, kinds?: string): ContactTi
     // A tour-reminder / placement-nudge ladder was armed/rescheduled/canceled —
     // refetch so the pinned "Upcoming" section updates live (Task 6).
     onScheduledUpdated: scheduleRefetch,
+    // unknown-inactive (WORKLIST OR-4): a status change writes a "Status -> X"
+    // milestone and no thread - the edit form's save through setTenantStatus
+    // emits only contact.updated - so refetch when it names THIS contact.
+    onContactUpdated: (event) => {
+      if (event.contactId === contactId) scheduleRefetch();
+    },
   });
 
   // Merge server items with optimistic sends, dropping any optimistic bubble the

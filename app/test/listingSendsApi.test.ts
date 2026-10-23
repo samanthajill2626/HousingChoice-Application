@@ -546,6 +546,20 @@ describe('last-heard-from: the outcome on both GET projections (spec 5.4, D12)',
     expect(byId.get('c-stop')).toMatchObject({ eligible: false });
   });
 
+  it('unknown-inactive D4.1: an INACTIVE caseworker recipient is eligible:false; an Active one stays eligible:true', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    world.contacts.push({ contactId: 'c-pt-off', type: 'partner', status: 'inactive', phone: '+15550109011', role: 'Caseworker' });
+    world.contacts.push({ contactId: 'c-pt-on', type: 'partner', status: 'active', phone: '+15550109012', role: 'Caseworker' });
+    for (const contactId of ['c-pt-off', 'c-pt-on']) {
+      await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId, sentAt: SENT_AT });
+    }
+    const res = await get(app, '/api/units/unit-1/recipients');
+    const byId = new Map((res.body.recipients as Array<Record<string, unknown>>).map((r) => [r['contactId'] as string, r]));
+    expect(byId.get('c-pt-off')).toMatchObject({ eligible: false, type: 'partner' });
+    expect(byId.get('c-pt-on')).toMatchObject({ eligible: true, type: 'partner' });
+  });
+
   it('a PARTNER row is served WITHOUT tour even when tour data exists (B11), interestedSupported false', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-1');

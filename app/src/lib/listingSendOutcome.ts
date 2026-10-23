@@ -97,7 +97,14 @@ export function wireDecline(
   return { at: row.declined.at, by: row.declined.by };
 }
 
-/** Spec 5.6 / B6: can this recipient be chased by text at all? */
+/**
+ * Spec 5.6 / B6: can this recipient be chased by text at all?
+ *
+ * unknown-inactive D4.1 (2026-10-23): `inactive` is dropped for EVERY type -
+ * Inactive means the same thing for a tenant, caseworker, team member or
+ * unknown contact. `placed` stays tenant-only (only tenants have it). The
+ * landlord's own `parked` is NOT `inactive` and is untouched.
+ */
 export function isEligibleRecipient(c: {
   type?: string;
   status?: string;
@@ -109,7 +116,8 @@ export function isEligibleRecipient(c: {
   if (typeof c.deleted_at === 'string' && c.deleted_at.length > 0) return false;
   if (c.sms_opt_out === true || c.sms_unreachable === true) return false;
   if (typeof c.phone !== 'string' || c.phone.length === 0) return false;
-  if (c.type === 'tenant' && (c.status === 'inactive' || c.status === 'placed')) return false;
+  if (c.status === 'inactive') return false;
+  if (c.type === 'tenant' && c.status === 'placed') return false;
   return true;
 }
 

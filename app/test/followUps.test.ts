@@ -182,6 +182,21 @@ describe('buildFollowUps (last-heard-from 5.6)', () => {
     expect(out.items.find((i) => i.contactId === 'p-1')).toMatchObject({ type: 'partner', role: 'Case worker', interestedSupported: false, name: 'Renee Carter' });
   });
 
+  it('unknown-inactive D4.1: an Inactive caseworker, team member and unknown contact are dropped; an Active caseworker and a Parked landlord are kept', async () => {
+    const w = emptyWorld();
+    w.units.push(unit('u1'));
+    w.contacts.push(
+      { contactId: 'p-inactive', type: 'partner', status: 'inactive', phone: '+15550100101', firstName: 'Ina', lastName: 'Ctive', role: 'Case worker' } as ContactItem,
+      { contactId: 'p-active', type: 'partner', status: 'active', phone: '+15550100102', firstName: 'Act', lastName: 'Ive', role: 'Case worker' } as ContactItem,
+      { contactId: 'tm-inactive', type: 'team_member', status: 'inactive', phone: '+15550100103', firstName: 'Team', lastName: 'Gone' } as ContactItem,
+      { contactId: 'u-inactive', type: 'unknown', status: 'inactive', phone: '+15550100104' } as ContactItem,
+      { contactId: 'l-parked', type: 'landlord', status: 'parked', phone: '+15550100105', firstName: 'Park', lastName: 'Ed' } as ContactItem,
+    );
+    for (const c of w.contacts) w.sends.push(send('u1', c.contactId, ago(3 * DAY)));
+    const out = await buildFollowUps(depsFor(w).deps);
+    expect(out.items.map((i) => i.contactId).sort()).toEqual(['l-parked', 'p-active']);
+  });
+
   // The id rung of the fallback is unreachable for a KEPT row (eligibility
   // requires a phone); it exists because FollowUpItem.name is required.
   it('a nameless contact falls back to its formatted phone; names are part-wise trimmed', async () => {

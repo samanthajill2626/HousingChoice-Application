@@ -192,9 +192,22 @@ describe('isEligibleRecipient (B6 - one rule, has-a-phone included)', () => {
   it('an empty deleted_at is not deleted; false flags are not set', () => {
     expect(isEligibleRecipient({ ...base, deleted_at: '', sms_opt_out: false, sms_unreachable: false })).toBe(true);
   });
-  it('the status clause is TENANT-only: a partner marked inactive/placed stays eligible', () => {
-    expect(isEligibleRecipient({ type: 'partner', status: 'inactive', phone: '+14045550101' })).toBe(true);
+  // FLIPPED by unknown-inactive D4.1 (2026-10-23): Inactive means the same
+  // thing for every contact type, so it is never chased. This case used to pin
+  // the opposite ("the status clause is TENANT-only").
+  it('Inactive is NOT eligible for ANY type: caseworker, team member, unknown', () => {
+    expect(isEligibleRecipient({ type: 'partner', status: 'inactive', phone: '+14045550101' })).toBe(false);
+    expect(isEligibleRecipient({ type: 'team_member', status: 'inactive', phone: '+14045550103' })).toBe(false);
+    expect(isEligibleRecipient({ type: 'unknown', status: 'inactive', phone: '+14045550104' })).toBe(false);
+  });
+  it('PIN: placed stays TENANT-only - a partner carrying placed stays eligible', () => {
     expect(isEligibleRecipient({ type: 'partner', status: 'placed', phone: '+14045550101' })).toBe(true);
+  });
+  it('PIN: an Active caseworker is eligible', () => {
+    expect(isEligibleRecipient({ type: 'partner', status: 'active', phone: '+14045550105' })).toBe(true);
+  });
+  it('PIN: a Parked landlord keeps today\'s behavior - parked is the landlord\'s own status, not inactive', () => {
+    expect(isEligibleRecipient({ type: 'landlord', status: 'parked', phone: '+14045550106' })).toBe(true);
   });
   it('a tenant with no status is eligible', () => {
     expect(isEligibleRecipient({ type: 'tenant', phone: '+14045550102' })).toBe(true);

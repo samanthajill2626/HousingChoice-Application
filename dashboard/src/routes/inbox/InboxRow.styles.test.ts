@@ -45,10 +45,19 @@ describe('InboxRow.module.css', () => {
     expect(body).not.toMatch(/min-width:\s*0/);
   });
 
-  it.each(['.tag', '.deletedTag', '.channel'])('%s is a rigid state marker: no flex-shrink, no min-width: 0', (selector) => {
+  it.each(['.tag', '.deletedTag', '.inactiveTag', '.channel'])('%s is a rigid state marker: no flex-shrink, no min-width: 0', (selector) => {
     const body = bodyOf(selector);
     expect(body).not.toMatch(/flex-shrink/);
     expect(body).not.toMatch(/min-width:\s*0/);
+  });
+
+  // Spec 2026-10-23 D9 / AR7: the Inactive tag is MUTED - the `.tag` look -
+  // never the danger tint of `.deletedTag` or the amber of `.triage`.
+  it('.inactiveTag is muted: the .tag look, no danger or amber tint', () => {
+    const body = bodyOf('.inactiveTag');
+    expect(body).toMatch(/(?:^|\s)color:\s*var\(--c-text-muted\)\s*;/);
+    expect(body).toMatch(/background:\s*var\(--c-surface-2\)\s*;/);
+    expect(body).not.toMatch(/--c-danger|--c-evt-amber/);
   });
 
   it('the actions box is an overlay that takes no layout width', () => {

@@ -341,3 +341,68 @@ describe('InboxRow - a phone-named row keeps every digit (spec 5.4)', () => {
     expect(screen.getByText('Tasha Williams').className).not.toMatch(/numberName/);
   });
 });
+
+// Spec 2026-10-23 D9, rulings AR5 + AR7: a contact row whose contact is
+// Inactive carries `inactive: true` on the wire (present and true ONLY then,
+// the `deleted?` convention) and renders a muted "Inactive" tag - for any
+// contact type, on any tab. The server sets needsTriage false for such a row.
+describe('InboxRow - Inactive tag (spec D9, AR5, AR7)', () => {
+  it('renders a muted Inactive tag inside the row link when row.inactive is true', () => {
+    renderRow(mkRow({ role: 'unknown', inactive: true }));
+    const link = screen.getByRole('link', { name: /Tasha Williams/ });
+    const tag = within(link).getByText('Inactive');
+    expect(tag.className).toMatch(/inactiveTag/);
+  });
+
+  it('renders NO Inactive tag on a row without the field', () => {
+    renderRow(mkRow({ role: 'unknown' }));
+    expect(screen.queryByText('Inactive')).toBeNull();
+  });
+
+  it('shows for an Inactive contact of any type, read or unread (Goal 4)', () => {
+    renderRow(mkRow({ role: 'tenant', inactive: true, unreadCount: 0 }));
+    expect(screen.getByText('Inactive')).toBeInTheDocument();
+    cleanupAndRender(mkRow({ role: 'partner', inactive: true, unreadCount: 3 }));
+    expect(screen.getByText('Inactive')).toBeInTheDocument();
+  });
+
+  // The chip follows the wire flag; the server sends needsTriage false for an
+  // Inactive contact (AR5), so no Needs triage chip sits beside the tag. (The
+  // first assertion is a PIN; the second is RED until the tag exists.)
+  it('an Inactive unknown row with needsTriage false shows no Needs triage chip', () => {
+    renderRow(mkRow({ role: 'unknown', inactive: true, needsTriage: false }));
+    expect(screen.queryByText(/Needs triage/i)).toBeNull();
+    expect(screen.getByText('Inactive')).toBeInTheDocument();
+  });
+
+  // WORKLIST OR-7, AR5 kept literal: a soft-deleted contact's row that an
+  // unread post-deletion inbound resurfaces keeps its stored status, so an
+  // Inactive one carries `deleted: true` AND `inactive: true` (the server's
+  // buildContactRow) and shows BOTH markers - the contact page also keeps
+  // showing a deleted contact's status (spec D2).
+  it('a resurfaced deleted Inactive contact row shows BOTH the Deleted chip and the Inactive tag', () => {
+    renderRow(mkRow({ role: 'unknown', deleted: true, inactive: true, needsTriage: false }));
+    const link = screen.getByRole('link', { name: /Tasha Williams/ });
+    expect(within(link).getByText('Deleted')).toBeInTheDocument();
+    expect(within(link).getByText('Inactive')).toBeInTheDocument();
+  });
+
+  // (PIN) Inactive does not gate the read/unread toggle - only a deleted
+  // contact's row and a closed relay row do.
+  it('a read Inactive row still offers Mark unread', () => {
+    const onMarkUnread = vi.fn();
+    render(
+      <MemoryRouter>
+        <ul>
+          <InboxRow
+            row={mkRow({ role: 'unknown', inactive: true, unreadCount: 0 })}
+            onOpen={onOpen}
+            onMarkRead={onMarkRead}
+            onMarkUnread={onMarkUnread}
+          />
+        </ul>
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole('button', { name: 'Mark Tasha Williams as unread' })).toBeInTheDocument();
+  });
+});

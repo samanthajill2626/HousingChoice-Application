@@ -3871,6 +3871,13 @@ export interface InboxRow {
    *  the dashboard renders a "Deleted" chip. Absent on live contacts and
    *  non-contact rows. */
   deleted?: boolean;
+  /** Inactive contact (spec 2026-10-23 D9, ruling AR5): present and true ONLY
+   *  on a contact row whose contact's status is `inactive` (any type) - the
+   *  dashboard renders a muted "Inactive" tag, and the Unknown tab sorts these
+   *  rows after the Needs review rows (compareUnknownTabRows). Absent on every
+   *  other row: live non-inactive contacts, contactless number rows, relay and
+   *  group rows. MIRROR of app/src/routes/inbox.ts InboxRow `inactive`. */
+  inactive?: boolean;
   // --- relay_group only (present iff kind === 'relay_group') --------------------
   conversationId?: string; // the relay conversation id → route /conversations/:conversationId
   // Lifecycle status. `connecting` (D9) was on the server union only - a

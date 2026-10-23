@@ -100,9 +100,10 @@
   font-weight: var(--fw-bold);
 }
 /* THE CHIP RULE (build review R3-1), one rule for every chip in the head:
-   - The channel chip (`.channel`), the relay Closed tag (`.tag`) and the
-     Deleted chip (`.deletedTag`) are short fixed-vocabulary state markers and
-     NEVER shrink (no flex-shrink, no min-width: 0 - rigid as on main).
+   - The channel chip (`.channel`), the relay Closed tag (`.tag`), the
+     Deleted chip (`.deletedTag`) and the Inactive tag (`.inactiveTag`) are
+     short fixed-vocabulary state markers and NEVER shrink (no flex-shrink,
+     no min-width: 0 - rigid as on main).
    - The placement tag (`.placementTag`, an unbounded stage label of up to 29
      characters) and the Needs triage chip (`.triage`) YIELD BEFORE THE NAME,
      never below 4em: the name - or an unknown row's number - is the row's
@@ -170,6 +171,20 @@
   color: var(--c-danger);
   font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
+  white-space: nowrap;
+}
+
+/* Inactive contact (spec 2026-10-23 D9): MUTED - the `.tag` look
+   (declarations duplicated: this module does not use `composes`), so it reads
+   as a quiet status note, not a warning. A rigid state marker (the chip rule
+   above). */
+.inactiveTag {
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-border);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
   white-space: nowrap;
 }
 

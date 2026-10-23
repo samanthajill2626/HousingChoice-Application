@@ -130,6 +130,11 @@ export const InboxRow = memo(function InboxRow({
               </span>
             ) : null}
             {row.needsTriage ? <span className={styles.triage}>Needs triage</span> : null}
+            {/* Inactive contact (spec 2026-10-23 D9): a muted, rigid state
+                marker on a contact row of any type, on any tab. The server
+                sends needsTriage false for such a row (AR5), so the tag never
+                sits beside the Needs triage chip. */}
+            {row.inactive ? <span className={styles.inactiveTag}>Inactive</span> : null}
             {row.deleted ? <span className={styles.deletedTag}>Deleted</span> : null}
           </span>
           <span className={`${styles.preview} ${unread ? styles.bold : ''}`}>

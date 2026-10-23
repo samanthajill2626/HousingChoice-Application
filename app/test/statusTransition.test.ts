@@ -8,12 +8,14 @@
 // items the transition arms/retires (rta_window on entering/leaving
 // awaiting_landlord_submission; clearForPlacement on terminal). The stuck signal
 // is DERIVED in today.ts now — the transition arms NO stuck deadline.
-import { beforeEach, describe, expect, it } from 'vitest';
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import {
   buildContactStatusTransitionPlan,
+  ContactTypeChangedError,
   createStatusTransitionService,
   EntityNotFoundError,
   StatusTransitionCommittedError,
@@ -402,6 +404,98 @@ describe('statusTransition — tenant status (no RTA-in-hand gate, §5; 2026-06-
     expect(thrown).toBeInstanceOf(StatusTransitionCommittedError);
     expect((thrown as StatusTransitionCommittedError).cause).toBe(cause);
     expect((await world.contactsRepo.getById('t-audit-failure'))?.status).toBe('searching');
+  });
+});
+
+// unknown-inactive spec D2, rulings AR3 + AR4: the status write is conditioned
+// on the contact type the caller checked the status against, and every
+// successful call emits the ID-only contact.updated.
+describe('statusTransition - conditional type write + contact.updated (AR3, AR4)', () => {
+  let world: FakeWorld;
+  let svc: StatusTransitionService;
+  let notified: unknown[];
+
+  beforeEach(() => {
+    world = createFakeWorld();
+    svc = makeServiceWithActivity(world);
+    notified = [];
+    world.events.on('contact.updated', (payload) => notified.push(payload));
+  });
+
+  it('writes when the stored type is still the expected one and emits contact.updated { contactId }', async () => {
+    await world.contactsRepo.create({ contactId: 'uk-1', type: 'unknown', status: 'needs_review' });
+    const updated = await svc.setTenantStatus('uk-1', {
+      toStatus: 'inactive',
+      source: 'manual',
+      expectedType: 'unknown',
+    });
+    expect(updated.status).toBe('inactive');
+    expect(updated.status_source).toBe('manual');
+    // ID-only payload: exact equality proves no name/phone/status rides along.
+    expect(notified).toEqual([{ contactId: 'uk-1' }]);
+  });
+
+  it('reads the contact strongly consistent - the audit from, the milestone and its label come from that read (plan round 2 R2P-2)', async () => {
+    // The edit form sends this right after a type-change PATCH (S4.4); a stale
+    // read would audit the old `from` and label the milestone by the old type.
+    await world.contactsRepo.create({ contactId: 'uk-4', type: 'unknown', status: 'needs_review' });
+    const getById = vi.spyOn(world.contactsRepo, 'getById');
+    await svc.setTenantStatus('uk-4', { toStatus: 'inactive', source: 'manual', expectedType: 'unknown' });
+    // The first read is the setter's own (the guard's re-read runs only on a
+    // refused write).
+    expect(getById).toHaveBeenNthCalledWith(1, 'uk-4', { consistentRead: true });
+  });
+
+  it('a contact re-typed since the caller checked is ContactTypeChangedError: nothing written, audited, timelined or emitted', async () => {
+    // The caller validated `inactive` against `unknown`; a concurrent writer
+    // has since made the contact a landlord, for whom `inactive` is illegal.
+    await world.contactsRepo.create({ contactId: 'uk-2', type: 'landlord', status: 'needs_review' });
+    await expect(
+      svc.setTenantStatus('uk-2', { toStatus: 'inactive', source: 'manual', expectedType: 'unknown' }),
+    ).rejects.toBeInstanceOf(ContactTypeChangedError);
+    const stored = await world.contactsRepo.getById('uk-2');
+    expect(stored?.type).toBe('landlord');
+    expect(stored?.status).toBe('needs_review');
+    expect(stored?.status_source).toBeUndefined();
+    expect(world.auditEvents.filter((a) => a.entityKey === 'contacts#uk-2')).toEqual([]);
+    expect(world.activityEvents.filter((e) => e.contactId === 'uk-2')).toEqual([]);
+    expect(notified).toEqual([]);
+  });
+
+  it('a contact deleted under the write is EntityNotFoundError (404), not a type change', async () => {
+    await world.contactsRepo.create({ contactId: 'uk-3', type: 'unknown', status: 'needs_review' });
+    vi.spyOn(world.contactsRepo, 'update').mockImplementationOnce(async () => {
+      // The contact vanishes between the setter's read and its conditional
+      // write; the real repo answers that with the same conditional error.
+      world.contacts.splice(world.contacts.findIndex((c) => c.contactId === 'uk-3'), 1);
+      throw new ConditionalCheckFailedException({ message: 'contact gone', $metadata: {} });
+    });
+    await expect(
+      svc.setTenantStatus('uk-3', { toStatus: 'inactive', source: 'manual', expectedType: 'unknown' }),
+    ).rejects.toBeInstanceOf(EntityNotFoundError);
+    expect(notified).toEqual([]);
+  });
+
+  it('(PIN) without expectedType the write is guarded on the type the setter read - direct callers keep working', async () => {
+    await world.contactsRepo.create({ contactId: 't-direct', type: 'tenant', status: 'onboarding' });
+    const updated = await svc.setTenantStatus('t-direct', { toStatus: 'searching', source: 'manual' });
+    expect(updated.status).toBe('searching');
+  });
+
+  it('emits contact.updated on EVERY successful call, a same-status call included', async () => {
+    await world.contactsRepo.create({ contactId: 'pt-1', type: 'partner', status: 'active' });
+    await svc.setTenantStatus('pt-1', { toStatus: 'active', source: 'manual', expectedType: 'partner' });
+    await svc.setTenantStatus('pt-1', { toStatus: 'inactive', source: 'manual', expectedType: 'partner' });
+    expect(notified).toEqual([{ contactId: 'pt-1' }, { contactId: 'pt-1' }]);
+  });
+
+  it('(PIN) emits nothing when the required audit fails after the write (the call did not succeed)', async () => {
+    await world.contactsRepo.create({ contactId: 't-audit-down', type: 'tenant', status: 'onboarding' });
+    world.auditRepo.append = async () => { throw new Error('audit down'); };
+    await expect(
+      svc.setTenantStatus('t-audit-down', { toStatus: 'searching', source: 'manual', expectedType: 'tenant' }),
+    ).rejects.toBeInstanceOf(StatusTransitionCommittedError);
+    expect(notified).toEqual([]);
   });
 });
 

@@ -11,6 +11,7 @@
 //
 // PII (doc §9): logs are IDs/sources/counts only — never names/phones/bodies,
 // never the lost-reason free text.
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { mergeContext } from '../lib/context.js';
 import { toPlacementUpdatedEvent, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
@@ -39,7 +40,7 @@ import {
   soonestDeadline,
   type PlacementDeadlinesRepo,
 } from '../repos/placementDeadlinesRepo.js';
-import { type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
+import { type ContactItem, type ContactsRepo, type ContactType } from '../repos/contactsRepo.js';
 import { type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
 import type { ConversationsRepo } from '../repos/conversationsRepo.js';
 import { recordPersonMilestone } from '../lib/personEvents.js';
@@ -136,6 +137,15 @@ export interface SetTenantStatusInput {
   reason?: string;
   /** Update the porting flag in the same write (an informational §5 flag — never a gate). */
   porting?: boolean;
+  /**
+   * The contact type the caller validated `toStatus` against (the route
+   * passes the stored type it read - unknown-inactive spec D2, ruling AR4).
+   * The write is conditioned on the stored type still being this value, so a
+   * concurrent re-type can never leave an illegal pair such as
+   * (landlord, inactive). A mismatch throws ContactTypeChangedError and
+   * writes nothing. Absent: the type this setter itself read is used.
+   */
+  expectedType?: ContactType;
   /** The acting user (userId) — indexed onto the audit row's byActor GSI (§8). */
   actor?: string;
 }
@@ -201,6 +211,19 @@ export class EntityNotFoundError extends Error {
   ) {
     super(`${entity} ${id} not found`);
     this.name = 'EntityNotFoundError';
+  }
+}
+
+/**
+ * The contact's stored type changed between the caller's status check and the
+ * conditional status write (unknown-inactive spec D2, ruling AR4). The write
+ * was refused, so nothing was written, audited, timelined or emitted. The
+ * route maps it to 409 { error: 'contact_type_changed' }. Carries the id only.
+ */
+export class ContactTypeChangedError extends Error {
+  constructor(readonly contactId: string) {
+    super(`contact ${contactId} type changed before the status write`);
+    this.name = 'ContactTypeChangedError';
   }
 }
 
@@ -601,7 +624,10 @@ export function createStatusTransitionService(
 
     async setTenantStatus(contactId, input) {
       const { toStatus, source, actor } = input;
-      const contact = await contactsRepo.getById(contactId);
+      // Strongly consistent (plan round 2 R2P-2): the audit `from`, the
+      // milestone decision and its label map all come from this read, and the
+      // edit form calls this right after a type-change PATCH.
+      const contact = await contactsRepo.getById(contactId, { consistentRead: true });
       if (!contact) throw new EntityNotFoundError('contact', contactId);
       // The tenant lifecycle lives on the unified `status` field (§5).
       const from = contact.status;
@@ -612,7 +638,30 @@ export function createStatusTransitionService(
       // `setTenantStatus` always applies (subject only to the entity existing);
       // `porting` is an informational flag set in the same write, never a gate.
       const plan = buildContactStatusTransitionPlan(contact, input);
-      const updated = await contactsRepo.update(contactId, plan.patch);
+      // Conditioned on the type the caller validated `toStatus` against
+      // (ruling AR4): the route's allowlist check and this write are separate
+      // calls, so without the guard a concurrent re-type could store a pair
+      // the check never allowed. A lost guard and a missing contact fail the
+      // same way; a consistent re-read tells them apart (the
+      // caseworkerConversion commit uses the same shape).
+      const expectedType = input.expectedType ?? contact.type;
+      let updated: ContactItem;
+      try {
+        updated = await contactsRepo.update(contactId, plan.patch, {
+          expect: { attr: 'type', value: expectedType },
+        });
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          const current = await contactsRepo.getById(contactId, { consistentRead: true });
+          if (!current) throw new EntityNotFoundError('contact', contactId);
+          log.info(
+            { contactId, expectedType, storedType: current.type },
+            'tenant status refused: the contact type changed since the check',
+          );
+          throw new ContactTypeChangedError(contactId);
+        }
+        throw err;
+      }
 
       try {
         await auditRepo.append(`contacts#${contactId}`, plan.audit.eventType, plan.audit.payload);
@@ -622,6 +671,11 @@ export function createStatusTransitionService(
       // Contact-timeline milestone on a REAL status change (explicit path). The
       // label comes from statusLabelFor(contact.type, ...) (lib/statusModel.ts).
       if (plan.activity !== undefined) await recordStatusActivity(contactId, plan.activity);
+      // Live notify (ruling AR3): EVERY successful call, a same-status call
+      // included, after the write, the audit and the timeline entry. ID-only.
+      // Not on the refused paths above, and not when the audit throws
+      // StatusTransitionCommittedError (the call did not succeed).
+      events.emit('contact.updated', { contactId });
       mergeContext({ contactId });
       log.info({ contactId, from, to: toStatus, source, ...(actor !== undefined && { actor }) }, 'tenant status set');
       return updated;

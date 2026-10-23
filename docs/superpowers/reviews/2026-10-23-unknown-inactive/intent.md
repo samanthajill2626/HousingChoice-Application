@@ -16,13 +16,20 @@
   minutes (his pick over the 30-minute default; 55 is the cache ceiling).
   He did not answer the P9/AR21 question, so the default stands: Contacts
   list non-tenant rows keep plain-text status, no new badge.
-- Launch mode: AUTO. Gate B: registration confirmed (--show, persist,
-  expires 2026-10-30), replay proven (9 human turns, last = the launch
-  pick), watcher started, compaction offered.
+- Launch mode: AUTO. Gate B taken 2026-10-23 17:53 (manual /compact,
+  320k -> 26k); replay re-read in full after it.
+- DISPATCHED 2026-10-23 ~17:56: abt:build-orchestrator in the background
+  with mission-block.md verbatim. In flight: the orchestrator, a
+  55-minute-checkpoint watchdog on .superpowers/sdd/progress.md, and the
+  transcript mirror into .superpowers/sdd/live.log. Failure budget: 0 used.
 - Worktree: `W:\tmp\unknown-inactive`, branch `feat/unknown-inactive`, cut from
   main @916258ae. Issue `contacts-status-filter-tenants-only` committed @0957ed39.
   No node_modules yet (plan section 0 has the builder run `npm ci`).
-- NEXT STEP: gate B (compaction offer), then dispatch abt:build-orchestrator (AUTO) with mission-block.md verbatim, arm the 55-min watchdog, start the mirror.
+- NEXT STEP: supervise. On each watchdog wake: CHECKPOINT -> ledger tail,
+  one "**Checkpoint:**" line, re-arm (55 min); QUESTION -> relay to
+  Cameron; STALL -> ladder rung 0 (transcript probe). On DONE -> handback
+  review (replay in full, own gates on a quiet tree, spec reviewer +
+  plan-blind adversarial reviewer, live QA, verdict).
 - Spec gate calls Cameron APPROVED: D7 team_member -> Active / unknown -> Needs
   review from Inactive; D8 "Type unknown"; D9 Inactive tag on every type's
   row; AI extraction keeps running for Inactive; same-type PATCH never resets

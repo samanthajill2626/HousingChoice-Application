@@ -281,11 +281,17 @@ Two differences remain, on purpose:
   no status filter (`docs/issues/contacts-status-filter-tenants-only.md`).
 - An Inactive tenant's or partner's unread text still shows on Today, exactly where
   it would if the contact were not Inactive: in Unreplied, or as a "New unknown
-  contact" row in Needs you now when its thread is still an unknown thread (a
+  contact" row in Needs you now when its thread is still an unknown thread (the
+  importer mints every imported one-to-one thread as an unknown thread, whatever
+  the contact's type -
+  `docs/issues/imported-unknown-threads-surface-as-unknown-on-today.md` - and a
   second number's thread can stay one after the contact is typed). An Inactive
-  unknown contact's or team member's unread text does NOT show in Needs you now (a
-  team member's 1:1 threads are unknown threads, so the same rule covers them) -
-  it shows only in the inbox.
+  unknown contact's or team member's unknown threads do NOT show in Needs you now
+  (a team member's 1:1 threads are unknown threads, so the same rule covers them) -
+  those unread texts show only in the inbox. A typed thread such a contact kept
+  from an earlier type still feeds Unreplied: a re-type to unknown or team member
+  (through the API or an import; the Edit contact details picker offers neither)
+  re-types none of the contact's threads.
 
 Automatic texts (tour reminders, group text rosters, the missed-call auto-text,
 placement nudges, hand-picked share recipients) check no status for any type, and

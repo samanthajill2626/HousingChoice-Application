@@ -699,7 +699,7 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   on a reply**). The unread thread also shows on Today: a
   tenant's, landlord's or partner's under Unreplied as "<name> -
   Unreplied", an existing unknown contact's under Needs you now as a "New
-  unknown contact" (not when that contact is **Inactive**: its thread then
+  unknown contact" (not when that contact is **Inactive**: its unknown thread
   shows only in the inbox). When the contact had no thread on that phone, the
   sign-up creates one with no message, so its inbox row is bold with a
   blank preview and, as the contact's newest conversation, heads that
@@ -715,14 +715,19 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   search and in the inbox, where its texts and calls still show unread and
   its row carries a small muted "Inactive" tag and no "Needs triage" chip.
   An inbound text or call never moves it back to Needs review. An unknown
-  contact or team member marked Inactive leaves Today's Needs you now (a
-  team member's 1:1 threads are unknown threads too; the unread texts show
-  only in the inbox), and an Inactive unknown contact sorts below the Needs
-  review ones on the inbox Unknown tab and on Contacts > Unknown; an
+  contact's or team member's unknown threads leave Today's Needs you now
+  when it is marked Inactive (a team member's 1:1 threads are unknown
+  threads too; those unread texts show only in the inbox, while a typed
+  thread it kept from an earlier type - a re-type to unknown or team
+  member, through the API or an import, re-types none of its threads -
+  still feeds Unreplied), and an Inactive unknown contact sorts below the
+  Needs review ones on the inbox Unknown tab and on Contacts > Unknown; an
   Inactive tenant's or partner's unread text still shows on Today where it
   would otherwise (under Unreplied, or as a "New unknown contact" row when
-  its thread is still an unknown thread, as a second number's can stay
-  after the contact is typed).
+  its thread is still an unknown thread: the importer mints every imported
+  one-to-one thread as one, whatever the contact's type -
+  `docs/issues/imported-unknown-threads-surface-as-unknown-on-today.md` -
+  and a second number's can stay one after the contact is typed).
   Staff set it from the contact page header dropdown or the Edit contact
   details Status field, which offer the same choices for every type; an
   unknown contact has no "Active" (Needs review or Inactive only). NOT a

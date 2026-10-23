@@ -758,12 +758,16 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         // Active team member keeps today's row. It is limited to an
         // `unknown_1to1` thread whose OWNER is an `unknown` or `team_member`
         // contact - the types whose own threads are unknown_1to1 (code review
-        // R2-1, fix wave 2). Any other owner keeps today's row: a tenant's or
-        // caseworker's SECOND number can keep an unknown_1to1 thread (the
+        // R2-1, fix wave 2). Any other owner keeps today's row. A typed
+        // contact can hold an unknown_1to1 thread: the importer mints EVERY
+        // imported one-to-one thread unknown_1to1, whatever the contact's
+        // type (lib/import/apply.ts upsertConversation;
+        // docs/issues/imported-unknown-threads-surface-as-unknown-on-today.md),
+        // and a tenant's or caseworker's SECOND number can keep one (the
         // contacts PATCH re-types only the primary phone's and the email
-        // threads, routes/contacts.ts), and an Inactive tenant's or
-        // caseworker's unread text is not hidden - its typed threads feed
-        // Unreplied (tracker #31 owns that section). A thread whose contact
+        // threads, routes/contacts.ts). An Inactive tenant's or caseworker's
+        // unread text is not hidden - its typed threads feed Unreplied
+        // (tracker #31 owns that section). A thread whose contact
         // cannot be resolved keeps today's behavior. NO EXTRA READ:
         // `getContact` is memoized and isDeletedContact just read this id.
         if (conv.type === 'unknown_1to1' && ownerId !== undefined) {

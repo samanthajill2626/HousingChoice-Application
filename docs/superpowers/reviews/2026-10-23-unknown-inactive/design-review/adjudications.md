@@ -66,3 +66,36 @@ Gate calls for Cameron (planner's, not his): D7 team_member -> Active /
 unknown -> Needs review from Inactive; D8 card title "Type unknown"; D9
 Inactive tag on every type's inbox row; M9 AI extraction/suggestions keep
 running for Inactive contacts; R2-5 same-type PATCH no longer resets a status.
+
+## Plan round 1 (plan v1 @3d6e9ec9) - two opus reviewers, independent
+
+Reports: `plan-r1-a.md` (A, 10 findings), `plan-r1-b.md` (B, 8 findings).
+Merged: 15 distinct findings. 14 ACCEPT, 1 ACCEPT-and-put-to-Cameron.
+Load-bearing claims checked in the code: ContactEditForm.tsx:204
+(`liveType = kind.type ?? contact.type`) with KindPicker.tsx:150-160 (Other
+sets type null); dashboard/src/api/endpoints.ts:1474-1484 (`getContact`
+takes `{ consistent: true }`, planner ruling PR-3); routes/statusTransition.ts:268
+(the route's type read is not consistent).
+
+| # | Finding (reviewer refs) | Ruling | Decision changed? |
+|---|---|---|---|
+| P1 | Edit form: a change-and-back through KindPicker "Other" (type null, liveType falls back to the stored type) leaves a status derived for another type, so the save demotes a Searching tenant or un-parks a Parked landlord (A1, B1). | ACCEPT - the form tracks the type its Status was last derived for (`statusType`); a non-null kind change re-derives only when it differs from `statusType`; back to the stored type restores the stored status. New tests: tenant -> landlord -> Other -> tenant writes no status; Parked landlord the same. | YES (mechanism + tests) |
+| P2 | The `contact.updated` re-read (S2.9) and the 409 re-read (S4.3) are eventually consistent and can overwrite fresh state right after the operator's own write (A2). | ACCEPT - both call `getContact(id, signal, { consistent: true })`; tests assert the option. | YES (mechanism) |
+| P3 | AR17 not carried into the slice text: S1.1 commits a red tree (no inbox.integration flip), S3.4 Step 1 says STOP, S3 contradiction 2 says the opposite (A3, B2). | ACCEPT - restructured: S1.1 applies S3.4 Steps 2-5 verbatim IN PLACE OF its own step 1f, and its files/commands/commit include all four test files; S1.1 step 3f keeps only the import, type and order-object edits (the two docblock lines it also rewrote belong to S3.4 Step 6); S3.4 drops Steps 1-5 and is a comment-only task (exempt from the RED rule, verified by the GREEN run). AR17 rewritten. | YES (ordering) |
+| P4 | S3.4 Step 6 Edits C/D and Step 3 Edit F anchor on text S1.1 already rewrote; the pre-deploy cursor pins lose their anchor (A4). | Folded into P3 (Edit F now runs inside S1.1 on the original text). | - |
+| P5 | S2.4 writes the `\u2192` escape in test code; Edit decodes it (A5, B3 - B reproduced the decode). | ACCEPT - S2.4 uses `String.fromCharCode(0x2192)` as S1 does. | no |
+| P6 | Three "prints nothing" greps in S4.3/S4.4 also match `setTenantStatus` and can never pass (A6). | ACCEPT - patterns fixed. | no |
+| P7 | S1.3 labels a case PIN that is red before S1.3 (A7). | ACCEPT - relabelled RED. | no |
+| P8 | S5.1 says four cases fail, lists three (A8). | ACCEPT - "three". | no |
+| P9 | AR21 narrows D4.4: on the Contacts list an Inactive tenant gets a muted badge, an Inactive caseworker or unknown plain text (A9). | ACCEPT the record; AR21 stands as the plan's default (no new badges on those lists; they show plain text today) and goes to Cameron at the launch gate as a planner call. | no (pending Cameron) |
+| P10 | W4 omits services/inboundEmail.ts and routes/unmatchedEmail.ts (A10; A verified neither writes status). | ACCEPT - listed in W4 as checked. | no |
+| P11 | S1.3 lists "tenant re-typed to landlord" label as RED, but the fake repo returns the live object so it already passes (B4). | ACCEPT - relabelled PIN with the reason; the label-by-new-type RED is carried by P7's case. | no |
+| P12 | The tenant-target follow-up `setTenantStatus` reads the type eventually consistently; a stale read 400s or 409s after the PATCH committed (B5). | ACCEPT - the transition route reads the contact with `{ consistentRead: true }`; test asserts it. | YES (small) |
+| P13 | Comments still describing (unknown, active) as live have no owner: inboxFilters.ts:78-80, measure-unread-contact-coverage.ts ~661-664 (B6). | ACCEPT - inboxFilters.ts to S3.4 Step 7, the measure script to S1.2. | no |
+| P14 | The spec file still says DRAFT though the plan says APPROVED (B7). | ACCEPT - planner stamps the spec status line (records fix). | no |
+| P15 | AR19's S1 report entry has no step and is missing from the S1.6 checklist (B8). | ACCEPT - step added to S1.2, item added to S1.6. | no |
+
+Round 1 changed decisions (P1, P2, P3, P12), so round 2 runs. Continued
+reviewer: A (more accepted unique findings), handed B's report.
+Note: commit bce89000's message names AR15-AR24, but those rulings landed
+in 3d6e9ec9 (an Edit had failed); the plan text is what counts.

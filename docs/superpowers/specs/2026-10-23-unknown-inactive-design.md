@@ -1,12 +1,12 @@
 # Inactive for every contact type - design
 
-Status: DRAFT revision 3 (2026-10-23), at Cameron's spec gate.
+Status: APPROVED revision 3 (2026-10-23). Cameron: "The spec looks good, so let's continue."
 - Rev 2 folds in design review round 1: two reviewers, 21 merged findings,
   19 accepted, 1 accepted as wording only, 1 kept as a watch item.
 - Rev 3 folds in round 2 (the continued reviewer): 11 findings, 9 accepted
   as precision edits, 2 concessions noted. Round 2 changed no decision, so it
   is the terminal round.
-- Next: Cameron's approval.
+- Approved by Cameron 2026-10-23; next: the plan (docs/superpowers/plans/2026-10-23-unknown-inactive-plan.md).
 
 Adjudications:
 `docs/superpowers/reviews/2026-10-23-unknown-inactive/design-review/adjudications.md`.

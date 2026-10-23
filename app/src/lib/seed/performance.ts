@@ -553,7 +553,8 @@ function buildContact(index: number, anchorMs: number, counts: ContactTypeCounts
         ? LANDLORD_STATUSES[ordinal % LANDLORD_STATUSES.length]!
         : ordinal % 2 === 0
           ? 'needs_review'
-          : 'active';
+          // unknown alternates the two statuses it can hold (UNKNOWN_STATUSES, tracker #30).
+          : 'inactive';
   return {
     contactId: performanceId('contact', index),
     type,

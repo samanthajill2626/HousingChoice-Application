@@ -212,11 +212,19 @@ const LANDLORD_STATUS_DURATION_DAYS: Readonly<Record<string, number>> = {
   parked: 0,
 };
 
-// Non-tenant/non-landlord contacts (team_member/unknown): needs_review → active.
+// Non-tenant/non-landlord contacts (partner/team_member/unknown):
+// partner and team_member walk needs_review -> active; unknown has no active
+// (UNKNOWN_STATUSES, tracker #30), so its linear ladder is needs_review alone.
+// Inactive is a BRANCH off needs_review for all three: an Inactive contact's
+// trail is needs_review -> inactive and never passes through active.
 const OTHER_LINEAR = ['needs_review', 'active'] as const;
+const UNKNOWN_LINEAR = ['needs_review'] as const;
+const OTHER_OVERRIDES: ReadonlySet<string> = new Set(['inactive']);
+const OTHER_BRANCH_FROM = 'needs_review';
 const OTHER_STATUS_DURATION_DAYS: Readonly<Record<string, number>> = {
   needs_review: 2,
   active: 0,
+  inactive: 0,
 };
 
 // Listing progression (setup → available → under_application → finalizing → occupied;
@@ -458,9 +466,9 @@ export function standaloneContactHistory(contact: Record<string, unknown>): Audi
     branchFrom = LANDLORD_BRANCH_FROM;
     durations = LANDLORD_STATUS_DURATION_DAYS;
   } else {
-    linear = OTHER_LINEAR;
-    overrides = new Set<string>();
-    branchFrom = 'needs_review';
+    linear = type === 'unknown' ? UNKNOWN_LINEAR : OTHER_LINEAR;
+    overrides = OTHER_OVERRIDES;
+    branchFrom = OTHER_BRANCH_FROM;
     durations = OTHER_STATUS_DURATION_DAYS;
   }
 

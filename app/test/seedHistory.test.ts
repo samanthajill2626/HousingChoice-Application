@@ -1234,3 +1234,28 @@ describe.skipIf(!reachable)('seed history — generator ↔ real statusTransitio
     }
   }, 60_000);
 });
+
+// Tracker #30 (D1): Inactive is a BRANCH off Needs review for partner,
+// team_member and unknown - the seeded trail never passes through Active, which
+// an unknown contact can no longer hold.
+describe('seed history - non-tenant Inactive trails (tracker #30)', () => {
+  const trail = (contact: Record<string, unknown>) =>
+    standaloneContactHistory({ contactId: 'c-hist', created_at: '2026-06-01T00:00:00.000Z', ...contact })
+      .map((row) => [row.payload['from'], row.payload['to']]);
+
+  it.each(['partner', 'team_member', 'unknown'])('an Inactive %s branches straight from needs_review', (type) => {
+    expect(trail({ type, status: 'inactive' })).toEqual([['needs_review', 'inactive']]);
+  });
+
+  it.each(['partner', 'team_member'])('(PIN) an Active %s keeps its needs_review -> active trail', (type) => {
+    expect(trail({ type, status: 'active' })).toEqual([['needs_review', 'active']]);
+  });
+
+  it('an (unknown, active) contact - no longer a legal pair - gets no trail', () => {
+    expect(trail({ type: 'unknown', status: 'active' })).toEqual([]);
+  });
+
+  it.each(['partner', 'team_member', 'unknown'])('(PIN) a needs_review %s gets no trail', (type) => {
+    expect(trail({ type, status: 'needs_review' })).toEqual([]);
+  });
+});

@@ -39,6 +39,7 @@ import {
   type PerformanceSeedInput,
 } from '../src/lib/seed/performance.js';
 import { isCaseworker } from '../src/lib/caseworkers.js';
+import { statusAllowlistFor } from '../src/lib/statusModel.js';
 import { unitContacts, type UnitItem } from '../src/repos/unitsRepo.js';
 
 type Row = Record<string, unknown>;
@@ -197,4 +198,35 @@ describe('the seed checker itself', () => {
       'tours t-x: tenantId c-x is typed landlord, not tenant',
     ]);
   });
+});
+
+// Tracker #30 (D1). Seeds are raw puts, so no route allowlist runs for them:
+// a seed could store a (type, status) pair the app refuses - (unknown, active)
+// above all. Checked for the three types whose lists this change touched; the
+// extra world generates enough contacts (300 -> 3 unknowns) for the
+// performance generator's second unknown to exist.
+describe('seeded partner, team_member and unknown statuses are legal for their type (tracker #30)', () => {
+  const worlds: Readonly<Record<string, readonly Tables[]>> = {
+    ...WORLDS,
+    'performance-300-contacts': [SEED, performanceTables({ contacts: 300 })],
+  };
+  for (const [world, layers] of Object.entries(worlds)) {
+    it(`${world}: every partner, team_member and unknown contact holds a status from its own list`, () => {
+      const illegal: string[] = [];
+      let checked = 0;
+      for (const [id, contact] of byId(layers, 'contacts', 'contactId')) {
+        const type = String(contact['type']);
+        if (type !== 'partner' && type !== 'team_member' && type !== 'unknown') continue;
+        const status = contact['status'];
+        if (status === undefined) continue;
+        checked += 1;
+        if (typeof status !== 'string' || !statusAllowlistFor(type).includes(status)) {
+          illegal.push(`contacts ${id}: (${type}, ${String(status)})`);
+        }
+      }
+      expect(illegal, `${world} illegal pairs`).toEqual([]);
+      // Not vacuous: every world carries at least the lean partner.
+      expect(checked, `${world} contacts checked`).toBeGreaterThan(0);
+    });
+  }
 });

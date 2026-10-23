@@ -980,3 +980,14 @@ describe('validatePerformanceConversation', () => {
     expect(() => validatePerformanceConversation({ ...relay!, participant_phone: '+15550000000' })).toThrow('conversation');
   });
 });
+
+// Tracker #30 (D1): an unknown contact has no active status, so the generator
+// alternates the two statuses an unknown contact CAN hold. 300 contacts makes
+// 3 unknowns (resolvedContactTypeCounts: floor(300 / 100)).
+describe('performance seed unknown contacts (tracker #30)', () => {
+  it('alternates needs_review / inactive and never seeds an active unknown', () => {
+    const { tables } = generatePerformanceSeed(resolvePerformanceSeedConfig(zeroWorld({ contacts: 300 }), ANCHOR));
+    const unknowns = tables.contacts.filter((row) => row.type === 'unknown');
+    expect(unknowns.map((row) => row.status)).toEqual(['needs_review', 'inactive', 'needs_review']);
+  });
+});

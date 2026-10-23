@@ -1766,6 +1766,35 @@ describe('ContactEditForm - one status list per type and the type-change rules (
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith(searching));
   });
 
+  // Plan S4.4 clarification 3 (code review R1 FW1-5, SPEC-F2): porting is
+  // writable only through setTenantStatus, so a Porting tick on a type change
+  // to tenant forces the follow-up write even when the field keeps the
+  // Onboarding the server's auto-advance writes.
+  it('a type change to tenant with Porting ticked and Onboarding kept: the PATCH, then ONE setTenantStatus carrying porting', async () => {
+    const user = userEvent.setup();
+    const onSaved = vi.fn();
+    updateContact.mockResolvedValue({ ...UNKNOWN_INACTIVE, type: 'tenant', status: 'onboarding' });
+    const porting = { ...UNKNOWN_INACTIVE, type: 'tenant' as const, status: 'onboarding', porting: true };
+    setTenantStatus.mockResolvedValue(porting);
+    render(<ContactEditForm contact={UNKNOWN_INACTIVE} onClose={vi.fn()} onSaved={onSaved} />);
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    await user.click(screen.getByRole('button', { name: 'Tenant' }));
+    expect(statusSelect().value).toBe('onboarding');
+    await user.click(screen.getByRole('checkbox', { name: /Porting/i }));
+    await user.click(save());
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(porting));
+    expect(updateContact).toHaveBeenCalledTimes(1);
+    expect(updateContact).toHaveBeenCalledWith('u9', { type: 'tenant' });
+    expect(setTenantStatus).toHaveBeenCalledTimes(1);
+    expect(setTenantStatus).toHaveBeenCalledWith('u9', {
+      toStatus: 'onboarding',
+      source: 'manual',
+      porting: true,
+      expectedType: 'tenant',
+    });
+    expect(updateContact.mock.invocationCallOrder[0]!).toBeLessThan(setTenantStatus.mock.invocationCallOrder[0]!);
+  });
+
   it('a type change from an Inactive unknown contact to partner shows Active and the PATCH carries it', async () => {
     const user = userEvent.setup();
     updateContact.mockResolvedValue({ ...UNKNOWN_INACTIVE, type: 'partner', status: 'active' });

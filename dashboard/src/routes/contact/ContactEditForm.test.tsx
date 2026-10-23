@@ -1943,11 +1943,14 @@ describe('ContactEditForm - one status list per type and the type-change rules (
     expect(updateContact).not.toHaveBeenCalled();
   });
 
+  // Code review R2 FW2-2 (R2-6): after this 409 Save stays disabled until the
+  // form is reopened (closing unmounts it), so the copy's "Reload the
+  // contact" is the only way forward; Cancel still closes.
   it.each([
     ['with a field edit (the field PATCH lands first)', true],
     ['with the status alone (no field PATCH)', false],
   ] as const)(
-    'a 409 contact_type_changed on the status write, %s: says so, never the generic error, and keeps the form open on its draft',
+    'a 409 contact_type_changed on the status write, %s: says so, never the generic error, keeps the draft and disables Save; Cancel closes',
     async (_label, editName) => {
       const user = userEvent.setup();
       const onClose = vi.fn();
@@ -1977,9 +1980,54 @@ describe('ContactEditForm - one status list per type and the type-change rules (
       expect(onClose).not.toHaveBeenCalled();
       expect(screen.getByLabelText(/First name/i)).toHaveValue(editName ? 'Samuel' : 'Sam');
       expect(statusSelect().value).toBe('inactive');
-      expect(save()).toBeEnabled();
+      expect(save()).toBeDisabled();
+      const cancel = screen.getByRole('button', { name: 'Cancel' });
+      expect(cancel).toBeEnabled();
+      await user.click(cancel);
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(setTenantStatus).toHaveBeenCalledTimes(1);
+      expect(updateContact).toHaveBeenCalledTimes(editName ? 1 : 0);
     },
   );
+
+  // R2-6's interleaving: the draft re-types an unknown contact to Tenant with
+  // Searching; the PATCH lands, a colleague re-types the contact before the
+  // status write, which 409s. A second Save would diff against the contact
+  // as opened and re-send { type: 'tenant' } (the PATCH carries no type
+  // fence) over the colleague's change, and its status write would succeed.
+  it('a 409 contact_type_changed after a draft type change: the copy, the draft kept, Save disabled and no second write; Cancel closes', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    const onSaved = vi.fn();
+    updateContact.mockResolvedValue({ ...UNKNOWN_INACTIVE, type: 'tenant', status: 'onboarding' });
+    setTenantStatus.mockRejectedValue(
+      new ApiError(409, 'contact_type_changed', 'contact_type_changed', { error: 'contact_type_changed' }),
+    );
+    render(<ContactEditForm contact={UNKNOWN_INACTIVE} onClose={onClose} onSaved={onSaved} />);
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    await user.click(screen.getByRole('button', { name: 'Tenant' }));
+    await user.selectOptions(statusSelect(), 'searching');
+    await user.click(save());
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(CONTACT_TYPE_CHANGED_SAVE_COPY);
+    expect(updateContact).toHaveBeenCalledWith('u9', { type: 'tenant' });
+    expect(setTenantStatus).toHaveBeenCalledWith('u9', {
+      toStatus: 'searching',
+      source: 'manual',
+      expectedType: 'tenant',
+      porting: false,
+    });
+    expect(onSaved).not.toHaveBeenCalled();
+    // The draft stays: the Tenant pick, on Searching.
+    expect(statusSelect().value).toBe('searching');
+    expect(save()).toBeDisabled();
+    // Nor does a submit by another route (Enter in a field) write again.
+    fireEvent.submit(document.getElementById('contact-edit-form')!);
+    expect(updateContact).toHaveBeenCalledTimes(1);
+    expect(setTenantStatus).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
 
   it('(PIN) a Parked landlord keeps its park reason across an unrelated-field save', async () => {
     const user = userEvent.setup();

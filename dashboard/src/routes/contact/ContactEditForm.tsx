@@ -106,13 +106,18 @@ export const CASEWORKER_USE_CONVERSION = 'To make this contact a caseworker, use
 export const DEPOSIT_CONFLICT_COPY =
   "A deposit can be one month's rent or a fixed amount, not both. Reload the landlord and try again.";
 
-/** Code review R1 FW1-1: the save's status write answered 409
- *  contact_type_changed - a colleague re-typed the contact while this form
- *  was open, and the Status list it offers is the OPENED type's, so the route
- *  wrote no status. It claims nothing about the other fields: a field PATCH
- *  that ran first may have saved them, or there was none. A retry from this
- *  form would send the old type again, so the copy sends staff to a fresh
- *  read. */
+/** Code review R1 FW1-1 (docblock corrected in R2 FW2-2): the save's status
+ *  write answered 409 contact_type_changed - the stored type is no longer the
+ *  one this form's Status list was built for (`statusType`: the type as
+ *  opened, or the type the draft changed it to) because a colleague re-typed
+ *  the contact, so the route wrote no status. It claims nothing about the
+ *  other fields: a field PATCH that ran first may have saved them (a draft's
+ *  type change included), or there was none. The form then disables Save
+ *  until it is reopened: a retry would send the same expectedType into
+ *  another 409 or, for a draft that changed the type, re-send that type in
+ *  the field PATCH - which has no type fence - over the colleague's re-type,
+ *  and its status write would then succeed. So the copy sends staff to a
+ *  fresh read. */
 export const CONTACT_TYPE_CHANGED_SAVE_COPY =
   "This contact's type changed while you were editing, so its status was not saved. Reload the contact to pick a status for its new type.";
 
@@ -317,6 +322,10 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
   const [zip, setZip] = useState(initAddr.zip);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Code review R2 FW2-2: a save's status write answered 409
+  // contact_type_changed. Save then stays off until the form is reopened
+  // (closing unmounts it) - see CONTACT_TYPE_CHANGED_SAVE_COPY.
+  const [retypedUnderForm, setRetypedUnderForm] = useState(false);
 
   // Build the PATCH from only the fields the user actually changed. `org` is
   // the org fields as Save settled them (settleTypedText).
@@ -510,7 +519,9 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
 
   async function onSubmit(e: React.FormEvent): Promise<void> {
     e.preventDefault();
-    if (saving) return;
+    // retypedUnderForm: a submit by another route (Enter in a field) is as
+    // closed as the disabled Save button.
+    if (saving || retypedUnderForm) return;
     const org = settleTypedText();
     if (org === null) return; // refused: the picker says why
     const result = buildPatch(org);
@@ -584,9 +595,12 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
         // the generic save error below.
         setError(DEPOSIT_CONFLICT_COPY);
       } else if (err instanceof ApiError && err.status === 409 && err.code === 'contact_type_changed') {
-        // FW1-1: the status write found the contact re-typed since this form
-        // opened, so it wrote nothing. Say so; keep the draft.
+        // FW1-1: the status write found the stored type is no longer the one
+        // this form's Status list was built for (a colleague re-typed the
+        // contact), so it wrote nothing. Say so; keep the draft. FW2-2: and
+        // turn Save off until the form is reopened (see the copy's docblock).
         setError(CONTACT_TYPE_CHANGED_SAVE_COPY);
+        setRetypedUnderForm(true);
       } else {
         // A type change that would orphan open records (spec 2026-10-12 D2):
         // keep the draft and show what blocks it beside the kind picker.
@@ -604,9 +618,11 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
   const currentKindLabel = savedRole
     ? `${savedRole} - ${CONTACT_TYPE_LABEL[base.type]}`
     : CONTACT_TYPE_LABEL[base.type];
-  // Save is blocked only while a type change is mid-flight with no base picked
-  // (KindPicker "Other" before choosing Tenant/Landlord ? kind.type null).
-  const canSave = !saving && kind.type !== null;
+  // Save is blocked while a type change is mid-flight with no base picked
+  // (KindPicker "Other" before choosing Tenant/Landlord ? kind.type null),
+  // and from a save's 409 contact_type_changed until the form is reopened
+  // (retypedUnderForm, code review R2 FW2-2).
+  const canSave = !saving && kind.type !== null && !retypedUnderForm;
 
   // Status options for the type the field was last derived for - EXACTLY the
   // header dropdown's list (statusOptionsFor, spec 2026-10-23 D3); no off-list

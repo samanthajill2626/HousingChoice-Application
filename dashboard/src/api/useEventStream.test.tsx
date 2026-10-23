@@ -3,7 +3,7 @@ import { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventStreamProvider } from './EventStreamProvider.js';
 import { useEventStream, type EventStreamHandlers } from './useEventStream.js';
-import type { PlacementUpdatedEvent, ConversationUpdatedEvent } from './types.js';
+import type { PlacementUpdatedEvent, ConversationUpdatedEvent, ContactUpdatedEvent } from './types.js';
 
 // A minimal in-memory EventSource double: records the URL it was opened with,
 // lets a test dispatch named events, and tracks close(). One live instance at a
@@ -145,6 +145,23 @@ describe('EventStreamProvider + useEventStream', () => {
     });
     expect(onConversationUpdated).toHaveBeenCalledWith(conv);
     expect(onPlacementUpdated).toHaveBeenCalledWith(kase);
+  });
+
+  it('dispatches contact.updated to onContactUpdated (unknown-inactive AR3)', () => {
+    const onContactUpdated = vi.fn();
+    const onSuggestionUpdated = vi.fn();
+    render(
+      <EventStreamProvider>
+        <Sub onContactUpdated={onContactUpdated} onSuggestionUpdated={onSuggestionUpdated} />
+      </EventStreamProvider>,
+    );
+    const event: ContactUpdatedEvent = { contactId: 'c-1' };
+    act(() => {
+      FakeEventSource.instances[0]?.emit('contact.updated', event);
+    });
+    expect(onContactUpdated).toHaveBeenCalledWith(event);
+    // Its own channel: never delivered as a suggestion event.
+    expect(onSuggestionUpdated).not.toHaveBeenCalled();
   });
 
   it('skips a subscriber opted out with enabled:false', () => {

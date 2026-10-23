@@ -2069,6 +2069,16 @@ export interface SuggestionUpdatedEvent {
   contactId: string;
 }
 
+/** GET /api/events 'contact.updated' payload (unknown-inactive spec D2, ruling
+ *  AR3). A contact's status or type changed - through the status transition
+ *  route (the header dropdown) or the contact PATCH (the edit form). Today and
+ *  the inbox refetch on it; the contact page re-reads the contact when
+ *  `contactId` is the one it shows. Mirrors app/src/lib/events.ts
+ *  ContactUpdatedEvent. ID-only - NO PII. */
+export interface ContactUpdatedEvent {
+  contactId: string;
+}
+
 /** GET /api/events 'ai_run.completed' payload (manual-extraction-trigger 4.4b).
  *  One extraction run finished - emitted for EVERY outcome, including the skips
  *  and failures `suggestion.updated` never reports, because those are exactly

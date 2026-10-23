@@ -856,9 +856,9 @@ interface CreateContactResult {
  * Bed" convenience string via `contactName` (the one true parser). Phone is
  * normalized to E.164 and rejected when it can't be canonicalized. A manual
  * create defaults status type-scoped (tenant -> 'onboarding', landlord ->
- * 'interested', else -> 'active') - the human entering it knows who it is,
- * unlike auto-capture stubs, which are 'needs_review'. An explicit status in
- * the body still wins.
+ * 'interested', unknown -> 'needs_review', else -> 'active') - the human
+ * entering a known type knows who it is, unlike auto-capture stubs, which are
+ * 'needs_review'. An explicit status in the body still wins.
  */
 function parseCreateBody(body: unknown): CreateContactResult | { error: string } {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) {

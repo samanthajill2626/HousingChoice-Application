@@ -14,6 +14,7 @@ Work map (build in order; plan section 2):
 - S5 dashboard inbox: Inactive tag, compareUnknownTabRows on the Unknown tab only
 - S6 e2e spec (spec test 8) + STATUS-MODEL.md / GLOSSARY.md + W3 record
 - S7 one main sync, five bare gates, S7-gates.md
+Launch: AUTO (Cameron 2026-10-23), planner watchdog every 55 minutes. AR21 default confirmed (Cameron did not pick badges).
 Watch items: plan section 3 W1-W8. In particular W1 (#31 has no branch as of 2026-10-23 - re-check at S3 and S7, read its PLAN not commits), W4 (any inbound writer that touches an existing contact's status is STOP-and-report), W6 (lean seed byte-stable), W8 (eventually consistent refetch - record only). Section 4 rulings AR1-AR24 win over slice text. AR21 (Contacts list non-tenant rows: plain-text status, no new badge) is the default; the planner relays any change from Cameron.
 Gates (bare, from the worktree, never piped; AGENTS.md "Required completion gates"):
 1. npm run typecheck  2. npm test  3. npm run smoke  4. npm run e2e

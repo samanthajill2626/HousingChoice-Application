@@ -21,7 +21,7 @@
 - Worktree: `W:\tmp\unknown-inactive`, branch `feat/unknown-inactive`, cut from
   main @916258ae. Issue `contacts-status-filter-tenants-only` committed @0957ed39.
   No node_modules yet (plan section 0 has the builder run `npm ci`).
-- NEXT STEP: Cameron answers the launch gate; then gate B and dispatch (or MANUAL handover).
+- NEXT STEP: gate B (compaction offer), then dispatch abt:build-orchestrator (AUTO) with mission-block.md verbatim, arm the 55-min watchdog, start the mirror.
 - Spec gate calls Cameron APPROVED: D7 team_member -> Active / unknown -> Needs
   review from Inactive; D8 "Type unknown"; D9 Inactive tag on every type's
   row; AI extraction keeps running for Inactive; same-type PATCH never resets

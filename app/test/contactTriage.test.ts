@@ -1083,7 +1083,7 @@ describe('PATCH /api/contacts/:contactId - per-type status lists (tracker #30)',
 // Tracker #30 (D7, AR10, AR11): a type change with no explicit status FROM
 // Inactive starts the new type's first step; both the auto-advance and the
 // normalize fallback run only on a REAL type change, so a same-type PATCH
-// never moves the status. D4.5: the status milestone is labelled by the type
+// never moves the status. D4.5: the status milestone is labeled by the type
 // the contact has AFTER the write.
 describe('PATCH /api/contacts/:contactId - type change from Inactive and same-type PATCH (tracker #30)', () => {
   const ARROW = String.fromCharCode(0x2192);
@@ -1110,7 +1110,7 @@ describe('PATCH /api/contacts/:contactId - type change from Inactive and same-ty
     world.activityEvents.filter((e) => e.type === 'contact_status_changed').map((e) => e.label);
   // The harness getById returns the LIVE contact object and update mutates it
   // in place (helpers/twilioWebhookHarness.ts), so the PATCH's pre-write
-  // `stored` would already carry the NEW type when the milestone is labelled.
+  // `stored` would already carry the NEW type when the milestone is labeled.
   // The real repo returns a copy; so do these reads (the snapshotReads pattern
   // above), which is what lets the label cases tell the new type from the
   // stored one.

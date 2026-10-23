@@ -408,7 +408,7 @@ export function createCaseworkerConversionService(
     } catch (err) {
       log.error({ err, contactId }, 'caseworker conversion: audit failed after the commit (make again repairs)');
     }
-    // R1-F12: labelled by the NEW type (partner -> "Active"), as the contact
+    // R1-F12: labeled by the NEW type (partner -> "Active"), as the contact
     // PATCH's own milestone is since tracker #30 (D4.5).
     if (!ctx.repair && ctx.priorStatus !== 'active') {
       try {

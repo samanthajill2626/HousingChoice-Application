@@ -2152,7 +2152,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // handler may auto-set `status` even when the client didn't send it; the
     // `!== stored.status` diff guard suppresses a no-op milestone in that case.
     if (typeof parsed.patch.status === 'string' && stored && parsed.patch.status !== priorStatus) {
-      // Tracker #30 D4.5: labelled by the type the contact has AFTER this write
+      // Tracker #30 D4.5: labeled by the type the contact has AFTER this write
       // (on a re-type, the NEW type's label map).
       const labelType = isContactType(newType) ? newType : stored.type;
       try {

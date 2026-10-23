@@ -6,7 +6,7 @@ severity: low
 status: open
 area: app/inbox
 created: 2026-08-26
-updated: 2026-09-25
+updated: 2026-10-23
 refs: app/src/routes/inbox.ts, app/src/lib/unknownQueue.ts, app/src/repos/contactsRepo.ts, dashboard/src/routes/inbox/useInbox.ts, app/test/inboxUnknownTab.test.ts
 ---
 
@@ -27,6 +27,23 @@ else" root, was closed 2026-09-02 by giving the cursor a deferral marker
 that marker names one row and does not carry a seen-set, so it changes nothing
 here. The reopen trigger below is unchanged: escalate when the live partition
 exceeds one page.
+
+**Re-read 2026-10-23 (unknown-inactive, tracker #30).** The second block is
+now `inactive`, not `active`: `active` is no longer legal for an unknown
+contact (`docs/superpowers/specs/2026-10-23-unknown-inactive-design.md` D1,
+D9). The mechanism below is unchanged with the names swapped - the COMMON
+action is now `needs_review -> inactive` (served on two pages; the
+dashboard's `appendPage` drops the second copy, so the stale Needs-triage
+copy wins until the next head read) and the RARE one `inactive ->
+needs_review` (served on no page). Read `active` below as `inactive`. The
+change adds no rows by itself, but Inactive is now the one-click set-aside
+and it does NOT drain the partition (only a re-type or a delete does,
+unknownQueue.ts:67-68), so the partition only grows and a status write
+between Load-more clicks is now routine. The trigger is NOT met on the
+recorded counts; nobody re-measured. Re-measure beside the W7 re-count. The
+dashboard's new Unknown-tab sort (Needs review first, then Inactive, each
+newest first, browser-side) orders what is loaded and changes nothing about
+which rows a walk serves.
 
 **Problem.** The Unknown tab pages the `(type='unknown')` byTypeStatus partition
 as an ordered sequence of `(type, status)` BLOCKS - `needs_review` first, then

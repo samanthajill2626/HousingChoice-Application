@@ -82,7 +82,7 @@ export interface ResolvedContact {
    * last-heard-from (spec 5.3): the contact's lifecycle status, for the review
    * row's StatusBadge kind="tenant". TENANT rows only - the resolver is
    * tenant-fenced and resolveSeeds omits it for a partner seed (a partner's
-   * needs_review | active is not a tenant status).
+   * needs_review | active | inactive is not a tenant status).
    */
   status?: string;
   /** last-heard-from: contact.last_heard_from_at (any type), for the review

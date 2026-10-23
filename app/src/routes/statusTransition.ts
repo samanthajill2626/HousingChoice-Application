@@ -3,7 +3,7 @@
 // the placements/units/contacts authz posture; the /api mount supplies the gate).
 //
 //   POST  /api/placements/:placementId/transition  { toStage, source, reason?, lostReason?, finalRent?, inspectionOutcome? } → { placement }
-//   PATCH /api/contacts/:contactId/tenant-status { toStatus, source, reason?, porting? }        → { contact }
+//   PATCH /api/contacts/:contactId/tenant-status { toStatus, source, reason?, porting?, expectedType? } -> { contact }
 //   PATCH /api/units/:unitId/listing-status      { toStatus, source, reason? }                  → { unit }
 //   GET   /api/placements/:placementId/history                                                  → { history }
 //
@@ -31,7 +31,7 @@ import {
   createPlacementDeadlinesRepo,
   type PlacementDeadlinesRepo,
 } from '../repos/placementDeadlinesRepo.js';
-import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
+import { createContactsRepo, type ContactsRepo, type ContactType } from '../repos/contactsRepo.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
 import {
@@ -70,6 +70,22 @@ export interface StatusTransitionRouterDeps {
 
 const MAX_HISTORY_LIMIT = 100;
 const DEFAULT_HISTORY_LIMIT = 50;
+
+/**
+ * Every ContactType as the keys of a Record, so a type added later that is not
+ * listed here is a COMPILE error (the services/orgRecords.ts idiom).
+ */
+const CONTACT_TYPE_KEYS: Record<ContactType, true> = {
+  tenant: true,
+  landlord: true,
+  partner: true,
+  team_member: true,
+  unknown: true,
+};
+
+function isContactType(value: unknown): value is ContactType {
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(CONTACT_TYPE_KEYS, value);
+}
 
 export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
@@ -260,6 +276,13 @@ export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = 
       res.status(400).json({ error: 'porting must be a boolean' });
       return;
     }
+    // The type the CLIENT built its status list from (code review R1 FW1-1):
+    // optional, so an API caller that omits it keeps the stored-type check
+    // below as its only check.
+    if (b['expectedType'] !== undefined && !isContactType(b['expectedType'])) {
+      res.status(400).json({ error: 'expectedType must be a contact type' });
+      return;
+    }
 
     // TYPE-SCOPED status guard (docs/issues/landlord-lead-status-and-park.md):
     // this route handles ALL contact types, so validate `toStatus` against the
@@ -274,6 +297,20 @@ export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = 
     const stored = await contacts.getById(contactId, { consistentRead: true });
     if (!stored) {
       res.status(404).json({ error: 'contact_not_found' });
+      return;
+    }
+    // FW1-1 (extends ruling AR4 to the window before this request): the client
+    // picked `toStatus` from the list of the type it showed. A contact re-typed
+    // since then is the same 409 as a re-type under the write below, decided
+    // BEFORE the allowlist check so a pick that happens to be legal for the
+    // new type is never written onto it. Nothing is written, audited,
+    // timelined or emitted.
+    if (b['expectedType'] !== undefined && b['expectedType'] !== stored.type) {
+      log.info(
+        { contactId, expectedType: b['expectedType'], storedType: stored.type },
+        'tenant status refused: the contact type changed since the client read it',
+      );
+      res.status(409).json({ error: 'contact_type_changed' });
       return;
     }
     const allow = statusAllowlistFor(stored.type);

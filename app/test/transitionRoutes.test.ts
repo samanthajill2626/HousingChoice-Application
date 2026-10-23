@@ -381,6 +381,122 @@ describe('status-model transition routes', () => {
         expect(notified).toEqual([]);
       });
     });
+
+    // Code review R1 FW1-1 (ADV-1), extending ruling AR4: the client names the
+    // type its status list was built from (`expectedType`). A contact re-typed
+    // since the page or form showed that list is 409 contact_type_changed,
+    // decided BEFORE the allowlist check - so a pick that happens to be legal
+    // for the new type is never written onto it - and nothing is written.
+    // Absent: the route decides by the stored type alone (API callers).
+    describe("the client's expectedType (FW1-1)", () => {
+      let notified: unknown[];
+
+      beforeEach(async () => {
+        await world.contactsRepo.create({ contactId: 'pt-1', type: 'partner', status: 'active' });
+        await world.contactsRepo.create({ contactId: 'uk-1', type: 'unknown', status: 'needs_review' });
+        await world.contactsRepo.create({ contactId: 'll-2', type: 'landlord', status: 'interested' });
+        notified = [];
+        world.events.on('contact.updated', (payload) => notified.push(payload));
+      });
+
+      const statusAudits = (contactId: string) =>
+        world.auditEvents.filter((a) => a.entityKey === `contacts#${contactId}` && a.event_type === 'tenant_status_changed');
+      const statusMilestones = (contactId: string) =>
+        world.activityEvents.filter((e) => e.contactId === contactId && e.type === 'contact_status_changed');
+
+      it('a pick from a list built for another type is 409 contact_type_changed and writes nothing, even when the status is legal for the stored type', async () => {
+        const res = await authedPatch('/api/contacts/pt-1/tenant-status', {
+          toStatus: 'inactive',
+          source: 'manual',
+          expectedType: 'unknown',
+        });
+        expect(res.status).toBe(409);
+        expect(res.body).toEqual({ error: 'contact_type_changed' });
+        const stored = await world.contactsRepo.getById('pt-1');
+        expect(stored).toMatchObject({ type: 'partner', status: 'active' });
+        expect(stored?.status_source).toBeUndefined();
+        expect(statusAudits('pt-1')).toEqual([]);
+        expect(statusMilestones('pt-1')).toEqual([]);
+        expect(notified).toEqual([]);
+      });
+
+      it('the mismatch is decided before the allowlist check: a pick illegal for the stored type is 409, not 400', async () => {
+        const res = await authedPatch('/api/contacts/ll-2/tenant-status', {
+          toStatus: 'inactive',
+          source: 'manual',
+          expectedType: 'unknown',
+        });
+        expect(res.status).toBe(409);
+        expect(res.body).toEqual({ error: 'contact_type_changed' });
+        expect(await world.contactsRepo.getById('ll-2')).toMatchObject({ type: 'landlord', status: 'interested' });
+        expect(notified).toEqual([]);
+      });
+
+      it('(PIN) a matching expectedType writes as before: 200, the audit, the milestone, contact.updated', async () => {
+        const res = await authedPatch('/api/contacts/uk-1/tenant-status', {
+          toStatus: 'inactive',
+          source: 'manual',
+          expectedType: 'unknown',
+        });
+        expect(res.status).toBe(200);
+        expect(res.body.contact).toMatchObject({ type: 'unknown', status: 'inactive', status_source: 'manual' });
+        expect(statusAudits('uk-1')).toHaveLength(1);
+        expect(statusMilestones('uk-1')).toHaveLength(1);
+        expect(notified).toEqual([{ contactId: 'uk-1' }]);
+      });
+
+      it('400s an expectedType that is not a contact type and writes nothing', async () => {
+        for (const expectedType of ['robot', '', 42, null, ['unknown']]) {
+          const res = await authedPatch('/api/contacts/uk-1/tenant-status', {
+            toStatus: 'inactive',
+            source: 'manual',
+            expectedType,
+          });
+          expect(res.status, JSON.stringify(expectedType)).toBe(400);
+          expect(res.body, JSON.stringify(expectedType)).toEqual({ error: 'expectedType must be a contact type' });
+        }
+        expect(await world.contactsRepo.getById('uk-1')).toMatchObject({ type: 'unknown', status: 'needs_review' });
+        expect(statusAudits('uk-1')).toEqual([]);
+        expect(notified).toEqual([]);
+      });
+
+      it('(PIN) an absent expectedType keeps the route deciding by the stored type alone', async () => {
+        const res = await authedPatch('/api/contacts/pt-1/tenant-status', { toStatus: 'inactive', source: 'manual' });
+        expect(res.status).toBe(200);
+        expect(res.body.contact).toMatchObject({ type: 'partner', status: 'inactive' });
+      });
+
+      // The adversarial reviewer's stale-client interleaving, as regressions:
+      // the page or form showed an unknown contact's list, a colleague's
+      // "Mark as" PATCH re-typed it, then the stale Inactive pick arrives.
+      for (const [to, after] of [
+        ['tenant', 'onboarding'],
+        ['partner', 'active'],
+        ['landlord', 'interested'],
+      ] as const) {
+        it(`an unknown contact re-typed to ${to} under an open page: the stale Inactive pick is 409 and the ${to} stays ${after}`, async () => {
+          const retype = await authedPatch('/api/contacts/uk-1', { type: to });
+          expect(retype.status).toBe(200);
+          expect(retype.body.contact).toMatchObject({ type: to, status: after });
+          // The re-type's own milestone and contact.updated are not the pick's.
+          const milestonesBefore = statusMilestones('uk-1').length;
+          notified = [];
+
+          const res = await authedPatch('/api/contacts/uk-1/tenant-status', {
+            toStatus: 'inactive',
+            source: 'manual',
+            expectedType: 'unknown',
+          });
+
+          expect(res.status).toBe(409);
+          expect(res.body).toEqual({ error: 'contact_type_changed' });
+          expect(await world.contactsRepo.getById('uk-1')).toMatchObject({ type: to, status: after });
+          expect(statusAudits('uk-1')).toEqual([]);
+          expect(statusMilestones('uk-1')).toHaveLength(milestonesBefore);
+          expect(notified).toEqual([]);
+        });
+      }
+    });
   });
 
   // Tracker #30 (D1/D6): the route validates toStatus against the stored

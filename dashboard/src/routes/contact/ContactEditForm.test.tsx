@@ -1944,8 +1944,9 @@ describe('ContactEditForm - one status list per type and the type-change rules (
   });
 
   // Code review R2 FW2-2 (R2-6): after this 409 Save stays disabled until the
-  // form is reopened (closing unmounts it), so the copy's "Reload the
-  // contact" is the only way forward; Cancel still closes.
+  // form is reopened (closing unmounts it); Cancel still closes. The next
+  // opening is built from the contact the page re-reads on onStale (R3
+  // FW3-1, pinned in ContactDetail.test.tsx), or from the copy's reload.
   it.each([
     ['with a field edit (the field PATCH lands first)', true],
     ['with the status alone (no field PATCH)', false],

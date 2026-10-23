@@ -97,7 +97,11 @@ export function UnknownFile({
 
   return (
     <>
-      <Card title="Needs triage">
+      {/* Spec 2026-10-23 D8: "Needs triage" only while the contact is Needs
+          review; an Inactive one is not waiting on triage, so it reads "Type
+          unknown". The Mark as actions stay - staff still classify one when
+          they learn who it is - and the body copy is unchanged. */}
+      <Card title={contact.status === 'needs_review' ? 'Needs triage' : 'Type unknown'}>
         <p className={styles.note}>
           This contact hasn&apos;t been classified yet. Classify them as a Tenant,
           Landlord, Partner, Caseworker, or Property Manager to file them correctly and

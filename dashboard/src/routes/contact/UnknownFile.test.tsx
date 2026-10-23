@@ -35,12 +35,13 @@ function renderIt(opts: {
   triaging?: boolean;
   media?: CommsMediaItem[];
   triageError?: TriageError | null;
+  contact?: Contact;
 } = {}): void {
   render(
     <MemoryRouter>
       <ImageViewerProvider>
         <UnknownFile
-          contact={UNKNOWN}
+          contact={opts.contact ?? UNKNOWN}
           phones={[{ phone: '+15550100001', primary: true }]}
           placements={[]}
           units={[]}
@@ -228,5 +229,34 @@ describe('UnknownFile - a Mark as failure on the card (spec 2026-10-12 D2)', () 
   it('(PIN) shows nothing on the card without a failure', () => {
     renderIt();
     expect(within(card()).queryByRole('alert')).toBeNull();
+  });
+});
+
+// Spec 2026-10-23 D8 (copy: plan ruling AR7): the card reads "Needs triage"
+// only while the contact is Needs review; an Inactive one reads "Type
+// unknown". The Mark as actions stay and the body copy is unchanged.
+describe('UnknownFile - the card title follows the status (spec 2026-10-23 D8)', () => {
+  it('(PIN) reads Needs triage while the contact is Needs review', () => {
+    renderIt();
+    expect(screen.getByRole('heading', { name: 'Needs triage' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Type unknown' })).toBeNull();
+  });
+
+  it('reads Type unknown for an Inactive contact and keeps every Mark as action and the body copy', () => {
+    renderIt({ contact: { ...UNKNOWN, status: 'inactive' } });
+    const card = screen.getByRole('heading', { name: 'Type unknown' }).closest('section') as HTMLElement;
+    expect(screen.queryByRole('heading', { name: 'Needs triage' })).toBeNull();
+    for (const label of [
+      'Mark as Tenant',
+      'Mark as Landlord',
+      'Mark as Partner',
+      'Mark as Caseworker',
+      'Mark as Property Manager',
+    ]) {
+      expect(within(card).getByRole('button', { name: label })).toBeEnabled();
+    }
+    expect(within(card).getByText(/Tenant, Landlord, Partner, Caseworker, or Property Manager/)).toBeInTheDocument();
+    // The Details row names the status.
+    expect(screen.getByText('Inactive')).toBeInTheDocument();
   });
 });

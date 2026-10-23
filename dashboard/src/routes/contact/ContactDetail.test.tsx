@@ -588,6 +588,19 @@ describe('ContactDetail', () => {
     await screen.findByRole('button', { name: 'Contact status: Onboarding' });
   });
 
+  it('marking an unknown contact Inactive from the header retitles its card Type unknown; the Mark as actions stay (spec 2026-10-23 D8)', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(UNKNOWN);
+    setTenantStatus.mockResolvedValue({ ...UNKNOWN, status: 'inactive' });
+    renderAt('u9');
+    await user.click(await screen.findByRole('button', { name: 'Contact status: Needs review' }));
+    await user.click(screen.getByRole('menuitemradio', { name: 'Inactive' }));
+    const card = (await screen.findByRole('heading', { name: 'Type unknown' })).closest('section') as HTMLElement;
+    expect(screen.queryByRole('heading', { name: 'Needs triage' })).toBeNull();
+    expect(within(card).getByRole('button', { name: 'Mark as Tenant' })).toBeEnabled();
+  });
+
   it('renders the landlord file (Properties card) for a landlord', async () => {
     getContact.mockResolvedValue(LANDLORD);
     renderAt('L1');

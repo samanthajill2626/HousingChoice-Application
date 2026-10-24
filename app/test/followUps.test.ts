@@ -7,7 +7,7 @@ import { IncompleteBatchReadError, type ContactItem, type RecipientDisplay } fro
 import type { ListingSendItem } from '../src/repos/listingSendsRepo.js';
 import type { TourItem } from '../src/repos/toursRepo.js';
 import type { ListUnitsOpts, UnitItem, UnitsPage } from '../src/repos/unitsRepo.js';
-import { buildFollowUps, FOLLOW_UPS_UNIT_CAP, type FollowUpsDeps } from '../src/services/followUps.js';
+import { buildFollowUps, collectWaitingFollowUps, FOLLOW_UPS_UNIT_CAP, type FollowUpsDeps } from '../src/services/followUps.js';
 import { FLYER_SHARE_KEY, flyerAttemptKey, latestCountedShareKey } from '../src/lib/shareLedgerKeys.js';
 import { seedFlyerSignUp } from './helpers/listingSendSeed.js';
 import { createLogCapture } from './helpers/logCapture.js';
@@ -57,7 +57,12 @@ function depsFor(world: World, pageSize = Number.POSITIVE_INFINITY) {
     listByStatus: [] as ListUnitsOpts[],
     listByUnit: [] as string[],
     toursByUnit: [] as string[],
-    batches: [] as Array<{ ids: string[]; requireComplete: boolean | undefined }>,
+    batches: [] as Array<{
+      ids: string[];
+      requireComplete: boolean | undefined;
+      consistentRead: boolean | undefined;
+      opts: { requireComplete?: boolean; consistentRead?: boolean } | undefined;
+    }>,
     wholeItemBatches: [] as string[][],
   };
   const capture = createLogCapture();
@@ -87,8 +92,13 @@ function depsFor(world: World, pageSize = Number.POSITIVE_INFINITY) {
       },
     },
     contacts: {
-      async getRecipientDisplaysByIds(ids: string[], o?: { requireComplete?: boolean }) {
-        calls.batches.push({ ids: [...ids], requireComplete: o?.requireComplete });
+      async getRecipientDisplaysByIds(ids: string[], o?: { requireComplete?: boolean; consistentRead?: boolean }) {
+        calls.batches.push({
+          ids: [...ids],
+          requireComplete: o?.requireComplete,
+          consistentRead: o?.consistentRead,
+          opts: o === undefined ? undefined : { ...o },
+        });
         return new Map(world.contacts.filter((c) => ids.includes(c.contactId)).map((c) => [c.contactId, projectRecipient(c)] as const));
       },
       // Review ADV-2 guard: the builder never reads WHOLE contact items.
@@ -417,5 +427,67 @@ describe('flyer-leads D8: a signed_up pair never waits (followUps.ts derives thr
       },
     ]);
     expect(out.byUnit).toEqual({ u1: 1 });
+  });
+});
+
+// Today checklist (spec 2026-10-23-today-checklist-design.md 6.1, plan PR22 /
+// WI1): the Follow up CORE returns the waiting rows WITH the recipient
+// projection each was judged on (Today reads its quiet clock off it - one
+// contacts read, not two), and the Follow up tab's list is that core plus the
+// existing sort and byUnit, byte-identical.
+describe('collectWaitingFollowUps - the Follow up core (today-checklist PR22)', () => {
+  it('returns each waiting row with its recipient projection, last_reached_out_at included', async () => {
+    const w = emptyWorld();
+    w.units.push(unit('u1'));
+    const reached = ago(3 * HOUR);
+    w.contacts.push(tenant('c1', { last_reached_out_at: reached }), tenant('c2'));
+    w.sends.push(send('u1', 'c1', ago(2 * DAY)), send('u1', 'c2', ago(2 * HOUR)));
+    const { rows, truncated } = await collectWaitingFollowUps(depsFor(w).deps);
+    expect(truncated).toBe(false);
+    // c2 is still inside the tab's 24h QUIET window: the core applies the
+    // tab's own waiting filter, so Today's candidates are exactly the tab's.
+    expect(rows.map((r) => r.item.contactId)).toEqual(['c1']);
+    expect(rows[0]!.item).toEqual((await buildFollowUps(depsFor(w).deps)).items[0]);
+    expect(rows[0]!.recipient).toMatchObject({ contactId: 'c1', type: 'tenant', last_reached_out_at: reached });
+  });
+
+  it('passes consistentRead to the ONE contacts batch only when asked; requireComplete always; the tab passes exactly { requireComplete: true }', async () => {
+    const w = emptyWorld();
+    w.units.push(unit('u1'));
+    w.contacts.push(tenant('c1'));
+    w.sends.push(send('u1', 'c1', ago(2 * DAY)));
+    const asked = depsFor(w);
+    await collectWaitingFollowUps(asked.deps, { consistentRead: true });
+    expect(asked.calls.batches).toHaveLength(1);
+    expect(asked.calls.batches[0]!.opts).toStrictEqual({ requireComplete: true, consistentRead: true });
+    const plain = depsFor(w);
+    await collectWaitingFollowUps(plain.deps);
+    expect(plain.calls.batches[0]!.opts).toStrictEqual({ requireComplete: true });
+    const tab = depsFor(w);
+    await buildFollowUps(tab.deps);
+    expect(tab.calls.batches).toHaveLength(1);
+    expect(tab.calls.batches[0]!.opts).toStrictEqual({ requireComplete: true });
+  });
+
+  it('carries the walk truncation flag (more than 100 available properties)', async () => {
+    const w = emptyWorld();
+    for (let i = 0; i <= FOLLOW_UPS_UNIT_CAP; i += 1) w.units.push(unit(`u${String(i).padStart(3, '0')}`));
+    const { rows, truncated } = await collectWaitingFollowUps(depsFor(w).deps);
+    expect(truncated).toBe(true);
+    expect(rows).toEqual([]);
+  });
+
+  it('(PIN, WI1) buildFollowUps output is byte-identical whether or not the recipients carry last_reached_out_at', async () => {
+    const w = emptyWorld();
+    w.units.push(unit('u1'), unit('u2'));
+    w.contacts.push(tenant('c1'), tenant('c2', { last_heard_from_at: ago(3 * DAY) }));
+    w.sends.push(send('u1', 'c1', ago(2 * DAY)), send('u2', 'c2', ago(5 * DAY)));
+    const before = JSON.stringify(await buildFollowUps(depsFor(w).deps));
+    // The LATEST signal on each contact, so a reader that used it would move
+    // waitingSince or drop the row - the tab must do neither (spec 6.4).
+    for (const c of w.contacts) c.last_reached_out_at = ago(HOUR);
+    const after = JSON.stringify(await buildFollowUps(depsFor(w).deps));
+    expect(after).toBe(before);
+    expect(JSON.parse(after).items).toHaveLength(2);
   });
 });

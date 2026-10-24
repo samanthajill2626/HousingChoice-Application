@@ -14,6 +14,14 @@
 // been quiet past QUIET (isWaiting). Order: longest-waiting first (oldest waitingSince), so
 // a client grouping by property in first-appearance order gets groups ordered by
 // their oldest row. Logs carry ids/counts only - never names or phones.
+//
+// Today checklist (spec 2026-10-23-today-checklist-design.md 6.1, plan PR22):
+// steps 1-4 are the CORE, collectWaitingFollowUps, which returns each waiting
+// row together with the recipient projection it was judged on. Today's Quiet
+// shares section applies its own quiet rule to the core's rows
+// (services/quietShares.ts) - one contacts read, not two. buildFollowUps is
+// the core plus step 5; its output (the Follow up tab, GET
+// /api/broadcasts/follow-ups) is byte-for-byte what it was before the split.
 import { formatAddress } from '../lib/address.js';
 import { contactDisplayName } from '../lib/contactName.js';
 import type { Logger } from '../lib/logger.js';
@@ -107,7 +115,31 @@ function groupByTenant(tours: TourItem[]): Map<string, TourItem[]> {
   return out;
 }
 
-export async function buildFollowUps(deps: FollowUpsDeps): Promise<FollowUpsResponse> {
+/** One waiting row with the recipient projection it was judged on (spec
+ *  2026-10-23 6.1): Today's quiet rule reads `recipient.last_heard_from_at`
+ *  and `recipient.last_reached_out_at` off it. */
+export interface WaitingFollowUp {
+  item: FollowUpItem;
+  recipient: RecipientDisplay;
+}
+
+/**
+ * The Follow up CORE (spec 2026-10-23 6.1, plan PR22): the available-properties
+ * walk, the per-unit reads, the ONE requireComplete contacts batch and the
+ * waiting filter (steps 1-4 below), returning each waiting row with its
+ * recipient in walk order, UNSORTED, plus the walk's truncation flag. Every
+ * required read failing REJECTS, exactly as before (the tab answers 503; Today
+ * marks its section unavailable).
+ *
+ * `opts.consistentRead` reaches ONLY the contacts batch: Today passes true so a
+ * refetch fired by a staff-outreach stamp's event sees the stamp. The Follow up
+ * tab passes nothing, so its batch is exactly `{ requireComplete: true }` - its
+ * read is unchanged (spec 6.4).
+ */
+export async function collectWaitingFollowUps(
+  deps: FollowUpsDeps,
+  opts: { consistentRead?: boolean } = {},
+): Promise<{ rows: WaitingFollowUp[]; truncated: boolean }> {
   // 1. The available properties: KEPT (non-deleted) units, capped. The walk
   //    reads past the cap only far enough to learn whether a 101st exists.
   const kept: UnitItem[] = [];
@@ -158,10 +190,17 @@ export async function buildFollowUps(deps: FollowUpsDeps): Promise<FollowUpsResp
   //    silently drop a row (an OUTCOME, not a label). The recipient
   //    projection, not whole items (review ADV-2).
   const ids = [...new Set(perUnit.flatMap((u) => u.rows.map((r) => r.contactId)))];
-  const byId = ids.length > 0 ? await deps.contacts.getRecipientDisplaysByIds(ids, { requireComplete: true }) : new Map<string, RecipientDisplay>();
+  const byId =
+    ids.length > 0
+      ? await deps.contacts.getRecipientDisplaysByIds(ids, {
+          requireComplete: true,
+          ...(opts.consistentRead === true && { consistentRead: true }),
+        })
+      : new Map<string, RecipientDisplay>();
 
-  // 4. Keep the waiting rows.
-  const items: FollowUpItem[] = [];
+  // 4. Keep the waiting rows, each with the recipient it was judged on.
+  //    (Named `waiting`: the loop below destructures each unit's `rows`.)
+  const waiting: WaitingFollowUp[] = [];
   for (const { unit, rows, toursByTenant } of perUnit) {
     for (const row of rows) {
       if (typeof row.sentAt !== 'string') continue; // listByUnit returns LISTED rows only; a type guard
@@ -182,7 +221,8 @@ export async function buildFollowUps(deps: FollowUpsDeps): Promise<FollowUpsResp
       const eligible = isEligibleRecipient(contact);
       if (!isWaiting({ outcome, eligible, sentAt: row.sentAt, ...(lastHeardFromAt !== undefined && { lastHeardFromAt }), now: deps.now })) continue;
       const role = typeof contact.role === 'string' && contact.role.trim().length > 0 ? contact.role.trim() : undefined;
-      items.push({
+      // The same literal, key for key, as before the core split (WI1).
+      const item: FollowUpItem = {
         unitId: unit.unitId,
         unitLabel: formatAddress(unit.address) || unit.unitId,
         contactId: row.contactId,
@@ -195,10 +235,19 @@ export async function buildFollowUps(deps: FollowUpsDeps): Promise<FollowUpsResp
         interestedSupported: contact.type === 'tenant',
         interestedMode: interestedModeFor(unit),
         waitingSince: waitingSince(row.sentAt, lastHeardFromAt),
-      });
+      };
+      waiting.push({ item, recipient: contact });
     }
   }
+  return { rows: waiting, truncated };
+}
 
+/** The Follow up tab's list (spec 5.6): the core's rows, longest-waiting first,
+ *  plus the per-property counts. Byte-identical to the list before the core
+ *  split (plan WI1, pinned in followUps.test.ts and followUpsApi.test.ts). */
+export async function buildFollowUps(deps: FollowUpsDeps): Promise<FollowUpsResponse> {
+  const { rows, truncated } = await collectWaitingFollowUps(deps);
+  const items = rows.map((r) => r.item);
   // 5. Longest-waiting first; stable ties by unit then contact.
   items.sort(
     (a, b) =>

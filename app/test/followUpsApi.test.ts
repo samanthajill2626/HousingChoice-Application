@@ -73,4 +73,27 @@ describe('GET /api/broadcasts/follow-ups', () => {
     expect(res.status).toBe(503);
     expect(res.body).toEqual({ error: 'outcome_unavailable' });
   });
+
+  // WI1 (today-checklist plan): last_reached_out_at feeds ONLY Today's quiet
+  // clock. The Follow up tab keeps its inbound-only clock and its read (spec
+  // 6.4): a set field changes nothing in the body, and the tab's contacts
+  // batch never asks for a consistent read. Each recorded call is
+  // { contactIds, opts? } (S1.3); the requireComplete line proves the opts
+  // are really read, so the consistentRead line cannot pass vacuously (PR82).
+  it('(PIN, WI1) a set last_reached_out_at changes NOTHING in the body; the tab reads contacts without consistentRead', async () => {
+    const world = createFakeWorld();
+    seed(world);
+    const { app } = makeWebhookHarness({ world });
+    const before = await get(app);
+    expect(before.status).toBe(200);
+    for (const c of world.contacts) c.last_reached_out_at = new Date().toISOString();
+    const after = await get(app);
+    expect(after.status).toBe(200);
+    expect(after.text).toBe(before.text);
+    expect(world.recipientDisplayCalls.length).toBeGreaterThan(0);
+    for (const call of world.recipientDisplayCalls) {
+      expect(call.opts?.requireComplete).toBe(true);
+      expect(call.opts?.consistentRead).toBeUndefined();
+    }
+  });
 });

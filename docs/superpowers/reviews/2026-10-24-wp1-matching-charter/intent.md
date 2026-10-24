@@ -324,3 +324,13 @@ quality Sam trusts, then her review of it, then the two views.
   reply tenants by default behind a counted filter chip ("7 already sent -
   show"); on the TENANT anchor already-sent properties stay visible with
   their chip (round 5). Send history remains a model input either way.
+
+## Decisions, round 12 (Cameron, 2026-10-24)
+
+- D-model: Sonnet 5.5 for stage one ("probably the way to go for right
+  now"), model name per stage in configuration like the extraction model;
+  Opus 5.5 is the default for the refinement stage when it is added;
+  Haiku 5.5 stays out of WP1 (a cost cut to prove under the A1 section 9
+  model-comparison option first). Deterministic fake driver for e2e,
+  modeled on the extraction fake. Every run records cost from a price
+  table in configuration.

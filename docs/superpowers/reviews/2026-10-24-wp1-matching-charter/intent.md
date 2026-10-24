@@ -304,3 +304,23 @@ quality Sam trusts, then her review of it, then the two views.
   tenant record ("those are the two pages that I think we'll be able to
   send this from"). Open: where the ranked list is displayed (next
   question).
+
+## Decisions, round 11 (Cameron, 2026-10-24)
+
+- D-composer: ONE composer, TWO anchors - the existing Matching composer
+  (dashboard/src/routes/broadcasts) becomes the ranking surface. Send
+  property on a property record opens it anchored on the property (ranked
+  tenants replace the filter-only audience; pick one, a few or many);
+  Send property on a tenant record opens it anchored on the tenant (ranked
+  properties; pick one). Matching nav entry stays and asks which record to
+  start from. Cameron: "That matches what we're using right now for the
+  matching page today, although it really has been more focused on the
+  one-to-one sending. This can still be used the same way, but just has an
+  automated matching process."
+- D-rerun: re-running on the same property shows tenants already sent and
+  not yet replied as such: "Either they're not a fit, or we're filtering
+  them from the list on that matching page." Planner reading, pending his
+  flip: on the PROPERTY anchor the composer hides already-sent-awaiting-
+  reply tenants by default behind a counted filter chip ("7 already sent -
+  show"); on the TENANT anchor already-sent properties stay visible with
+  their chip (round 5). Send history remains a model input either way.

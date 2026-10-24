@@ -637,6 +637,11 @@ export function createFakeWorld(): FakeWorld {
   events.on('scheduled.updated', (payload) => emitted.push({ event: 'scheduled.updated', payload }));
   events.on('tour.updated', (payload) => emitted.push({ event: 'tour.updated', payload }));
   events.on('suggestion.updated', (payload) => emitted.push({ event: 'suggestion.updated', payload }));
+  // contact.updated (today-checklist PR7): a staff-outreach writer emits it
+  // after its stamp and its tests count events per send (spec 7.3), so it is
+  // recorded like the others. The exact-list pins that predate this were
+  // updated deliberately (contactTriage.test.ts).
+  events.on('contact.updated', (payload) => emitted.push({ event: 'contact.updated', payload }));
 
   /** The real repos throw the SDK's conditional-check error — mirror it. */
   const conditionalCheckFailed = (message: string): ConditionalCheckFailedException =>

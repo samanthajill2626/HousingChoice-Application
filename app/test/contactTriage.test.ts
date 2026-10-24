@@ -60,9 +60,10 @@ describe('GET /api/contacts/:contactId', () => {
 
 // unknown-inactive spec D2, ruling AR3: the PATCH emits ONE ID-only
 // contact.updated when it changed `status` or `type` - whether or not a
-// linked thread was touched - and none otherwise. The harness does not
-// record this event in world.emitted (that list is asserted exactly above
-// and below), so each case subscribes its own listener.
+// linked thread was touched - and none otherwise. Since today-checklist PR7
+// the harness also records it in world.emitted (the exact-list pins below
+// name it); these cases keep their own listener, which hears ONLY this
+// event.
 describe('PATCH /api/contacts/:contactId - contact.updated (AR3)', () => {
   function recordContactUpdated(world: ReturnType<typeof createFakeWorld>): unknown[] {
     const seen: unknown[] = [];
@@ -147,7 +148,10 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
     expect(world.conversations.get('conv-triage-1')?.participant_display_name).toBe('Keisha Jones');
 
     // LIVE EMIT (Cluster C): one conversation.updated carrying the new wire
-    // shape (type + the denormalized resolved name) for the touched thread.
+    // shape (type + the denormalized resolved name) for the touched thread,
+    // THEN the PATCH's one ID-only contact.updated (unknown-inactive AR3 -
+    // the type changed). The harness records contact.updated since
+    // today-checklist PR7, so this exact list now names both.
     expect(world.emitted).toEqual([
       {
         event: 'conversation.updated',
@@ -159,6 +163,7 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
           participant_display_name: 'Keisha Jones',
         },
       },
+      { event: 'contact.updated', payload: { contactId: 'contact-triage-1' } },
     ]);
 
     const audit = world.auditEvents.find((e) => e.event_type === 'contact_updated');
@@ -342,7 +347,7 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
     expect(world.conversations.get('conv-triage-1')?.type).toBe('tenant_1to1');
   });
 
-  it('setting type=team_member/unknown does NOT propagate a 1:1 type, auto-advance status, or emit', async () => {
+  it('setting type=team_member/unknown does NOT propagate a 1:1 type, auto-advance status, or emit conversation.updated', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnknownContactAndThread(world);
     const res = await request(app)
@@ -353,8 +358,11 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
     expect(world.conversations.get('conv-triage-1')?.type).toBe('unknown_1to1');
     // team_member/unknown do not resolve a 1:1 identity → no auto-advance.
     expect(res.body.contact.status).toBe('needs_review');
-    // No name known and no type flip → nothing to denormalize → no live emit.
-    expect(world.emitted).toHaveLength(0);
+    // No name known and no thread type flip - nothing to denormalize, so no
+    // conversation.updated. The contact's type DID change, so the PATCH's one
+    // ID-only contact.updated (unknown-inactive AR3) is the only event; the
+    // harness records it since today-checklist PR7.
+    expect(world.emitted).toEqual([{ event: 'contact.updated', payload: { contactId: 'contact-triage-1' } }]);
   });
 
   it('re-typing a tenant (with a lifecycle status) to team_member normalizes the now-invalid status', async () => {

@@ -215,8 +215,9 @@ describe('GET /api/events — stream mechanics', () => {
     // name asserts 1 === 2 and fails for a reason that has nothing to do with
     // the cleanup under test - which is why this one carries its own baseline.
     const aiRunBaseline = world.events.listenerCount('ai_run.completed');
-    // contact.updated is not recorded by the harness either (unknown-inactive
-    // keeps it out of world.emitted), so it carries its own baseline too.
+    // contact.updated: the harness records it too since today-checklist
+    // (plan PR7), so today this equals the shared baseline; it keeps its own
+    // so a change to the recorder list cannot break this cleanup test.
     const contactUpdatedBaseline = world.events.listenerCount('contact.updated');
 
     const client = await connectSse(port);

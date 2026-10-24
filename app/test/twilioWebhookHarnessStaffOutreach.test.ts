@@ -80,3 +80,15 @@ describe('harness conversationsRepo.getByIdConsistent (PR6)', () => {
     expect(await world.conversationsRepo.getByIdConsistent('conv-missing')).toBeUndefined();
   });
 });
+
+describe('harness event recorder records contact.updated (PR7)', () => {
+  it('a contact.updated emit lands in world.emitted, in order with the others', () => {
+    const world = createFakeWorld();
+    world.events.emit('contact.updated', { contactId: 'c-1' });
+    world.events.emit('contact.updated', { contactId: 'c-2' });
+    expect(world.emitted).toEqual([
+      { event: 'contact.updated', payload: { contactId: 'c-1' } },
+      { event: 'contact.updated', payload: { contactId: 'c-2' } },
+    ]);
+  });
+});

@@ -295,7 +295,9 @@ async function runAssertions(base, hasDevLogin) {
   assert(rangeTourCount >= 2, `tours in today+3d window ≥ 2 (today + tomorrow) (got ${rangeTourCount})`);
 
   // --- E. Today queue (TodayResponse: { items: TodayItem[], generatedAt }) ---
-  // items[].group is one of: needs_you_now | tours_today | unreplied | follow_ups
+  // items[].group is one of: needs_you_now | identify | tours_to_book |
+  // tours_today | follow_ups | ai_suggestions (Unreplied was removed, spec
+  // docs/superpowers/specs/2026-10-23-today-checklist-design.md).
   const todayStart = new Date(nowMs);
   todayStart.setUTCHours(0, 0, 0, 0);
   const todayEnd = new Date(nowMs);

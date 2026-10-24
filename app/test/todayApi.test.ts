@@ -81,14 +81,38 @@ describe('today action-queue API (BE6/C7)', () => {
   };
   const seedConversation = (conv: ConversationItem): ConversationItem => {
     // FLAG IFF COUNT>0, derived centrally (helpers/unreadIndexFake.ts): Today's
-    // unread sections become index-fed, and the sparse byUnread index keys on
-    // `unread_flag` - an unread fixture with no flag would make `unreplied` and
-    // the untriaged-inbound `needs_you_now` rows silently EMPTY. An explicit
+    // unread pass is index-fed, and the sparse byUnread index keys on
+    // `unread_flag` - an unread fixture with no flag would make the Identify
+    // rows from unread unknown threads silently EMPTY. An explicit
     // `unread_flag` on the fixture still wins.
     const item: ConversationItem = { ...unreadFlagFor(conv), ...conv };
     world.conversations.set(item.conversationId, item);
     return item;
   };
+  // Today checklist (spec 2026-10-23 4, plan PR26): the unread pass reads ONLY
+  // unknown_1to1 threads, so every unread-pass fixture is one. With no contact
+  // item for `contactId` the owner is UNRESOLVED and keeps its row (spec 5.2) -
+  // the vehicle for cases where the triage pass must not be able to rescue the
+  // live row by itself.
+  const seedUnknownThread = (o: {
+    conversationId: string;
+    contactId: string;
+    phone: string;
+    offset: number;
+    displayName?: string;
+  }): ConversationItem =>
+    seedConversation({
+      conversationId: o.conversationId,
+      participant_phone: o.phone,
+      ...(o.displayName !== undefined && { participant_display_name: o.displayName }),
+      participants: [{ contactId: o.contactId, phone: o.phone }],
+      status: 'open',
+      last_activity_at: iso(o.offset),
+      type: 'unknown_1to1',
+      ai_mode: 'auto',
+      created_at: iso(-900_000),
+      unread_count: 1,
+    } as ConversationItem);
 
   // ONE frozen base for every relative instant. This was `Date.now()` PER
   // CALL, which made looped fixtures nondeterministically collide: under
@@ -255,7 +279,7 @@ describe('today action-queue API (BE6/C7)', () => {
     });
   });
 
-  it('groups items into all four groups with refType/refId and populated who/why', async () => {
+  it('groups items into needs_you_now / tours_today / follow_ups with refType/refId and populated who/why; a known contact\'s unread thread is on none of them', async () => {
     seedTenant('t-1', 'Keisha', 'Brown');
     seedTenant('t-2', 'Maria', 'Lopez');
     seedTenant('t-3', 'Sam', 'Lee');
@@ -279,7 +303,8 @@ describe('today action-queue API (BE6/C7)', () => {
       next_deadline_type: 'follow_up',
       next_deadline_at: iso(-60_000),
     });
-    // unreplied: an open tenant_1to1 conversation with unread.
+    // A KNOWN contact's unread tenant_1to1 thread: Inbox only since the Today
+    // checklist (spec 2026-10-23 4) - it is no Today row.
     seedConversation({
       conversationId: 'conv-unreplied',
       participant_phone: '+15550100002',
@@ -305,15 +330,8 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(tours).toHaveLength(1);
     expect(tours[0]).toMatchObject({ refType: 'tour', refId: 'tour-today', who: 'Maria Lopez', why: 'Tour today' });
 
-    const unrep = byGroup('unreplied');
-    expect(unrep).toHaveLength(1);
-    // Links to the participant's CONTACT page, not /conversations/:id.
-    expect(unrep[0]).toMatchObject({
-      refType: 'contact',
-      refId: 'ct-pat',
-      who: 'Pat Nguyen',
-      why: 'Unreplied',
-    });
+    expect(items.some((i) => i.refId === 'ct-pat' || i.refId === 'conv-unreplied')).toBe(false);
+    expect(items.map((i) => i.group)).toEqual(['needs_you_now', 'tours_today', 'follow_ups']);
 
     const follow = byGroup('follow_ups');
     expect(follow).toHaveLength(1);
@@ -686,8 +704,11 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(stuckRow.why).toBe('Stuck — needs a check');
   });
 
-  // --- A2: partner_1to1 joins the Unreplied gate (parity with tenant/landlord) ---
-  it('a partner_1to1 conversation with unread surfaces in unreplied (A2 parity)', async () => {
+  // --- A2, re-pointed by the Today checklist (spec 2026-10-23 4) --------------
+  // partner_1to1 joined the Unreplied gate in A2. Unreplied is gone: a known
+  // contact's unread thread - tenant, landlord or partner - feeds only the
+  // Inbox (and its badge) and emits NO Today row.
+  it('a partner_1to1 conversation with unread emits NO Today row (Inbox only)', async () => {
     seedConversation({
       conversationId: 'conv-partner',
       participant_phone: '+15550105555',
@@ -701,27 +722,26 @@ describe('today action-queue API (BE6/C7)', () => {
     });
 
     const items = await getItems();
-    const unrep = items.filter((i) => i.group === 'unreplied');
-    expect(unrep.map((i) => i.refId)).toContain('conv-partner');
-    expect(unrep.find((i) => i.refId === 'conv-partner')).toMatchObject({
-      who: 'Case Worker',
-      why: 'Unreplied',
-    });
+    expect(items.some((i) => i.refId === 'conv-partner')).toBe(false);
+    expect(items).toEqual([]);
   });
 
   // --- ADVERSARIAL NEW-3: one contact, several unread threads, ONE row ---------
   // contactThreads.ts models exactly one conversation PER PARTICIPANT KEY, so a
   // person with a phone thread and an email thread reaches the unread pass
-  // TWICE. Both emitted an `unreplied` row with the same refType/refId.
-  it('a contact with an unread PHONE thread AND an unread EMAIL thread yields exactly ONE unreplied row', async () => {
-    seedTenant('c-dupe', 'Dee', 'Dupe');
+  // TWICE. Both emitted a row with the same refType/refId. (Re-expressed by the
+  // Today checklist on an UNKNOWN contact's two threads - the only threads the
+  // unread pass reads now - so the row is an identify row.)
+  it('an unknown contact with an unread PHONE thread AND an unread EMAIL thread yields exactly ONE identify row', async () => {
+    // No name on the contact, so `who` shows which thread represented the pair.
+    world.contacts.push({ contactId: 'c-dupe', type: 'unknown', status: 'needs_review', phone: '+15550108888' });
     seedConversation({
       conversationId: 'conv-dupe-phone',
       participant_phone: '+15550108888',
       participant_display_name: 'Dee Dupe',
       status: 'open',
       last_activity_at: iso(-50_000),
-      type: 'tenant_1to1',
+      type: 'unknown_1to1',
       ai_mode: 'auto',
       created_at: iso(-200_000),
       unread_count: 1,
@@ -732,25 +752,24 @@ describe('today action-queue API (BE6/C7)', () => {
       participant_email: 'dee@example.test',
       status: 'open',
       last_activity_at: iso(-60_000),
-      type: 'tenant_1to1',
+      type: 'unknown_1to1',
       ai_mode: 'auto',
       created_at: iso(-200_000),
       unread_count: 1,
       participants: [{ contactId: 'c-dupe', phone: '+15550108888' }],
     } as ConversationItem);
 
-    const items = await getItems();
-    const unrep = items.filter((i) => i.group === 'unreplied');
+    const ident = (await getItems()).filter((i) => i.group === 'identify');
 
-    expect(unrep.filter((i) => i.refId === 'c-dupe')).toHaveLength(1);
+    expect(ident.filter((i) => i.refId === 'c-dupe')).toHaveLength(1);
     // The actual breakage: Today.tsx renders key={`${refType}:${refId}`} inside
     // ONE <ul> per group, so two rows for one contact are duplicate React keys.
-    const keys = unrep.map((i) => `${i.refType}:${i.refId}`);
+    const keys = ident.map((i) => `${i.refType}:${i.refId}`);
     expect(new Set(keys).size).toBe(keys.length);
     // Newest-activity-first, so the PHONE thread is the representative - which
     // is also why the surviving row carries a name rather than the email
     // thread's blank `who`.
-    expect(unrep.find((i) => i.refId === 'c-dupe')?.who).toBe('Dee Dupe');
+    expect(ident.find((i) => i.refId === 'c-dupe')?.who).toBe('Dee Dupe');
   });
 
   it('a duplicate thread does NOT consume one of the TODAY_UNREAD_CAP slots', async () => {
@@ -759,46 +778,35 @@ describe('today action-queue API (BE6/C7)', () => {
     // time would collect the duplicate into the cap and starve the oldest real
     // contact, leaving 99 rows - so this pins that the dedupe runs BEFORE the
     // cap is counted.
+    // Unresolved owners (no contact items, spec 5.2): the triage pass adds
+    // nothing, so every row below is the unread pass's own.
     for (let i = 0; i < 99; i += 1) {
       const id = `c-bulk-${String(i).padStart(3, '0')}`;
-      const phone = `+1555020${String(i).padStart(4, '0')}`;
-      seedTenant(id, 'Bulk', id);
-      seedConversation({
+      seedUnknownThread({
         conversationId: `conv-bulk-${String(i).padStart(3, '0')}`,
-        participant_phone: phone,
-        participant_display_name: `Bulk ${id}`,
-        status: 'open',
+        contactId: id,
+        phone: `+1555020${String(i).padStart(4, '0')}`,
+        displayName: `Bulk ${id}`,
         // Older than the duplicate pair below, so the pair is scanned first and
         // the starved contact is one of these.
-        last_activity_at: iso(-200_000 - i * 1_000),
-        type: 'tenant_1to1',
-        ai_mode: 'auto',
-        created_at: iso(-900_000),
-        unread_count: 1,
-        participants: [{ contactId: id, phone }],
-      } as ConversationItem);
+        offset: -200_000 - i * 1_000,
+      });
     }
-    seedTenant('c-twin', 'Twin', 'Threads');
     for (const [suffix, offset] of [
       ['phone', -10_000],
       ['email', -20_000],
     ] as const) {
-      seedConversation({
+      seedUnknownThread({
         conversationId: `conv-twin-${suffix}`,
-        participant_phone: '+15550209999',
-        participant_display_name: 'Twin Threads',
-        status: 'open',
-        last_activity_at: iso(offset),
-        type: 'tenant_1to1',
-        ai_mode: 'auto',
-        created_at: iso(-900_000),
-        unread_count: 1,
-        participants: [{ contactId: 'c-twin', phone: '+15550209999' }],
-      } as ConversationItem);
+        contactId: 'c-twin',
+        phone: '+15550209999',
+        displayName: 'Twin Threads',
+        offset,
+      });
     }
 
-    const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
-    const ids = unrep.map((i) => i.refId);
+    const ident = (await getItems()).filter((i) => i.group === 'identify');
+    const ids = ident.map((i) => i.refId);
 
     expect(new Set(ids).size).toBe(ids.length); // no duplicate React keys
     expect(ids).toHaveLength(100); // every distinct person fits
@@ -815,49 +823,33 @@ describe('today action-queue API (BE6/C7)', () => {
     // deleted contacts live by construction (the product rule keeps them unread
     // indefinitely until someone reads them), where the newest 100 OPEN rows
     // held only a small fraction. A hundred of them at the head of the index
-    // rendered Unreplied EMPTY, with warnIfCapped reporting "capped" rather
-    // than "filtered to nothing".
+    // rendered the unread-fed block EMPTY, with warnIfCapped reporting
+    // "capped" rather than "filtered to nothing". (Re-expressed by the Today
+    // checklist on unknown_1to1 threads; the live owner is UNRESOLVED so only
+    // the unread pass - never the triage pass - can deliver its row.)
     for (let i = 0; i < 100; i += 1) {
       const id = `c-gone-${String(i).padStart(3, '0')}`;
       const phone = `+1555030${String(i).padStart(4, '0')}`;
-      world.contacts.push({
-        contactId: id,
-        type: 'tenant',
-        status: 'active',
-        firstName: 'Gone',
-        lastName: id,
-        deleted_at: iso(-500_000),
-      });
-      seedConversation({
+      world.contacts.push({ contactId: id, type: 'unknown', status: 'needs_review', phone, deleted_at: iso(-500_000) });
+      // NEWEST, so they are scanned first and would fill the cap.
+      seedUnknownThread({
         conversationId: `conv-gone-${String(i).padStart(3, '0')}`,
-        participant_phone: phone,
-        participant_display_name: `Gone ${id}`,
-        status: 'open',
-        // NEWEST, so they are scanned first and would fill the cap.
-        last_activity_at: iso(-1_000 - i),
-        type: 'tenant_1to1',
-        ai_mode: 'auto',
-        created_at: iso(-900_000),
-        unread_count: 1,
-        participants: [{ contactId: id, phone }],
-      } as ConversationItem);
+        contactId: id,
+        phone,
+        displayName: `Gone ${id}`,
+        offset: -1_000 - i,
+      });
     }
-    seedTenant('c-behind', 'Behind', 'Wall');
-    seedConversation({
+    seedUnknownThread({
       conversationId: 'conv-behind',
-      participant_phone: '+15550309999',
-      participant_display_name: 'Behind Wall',
-      status: 'open',
-      last_activity_at: iso(-400_000),
-      type: 'tenant_1to1',
-      ai_mode: 'auto',
-      created_at: iso(-900_000),
-      unread_count: 1,
-      participants: [{ contactId: 'c-behind', phone: '+15550309999' }],
-    } as ConversationItem);
+      contactId: 'c-behind',
+      phone: '+15550309999',
+      displayName: 'Behind Wall',
+      offset: -400_000,
+    });
 
-    const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
-    const ids = unrep.map((i) => i.refId);
+    const ident = (await getItems()).filter((i) => i.group === 'identify');
+    const ids = ident.map((i) => i.refId);
 
     // The live person behind the wall is reachable, and no deleted contact is
     // on the board.
@@ -876,49 +868,31 @@ describe('today action-queue API (BE6/C7)', () => {
     // The bound now limits the LOOKUPS, not the walk: past it a 1:1 item is
     // treated as non-deleted (the declared cost - a deleted contact past the
     // bound can render) and the existing TODAY_UNREAD_CAP ends the pass.
+    // (Re-expressed by the Today checklist on unknown_1to1 threads; the live
+    // owners are UNRESOLVED so only the unread pass can deliver their rows.)
     for (let i = 0; i < 250; i += 1) {
       const id = `c-deep-${String(i).padStart(3, '0')}`;
       const phone = `+1555032${String(i).padStart(4, '0')}`;
-      world.contacts.push({
-        contactId: id,
-        type: 'tenant',
-        status: 'active',
-        firstName: 'Deep',
-        lastName: id,
-        deleted_at: iso(-500_000),
-      });
-      seedConversation({
+      world.contacts.push({ contactId: id, type: 'unknown', status: 'needs_review', phone, deleted_at: iso(-500_000) });
+      seedUnknownThread({
         conversationId: `conv-deep-${String(i).padStart(3, '0')}`,
-        participant_phone: phone,
-        participant_display_name: `Deep ${id}`,
-        status: 'open',
-        last_activity_at: iso(-1_000 - i),
-        type: 'tenant_1to1',
-        ai_mode: 'auto',
-        created_at: iso(-900_000),
-        unread_count: 1,
-        participants: [{ contactId: id, phone }],
-      } as ConversationItem);
+        contactId: id,
+        phone,
+        displayName: `Deep ${id}`,
+        offset: -1_000 - i,
+      });
     }
     for (let i = 0; i < 5; i += 1) {
-      const id = `c-alive-${i}`;
-      const phone = `+1555033${String(i).padStart(4, '0')}`;
-      seedTenant(id, 'Alive', String(i));
-      seedConversation({
+      seedUnknownThread({
         conversationId: `conv-alive-${i}`,
-        participant_phone: phone,
-        participant_display_name: `Alive ${i}`,
-        status: 'open',
-        last_activity_at: iso(-400_000 - i),
-        type: 'tenant_1to1',
-        ai_mode: 'auto',
-        created_at: iso(-900_000),
-        unread_count: 1,
-        participants: [{ contactId: id, phone }],
-      } as ConversationItem);
+        contactId: `c-alive-${i}`,
+        phone: `+1555033${String(i).padStart(4, '0')}`,
+        displayName: `Alive ${i}`,
+        offset: -400_000 - i,
+      });
     }
 
-    const ids = (await getItems()).filter((i) => i.group === 'unreplied').map((i) => i.refId);
+    const ids = (await getItems()).filter((i) => i.group === 'identify').map((i) => i.refId);
 
     // The live work the block exists to show is on the board.
     for (let i = 0; i < 5; i += 1) expect(ids).toContain(`c-alive-${i}`);
@@ -945,45 +919,29 @@ describe('today action-queue API (BE6/C7)', () => {
     // 101st deleted contact is treated as non-deleted and can render, while the
     // live row behind the wall is still delivered. The WARN is what says the
     // rule went unenforced past that point.
+    // (Re-expressed by the Today checklist on unknown_1to1 threads; the live
+    // owner is UNRESOLVED so only the unread pass can deliver its row.)
     for (let i = 0; i < 101; i += 1) {
       const id = `c-wall-${String(i).padStart(3, '0')}`;
       const phone = `+1555031${String(i).padStart(4, '0')}`;
-      world.contacts.push({
-        contactId: id,
-        type: 'tenant',
-        status: 'active',
-        firstName: 'Wall',
-        lastName: id,
-        deleted_at: iso(-500_000),
-      });
-      seedConversation({
+      world.contacts.push({ contactId: id, type: 'unknown', status: 'needs_review', phone, deleted_at: iso(-500_000) });
+      seedUnknownThread({
         conversationId: `conv-wall-${String(i).padStart(3, '0')}`,
-        participant_phone: phone,
-        participant_display_name: `Wall ${id}`,
-        status: 'open',
-        last_activity_at: iso(-1_000 - i),
-        type: 'tenant_1to1',
-        ai_mode: 'auto',
-        created_at: iso(-900_000),
-        unread_count: 1,
-        participants: [{ contactId: id, phone }],
-      } as ConversationItem);
+        contactId: id,
+        phone,
+        displayName: `Wall ${id}`,
+        offset: -1_000 - i,
+      });
     }
-    seedTenant('c-past-bound', 'Past', 'Bound');
-    seedConversation({
+    seedUnknownThread({
       conversationId: 'conv-past-bound',
-      participant_phone: '+15550319999',
-      participant_display_name: 'Past Bound',
-      status: 'open',
-      last_activity_at: iso(-400_000),
-      type: 'tenant_1to1',
-      ai_mode: 'auto',
-      created_at: iso(-900_000),
-      unread_count: 1,
-      participants: [{ contactId: 'c-past-bound', phone: '+15550319999' }],
-    } as ConversationItem);
+      contactId: 'c-past-bound',
+      phone: '+15550319999',
+      displayName: 'Past Bound',
+      offset: -400_000,
+    });
 
-    const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
+    const unrep = (await getItems()).filter((i) => i.group === 'identify');
 
     // The live row behind the wall IS shown, and NOTHING ELSE: there is no
     // lookup bound any more (adversarial r4 finding 1 showed every threshold
@@ -1000,12 +958,13 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(skipWarns).toHaveLength(1);
   });
 
-  // --- unknown-inactive D5 (AR8): skip an Inactive contact's unknown_1to1 thread
-  // Cameron 2026-10-23: Needs you now shows unread texts from an unknown contact
-  // that needs review; an Inactive one "just shows in the inbox". The skip is
-  // "skip Inactive", not "keep only needs_review" (team_member threads are
-  // unknown_1to1 too), it is limited to unknown_1to1 (an Inactive tenant stays
-  // in Unreplied, #31's section), and it runs ahead of the cap.
+  // --- unknown-inactive D5 (AR8), as narrowed by the Today checklist ---------
+  // (spec 2026-10-23 5.2, plan PR26): an unknown_1to1 thread emits an Identify
+  // row only when its owner is a type-unknown contact that is not Inactive. An
+  // Inactive unknown "just shows in the inbox" (Cameron 2026-10-23); a team
+  // member's, tenant's or caseworker's thread - Active or not - emits NO Today
+  // row (PR40 inverts the #30 pins that kept them); the owner test runs ahead
+  // of the cap.
   describe('unknown-inactive D5: an Inactive contact\'s unknown_1to1 thread', () => {
     const unknownThread = (conversationId: string, contactId: string, phone: string, offset: number): ConversationItem =>
       seedConversation({
@@ -1042,19 +1001,24 @@ describe('today action-queue API (BE6/C7)', () => {
       expect(newUnknownRefIds(items)).toEqual(['c-unk-nr']);
     });
 
-    it('PIN: an unread unknown_1to1 thread from an ACTIVE team member is still in needs_you_now (unchanged)', async () => {
+    // INVERTED by the Today checklist (spec 2026-10-23 5.2, plan PR40): this
+    // pinned the #30 rule that an Active team member's unknown_1to1 thread
+    // kept its row. Identify lists only type-unknown contacts, so the thread
+    // emits NO Today row; it stays in the Inbox.
+    it('an unread unknown_1to1 thread from an ACTIVE team member emits NO Today row (Inbox only)', async () => {
       world.contacts.push({ contactId: 'c-team-on', type: 'team_member', status: 'active', firstName: 'Tea', lastName: 'Mate', phone: '+15550360003' });
       unknownThread('conv-team-on', 'c-team-on', '+15550360003', -30_000);
 
       const items = await getItems();
-      expect(newUnknownRefIds(items)).toEqual(['c-team-on']);
+      expect(newUnknownRefIds(items)).toEqual([]);
+      expect(items.map((i) => i.refId)).not.toContain('c-team-on');
     });
 
-    // OR-6 (build worklist): the skip keys on the THREAD type plus the
-    // contact's status, and an Inactive team member's unknown_1to1 thread
-    // leaves Needs you now too (spec D5 "skip Inactive", Goal 4: Inactive means
-    // the same thing for every type). Since FW2-1 the owner's type must also
-    // be unknown or team_member (the cases at the end of this block).
+    // OR-6 (build worklist): an Inactive team member's unknown_1to1 thread
+    // emits no row (spec D5 "skip Inactive", Goal 4: Inactive means the same
+    // thing for every type). Still true under the Today checklist's owner
+    // rule (spec 2026-10-23 5.2), which drops a team member's thread whatever
+    // its status.
     it('RED: an unread unknown_1to1 thread from an INACTIVE team member is NOT an identify row', async () => {
       world.contacts.push({ contactId: 'c-team-off', type: 'team_member', status: 'inactive', firstName: 'Tea', lastName: 'Gone', phone: '+15550360005' });
       unknownThread('conv-team-off', 'c-team-off', '+15550360005', -30_000);
@@ -1063,7 +1027,9 @@ describe('today action-queue API (BE6/C7)', () => {
       expect(newUnknownRefIds(items)).toEqual([]);
     });
 
-    it('PIN: an INACTIVE TENANT\'s unread thread is still in unreplied (the skip is unknown_1to1 only)', async () => {
+    // Re-pointed by the Today checklist (spec 2026-10-23 4): Unreplied is gone,
+    // so a tenant's typed thread - Inactive or not - is Inbox only.
+    it('an INACTIVE TENANT\'s unread tenant_1to1 thread emits NO Today row (the Inbox has it)', async () => {
       world.contacts.push({ contactId: 'c-ten-off', type: 'tenant', status: 'inactive', firstName: 'Ina', lastName: 'Tenant', phone: '+15550360004' });
       seedConversation({
         conversationId: 'conv-ten-off',
@@ -1079,25 +1045,29 @@ describe('today action-queue API (BE6/C7)', () => {
       } as ConversationItem);
 
       const items = await getItems();
-      expect(items.filter((i) => i.group === 'unreplied').map((i) => i.refId)).toEqual(['c-ten-off']);
+      expect(items).toEqual([]);
     });
 
-    it('RED: more than TODAY_UNREAD_CAP Inactive unknown threads ahead of live work do not hide it (the skip runs BEFORE the cap)', async () => {
+    it('RED: more than TODAY_UNREAD_CAP Inactive unknown threads ahead of live work do not hide it (the owner test runs BEFORE the cap)', async () => {
       // 101 Inactive unknown threads, all NEWER than the live rows, so without
-      // a collect-loop skip they spend all 100 slots. Behind them: an Active
-      // team member's unknown_1to1 thread and a tenant's thread - neither has a
-      // second source, so the cap hides them - plus a Needs review unknown
-      // (PIN only: the contacts-triage pass would rescue it by itself).
+      // a collect-loop owner test they spend all 100 slots. Behind them: an
+      // unknown_1to1 thread whose owner cannot be resolved (no contact item) -
+      // it has no second source, so the cap would hide it - and a Needs review
+      // unknown (PIN only: the contacts-triage pass would rescue it by itself).
+      // INVERTED (plan PR40): the Active team member's thread and the tenant's
+      // thread behind them were the no-second-source rows under #30; neither is
+      // a Today row any more.
       for (let i = 0; i < 101; i += 1) {
         const id = `c-off-${String(i).padStart(3, '0')}`;
         const phone = `+1555034${String(i).padStart(4, '0')}`;
         world.contacts.push({ contactId: id, type: 'unknown', status: 'inactive', phone });
         unknownThread(`conv-off-${String(i).padStart(3, '0')}`, id, phone, -1_000 - i);
       }
+      unknownThread('conv-live-unres', 'c-live-unres', '+15550359004', -400_000);
       world.contacts.push({ contactId: 'c-live-team', type: 'team_member', status: 'active', firstName: 'Live', lastName: 'Team', phone: '+15550359001' });
-      unknownThread('conv-live-team', 'c-live-team', '+15550359001', -400_000);
+      unknownThread('conv-live-team', 'c-live-team', '+15550359001', -400_001);
       world.contacts.push({ contactId: 'c-live-nr', type: 'unknown', status: 'needs_review', phone: '+15550359002' });
-      unknownThread('conv-live-nr', 'c-live-nr', '+15550359002', -400_001);
+      unknownThread('conv-live-nr', 'c-live-nr', '+15550359002', -400_002);
       seedTenant('c-live-ten', 'Live', 'Tenant');
       seedConversation({
         conversationId: 'conv-live-ten',
@@ -1105,7 +1075,7 @@ describe('today action-queue API (BE6/C7)', () => {
         participant_display_name: 'Live Tenant',
         participants: [{ contactId: 'c-live-ten', phone: '+15550359003' }],
         status: 'open',
-        last_activity_at: iso(-400_002),
+        last_activity_at: iso(-400_003),
         type: 'tenant_1to1',
         ai_mode: 'auto',
         created_at: iso(-900_000),
@@ -1113,22 +1083,23 @@ describe('today action-queue API (BE6/C7)', () => {
       } as ConversationItem);
 
       const items = await getItems();
-      expect(newUnknownRefIds(items)).toEqual(['c-live-nr', 'c-live-team']);
-      expect(items.filter((i) => i.group === 'unreplied').map((i) => i.refId)).toEqual(['c-live-ten']);
+      expect(newUnknownRefIds(items)).toEqual(['c-live-nr', 'c-live-unres']);
+      const refIds = items.map((i) => i.refId);
+      expect(refIds).not.toContain('c-live-team');
+      expect(refIds).not.toContain('c-live-ten');
     });
 
-    // FW2-1 (code review R2-1): the skip also keys on the OWNER's type - only
-    // an `unknown` or `team_member` owner, the types whose own threads are
-    // unknown_1to1. The contacts PATCH re-types only the primary phone's and
-    // the email threads (routes/contacts.ts, the linked-thread gather), so a
-    // tenant's or caseworker's SECOND number can keep an unknown_1to1 thread.
-    // Before this branch its unread text showed on Today as a "New unknown
-    // contact" row; an Inactive tenant's or caseworker's unread text is not
-    // hidden (spec D4).
+    // FW2-1 (code review R2-1), INVERTED by the Today checklist (spec
+    // 2026-10-23 5.2, plan PR40). The contacts PATCH re-types only the primary
+    // phone's and the email threads (routes/contacts.ts, the linked-thread
+    // gather), so a tenant's or caseworker's SECOND number can keep an
+    // unknown_1to1 thread. #30 kept that thread's "New unknown contact" row;
+    // Identify now lists only type-unknown owners, so it emits NO Today row,
+    // Active or Inactive - the Inbox still shows the unread text.
     const authedPatch = (path: string, body: object) =>
       request(app).patch(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE).send(body);
 
-    it('RED: an INACTIVE TENANT\'s unread unknown_1to1 thread (a second number triage never re-typed) is emitted exactly as before', async () => {
+    it('a re-typed TENANT\'s unread unknown_1to1 thread (a second number triage never re-typed) emits NO Today row, before or after Inactive', async () => {
       // The reviewer's probe flow, through the real routes: an unknown contact
       // with two numbers and a thread on each, the SECOND one unread.
       world.contacts.push({
@@ -1157,10 +1128,8 @@ describe('today action-queue API (BE6/C7)', () => {
       expect((await authedPatch('/api/contacts/c-two', { type: 'tenant' })).status).toBe(200);
       expect(world.conversations.get('conv-p1')?.type).toBe('tenant_1to1');
       expect(world.conversations.get('conv-p2')?.type).toBe('unknown_1to1');
-      const before = (await getItems()).filter((i) => i.group === 'identify');
-      expect(before).toEqual([
-        expect.objectContaining({ refType: 'contact', refId: 'c-two', why: 'New unknown contact', attention: true }),
-      ]);
+      const before = (await getItems()).filter((i) => i.refId === 'c-two');
+      expect(before).toEqual([]);
 
       const toInactive = await authedPatch('/api/contacts/c-two/tenant-status', {
         toStatus: 'inactive',
@@ -1170,24 +1139,26 @@ describe('today action-queue API (BE6/C7)', () => {
       expect(toInactive.status).toBe(200);
       expect((await world.contactsRepo.getById('c-two'))?.status).toBe('inactive');
 
-      // The status write alone changes nothing on Today for this thread.
-      const after = (await getItems()).filter((i) => i.group === 'identify');
-      expect(after).toEqual(before);
+      // The status write changes nothing on Today for this thread either.
+      const after = (await getItems()).filter((i) => i.refId === 'c-two');
+      expect(after).toEqual([]);
     });
 
-    it('RED: an INACTIVE CASEWORKER\'s unread unknown_1to1 thread is still in needs_you_now, the row unchanged', async () => {
+    // INVERTED by the Today checklist (spec 2026-10-23 5.2, plan PR40): a
+    // caseworker's leftover unknown_1to1 thread emits NO Today row.
+    it('an INACTIVE CASEWORKER\'s unread unknown_1to1 thread emits NO Today row (Identify is type-unknown owners only)', async () => {
       world.contacts.push({ contactId: 'c-cw-off', type: 'partner', status: 'inactive', firstName: 'Casey', lastName: 'Worker', phone: '+15550360201' });
       unknownThread('conv-cw-off', 'c-cw-off', '+15550360202', -30_000);
 
       const items = await getItems();
-      expect(items.filter((i) => i.group === 'identify')).toEqual([
-        { group: 'identify', refType: 'contact', refId: 'c-cw-off', who: 'Casey Worker', why: 'New unknown contact', attention: true },
-      ]);
+      expect(items).toEqual([]);
     });
   });
 
-  // --- FIX B: relay_group threads never surface in unreplied --------------------
-  it('a relay_group conversation with unread does NOT appear in unreplied (a tenant_1to1 still does)', async () => {
+  // --- FIX B: relay_group threads never surface on Today ----------------------
+  // (Re-pointed by the Today checklist, spec 2026-10-23 4: the tenant_1to1
+  // control is Inbox only now too, so the page is empty.)
+  it('a relay_group conversation with unread emits NO Today row (nor does a known tenant_1to1 - Inbox only)', async () => {
     seedConversation({
       conversationId: 'conv-relay',
       participant_phone: '+15550107777', // synthetic pool number, no display name
@@ -1211,12 +1182,9 @@ describe('today action-queue API (BE6/C7)', () => {
     });
 
     const items = await getItems();
-    const unrep = items.filter((i) => i.group === 'unreplied');
-    const ids = unrep.map((i) => i.refId);
-    expect(ids).toContain('conv-tenant');
-    expect(ids).not.toContain('conv-relay');
-    // And the relay group is nowhere else either (not an unreplied or needs_you_now row).
     expect(items.some((i) => i.refId === 'conv-relay')).toBe(false);
+    expect(items.some((i) => i.refId === 'conv-tenant')).toBe(false);
+    expect(items).toEqual([]);
   });
 
   // --- A2P: relay opt-out attention (a relay member on the Do-Not-Contact list) --
@@ -1805,22 +1773,20 @@ describe('today action-queue API (BE6/C7)', () => {
       // Query's first 100 rows never reach it. Before this change that thread
       // was invisible on Today no matter how long it sat unanswered.
       for (let n = 0; n < 130; n += 1) seedReadOpen(n);
-      seedConversation({
+      // The target is an unknown thread (the only kind the pass reads now) with
+      // an unresolved owner, so only the unread pass can deliver it.
+      seedUnknownThread({
         conversationId: 'conv-deep-unread',
-        participant_phone: '+15550209999',
-        participant_display_name: 'Deep Unread',
-        status: 'open',
-        last_activity_at: iso(-500_000), // oldest of them all -> ~131st
-        type: 'tenant_1to1',
-        ai_mode: 'auto',
-        created_at: iso(-900_000),
-        unread_count: 2,
+        contactId: 'c-deep-unread',
+        phone: '+15550209999',
+        displayName: 'Deep Unread',
+        offset: -500_000, // oldest of them all -> ~131st
       });
 
-      const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
+      const ident = (await getItems()).filter((i) => i.group === 'identify');
 
-      expect(unrep.map((i) => i.refId)).toEqual(['conv-deep-unread']);
-      expect(unrep[0]).toMatchObject({ who: 'Deep Unread', why: 'Unreplied' });
+      expect(ident.map((i) => i.refId)).toEqual(['c-deep-unread']);
+      expect(ident[0]).toMatchObject({ who: 'Deep Unread', why: 'New unknown contact' });
     });
 
     it('still emits the relay opt-out attention item - that scan stays on the open-partition loop', async () => {
@@ -1868,19 +1834,16 @@ describe('today action-queue API (BE6/C7)', () => {
 
     it('caps at 100 kept conversations and WARNS with the unread threshold, not the group-fetch one', async () => {
       for (let n = 0; n < 150; n += 1) {
-        seedConversation({
+        // Unresolved owners: the triage pass adds nothing to the count.
+        seedUnknownThread({
           conversationId: `conv-many-${String(n).padStart(4, '0')}`,
-          participant_phone: `+1555022${String(n).padStart(4, '0')}`,
-          status: 'open',
-          last_activity_at: iso(-1_000 - n * 1_000),
-          type: 'tenant_1to1',
-          ai_mode: 'auto',
-          created_at: iso(-900_000),
-          unread_count: 1,
+          contactId: `c-many-${String(n).padStart(4, '0')}`,
+          phone: `+1555022${String(n).padStart(4, '0')}`,
+          offset: -1_000 - n * 1_000,
         });
       }
 
-      const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
+      const unrep = (await getItems()).filter((i) => i.group === 'identify');
 
       expect(unrep).toHaveLength(100);
       const capWarns = harness.capture
@@ -1892,7 +1855,7 @@ describe('today action-queue API (BE6/C7)', () => {
       expect(capWarns[0]).toMatchObject({ group: 'unread', count: 100 });
     });
 
-    it('FILTER-THEN-CAP: a burst of unread group threads cannot starve the 1:1 sections', async () => {
+    it('FILTER-THEN-CAP: a burst of unread group threads cannot starve the Identify rows', async () => {
       // 120 group_text threads all sort NEWER than the three 1:1s. A
       // cap-then-filter walk would spend all 100 slots on rows Today never
       // shows and emit nothing; filter-then-cap keeps only 1:1-bucket rows.
@@ -1912,26 +1875,18 @@ describe('today action-queue API (BE6/C7)', () => {
         });
       }
       for (const n of [1, 2, 3]) {
-        seedConversation({
+        seedUnknownThread({
           conversationId: `conv-oneone-${n}`,
-          participant_phone: `+1555024000${n}`,
-          participant_display_name: `Solo ${n}`,
-          status: 'open',
-          last_activity_at: iso(-500_000 - n * 1_000),
-          type: 'tenant_1to1',
-          ai_mode: 'auto',
-          created_at: iso(-900_000),
-          unread_count: 1,
+          contactId: `c-solo-${n}`,
+          phone: `+1555024000${n}`,
+          displayName: `Solo ${n}`,
+          offset: -500_000 - n * 1_000,
         });
       }
 
-      const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
+      const ident = (await getItems()).filter((i) => i.group === 'identify');
 
-      expect(unrep.map((i) => i.refId).sort()).toEqual([
-        'conv-oneone-1',
-        'conv-oneone-2',
-        'conv-oneone-3',
-      ]);
+      expect(ident.map((i) => i.refId).sort()).toEqual(['c-solo-1', 'c-solo-2', 'c-solo-3']);
     });
 
     it('still writes emittedUnknownPhones, so the contacts-triage pass de-dupes the same person', async () => {
@@ -1969,15 +1924,11 @@ describe('today action-queue API (BE6/C7)', () => {
       // rows, so the block is short for a reason the operator cannot otherwise
       // see - neither capped nor exhausted.
       for (let n = 0; n < 5; n += 1) {
-        seedConversation({
+        seedUnknownThread({
           conversationId: `conv-budget-${n}`,
-          participant_phone: `+1555026000${n}`,
-          status: 'open',
-          last_activity_at: iso(-1_000 - n * 1_000),
-          type: 'tenant_1to1',
-          ai_mode: 'auto',
-          created_at: iso(-900_000),
-          unread_count: 1,
+          contactId: `c-budget-${n}`,
+          phone: `+1555026000${n}`,
+          offset: -1_000 - n * 1_000,
         });
       }
       const budgeted = makeWebhookHarness({ world, unreadWalkLimit: 2 });
@@ -1988,8 +1939,8 @@ describe('today action-queue API (BE6/C7)', () => {
         .set('cookie', TEST_SESSION_COOKIE);
 
       expect(res.status).toBe(200);
-      const unrep = (res.body as TodayResponse).items.filter((i) => i.group === 'unreplied');
-      expect(unrep).toHaveLength(2);
+      const ident = (res.body as TodayResponse).items.filter((i) => i.group === 'identify');
+      expect(ident).toHaveLength(2);
       const budgetWarns = budgeted.capture
         .atLevel(40)
         .filter((l) => l['event'] === 'today_unread_walk_truncated');
@@ -1998,60 +1949,81 @@ describe('today action-queue API (BE6/C7)', () => {
     });
   });
 
+  // Moved by the Today checklist (spec 2026-10-23 4, plan PR40): these cases
+  // rode an Unreplied row, which is gone. whoOfConversation still names every
+  // Identify row from an unread unknown thread, so the same rules are pinned
+  // through that vehicle; the owner is an unknown contact (the only owner type
+  // Identify keeps) on the thread's phone, so the triage pass de-dupes it.
   describe('participant names resolve on read (M1)', () => {
-    const seedUnreadTenantThread = (name: string | undefined, contactId = 't-renamed') =>
+    const seedUnreadUnknownThread = (name: string | undefined, contactId = 'c-renamed') =>
       seedConversation({
         conversationId: 'conv-renamed',
         participant_phone: '+15550107777',
         participants: [{ contactId, phone: '+15550107777' }],
         status: 'open',
         last_activity_at: iso(-30_000),
-        type: 'tenant_1to1',
+        type: 'unknown_1to1',
         ai_mode: 'auto',
         created_at: iso(-60_000),
         unread_count: 1,
         ...(name !== undefined && { participant_display_name: name }),
       });
+    const seedRenamedUnknown = (): void => {
+      world.contacts.push({
+        contactId: 'c-renamed',
+        type: 'unknown',
+        status: 'needs_review',
+        firstName: 'Renata',
+        lastName: 'New',
+        phone: '+15550107777',
+      });
+    };
 
     it('RED: a stale participant_display_name loses to the contact name', async () => {
-      seedTenant('t-renamed', 'Renata', 'New');
-      seedUnreadTenantThread('Old Name');
-      const row = (await getItems()).find((i) => i.refId === 't-renamed');
-      expect(row?.who).toBe('Renata New');
+      seedRenamedUnknown();
+      seedUnreadUnknownThread('Old Name');
+      const row = (await getItems()).find((i) => i.refId === 'c-renamed');
+      expect(row).toMatchObject({ group: 'identify', who: 'Renata New' });
     });
 
     it('RED: no stored name plus a named contact shows the contact', async () => {
-      seedTenant('t-renamed', 'Renata', 'New');
-      seedUnreadTenantThread(undefined);
-      const row = (await getItems()).find((i) => i.refId === 't-renamed');
-      expect(row?.who).toBe('Renata New');
+      seedRenamedUnknown();
+      seedUnreadUnknownThread(undefined);
+      const row = (await getItems()).find((i) => i.refId === 'c-renamed');
+      expect(row).toMatchObject({ group: 'identify', who: 'Renata New' });
     });
 
     it('PIN: an unreadable contact keeps the stored name', async () => {
-      seedUnreadTenantThread('Stored Name');
+      seedUnreadUnknownThread('Stored Name');
       const real = world.contactsRepo.getById.bind(world.contactsRepo);
       world.contactsRepo.getById = async (id) => {
-        if (id === 't-renamed') throw new Error('ProvisionedThroughputExceededException');
+        if (id === 'c-renamed') throw new Error('ProvisionedThroughputExceededException');
         return real(id);
       };
-      const row = (await getItems()).find((i) => i.refId === 't-renamed');
-      expect(row?.who).toBe('Stored Name');
+      const row = (await getItems()).find((i) => i.refId === 'c-renamed');
+      expect(row).toMatchObject({ group: 'identify', who: 'Stored Name' });
     });
 
-    it('PIN: an unlinked thread (no contactId) still renders the formatted phone', async () => {
-      seedUnreadTenantThread(undefined, '');
-      const row = (await getItems()).find((i) => i.who === '(555) 010-7777');
-      expect(row).toBeDefined();
+    it('PIN: an unlinked thread (no contactId) defers to the triage row, which renders the formatted phone', async () => {
+      seedUnreadUnknownThread(undefined, '');
+      world.contacts.push({ contactId: 'c-unlinked', type: 'unknown', status: 'needs_review', phone: '+15550107777' });
+      const items = await getItems();
+      expect(items.filter((i) => i.who === '(555) 010-7777')).toEqual([
+        expect.objectContaining({ group: 'identify', refType: 'contact', refId: 'c-unlinked' }),
+      ]);
+      expect(items.some((i) => i.refId === 'conv-renamed')).toBe(false);
     });
 
     it('PIN: resolving names adds NO contact reads - the deleted-check already memoized them', async () => {
-      seedTenant('t-renamed', 'Renata', 'New');
-      seedUnreadTenantThread('Old Name');
+      seedRenamedUnknown();
+      seedUnreadUnknownThread('Old Name');
       const real = world.contactsRepo.getById.bind(world.contactsRepo);
       const reads: string[] = [];
       world.contactsRepo.getById = async (id) => { reads.push(id); return real(id); };
       await getItems();
-      expect(reads.filter((id) => id === 't-renamed')).toHaveLength(1);
+      // The deleted check, the owner test, the name and the created_at sort
+      // key all read ONE memoized contact.
+      expect(reads.filter((id) => id === 'c-renamed')).toHaveLength(1);
     });
 
     it('RED: relay close-nag member names come from the contacts', async () => {
@@ -2265,6 +2237,128 @@ describe('today action-queue API (BE6/C7)', () => {
         ['needs_you_now', 'placement-needs'],
         ['identify', 'c-unk'],
       ]);
+    });
+  });
+
+  // --- Today checklist (spec 2026-10-23 4, 5.2; plan PR26): the unread pass
+  // reads ONLY unknown_1to1 threads, and only a type-unknown owner emits -----
+  describe('the unread pass: type filter first, then the owner rule (today-checklist PR26)', () => {
+    it('the type filter runs FIRST: 150 known unread threads ahead cost no contact read and no cap slot', async () => {
+      const KNOWN_TYPES = ['tenant_1to1', 'landlord_1to1', 'partner_1to1'] as const;
+      for (let i = 0; i < 150; i += 1) {
+        const id = `c-known-${String(i).padStart(3, '0')}`;
+        const phone = `+1555050${String(i).padStart(4, '0')}`;
+        seedTenant(id, 'Known', id);
+        seedConversation({
+          conversationId: `conv-known-${String(i).padStart(3, '0')}`,
+          participant_phone: phone,
+          participants: [{ contactId: id, phone }],
+          status: 'open',
+          // NEWEST, so a pass that filtered after the cap would fill it with these.
+          last_activity_at: iso(-1_000 - i),
+          type: KNOWN_TYPES[i % 3]!,
+          ai_mode: 'auto',
+          created_at: iso(-900_000),
+          unread_count: 1,
+        } as ConversationItem);
+      }
+      for (let i = 0; i < 100; i += 1) {
+        seedUnknownThread({
+          conversationId: `conv-new-${String(i).padStart(3, '0')}`,
+          contactId: `c-new-${String(i).padStart(3, '0')}`,
+          phone: `+1555051${String(i).padStart(4, '0')}`,
+          offset: -200_000 - i,
+        });
+      }
+      const real = world.contactsRepo.getById.bind(world.contactsRepo);
+      const reads: string[] = [];
+      world.contactsRepo.getById = async (id) => { reads.push(id); return real(id); };
+
+      const items = await getItems();
+
+      const ids = items.filter((i) => i.group === 'identify').map((i) => i.refId);
+      // Every unknown row fits: the 150 known threads spent no cap slot ...
+      expect(ids).toHaveLength(100);
+      expect(ids).toContain('c-new-099');
+      // ... and no contact read: the type test runs before the deleted check.
+      expect(reads.filter((id) => id.startsWith('c-known-'))).toEqual([]);
+      expect(items.some((i) => i.refId.startsWith('c-known-'))).toBe(false);
+    });
+
+    for (const [type, status] of [
+      ['tenant', 'searching'],
+      ['landlord', 'active'],
+      ['partner', 'active'],
+      ['team_member', 'active'],
+    ] as const) {
+      it(`an unknown_1to1 thread owned by an Active ${type} emits NO Today row (it stays in the Inbox)`, async () => {
+        world.contacts.push({ contactId: 'c-owner', type, status, firstName: 'Own', lastName: 'Er', phone: '+15550380001' });
+        seedUnknownThread({ conversationId: 'conv-owner', contactId: 'c-owner', phone: '+15550380001', offset: -30_000 });
+
+        expect(await getItems()).toEqual([]);
+      });
+    }
+
+    it('a type-unknown owner emits unless Inactive; a status-less unknown owner emits', async () => {
+      world.contacts.push({ contactId: 'c-unk-nr', type: 'unknown', status: 'needs_review', phone: '+15550380011' });
+      seedUnknownThread({ conversationId: 'conv-unk-nr', contactId: 'c-unk-nr', phone: '+15550380011', offset: -10_000 });
+      world.contacts.push({ contactId: 'c-unk-bare', type: 'unknown', phone: '+15550380012' });
+      seedUnknownThread({ conversationId: 'conv-unk-bare', contactId: 'c-unk-bare', phone: '+15550380012', offset: -20_000 });
+      world.contacts.push({ contactId: 'c-unk-off', type: 'unknown', status: 'inactive', phone: '+15550380013' });
+      seedUnknownThread({ conversationId: 'conv-unk-off', contactId: 'c-unk-off', phone: '+15550380013', offset: -30_000 });
+
+      const ids = (await getItems()).filter((i) => i.group === 'identify').map((i) => i.refId);
+
+      expect(ids).toEqual(['c-unk-bare', 'c-unk-nr']);
+    });
+
+    it('(PIN) an unresolved owner keeps today\'s behavior: a linked roster emits its row; an unlinked one defers to the triage pass', async () => {
+      seedUnknownThread({
+        conversationId: 'conv-unres',
+        contactId: 'c-unres',
+        phone: '+15550380101',
+        displayName: 'Una Resolved',
+        offset: -30_000,
+      });
+      seedConversation({
+        conversationId: 'conv-unlinked',
+        participant_phone: '+15550380102',
+        status: 'open',
+        last_activity_at: iso(-40_000),
+        type: 'unknown_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+      } as ConversationItem);
+      world.contacts.push({ contactId: 'c-unlinked', type: 'unknown', status: 'needs_review', phone: '+15550380102' });
+
+      const ident = (await getItems()).filter((i) => i.group === 'identify');
+
+      expect(ident.map((i) => [i.refType, i.refId, i.who])).toEqual([
+        ['contact', 'c-unlinked', '(555) 038-0102'],
+        ['contact', 'c-unres', 'Una Resolved'],
+      ]);
+    });
+
+    it('Unreplied is gone: no item carries the group, whatever is unread', async () => {
+      seedTenant('c-ten', 'Tia', 'Tenant');
+      seedConversation({
+        conversationId: 'conv-ten',
+        participant_phone: '+15550380201',
+        participants: [{ contactId: 'c-ten', phone: '+15550380201' }],
+        status: 'open',
+        last_activity_at: iso(-30_000),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 3,
+      } as ConversationItem);
+      world.contacts.push({ contactId: 'c-unk', type: 'unknown', status: 'needs_review', phone: '+15550380202' });
+
+      const groups = (await getItems()).map((i) => i.group as string);
+
+      expect(groups).toEqual(['identify']);
+      expect(groups).not.toContain('unreplied');
     });
   });
 });

@@ -107,9 +107,10 @@ describe.skipIf(!reachable)('Today non-regression: unmatched_email rows never re
         ensureTable(client, getTableSpec(base), tableName(base, testEnv)),
       ),
     );
-    // Real Today content, so "identical" is a non-trivial assertion:
-    // an untriaged unknown contact (identify) + an unread tenant 1:1
-    // thread (unreplied).
+    // Real Today content, so "identical" is a non-trivial assertion: an
+    // untriaged unknown contact (identify). The unread tenant 1:1 thread is a
+    // known contact's - Inbox only since the Today checklist (spec 2026-10-23
+    // 4) - and pins that it reaches no section.
     await contacts.create({
       type: 'unknown',
       status: 'needs_review',
@@ -141,7 +142,7 @@ describe.skipIf(!reachable)('Today non-regression: unmatched_email rows never re
     expect(before.body.items.length).toBeGreaterThan(0);
     expect(
       before.body.items.map((i: { group: string }) => i.group).sort(),
-    ).toEqual(['identify', 'unreplied']);
+    ).toEqual(['identify']);
 
     // Flood the side-door: one row per status the ingestion can write, plus a
     // route-transition status and a blocklist pointer - ALL invisible to Today.

@@ -82,7 +82,6 @@ import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRe
 import { GROUP_DETECTION_ORIGIN } from '../services/groupMembers.js';
 import { isMemberSuppressed } from '../services/relayAnnouncements.js';
 import {
-  isOneToOneBucket,
   iterateUnreadConversations,
   UNREAD_WALK_LIMIT,
   type UnreadWalkState,
@@ -97,7 +96,6 @@ export type TodayGroup =
   | 'needs_you_now'
   | 'identify'
   | 'tours_today'
-  | 'unreplied'
   | 'follow_ups'
   | 'ai_suggestions';
 
@@ -219,10 +217,11 @@ const UNTRIAGED_CONTACT_STATUSES: ReadonlySet<string> = new Set(['needs_review']
 const GROUP_FETCH_LIMIT = 100;
 
 /**
- * How many 1:1-bucket unread conversations the byUnread pass KEEPS
- * (inbox-unread-index spec 4.6). Same numeric bound Today always had, applied
- * AFTER the 1:1 filter rather than before it - so a burst of unread group/relay
- * threads can no longer starve the unreplied and untriaged-inbound sections.
+ * How many unknown_1to1 unread conversations the byUnread pass KEEPS
+ * (inbox-unread-index spec 4.6; today-checklist spec 4). Same numeric bound
+ * Today always had, applied AFTER the type filter and the owner test rather
+ * than before them - so a burst of unread known, group or relay threads can no
+ * longer starve the Identify rows this pass fills.
  */
 const TODAY_UNREAD_CAP = 100;
 
@@ -511,7 +510,6 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     /** Identify these contacts (spec 2026-10-23 5.2): both unknown sources. */
     const identify: Ranked[] = [];
     const toursToday: Ranked[] = [];
-    const unreplied: Ranked[] = [];
     const followUps: Ranked[] = [];
     const aiSuggestions: Ranked[] = [];
 
@@ -752,10 +750,11 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     // IS the fix. Today gains one index Query and loses nothing; this is a
     // CORRECTNESS fix, not a cost fix.
     //
-    // FILTER-THEN-CAP, explicitly: keep only 1:1-bucket rows and stop after
-    // TODAY_UNREAD_CAP KEPT ones. Capping the raw stream first would let a burst
-    // of unread group_text / relay_group threads - which Today never shows -
-    // consume every slot and starve the sections this pass exists to fill.
+    // FILTER-THEN-CAP, explicitly: keep only unknown_1to1 rows whose owner
+    // passes the Identify test and stop after TODAY_UNREAD_CAP KEPT ones.
+    // Capping the raw stream first would let a burst of unread known,
+    // group_text or relay_group threads - which Today never shows - consume
+    // every slot and starve the Identify rows this pass exists to fill.
     //
     // The iterator is LAZY, so breaking at the cap stops the paging too. It also
     // applies the shared visibility rule (unread_count > 0 plus the per-type
@@ -781,11 +780,8 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       // It sits in the COLLECT loop, ahead of the cap check, precisely so a
       // duplicate cannot spend one of the 100 slots. Newest-activity-first
       // order means the FIRST thread seen wins, which is the row the operator
-      // would want. Keyed PER DESTINATION GROUP, matching the per-group dedupe
-      // ruling above: an unknown thread emits into identify and a known
-      // 1:1 into unreplied, and Today renders those as separate <ul>s with
-      // independent keyspaces, so one contact legitimately appearing in both is
-      // not a duplicate.
+      // would want. Every kept thread emits into Identify (the type filter
+      // below), so the key is the row identity within that one group.
       const unreadRowKeys = new Set<string>();
       /**
        * DISTINCT deleted contacts this pass has skipped - one `contacts.getById`
@@ -798,7 +794,15 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         { budget: unreadWalkBudget },
         walkState,
       )) {
-        if (!isOneToOneBucket(conv)) continue;
+        // TYPE FILTER FIRST (spec 2026-10-23-today-checklist-design.md 4, plan
+        // PR26). The known-contact unread section is gone: a known contact's unread thread feeds only
+        // the Inbox (and its badge), so this walk exists only to find Identify
+        // rows and keeps ONLY unknown_1to1 threads. The test runs before the
+        // deleted-contact skip, so a known thread costs no contact read, and
+        // before the cap, so known threads cannot spend TODAY_UNREAD_CAP slots.
+        // It also drops relay_group / group_text and a legacy row with no
+        // `type` - none of which ever emitted a row.
+        if (conv.type !== 'unknown_1to1') continue;
         // DELETED CONTACTS, ALSO BEFORE THE CAP (adversarial A9). This test used
         // to run in the emit loop below, after the cap had been spent - the very
         // ordering the comment above rejects for group threads - and the index
@@ -806,13 +810,13 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         // deleted contacts live BY CONSTRUCTION (the product rule keeps them
         // unread until someone reads them), where the newest 100 OPEN rows held
         // only a small fraction of them. A hundred at the head of the index
-        // rendered Unreplied and the untriaged block EMPTY, with warnIfCapped
-        // announcing "capped" rather than "filtered to nothing".
+        // rendered the unread-fed block EMPTY, with warnIfCapped announcing
+        // "capped" rather than "filtered to nothing".
         //
         // IT IS NOT FREE (adversarial r2 finding 6 - the earlier claim that the
         // request cache made it so was wrong): `getContact` memoizes per contact
         // ID, so every DISTINCT contact costs a real `contacts.getById`, and
-        // ahead of the cap this runs over every 1:1 item walked rather than the
+        // ahead of the cap this runs over every unknown_1to1 item walked rather than the
         // 100 kept ones. Unbounded, an index head thick with deleted residue
         // could issue up to UNREAD_WALK_LIMIT (2000) sequential contact Gets on
         // a route every connected dashboard SSE-refetches. So the skip work
@@ -824,10 +828,10 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         // tried here was wrong at some threshold: fix wave 2 stopped the WALK
         // (hid live work - the walk-stop that was BLOCKING for the inbox), and
         // fix wave 3 stopped the LOOKUPS and treated the rest as non-deleted -
-        // which at 250 deleted ahead of 5 live rendered a FULL Unreplied block
-        // of deleted contacts and ZERO live work: the board inverted. There is
+        // which at 250 deleted ahead of 5 live rendered a FULL block of
+        // deleted contacts and ZERO live work: the board inverted. There is
         // no partial-knowledge state that is honest, so the rule is applied to
-        // every walked 1:1 item. COST: one memoized `getById` per DISTINCT
+        // every walked unknown_1to1 item. COST: one memoized `getById` per DISTINCT
         // contact, bounded by the raw walk budget - the same O(scanned index
         // items) the nav badge pays, watched by the scanned-items WARN, and
         // remedied by the BatchGet follow-up
@@ -837,37 +841,30 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
           skippedDeletedContacts.add(ownerId);
           continue;
         }
-        // INACTIVE CONTACTS' UNKNOWN THREADS, ALSO BEFORE THE CAP
-        // (unknown-inactive spec D5, plan ruling AR8). Cameron 2026-10-23:
-        // Needs you now shows unread texts from an unknown contact that needs
-        // review; "If it doesn't need review, meaning we've marked it as
-        // inactive, it wouldn't show there ... It just shows in the inbox."
-        // It sits HERE, beside the deleted-contact skip and ahead of the cap,
-        // for the A9 reason above: Inactive threads that stay unread would
-        // otherwise spend the TODAY_UNREAD_CAP slots and empty Needs you now
-        // AND Unreplied. The rule is "skip Inactive", NOT "keep only
-        // needs_review": team_member threads are `unknown_1to1` too and an
-        // Active team member keeps today's row. It is limited to an
-        // `unknown_1to1` thread whose OWNER is an `unknown` or `team_member`
-        // contact - the types whose own threads are unknown_1to1 (code review
-        // R2-1, fix wave 2). Any other owner keeps today's row. A typed
-        // contact can hold an unknown_1to1 thread: the importer mints EVERY
-        // imported one-to-one thread unknown_1to1, whatever the contact's
-        // type (lib/import/apply.ts upsertConversation;
+        // THE OWNER TEST, ALSO BEFORE THE CAP (spec 2026-10-23 5.2, plan PR26;
+        // it replaces - and contains - the unknown-inactive D5 / AR8 Inactive
+        // skip). Identify lists contacts we do not yet know, type `unknown`, so
+        // an unknown_1to1 thread is kept only when its OWNER is an unknown
+        // contact that is not Inactive. A thread owned by a team member,
+        // tenant, caseworker or any other type emits NO Today row and stays in
+        // the Inbox: the importer mints EVERY imported one-to-one thread
+        // unknown_1to1, whatever the contact's type (lib/import/apply.ts
+        // upsertConversation;
         // docs/issues/imported-unknown-threads-surface-as-unknown-on-today.md),
-        // and a tenant's or caseworker's SECOND number can keep one (the
-        // contacts PATCH re-types only the primary phone's and the email
-        // threads, routes/contacts.ts). An Inactive tenant's or caseworker's
-        // unread text is not hidden - its typed threads feed Unreplied
-        // (tracker #31 owns that section). A thread whose contact
-        // cannot be resolved keeps today's behavior. NO EXTRA READ:
-        // `getContact` is memoized and isDeletedContact just read this id.
-        if (conv.type === 'unknown_1to1' && ownerId !== undefined) {
+        // a tenant's or caseworker's SECOND number can keep one (the contacts
+        // PATCH re-types only the primary phone's and the email threads,
+        // routes/contacts.ts), and a team member's own threads are
+        // unknown_1to1. An Inactive unknown contact "just shows in the inbox"
+        // (Cameron, 2026-10-23). It sits ahead of the cap for the A9 reason
+        // above: rows that will not emit must not spend TODAY_UNREAD_CAP slots.
+        // A thread whose owner cannot be resolved (no contact item, or a failed
+        // read - getContact degrades to undefined) keeps today's behavior: a
+        // row when the roster is linked, else deferred to the triage pass
+        // below. NO EXTRA READ: getContact is memoized and isDeletedContact
+        // just read this id.
+        if (ownerId !== undefined) {
           const owner = await getContact(ownerId);
-          if (
-            owner?.status === 'inactive' &&
-            (owner.type === 'unknown' || owner.type === 'team_member')
-          ) {
+          if (owner !== undefined && !(owner.type === 'unknown' && owner.status !== 'inactive')) {
             continue;
           }
         }
@@ -902,69 +899,34 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         );
       }
       for (const conv of unreadOneToOne) {
-        const whoContactId = oneToOneContactId(conv);
-        // Memoized: the collect loop's deleted-contact test already read it.
-        const whoContact = whoContactId !== undefined ? await getContact(whoContactId) : undefined;
-        const who = whoOfConversation(conv, whoContact);
-        if (conv.type === 'unknown_1to1') {
-          // Untriaged inbound -> an Identify row (spec 2026-10-23 5.2) linking to
-          // the unknown CONTACT's page (the auto-captured needs_review contact),
-          // NOT /conversations/:id - the dashboard has no conversation route, so
-          // that was a DEAD link. When the roster isn't linked yet (auto-capture
-          // race), DEFER to the contacts triage pass below (it emits the proper
-          // contact row) rather than emitting a dead conversation ref - so we
-          // never produce a nowhere-link. The deleted-contact test has already
-          // run, ahead of the cap.
-          if (whoContactId !== undefined) {
-            if (typeof conv.participant_phone === 'string') {
-              emittedUnknownPhones.add(conv.participant_phone);
-            }
-            identify.push({
-              item: {
-                group: 'identify',
-                refType: 'contact',
-                refId: whoContactId,
-                who,
-                why: 'New unknown contact',
-                attention: true,
-              },
-              // Oldest contact first (spec 5.2); an unresolved owner sorts last.
-              at: createdAtRank(whoContact),
-            });
-          }
-        } else if (
-          // A POSITIVE allowlist: every multi-party type falls out deliberately.
-          // relay_group and group_text are already gone (isOneToOneBucket drops
-          // both above); this list is the second, type-level guard, and it is
-          // also what makes a legacy row with NO `type` emit nothing - the same
-          // thing it emitted before this pass was index-fed.
-          conv.type === 'tenant_1to1' ||
-          conv.type === 'landlord_1to1' ||
-          conv.type === 'partner_1to1'
-        ) {
-          // Unreplied is anchored to a 1:1 tenant/landlord/partner thread only. A
-          // relay_group's participant_phone is the synthetic POOL number (no
-          // display name) — surfacing it as an Unreplied row whose `who` is an
-          // internal pool number violates "anchored to a placement/contact". Skip it
-          // (and anything that isn't a known 1:1 type). Link to the contact page;
-          // fall back to the conversation ref only if the roster isn't linked yet.
-          // A deleted contact's thread is off the boards (an unlinked thread -
-          // contactId undefined - has no contact to be deleted, so it stays);
-          // both rules are applied in the collect loop above, ahead of the cap.
-          const contactId = oneToOneContactId(conv);
-          unreplied.push({
-            item: {
-              group: 'unreplied',
-              refType: contactId !== undefined ? 'contact' : 'conversation',
-              refId: contactId ?? conv.conversationId,
-              who,
-              why: 'Unreplied',
-            },
-            // Sort unreplied by most-recent activity first (soonest = most recent
-            // → use the negated activity time so newer sorts earlier).
-            at: -Date.parse(conv.last_activity_at),
-          });
+        // Every kept thread is unknown_1to1 (the type filter above). Untriaged
+        // inbound -> an Identify row (spec 2026-10-23 5.2) linking to the
+        // unknown CONTACT's page, NOT /conversations/:id - the dashboard has no
+        // conversation route, so that was a DEAD link. When the roster isn't
+        // linked yet (auto-capture race), DEFER to the contacts triage pass
+        // below (it emits the proper contact row) rather than emitting a dead
+        // conversation ref - so we never produce a nowhere-link. The type
+        // filter, the deleted-contact test and the owner test have already run,
+        // ahead of the cap.
+        const contactId = oneToOneContactId(conv);
+        if (contactId === undefined) continue;
+        // Memoized: the collect loop already read this contact.
+        const owner = await getContact(contactId);
+        if (typeof conv.participant_phone === 'string') {
+          emittedUnknownPhones.add(conv.participant_phone);
         }
+        identify.push({
+          item: {
+            group: 'identify',
+            refType: 'contact',
+            refId: contactId,
+            who: whoOfConversation(conv, owner),
+            why: 'New unknown contact',
+            attention: true,
+          },
+          // Oldest contact first (spec 5.2); an unresolved owner sorts last.
+          at: createdAtRank(owner),
+        });
       }
     }
 
@@ -1170,20 +1132,18 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       if (a.item.who !== b.item.who) return a.item.who < b.item.who ? -1 : 1;
       return a.item.refId < b.item.refId ? -1 : a.item.refId > b.item.refId ? 1 : 0;
     });
-    unreplied.sort(byUrgency);
     followUps.sort(byUrgency);
     // AI-suggestion rows share "now" ordering - tie-break by refId for a stable order.
     aiSuggestions.sort((a, b) =>
       a.item.refId < b.item.refId ? -1 : a.item.refId > b.item.refId ? 1 : 0,
     );
 
-    // Group order: Needs-you-now, Identify (spec 2026-10-23 2), Tours-today,
-    // Unreplied, Follow-ups, AI-suggestions.
+    // Group order: Needs-you-now, Identify, Tours-today, Follow-ups,
+    // AI-suggestions (spec 2026-10-23 2).
     const items: TodayItem[] = [
       ...needsYouNow.map((r) => r.item),
       ...identify.map((r) => r.item),
       ...toursToday.map((r) => r.item),
-      ...unreplied.map((r) => r.item),
       ...followUps.map((r) => r.item),
       ...aiSuggestions.map((r) => r.item),
     ];
@@ -1193,7 +1153,6 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         needs_you_now: needsYouNow.length,
         identify: identify.length,
         tours_today: toursToday.length,
-        unreplied: unreplied.length,
         follow_ups: followUps.length,
         ai_suggestions: aiSuggestions.length,
         relay_close_nags: relayCloseNags.length,
@@ -1211,8 +1170,8 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
 /** Conversation `who`: the CONTACT's current name (already memoized by the
  *  deleted-contact gate, so this adds no read), else the stored snapshot, else
  *  the participant phone in staff-facing form (email-only threads carry
- *  neither -> ''). Uses this file's own nameFromContact so Unreplied and the
- *  placement/tour rows share one join rule. */
+ *  neither -> ''). Uses this file's own nameFromContact so the Identify rows
+ *  and the placement/tour rows share one join rule. */
 function whoOfConversation(conv: ConversationItem, contact: ContactItem | undefined): string {
   const live = nameFromContact(contact);
   if (live !== undefined) return live;
@@ -1232,22 +1191,18 @@ function oneToOneContactId(conv: ConversationItem): string | undefined {
 }
 
 /**
- * The Today row IDENTITY a 1:1 unread thread would emit: the destination group
- * plus the `${refType}:${refId}` pair Today.tsx uses as its React key.
- *
- * Deliberately mirrors the two emit branches of the unread pass - an
- * `unknown_1to1` goes to identify, every other 1:1-bucket type to
- * unreplied, and both prefer the contact ref over the conversation ref. Two
- * threads of the SAME person therefore collide here, which is the point.
+ * The Today row IDENTITY an unread unknown_1to1 thread would emit: the
+ * `${refType}:${refId}` pair Today.tsx uses as its React key, within the one
+ * group the unread pass feeds (identify - spec 2026-10-23 4). Two threads of
+ * the SAME person therefore collide here, which is the point.
  *
  * An unlinked thread (no contactId yet - the auto-capture race) falls back to
  * its own conversationId, which is unique, so it never suppresses anything; the
- * unknown branch drops it at emit time anyway.
+ * emit loop defers it to the triage pass anyway.
  */
 function unreadRowKeyOf(conv: ConversationItem): string {
-  const group = conv.type === 'unknown_1to1' ? 'identify' : 'unreplied';
   const contactId = oneToOneContactId(conv);
   return contactId !== undefined
-    ? `${group}:contact:${contactId}`
-    : `${group}:conversation:${conv.conversationId}`;
+    ? `identify:contact:${contactId}`
+    : `identify:conversation:${conv.conversationId}`;
 }

@@ -61,9 +61,11 @@
 //   writer but one refuses (unknown, active), so its block is gone. Staff mark an
 //   unknown contact Inactive WITHOUT choosing a type - from the contact page
 //   header or the edit form; both validate against
-//   statusAllowlistFor(stored.type). The contact leaves Today's Needs you now
-//   (the triage pass reads only needs_review, and the unread pass skips an
-//   Inactive contact's unknown_1to1 thread) but it NEVER leaves this queue:
+//   statusAllowlistFor(stored.type). The contact leaves Today's Identify these
+//   contacts (the triage pass reads only needs_review, and the unread pass's
+//   owner rule keeps an unknown_1to1 thread only when its owner is a
+//   type-unknown contact that is not Inactive - today-checklist spec 5.2) but
+//   it NEVER leaves this queue:
 //   only a RE-TYPE - to ANY other ContactType, team_member included - or a
 //   SOFT-DELETE drains a row. The read-only count on 2026-10-23 found ZERO
 //   (unknown, active) contacts on dev and on prod, so no stored row is

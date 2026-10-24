@@ -205,7 +205,8 @@ export const PARTNER_STATUS_LABELS: Readonly<Record<PartnerStatus, string>> = {
 
 // --- Unknown-contact statuses (type=unknown) --------------------------------
 // An unknown contact is either waiting for review (`needs_review`: the triage
-// queue and Today's Needs you now) or set aside without a type (`inactive`).
+// queue and Today's Identify these contacts) or set aside without a type
+// (`inactive`).
 // There is NO `active` (Cameron, 2026-10-23): every status writer validates
 // through statusAllowlistFor and refuses (unknown, active), with one
 // exception - a re-import that re-types a contact whose status staff set

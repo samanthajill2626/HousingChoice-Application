@@ -1,7 +1,13 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { reseed } from '../../fixtures/reseed.js';
 import { extractionTick, sendExtractSms } from '../../fixtures/extraction.js';
-import { expectTodayReady } from '../../support/today.js';
+import {
+  AI_SUGGESTIONS_LIST,
+  aiSuggestionsLine,
+  expectNoAiSuggestionFor,
+  expectTodayReady,
+  openAiSuggestions,
+} from '../../support/today.js';
 
 // Conversation-fact-extraction, end-to-end against the hermetic stack with the
 // DETERMINISTIC FAKE driver (EXTRACTION_DRIVER=fake, set in e2e-session childEnv).
@@ -16,7 +22,9 @@ import { expectTodayReady } from '../../support/today.js';
 //   - AutoBadge  -> role img, name "Auto"
 //   - chip       -> role group, name `AI suggestion for <label>`; text `AI heard "<value>"`; buttons Accept/Dismiss
 //   - triage line-> text `AI suggests: Tenant`
-//   - Today group-> role list, name `AI suggestions to review`
+//   - Today AI   -> one collapsed button `AI suggestions for N contact(s)`
+//                   under At a glance (tracker #31); opened, a role list named
+//                   `AI suggestions` (support/today.ts openAiSuggestions)
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
@@ -351,13 +359,10 @@ test('type recommendation: an unknown caseworker triages to Partner and clears T
   expect(String(contact['notes'])).toContain('Identified as a caseworker at Hope Atlanta');
   expect(await readConversationType(page.request, contactId)).toBe('partner_1to1');
 
-  await page.goto(`${NEXT}/`);
-  await expectTodayReady(page);
-  const item = page
-    .getByRole('list', { name: 'AI suggestions to review' })
-    .getByRole('listitem')
-    .filter({ hasText: formattedPhone(phone) });
-  await expect(item).toHaveCount(0);
+  // Today's AI suggestions are one collapsed line (tracker #31): a zero count
+  // on the closed list would be vacuous, so read server truth, then the line
+  // (absent when Today holds no AI rows) or the opened list.
+  await expectNoAiSuggestionFor(page, contactId, formattedPhone(phone));
 });
 
 test('type recommendation: an unknown property manager triages to the landlord preset and clears Today review', async ({
@@ -396,16 +401,11 @@ test('type recommendation: an unknown property manager triages to the landlord p
   expect(String(contact['notes'])).toContain('Identified as property manager for Example Homes');
   expect(await readConversationType(page.request, contactId)).toBe('landlord_1to1');
 
-  await page.goto(`${NEXT}/`);
-  await expectTodayReady(page);
-  const item = page
-    .getByRole('list', { name: 'AI suggestions to review' })
-    .getByRole('listitem')
-    .filter({ hasText: formattedPhone(phone) });
-  await expect(item).toHaveCount(0);
+  // As above: server truth, then the line or the opened list (tracker #31).
+  await expectNoAiSuggestionFor(page, contactId, formattedPhone(phone));
 });
 
-test('Today tile: a phone-only contact shows its number in the AI-suggestions-to-review group', async ({
+test('Today tile: a phone-only contact shows its number in the AI suggestions line', async ({
   page,
   request,
 }) => {
@@ -423,12 +423,15 @@ test('Today tile: a phone-only contact shows its number in the AI-suggestions-to
   const tick = await extractionTick(request);
   expect(tick.processed).toBeGreaterThanOrEqual(1);
 
-  // The Today action queue is the dashboard home route ("/"). Re-navigate so
-  // useToday refetches now that a pending suggestion exists.
+  // The Today page is the dashboard home route ("/"). Re-navigate so useToday
+  // refetches now that a pending suggestion exists. The AI suggestions are
+  // ONE collapsed line under At a glance (tracker #31): closed by default,
+  // its list out of the accessibility tree until the line is opened.
   await page.goto(`${NEXT}/`);
   await expectTodayReady(page);
-  const group = page.getByRole('list', { name: 'AI suggestions to review' });
-  await expect(group).toBeVisible({ timeout: 10_000 });
+  await expect(aiSuggestionsLine(page)).toHaveAttribute('aria-expanded', 'false', { timeout: 10_000 });
+  await expect(page.getByRole('list', { name: AI_SUGGESTIONS_LIST, exact: true })).toHaveCount(0);
+  const group = await openAiSuggestions(page);
   const expectedPhone = formattedPhone(phone);
   const item = group.getByRole('listitem').filter({ hasText: expectedPhone });
   await expect(item).toBeVisible();

@@ -6,11 +6,11 @@
   in AUTO (background) with `mission-block.md` verbatim @fd00c81f (spec r8,
   plan v4 FINAL, rulings PR1-PR108, plan review R4). Orchestrator agent id
   a0d7116a9bbb938e6 (SendMessage target).
-- Worktree `W:	mp	oday-checklist`, branch `feat/today-checklist`, cut from
+- Worktree `W:\tmp\today-checklist`, branch `feat/today-checklist`, cut from
   main @970a29b9.
 - Launch mode: AUTO (Cameron, 2026-10-24), watchdog checkpoints every 55
   minutes (3300 s; stall exit at 25 min quiet), re-armed at every wake;
-  each wake reads `W:	mp	oday-checklist\.superpowers\sdd\progress.md`
+  each wake reads `W:\tmp\today-checklist\.superpowers\sdd\progress.md`
   and reports a bold "Checkpoint:" line. Mirror: transcript-tail.mjs ->
   `.superpowers/sdd/live.log`.
 - Failure budget: 0 consumed of 2.

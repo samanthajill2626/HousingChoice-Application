@@ -14,11 +14,14 @@ import {
   useEventStream,
   type RelayCloseNag,
   type TodayItem,
+  type TodayQuietShares,
 } from '../../api/index.js';
 import { buildTodayFromSources, localDayWindow, localYmd } from './buildToday.js';
 
 export type TodayStatus = 'loading' | 'ready' | 'error';
 export type TodaySource = 'server' | 'fallback';
+/** Today's Quiet shares as the page reads them (spec 2026-10-23 3, 6). */
+export type QuietSharesState = TodayQuietShares;
 
 export interface TodayState {
   status: TodayStatus;
@@ -28,6 +31,16 @@ export interface TodayState {
   /** Open relay groups whose 28-day close-nag is due (D5). Server-only - the
    *  client fallback can't derive it, so it's [] there. */
   relayCloseNags: RelayCloseNag[];
+  /** Quiet shares (spec 2026-10-23 6). 'unavailable' when the server says so,
+   *  when an older server omits the field (plan PR31), and always on the
+   *  fallback (spec 3.1). */
+  quietShares: QuietSharesState;
+  /** Whether Tours to book was computed: 'unavailable' on a server failure,
+   *  a missing field, and always on the fallback. */
+  toursToBookStatus: 'ok' | 'unavailable';
+  /** The server's generatedAt (the fallback's own now): the clock Quiet
+   *  shares counts "N days" from (plan S5 C4). */
+  generatedAt: string;
   /** Optimistically drop a nag row once its Close / Keep-open action succeeds (the
    *  server also drops it from the next refetch: close clears the nag, defer pushes
    *  it 28 days out). */
@@ -38,9 +51,14 @@ export interface TodayState {
  *  placement/conversation events (e.g. a broadcast send) into one refetch. */
 const REFETCH_DEBOUNCE_MS = 300;
 
-async function loadToday(
-  signal: AbortSignal,
-): Promise<{ items: TodayItem[]; source: TodaySource; relayCloseNags: RelayCloseNag[] }> {
+/** What one load produces (status and dismissNag are the hook's own). */
+type TodayLoad = Omit<TodayState, 'status' | 'dismissNag'>;
+
+/** The Quiet shares of a load that has none to show: an older server that
+ *  omits the field, and every fallback load (spec 3.1, plan PR31/PR32). */
+const QUIET_SHARES_UNAVAILABLE: QuietSharesState = { status: 'unavailable' };
+
+async function loadToday(signal: AbortSignal): Promise<TodayLoad> {
   // The BROWSER owns "today". Compute the operator's local day (and its
   // boundary instants) once and use them for BOTH paths: pass ?day= + the
   // toursFrom/toursTo window to the timezone-agnostic server, and (via the same
@@ -52,7 +70,16 @@ async function loadToday(
   const window = localDayWindow(now);
   try {
     const res = await getToday(day, signal, window);
-    return { items: res.items, source: 'server', relayCloseNags: res.relayCloseNags ?? [] };
+    return {
+      items: res.items,
+      source: 'server',
+      relayCloseNags: res.relayCloseNags ?? [],
+      // A missing field (an older server) is UNAVAILABLE, never an empty
+      // section that could let the page claim "All caught up" (plan PR31).
+      quietShares: res.quietShares?.status === 'ok' ? res.quietShares : QUIET_SHARES_UNAVAILABLE,
+      toursToBookStatus: res.toursToBook === 'ok' ? 'ok' : 'unavailable',
+      generatedAt: res.generatedAt,
+    };
   } catch (err) {
     // Only a 404 means "endpoint not live yet" → assemble client-side. Any other
     // failure (and the fallback's own failures) propagates to the error state.
@@ -71,8 +98,18 @@ async function loadToday(
       tours,
     );
     // The fallback can't derive the close nags (no close_nag_next_at on the
-    // /api/placements or /api/conversations payloads) - leave it empty.
-    return { items, source: 'fallback', relayCloseNags: [] };
+    // /api/placements or /api/conversations payloads) - leave it empty. It
+    // assembles no Tours to book and no Quiet shares either (spec 3.1), so both
+    // are UNAVAILABLE - which is what keeps a fallback load from ever reading
+    // "All caught up" (plan WI11).
+    return {
+      items,
+      source: 'fallback',
+      relayCloseNags: [],
+      quietShares: QUIET_SHARES_UNAVAILABLE,
+      toursToBookStatus: 'unavailable',
+      generatedAt: now.toISOString(),
+    };
   }
 }
 
@@ -85,6 +122,9 @@ export function useToday(): TodayState {
     items: [],
     source: 'server',
     relayCloseNags: [],
+    quietShares: QUIET_SHARES_UNAVAILABLE,
+    toursToBookStatus: 'unavailable',
+    generatedAt: '',
   });
 
   // Optimistically drop a nag row after its Close / Keep-open action succeeds.
@@ -105,9 +145,9 @@ export function useToday(): TodayState {
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      const { items, source, relayCloseNags } = await loadToday(controller.signal);
+      const load = await loadToday(controller.signal);
       if (controller.signal.aborted) return;
-      setState((prev) => ({ ...prev, status: 'ready', items, source, relayCloseNags }));
+      setState((prev) => ({ ...prev, ...load, status: 'ready' }));
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
         return;
@@ -143,16 +183,20 @@ export function useToday(): TodayState {
     onPlacementUpdated: scheduleRefetch,
     onConversationUpdated: scheduleRefetch,
     // conversation-fact-extraction: a new/accepted/dismissed suggestion changes the
-    // "AI suggestions to review" group count.
+    // At a glance "AI suggestions for N contacts" line.
     onSuggestionUpdated: scheduleRefetch,
     // A tour marked toured, canceled or rescheduled leaves (or joins) "Tours
     // today"; without this it stayed listed until an unrelated event - and,
     // since the past-tours section reloads on the same event, one tour could
-    // show in both sections at once.
+    // show in both sections at once. A tour CREATE emits it too (spec
+    // 2026-10-23 8): a new request joins Tours to book and its person leaves
+    // Quiet shares.
     onTourUpdated: scheduleRefetch,
     // unknown-inactive (spec D2, AR3): a contact marked Inactive or re-typed
-    // leaves (or joins) Needs you now. A header status change writes no
-    // thread, so contact.updated is the only signal for it.
+    // leaves (or joins) Identify these contacts. A header status change writes
+    // no thread, so contact.updated is the only signal for it. A staff send
+    // that stamps last_reached_out_at emits it as well (spec 2026-10-23 7.3),
+    // restarting that person's Quiet shares clock.
     onContactUpdated: scheduleRefetch,
   });
 

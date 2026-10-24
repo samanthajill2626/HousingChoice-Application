@@ -112,7 +112,7 @@ describe('buildTodayFromSources', () => {
     expect(items[0]?.tag).toBe('Placement - Awaiting approval');
   });
 
-  it('treats an untriaged unknown_1to1 as needs_you_now, linking to the contact page', () => {
+  it('puts an unknown_1to1 in identify (spec 2026-10-23 3.1), linking to the contact page', () => {
     const items = buildTodayFromSources(
       [],
       [
@@ -127,7 +127,7 @@ describe('buildTodayFromSources', () => {
       ],
       NOW,
     );
-    const unk = items.find((i) => i.group === 'needs_you_now');
+    const unk = items.find((i) => i.group === 'identify');
     // Links to the unknown CONTACT's detail page — NOT /conversations/:id (dead).
     expect(unk?.refType).toBe('contact');
     expect(unk?.refId).toBe('ct-unknown-1');
@@ -136,6 +136,8 @@ describe('buildTodayFromSources', () => {
     // Falls back to a formatted phone when there's no display name.
     expect(unk?.who).toBe('(404) 010-0007');
     expect(unk?.why).toMatch(/untriaged/i);
+    // It left Needs you now for Identify these contacts.
+    expect(items.filter((i) => i.group === 'needs_you_now')).toEqual([]);
   });
 
   it('falls back to the Unknown list (by phone) when an untriaged inbound has no resolvable contact id', () => {
@@ -152,7 +154,7 @@ describe('buildTodayFromSources', () => {
       ],
       NOW,
     );
-    const unk = items.find((i) => i.group === 'needs_you_now');
+    const unk = items.find((i) => i.group === 'identify');
     expect(unk?.refType).toBe('contact');
     // → /contacts/unknown?phone=%2B14040100007 (mirrors the Inbox; never dead-ends).
     expect(unk?.refId).toBe('unknown?phone=%2B14040100007');
@@ -197,53 +199,29 @@ describe('buildTodayFromSources', () => {
     expect(items.find((i) => i.group === 'tours_today')).toBeUndefined();
   });
 
-  it('puts an unread triaged 1:1 in unreplied, linking to the contact page', () => {
-    const items = buildTodayFromSources(
-      [],
-      [
-        convOf({
-          conversationId: 'unrep',
-          type: 'landlord_1to1',
-          participant_phone: '+14042220190',
-          participants: [{ contactId: 'L1', phone: '+14042220190' }],
-          unread_count: 2,
-          participant_display_name: 'James Porter',
-          preview: 'Is the 2BR still open?',
-        }),
-      ],
-      NOW,
-    );
-    const u = items.find((i) => i.group === 'unreplied');
-    expect(u?.refType).toBe('contact');
-    expect(u?.refId).toBe('L1'); // → /contacts/L1
-    expect(u?.who).toBe('James Porter');
-    expect(u?.why).toBe('Is the 2BR still open?');
-    expect(u?.tag).toBe('Contact - Landlord');
-  });
-
-  it('routes an unread partner_1to1 to the contact page, not the dead conversation link (n8)', () => {
-    const items = buildTodayFromSources(
-      [],
-      [
-        convOf({
-          conversationId: 'unrep-p',
-          type: 'partner_1to1',
-          participant_phone: '+14042220191',
-          participants: [{ contactId: 'P1', phone: '+14042220191' }],
-          unread_count: 1,
-          participant_display_name: 'Nadia Partner',
-          preview: 'Referral packet attached',
-        }),
-      ],
-      NOW,
-    );
-    const u = items.find((i) => i.group === 'unreplied');
-    // partner_1to1 is a 1:1 -> refType 'contact' (/contacts/P1), NOT the dead
-    // /conversations/:id 404 fallback a missing ONE_TO_ONE entry would produce.
-    expect(u?.refType).toBe('contact');
-    expect(u?.refId).toBe('P1');
-    expect(u?.tag).toBe('Contact - Partner');
-  });
+  // Spec 2026-10-23 4: Unreplied is gone - a known contact's unread thread is
+  // an Inbox row only. INVERTS the former "puts an unread triaged 1:1 in
+  // unreplied" and "routes an unread partner_1to1 ... (n8)" cases.
+  for (const type of ['tenant_1to1', 'landlord_1to1', 'partner_1to1', 'relay_group'] as const) {
+    it(`emits no row for an unread ${type} thread (the Inbox carries it)`, () => {
+      const items = buildTodayFromSources(
+        [],
+        [
+          convOf({
+            conversationId: `unread-${type}`,
+            type,
+            participant_phone: '+14042220190',
+            participants: [{ contactId: 'L1', phone: '+14042220190' }],
+            unread_count: 2,
+            participant_display_name: 'James Porter',
+            preview: 'Is the 2BR still open?',
+          }),
+        ],
+        NOW,
+      );
+      expect(items).toEqual([]);
+    });
+  }
 
   it('does not put a read conversation anywhere', () => {
     const items = buildTodayFromSources(
@@ -298,14 +276,18 @@ describe('buildTodayFromSources', () => {
         placementOf({ placementId: 'fu', stage: 'awaiting_approval', next_deadline_type: 'follow_up', next_deadline_at: at(DAY) }),
         placementOf({ placementId: 'need', next_deadline_type: 'rta_window', next_deadline_at: at(HOUR) }),
       ],
-      [convOf({ conversationId: 'unrep', unread_count: 1, preview: 'hi', participant_display_name: 'X' })],
+      [
+        convOf({ conversationId: 'unrep', unread_count: 1, preview: 'hi', participant_display_name: 'X' }),
+        convOf({ conversationId: 'unk', type: 'unknown_1to1', unread_count: 1, participant_display_name: 'Y' }),
+      ],
       NOW,
       [tourOf({ tourId: 'tour', scheduledAt: at(2 * HOUR) })],
     );
+    // The server's order (plan PR30); the unread tenant thread is no row.
     expect(items.map((i) => i.group)).toEqual([
       'needs_you_now',
+      'identify',
       'tours_today',
-      'unreplied',
       'follow_ups',
     ]);
   });
@@ -371,7 +353,7 @@ describe('buildTodayFromSources', () => {
 describe('buildTodayFromSources - native group texts are OUT of Today', () => {
   it('never surfaces a group_text thread, however unread', () => {
     // Spec 11: v1 treats group threads as inbox + thread-view only. An intake
-    // exclusion, so no later rule (ONE_TO_ONE, participantContactId) can readmit
+    // exclusion, so no later rule (participantContactId) can readmit
     // one - participantContactId would name roster member #1 as "who".
     const items = buildTodayFromSources(
       [],
@@ -392,15 +374,17 @@ describe('buildTodayFromSources - native group texts are OUT of Today', () => {
     expect(items).toEqual([]);
   });
 
-  it('still surfaces the 1:1 threads beside it', () => {
+  it('still surfaces the unknown 1:1 thread beside it', () => {
+    // Was a tenant_1to1 Unreplied row; Unreplied is gone (spec 2026-10-23 4),
+    // so the 1:1 that still surfaces beside a group text is an unknown one.
     const items = buildTodayFromSources(
       [],
       [
         convOf({ conversationId: 'gt-1', type: 'group_text', unread_count: 9 }),
-        convOf({ conversationId: 'c-1', type: 'tenant_1to1', unread_count: 1, preview: 'hi' }),
+        convOf({ conversationId: 'c-1', type: 'unknown_1to1', unread_count: 1, preview: 'hi' }),
       ],
       NOW,
     );
-    expect(items.map((i) => i.refId)).toEqual(['unknown?phone=%2B14040100007']);
+    expect(items.map((i) => [i.group, i.refId])).toEqual([['identify', 'unknown?phone=%2B14040100007']]);
   });
 });

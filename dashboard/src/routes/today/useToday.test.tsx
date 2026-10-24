@@ -33,13 +33,22 @@ vi.mock('../../api/index.js', async () => {
 import { useToday } from './useToday.js';
 
 function Probe(): React.JSX.Element {
-  const { status, items, source } = useToday();
+  const { status, items, source, quietShares, toursToBookStatus, generatedAt } = useToday();
   return (
     <div>
       <span data-testid="status">{status}</span>
       <span data-testid="source">{source}</span>
       <span data-testid="count">{items.length}</span>
       <span data-testid="first">{items[0]?.who ?? ''}</span>
+      <span data-testid="quiet">
+        {quietShares === undefined
+          ? 'missing'
+          : quietShares.status === 'ok'
+            ? `ok:${quietShares.properties.length}:${String(quietShares.truncated)}`
+            : 'unavailable'}
+      </span>
+      <span data-testid="ttb">{toursToBookStatus ?? 'missing'}</span>
+      <span data-testid="generated">{generatedAt ?? 'missing'}</span>
     </div>
   );
 }
@@ -190,5 +199,62 @@ describe('useToday', () => {
     lastHandlers.onContactUpdated?.();
     await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('0'));
     expect(getToday).toHaveBeenCalledTimes(2);
+  });
+});
+
+// Spec 2026-10-23-today-checklist-design 2.5 / 3.1, plan PR31-PR32: the two
+// sections the server may fail to compute, and the fallback that never has
+// them. generatedAt is the Quiet shares clock (plan S5 C4).
+describe('useToday - Quiet shares and Tours to book statuses', () => {
+  const QUIET: NonNullable<TodayResponse['quietShares']> = {
+    status: 'ok',
+    properties: [
+      {
+        unitId: 'u1',
+        unitLabel: '12 Oak St',
+        people: [
+          { contactId: 'c1', name: 'Dana Ruiz', type: 'tenant', state: 'no_reply', quietSince: '2026-06-10T12:00:00Z' },
+        ],
+      },
+    ],
+    // PR103: the wire carries no distinct-people count.
+    truncated: false,
+  };
+
+  it('passes the server quiet shares, the Tours to book status and generatedAt through', async () => {
+    getToday.mockResolvedValue({ ...TODAY, quietShares: QUIET, toursToBook: 'ok' });
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    expect(screen.getByTestId('quiet').textContent).toBe('ok:1:false');
+    expect(screen.getByTestId('ttb').textContent).toBe('ok');
+    expect(screen.getByTestId('generated').textContent).toBe('2026-06-16T12:00:00Z');
+  });
+
+  it('keeps a section the server could not compute unavailable', async () => {
+    getToday.mockResolvedValue({ ...TODAY, quietShares: { status: 'unavailable' }, toursToBook: 'unavailable' });
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    expect(screen.getByTestId('quiet').textContent).toBe('unavailable');
+    expect(screen.getByTestId('ttb').textContent).toBe('unavailable');
+  });
+
+  it('reads a field an older server omits as unavailable, never as an empty section', async () => {
+    getToday.mockResolvedValue(TODAY); // no quietShares, no toursToBook
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    expect(screen.getByTestId('quiet').textContent).toBe('unavailable');
+    expect(screen.getByTestId('ttb').textContent).toBe('unavailable');
+  });
+
+  it('a fallback load has both sections unavailable (it computes neither)', async () => {
+    getToday.mockRejectedValue(new ApiError(404, 'not_found', 'no'));
+    getAllPlacements.mockResolvedValue([]);
+    getAllConversations.mockResolvedValue(CONVERSATIONS);
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    expect(screen.getByTestId('source')).toHaveTextContent('fallback');
+    expect(screen.getByTestId('quiet').textContent).toBe('unavailable');
+    expect(screen.getByTestId('ttb').textContent).toBe('unavailable');
+    expect(screen.getByTestId('generated').textContent).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 });

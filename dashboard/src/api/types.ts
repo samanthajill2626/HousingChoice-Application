@@ -485,12 +485,18 @@ export type SystemTraceResult =
 // client-side from /api/placements + /api/conversations when that endpoint 404s (see
 // routes/today/buildToday.ts). Copied verbatim from the build plan §C7.
 
+/** Spec 2026-10-23-today-checklist-design 3 (mirrors app/src/routes/today.ts):
+ *  `identify` (split from needs_you_now) and `tours_to_book` are new.
+ *  `unreplied` has no producer left; plan task S5.6 removes it from this
+ *  union together with its last reader (Today.tsx). */
 export type TodayGroup =
   | 'needs_you_now'
+  | 'identify'
+  | 'tours_to_book'
   | 'tours_today'
-  | 'unreplied'
   | 'follow_ups'
-  | 'ai_suggestions';
+  | 'ai_suggestions'
+  | 'unreplied';
 export interface TodayItem {
   group: TodayGroup;
   refType: 'placement' | 'contact' | 'conversation' | 'tour';
@@ -500,6 +506,12 @@ export interface TodayItem {
   urgency?: string; // "2h left"
   tag?: string; // "Placement - Touring"
   attention?: boolean;
+  /** ISO, tour rows only. tours_today: the tour's scheduledAt (the At a glance
+   *  row's local time). tours_to_book: the tour's createdAt. */
+  at?: string;
+  /** Tour rows only: the property, formatAddress(unit.address) || unitId (the
+   *  server formatter; a failed unit lookup degrades to the unitId). */
+  unitLabel?: string;
 }
 /** One "close this still-open relay group?" nag on the Today queue (D5). Built
  *  server-side from open relay groups whose 28-day close-nag is due. A SEPARATE
@@ -520,11 +532,43 @@ export interface RelayCloseNag {
   /** ISO instant the nag became due. */
   nagDueAt: string;
 }
+/** One person waiting on one property in Today's Quiet shares (spec
+ *  2026-10-23-today-checklist-design 3, 6.2). */
+export interface QuietSharePerson {
+  contactId: string;
+  /** The Follow up tab's name rule. */
+  name: string;
+  type: string;
+  /** As on the Follow up tab (a caseworker's role tag reads it). */
+  role?: string;
+  state: 'replied' | 'no_reply';
+  /** ISO - the quiet clock (spec 6.1). */
+  quietSince: string;
+}
+/** One property line in Quiet shares (spec 6.3), people in the server's order. */
+export interface QuietShareProperty {
+  unitId: string;
+  /** The Follow up tab's formatter. */
+  unitLabel: string;
+  people: QuietSharePerson[];
+}
+/** Today's Quiet shares (spec r8 3; plan PR103: no distinct-people count).
+ *  `truncated` = more than 100 available properties exist ("Showing the
+ *  first 100 properties"). */
+export type TodayQuietShares =
+  | { status: 'ok'; properties: QuietShareProperty[]; truncated: boolean }
+  | { status: 'unavailable' };
 export interface TodayResponse {
   items: TodayItem[];
   /** Open relay groups whose 28-day close-nag is due (D5) - a SEPARATE list, not
    *  part of `items`. Absent on an older backend, so the client defaults to []. */
   relayCloseNags?: RelayCloseNag[];
+  /** Spec 3. OPTIONAL here (plan PR31): an older backend omits it, and
+   *  useToday reads a missing value as unavailable. */
+  quietShares?: TodayQuietShares;
+  /** Whether the server computed the tours_to_book group (spec 3). Optional
+   *  and read like quietShares. */
+  toursToBook?: 'ok' | 'unavailable';
   generatedAt: string;
 }
 

@@ -4,15 +4,18 @@
 // /api/conversations payloads. Pure + deterministic (takes `now` so it's
 // testable): no fetching, no Date.now(), no side effects.
 //
-// Grouping (from the build plan §B1):
-//   needs_you_now — a placement with a pending business-clock deadline (any type
-//     except follow_up, which is a follow-up) OR an `attention` flag,
-//     PLUS untriaged inbounds (unknown_1to1 conversations). Ordered most-urgent
-//     first (overdue/soonest deadline, then attention rows, then untriaged).
-//   tours_today  — a placement whose tour_date is today (local).
-//   unreplied    — a conversation with unread_count > 0 (excluding the untriaged
-//     unknowns, which surface in needs_you_now).
-//   follow_ups   — a placement whose next_deadline_type is follow_up.
+// Grouping (from the build plan section B1, as amended by spec
+// 2026-10-23-today-checklist-design 3.1):
+//   needs_you_now - a placement with a pending business-clock deadline (any type
+//     except follow_up, which is a follow-up) OR an `attention` flag. Ordered
+//     most-urgent first (overdue/soonest deadline, then attention rows).
+//   identify     - every unknown_1to1 conversation (the fallback's own rule and
+//     copy, unchanged), in the same section the server's identify rows use.
+//   tours_today  - a Tour entity scheduled on the operator's local day.
+//   follow_ups   - a placement whose next_deadline_type is follow_up.
+// There is no unread-thread group (spec 4: known contacts' unread threads live
+// in the Inbox only). The fallback assembles no tours_to_book and no quiet
+// shares; useToday marks both UNAVAILABLE for a fallback load.
 //
 // DERIVED-STUCK is DEFERRED to the server here. Stuck is no longer a
 // next_deadline_type value (the backend derives it from time-in-stage against
@@ -28,21 +31,25 @@ import {
   type PlacementDeadlineType,
   type PlacementItem,
   type ConversationSummary,
-  type ConversationType,
   type Tour,
   type TodayItem,
 } from '../../api/index.js';
 
 // --- Group ordering ---------------------------------------------------------
 
+// The server's response order (plan PR30). The client fallback never
+// assembles tours_to_book or ai_suggestions (they come only from GET
+// /api/today), but the record must stay exhaustive over TodayGroup.
 const GROUP_ORDER: Record<TodayItem['group'], number> = {
   needs_you_now: 0,
-  tours_today: 1,
-  unreplied: 2,
-  follow_ups: 3,
-  // The client fallback never assembles this group (it comes only from the server
-  // /api/today), but the record must stay exhaustive over TodayGroup.
-  ai_suggestions: 4,
+  identify: 1,
+  tours_to_book: 2,
+  tours_today: 3,
+  follow_ups: 4,
+  ai_suggestions: 5,
+  // No producer is left (spec 2026-10-23 4). Plan task S5.6 deletes this key
+  // with the group itself, once Today.tsx no longer reads it.
+  unreplied: 6,
 };
 
 /** Deadline types that route to follow_ups rather than needs_you_now. */
@@ -56,18 +63,6 @@ const DEADLINE_WHY: Record<PlacementDeadlineType, string> = {
   rta_window: 'RTA window closing',
   voucher_expiration: 'Voucher expiring',
   follow_up: 'Follow-up due',
-};
-
-const CONTACT_TYPE_LABELS: Record<ConversationType, string> = {
-  tenant_1to1: 'Tenant',
-  landlord_1to1: 'Landlord',
-  partner_1to1: 'Partner',
-  unknown_1to1: 'Unknown',
-  relay_group: 'Relay group',
-  // UNREACHABLE label, kept so the Record stays total: group threads are dropped
-  // at Today's intake filter (see buildToday's conversation loop), so no Today
-  // row is ever tagged with it.
-  group_text: 'Group text',
 };
 
 const HOUR_MS = 3_600_000;
@@ -135,20 +130,6 @@ function contactRefId(conv: ConversationSummary): string {
   );
 }
 
-/** 1:1 conversation types (one external contact) — these route to the contact
- *  page. relay_group has no single contact, so it keeps a conversation ref.
- *  group_text is deliberately NOT here and never reaches this Set: Today drops
- *  it at intake. Note this is a plain Set, so widening ConversationType does NOT
- *  produce a compile error here - the intake filter is the real guard.
- *  partner_1to1 is a 1:1 too (n8): omitting it dropped an unread partner thread
- *  onto the dead /conversations/:id 404 fallback instead of /contacts/:id. */
-const ONE_TO_ONE: ReadonlySet<ConversationType> = new Set<ConversationType>([
-  'tenant_1to1',
-  'landlord_1to1',
-  'partner_1to1',
-  'unknown_1to1',
-]);
-
 /** YYYY-MM-DD in LOCAL time for a Date — the browser's definition of "today".
  *  Used BOTH as the tour_date comparison basis here AND as the `?day=` the hook
  *  sends to /api/today, so the server and this fallback agree on which day. Built
@@ -195,7 +176,6 @@ export function buildTodayFromSources(
   const needs: NeedsRow[] = [];
   const tours: TodayItem[] = [];
   const followUps: TodayItem[] = [];
-  const unreplied: TodayItem[] = [];
 
   for (const c of placements) {
     // `?? c.stage` guards an unknown stage (PlacementItem is a flexible server doc) so
@@ -278,19 +258,21 @@ export function buildTodayFromSources(
     // NATIVE GROUP TEXTS ARE EXCLUDED FROM TODAY ENTIRELY (spec 11: v1 treats
     // them as inbox + thread-view only). An INTAKE filter, not a per-branch one,
     // so no later rule can readmit them: `participantContactId` below falls back
-    // to participants[0] and would name a random member, and `ONE_TO_ONE` is a
-    // plain Set that adding a type to the union does not force anyone to update.
+    // to participants[0] and would name a random member.
     // Today's own feed cannot return one either (it reads the `open` status
     // partition; group threads live in `group_open`) - this is the guard that
     // does not depend on that staying true.
     if (conv.type === 'group_text') continue;
     if (conv.type === 'unknown_1to1') {
-      // Untriaged inbound — needs triage (surfaces in needs_you_now, not
-      // unreplied). Links to the unknown CONTACT's page (the inbound created an
-      // unknown contact record), NOT /conversations/:id (an unrouted placeholder).
+      // Identify these contacts (spec 2026-10-23 3.1): the fallback's own rule
+      // (every unknown_1to1 thread) and copy, in the server's section. Links to
+      // the unknown CONTACT's page (the inbound created an unknown contact
+      // record), NOT /conversations/:id (an unrouted placeholder). It rides the
+      // `needs` array with a null sort key; the final GROUP_ORDER sort lifts it
+      // into its own group, keeping its order.
       needs.push({
         item: {
-          group: 'needs_you_now',
+          group: 'identify',
           refType: 'contact',
           refId: contactRefId(conv),
           who: conversationWho(conv),
@@ -300,21 +282,9 @@ export function buildTodayFromSources(
         },
         sortAt: null,
       });
-      continue;
     }
-    if (conv.unread_count > 0) {
-      // A 1:1 thread opens its contact page; a relay group has no single contact,
-      // so it keeps a conversation ref (a separate, future concern).
-      const is1to1 = ONE_TO_ONE.has(conv.type);
-      unreplied.push({
-        group: 'unreplied',
-        refType: is1to1 ? 'contact' : 'conversation',
-        refId: is1to1 ? contactRefId(conv) : conv.conversationId,
-        who: conversationWho(conv),
-        why: conv.preview ?? 'Unread message',
-        tag: `Contact - ${CONTACT_TYPE_LABELS[conv.type] ?? conv.type}`,
-      });
-    }
+    // Every other thread, read or unread, is NOT a Today row: known contacts'
+    // unread threads live in the Inbox and its badge (spec 2026-10-23 4).
   }
 
   // Order within needs_you_now: most-urgent first — overdue/soonest deadline by
@@ -329,7 +299,6 @@ export function buildTodayFromSources(
   const all: TodayItem[] = [
     ...needs.map((n) => n.item),
     ...tours,
-    ...unreplied,
     ...followUps,
   ];
   // Stable group ordering (canonical), preserving within-group order.

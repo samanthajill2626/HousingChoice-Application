@@ -48,6 +48,8 @@ interface Over {
   parked?: ReturnType<typeof vi.fn>;
   /** Prior messages listByConversation returns (newest-first) for reply threading. */
   priorMessages?: MessageItem[];
+  /** today-checklist W3: touchLastReachedOut's answer (default 'written'). */
+  reachedOutResult?: 'written' | 'skipped' | 'failed';
 }
 
 function makeFakes(over: Over = {}) {
@@ -89,6 +91,7 @@ function makeFakes(over: Over = {}) {
   const getReplyToken = vi.fn(async () => 'tok');
   const touchLastActivity = vi.fn(async () => conversation);
   const touchEmailLastSeen = vi.fn(async () => {});
+  const touchLastReachedOut = vi.fn(async (_id: string, _at: string) => over.reachedOutResult ?? 'written');
   const head = vi.fn();
   const getBytes = vi.fn();
   const emit = vi.fn();
@@ -116,6 +119,7 @@ function makeFakes(over: Over = {}) {
     contactsRepo: {
       getById: async (id: string) => (contact?.contactId === id ? contact : undefined),
       touchEmailLastSeen,
+      touchLastReachedOut,
     } as unknown as ContactsRepo,
     ...(store !== undefined ? { mediaStore: store } : {}),
     events: { emit } as unknown as EventBus,
@@ -134,6 +138,7 @@ function makeFakes(over: Over = {}) {
     getReplyToken,
     touchLastActivity,
     touchEmailLastSeen,
+    touchLastReachedOut,
     head,
     getBytes,
     emit,
@@ -505,5 +510,70 @@ describe('sendEmailMessage - deleted-contact guard (2026-08-03 spec)', () => {
     await expect(f.service(input())).rejects.toBeInstanceOf(EmailContactDeletedError);
     expect(f.append).not.toHaveBeenCalled();
     expect(f.send).not.toHaveBeenCalled();
+  });
+});
+
+// today-checklist spec 7.3 (W3, ruling PR12): an email counts as staff
+// outreach once SES ACCEPTED it. The addressed contact is stamped at the row's
+// own instant; ONE contact.updated follows the sent emit, only when written. A
+// send the adapter rejects stamps nothing, and a stamp never fails a sent mail.
+describe('sendEmailMessage - W3 staff-outreach stamp (today-checklist)', () => {
+  const contactUpdates = (f: ReturnType<typeof makeFakes>) =>
+    f.emit.mock.calls.filter((c) => c[0] === 'contact.updated');
+
+  it('stamps the addressed contact at the row instant AFTER SES accepted, and emits ONE contact.updated after the sent emit', async () => {
+    const f = makeFakes();
+    const out = await f.service(input());
+    expect(out.status).toBe('sent');
+    expect(f.touchLastReachedOut).toHaveBeenCalledTimes(1);
+    expect(f.touchLastReachedOut).toHaveBeenCalledWith('c1', NOW);
+    expect(f.touchLastReachedOut.mock.invocationCallOrder[0]).toBeGreaterThan(f.send.mock.invocationCallOrder[0]!);
+    expect(contactUpdates(f)).toEqual([['contact.updated', { contactId: 'c1' }]]);
+    const names = f.emit.mock.calls.map((c) => c[0]);
+    expect(names.indexOf('contact.updated')).toBeGreaterThan(names.lastIndexOf('conversation.updated'));
+    expect(names.at(-1)).toBe('contact.updated');
+  });
+
+  it('a send the adapter rejects stamps nothing and emits no contact.updated', async () => {
+    const send = vi.fn(async () => {
+      throw new Error('SES boom');
+    });
+    const f = makeFakes({ send });
+    await expect(f.service(input())).rejects.toThrow('SES boom');
+    expect(f.touchLastReachedOut).not.toHaveBeenCalled();
+    expect(contactUpdates(f)).toEqual([]);
+  });
+
+  it('a skipped or failed stamp emits no contact.updated, and the mail still reports sent', async () => {
+    for (const reachedOutResult of ['skipped', 'failed'] as const) {
+      const f = makeFakes({ reachedOutResult });
+      const out = await f.service(input());
+      expect(out.status).toBe('sent');
+      expect(f.touchLastReachedOut).toHaveBeenCalledTimes(1);
+      expect(contactUpdates(f)).toEqual([]);
+    }
+  });
+
+  it('a REJECTING stamp never fails, marks failed or rethrows a sent mail (M2)', async () => {
+    const f = makeFakes();
+    f.touchLastReachedOut.mockRejectedValueOnce(new Error('dynamo down'));
+    const out = await f.service(input());
+    expect(out.status).toBe('sent');
+    const statuses = f.updateDeliveryStatus.mock.calls.map((c) => (c as unknown[])[1]);
+    expect(statuses).not.toContain('failed');
+    expect(contactUpdates(f)).toEqual([]);
+  });
+
+  it('a redirected thread still stamps the ADDRESSED contact', async () => {
+    const f = makeFakes({ attachReturns: 'conv-OTHER' });
+    const out = await f.service(input());
+    expect(out.redirected).toBe(true);
+    expect(f.touchLastReachedOut).toHaveBeenCalledWith('c1', NOW);
+  });
+
+  it('a refused send (suppressed contact) stamps nothing', async () => {
+    const f = makeFakes({ contact: { email_opt_out: true } });
+    await expect(f.service(input())).rejects.toBeInstanceOf(EmailSuppressedError);
+    expect(f.touchLastReachedOut).not.toHaveBeenCalled();
   });
 });

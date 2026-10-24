@@ -41,6 +41,7 @@ import {
   type ContactsRepo,
 } from '../repos/contactsRepo.js';
 import { isKillSwitchOff } from './scheduledSendSuppression.js';
+import { recordStaffOutreach } from './staffOutreach.js';
 
 // --- Typed refusals (route maps these to HTTP statuses) --------------------
 
@@ -480,6 +481,13 @@ export function createSendEmailMessageService(deps: SendEmailServiceDeps = {}): 
       throw err;
     }
 
+    // today-checklist W3 (spec 7.3, PR12): SES accepted the mail - staff reached
+    // the addressed contact. Stamped at the row's own instant (nowIso, the
+    // providerTs it was appended under). recordStaffOutreach never throws (a
+    // failed stamp is its own ERROR line), so it can never mark this sent mail
+    // failed or rethrow (M2). Its contact.updated follows the sent emit below.
+    const reachedOut = await recordStaffOutreach({ contacts, log }, [{ contactId, at: nowIso }]);
+
     // ---- POST-SEND bookkeeping (the mail is already at SES). Each step is
     // independently log-and-continue: it NEVER marks the message failed and NEVER
     // rethrows. The route still returns a 'sent' outcome even if a step failed.
@@ -538,6 +546,10 @@ export function createSendEmailMessageService(deps: SendEmailServiceDeps = {}): 
         'email post-send SSE/touch failed - mail sent; the timeline may be briefly stale',
       );
     }
+
+    // W3: ONE contact.updated, the last event of the send, only when the stamp
+    // above was written.
+    if (reachedOut.includes(contactId)) events.emit('contact.updated', { contactId });
 
     log.info(
       { conversationId: effectiveConversationId, providerSid: bareId, sesMessageId, redirected, bookkeepingDegraded },

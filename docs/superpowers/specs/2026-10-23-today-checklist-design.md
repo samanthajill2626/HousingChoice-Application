@@ -1,7 +1,12 @@
 # Today as the daily checklist - design (tracker #31)
 
-Status: r6. Design review closed after round 3; Cameron passed the spec gate
-2026-10-24 and added the backfill (7.5), reviewed in round 4 (folded in). Branch `feat/today-checklist`,
+Status: r7. Design review closed after round 3; Cameron passed the spec gate
+2026-10-24 and added the backfill (7.5), reviewed in round 4 (folded in). r7
+(2026-10-24, plan review): four precision refinements from the plan's
+rulings PR88, PR91, PR93 - the W2 row (a Retry of an automated row does not
+stamp), the W4 row (a provider-accepted stranded leg stamps), the 7.3
+one-event rule (per fan-out pass), and 7.5 (manual retries, reconcile
+relay legs) - listed for Cameron at the launch gate. Branch `feat/today-checklist`,
 cut from `main` @970a29b9. Tracker: HousingChoice Improvements Tracker item #31
 (Oct 16 meeting with Sam, Oct 18 and Oct 23 decisions). Mockups shared with
 Sam (Design canvas https://claude.ai/artifact/673Q7i9fjQ7zWAH1XydJ5v); Sam
@@ -452,7 +457,8 @@ combined field is stored.
   email or call emits `contact.updated` for its contact when its stamp was
   written; a relay or group post emits nothing per member and instead ONE
   `conversation.updated` for the thread after its fan-out loop finishes, when
-  any member's stamp was written. That event's payload is built from a FRESH,
+  any member's stamp was written (r7: one per fan-out PASS - a continuation
+  pass for deferred members is its own job and emits its own). That event's payload is built from a FRESH,
   consistent read of the thread at emit time, never from the job's
   start-of-run snapshot: two dashboard consumers set `unread_count` straight
   from the event (`ThreadUnreadToggle.tsx`, `ContactDetail.tsx`), so a stale
@@ -486,9 +492,9 @@ Writers that STAMP:
 | # | Writer | Where the stamp goes | Contact(s) stamped |
 |---|---|---|---|
 | W1 | One-to-one SMS/MMS send, POST /api/conversations/:id/messages (`routes/api.ts` -> `services/sendMessage.ts`) | inside `sendMessage`, after the row is persisted, when the caller passes a staff-outreach option (only W1 and W2 pass it). The service owns the judged recipient (`heldRecipient ?? phoneContact`), which its outcome does not return | the judged recipient |
-| W2 | Staff Retry button, POST .../messages/:sid/retry | as W1, EXCEPT a retry of a share text (the retried row carries `broadcast_id`, `routes/api.ts` ~1880) does not stamp: it is a share, and shares do not count (7.2) | as W1 |
+| W2 | Staff Retry button, POST .../messages/:sid/retry | as W1, EXCEPT a retry of a share text (the retried row carries `broadcast_id`, `routes/api.ts` ~1880) or of an automated row (`automated: true`, for example the missed-call text) does not stamp: shares and automated copy do not count (7.2). r7: a Retry of a reminder / nudge "Send now" row (stored `automated: false`) or of an earlier manual retry of an automated row still stamps - rare, accepted | as W1 |
 | W3 | Email send, POST .../email (`services/sendEmailMessage.ts`) | after SES accepts the message | the addressed contact |
-| W4 | Relay group team post (`sendRelayTeamMessage` in `routes/api.ts`, open or still connecting) | in the relay fan-out LOOP (`jobs/relayFanOut.ts`, around the `sendOneRelayLeg` call ~1535), when a leg of a team post comes back sent or `sent_unrecorded` - NOT inside `sendOneRelayLeg`, which the 30003 retry rung also calls (`relayRetryLeg.ts`). The instant is the leg's send time, so a post queued while the group connects stamps when its legs actually go out. A suppressed member gets no leg and no stamp. The reconcile's relay-leg adoption does not stamp (a rare recovery path; best-effort) | each member whose leg was sent and who has a contactId |
+| W4 | Relay group team post (`sendRelayTeamMessage` in `routes/api.ts`, open or still connecting) | in the relay fan-out LOOP (`jobs/relayFanOut.ts`, around the `sendOneRelayLeg` call ~1535), when a leg of a team post comes back sent or `sent_unrecorded`, or (r7) `stranded` after the provider accepted it (`afterSend`) - NOT inside `sendOneRelayLeg`, which the 30003 retry rung also calls (`relayRetryLeg.ts`). The instant is the leg's send time, so a post queued while the group connects stamps when its legs actually go out. A suppressed member gets no leg and no stamp. The reconcile's relay-leg adoption does not stamp (a rare recovery path; best-effort) | each member whose leg was sent and who has a contactId |
 | W5 | Native group text post (`services/groupSend.ts`) | after the post succeeds (the row is written only then) | every resolved member contact EXCEPT members whose slot is seeded `excluded` (suppressed, `groupSend.ts` ~607-637) |
 | W6 | Outbound call (`services/originateCall.ts` + `routes/webhooks/voice.ts`) | in the outbound whisper-gate branch (`POST /voice/whisper-gate`, outbound=1), only when it returns the `<Dial>` to the target (after the DNC re-check passes), and AFTER the TwiML response is sent - never between press-1 and the `<Dial>`, where the file forbids awaited work because a slow answer drops the call. The target resolution (`resolveOutboundTarget`) must also carry the contactId the stamp needs. Not at originate (that rings the staff cell first) | the called contact |
 | W7 | Relay group intro whose body staff wrote (`intro_body`, set on the create routes for relay groups, tours and placements) | in `sendRelayAnnouncement`'s own member loop (`services/relayAnnouncements.ts` ~266-321, called from `jobs/relayFanOut.ts` ~1124), gated on the announcement kind being the intro AND the body being the staff-edited `intro_body`. Every other announcement through that loop (default intro, member added, group closed, tour reminder) does not stamp | each member the intro was sent to, with a contactId |
@@ -553,11 +559,16 @@ people staff followed up with before the deploy do not show as quiet early.
   - one-to-one text and email: `type` sms, mms or email; `automated` not
     true; no `broadcast_id` (shares and their retries); no automatic-retry
     fields (`retry_attempt` / `retry_window_start`); an email only once it
-    left for SES (not failed, and not still queued);
+    left for SES (not failed, and not still queued); (r7) a manual retry
+    (`retry_of`) whose retried row is in the thread's window and is
+    automated or a Send-now row does not count, while one whose retried row
+    is outside the window counts;
   - relay posts: rows with `relay_sender_key` 'team', not relay retry rows
     (`relay_retry_of`); a member counts only when their slot shows the leg
     was SENT (the slot's sid / sent instant - not its status, which can stay
-    'queued' after a successful send);
+    'queued' after a successful send). (r7) Legs the send reconcile adopted
+    count (they were staff posts); a provider-accepted stranded leg with no
+    slot sid cannot be seen and is not counted;
   - group-text posts: `relay_sender_key` 'team' on a group_text thread; each
     member slot is keyed by phone, so it is resolved to a contact by phone;
     slots whose transport state is 'excluded' (suppressed) are skipped;

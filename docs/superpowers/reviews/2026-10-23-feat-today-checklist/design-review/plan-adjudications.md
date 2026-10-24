@@ -48,3 +48,26 @@ The amender applied 23 rulings into slice text and found 30 already matched
 - PR96: PR86 makes PR24's units `isDeleted` alias unnecessary.
 
 Plan v2 @e04c578f. Round 2: reviewer A continued with the RE-REVIEW CHARGE.
+
+## Round 2 (plan v2 @e04c578f -> v3), reviewer A continued - TERMINAL
+
+Reviewer A confirmed PR94 in the code (`api.ts:694-703`,
+`sendMessage.ts:424`, harness `:5631`), checked 350 anchors after the
+write-through (none broken), and confirmed the new tests for PR81, PR84,
+PR86, PR87 and PR91 go RED for their stated reasons. It conceded PR88 and
+PR90.
+
+| Finding | Verdict | What changed / why |
+|---|---|---|
+| R2-1 S7.11's source check can never pass: Today.tsx writes `&apos;` | ACCEPT | Verified `Today.tsx:236,285`. PR97: decode `&apos;`/`&#39;` before comparing; the re-cite grep matches both forms. |
+| R2-2 PR88/PR91/PR93 depart from the approved spec, which was not amended | ACCEPT | PR98: spec r7 states the four refinements (W2 row, W4 row, 7.3 one event per pass, 7.5 retries and reconcile relay legs); listed for Cameron at the launch gate. The refinements make the spec consistent with its own 7.2 rules; nothing new is built. |
+| R2-3 the ContactUpdatedEvent doc comment misses PR81 and PR91 | ACCEPT | PR99: comment text amended (three inbound emitters; the Retry gate). |
+| R2-4 a second Retry of an automated text stamps (gate reads only the retried row) | ACCEPT (record) | PR100: accepted residue (a twice-failed automated text retried twice by staff); recorded in the S2 report and RUNBOOK; no chain lookup. |
+| R2-5 the S4.1 mutation check, followed literally, 500s the route | ACCEPT | PR101: change only the argument list, keep the destructuring. |
+
+No accepted finding changes what gets built: R2-1, R2-3 and R2-5 fix test
+and comment text, R2-2 aligns the spec's wording with rulings already taken,
+R2-4 is recorded. Round 2 is TERMINAL; the plan review ends after 2 rounds.
+
+Totals: round 1 18 findings (A 10, B 8, overlapping), round 2 5. No REJECT.
+Plan v3 FINAL.

@@ -1,7 +1,7 @@
 # Implementation plan - Today as the daily checklist (tracker #31)
 
 - Spec (the contract - read it in full before Task S1.1):
-  `docs/superpowers/specs/2026-10-23-today-checklist-design.md` (r6, APPROVED
+  `docs/superpowers/specs/2026-10-23-today-checklist-design.md` (r7; r6 APPROVED
   by Cameron 2026-10-24 with the backfill added). "Spec N.N" means its
   numbered sections; writers are W1-W8 (spec 7.3).
 - Branch `feat/today-checklist`, worktree `W:\tmp\today-checklist`, cut from
@@ -9,12 +9,12 @@
   `docs/superpowers/reviews/2026-10-23-feat-today-checklist/`.
 - Spec review: 4 rounds -
   `docs/superpowers/reviews/2026-10-23-feat-today-checklist/design-review/adjudications.md`.
-- Status: PLAN v2 (2026-10-24), after plan review round 1. Sections 0-4 are BINDING and written by the
+- Status: PLAN v3 FINAL (2026-10-24), plan review CLOSED after 2 rounds (round 2 terminal, precision only). Sections 0-4 are BINDING and written by the
   planner; slice sections 5-11 (S1-S7) are opus section drafts assembled
   verbatim, with every ruling PR41-PR93 that changes a step applied into
   the slice text and marked `[PRnn]` at the changed step (PR83); section 12
   (S8) is the planner's.
-  Section 4 (planner rulings PR1-PR96) wins over any slice text it
+  Section 4 (planner rulings PR1-PR101) wins over any slice text it
   contradicts. "Plan section N" always means this file's top-level sections.
 
 ## 0. Ground rules for this plan
@@ -742,6 +742,26 @@ where it differs from these, these win.
   `e2e/performance/routes.ts` (the precedent "Couldn't load our number.").
 - PR96 PR86 makes PR24's `isDeleted as isUnitDeleted` alias unnecessary:
   `today.ts` imports no units `isDeleted` (an unused import fails gate 5).
+
+### Plan review round 2 rulings (adjudications: `design-review/plan-adjudications.md`)
+
+- PR97 (R2-1) S7.11's source check decodes `&apos;` / `&#39;` before
+  comparing, and its re-cite grep matches both apostrophe forms.
+- PR98 (R2-2) The spec is amended to r7 where rulings PR88, PR91 and PR93
+  refine it (W2 row, W4 row, the 7.3 one-event sentence, 7.5's retry and
+  reconcile text), with a header note; the r7 changes are listed for
+  Cameron at the launch gate. With r7, plan section 1's "the spec wins on
+  any doubt" holds without exception.
+- PR99 (R2-3) The `ContactUpdatedEvent` doc comment (S7.12) names three
+  inbound emitters (PR81) and the PR91 Retry gate; slice text amended.
+- PR100 (R2-4) A second staff Retry of a failed automated text (retrying a
+  manual-retry row that is stored `automated: false`) stamps; the backfill
+  does the same. Accepted residue (a twice-failed automated text that staff
+  retry twice), recorded in the S2 report and the RUNBOOK entry; no chain
+  lookup is added.
+- PR101 (R2-5) The S4.1 mutation check changes only the call's argument
+  list and keeps the destructuring, so its red run fails on the
+  consistentRead assertion.
 
 ## 5. S1 - The signal: last_reached_out_at, touchLastReachedOut, recordStaffOutreach
 
@@ -3496,7 +3516,8 @@ new:
         retryOf: '2026-06-12T09:00:00.000Z#SMorig',
         // retry-send-adoption R7: a root row is its own chain's root.
         retryRoot: '2026-06-12T09:00:00.000Z#SMorig',
-        // today-checklist W2 (PR11): a staff Retry of a non-share text stamps.
+        // today-checklist W2 (PR11, PR91): a staff Retry of a text that is
+        // neither a share nor automated stamps.
         staffOutreach: true,
       },
     ]);
@@ -3515,7 +3536,8 @@ new:
 ```ts
         retryRoot: '2026-06-12T09:00:00.000Z#SMorig',
         recipient: real,
-        // today-checklist W2 (PR11): a staff Retry of a non-share text stamps.
+        // today-checklist W2 (PR11, PR91): a staff Retry of a text that is
+        // neither a share nor automated stamps.
         staffOutreach: true,
       },
     ]);
@@ -8711,8 +8733,12 @@ Expect all green and exit 0 (`listingSendsApi.test.ts` exercises the
 broadcasts router that mounts the tab).
 
 Mutation check [PR82] (proves the followUpsApi WI1 pin can go red; nothing
-is committed): temporarily change `buildFollowUps`'s first line to
-`await collectWaitingFollowUps(deps, { consistentRead: true })`, run
+is committed): temporarily change ONLY the argument list of the
+`collectWaitingFollowUps` call in `buildFollowUps`, keeping its
+destructuring, to
+`const { rows, truncated } = await collectWaitingFollowUps(deps, { consistentRead: true });`
+[R2-5] (the route must still answer 200, so the failure is the
+consistentRead assertion, not the status check), run
 `cd W:/tmp/today-checklist/app; npx vitest run test/followUpsApi.test.ts`,
 and confirm the "(PIN, WI1) a set last_reached_out_at changes NOTHING ..."
 case FAILS on `call.opts?.consistentRead`. Revert the line and confirm
@@ -22708,7 +22734,10 @@ describe('Today terminal copy', () => {
     const source = readdirSync(dir)
       .filter((file) => /\.tsx?$/u.test(file) && !/\.test\.tsx?$/u.test(file))
       .map((file) => readFileSync(join(dir, file), 'utf8'))
-      .join('\n');
+      .join('\n')
+      // [R2-1] JSX text writes an apostrophe as &apos; (Today.tsx carries
+      // "We couldn&apos;t load your queue"), so decode before comparing.
+      .replace(/&apos;|&#39;/gu, "'");
     for (const contract of [...today.terminal.populated, ...today.terminal.empty]) {
       const name = contract.name!;
       expect(
@@ -22787,7 +22816,7 @@ component file, add it after `; ` (the citation regex at
 `routes.test.ts:452` allows `; <file>:<ranges>`). Find them with:
 
 ```
-grep -n -E "Identify these contacts|All caught up|We couldn't load|Some sections can't load" dashboard/src/routes/today/*.tsx
+grep -n -E "Identify these contacts|All caught up|couldn(&apos;|')t load|can(&apos;|')t load" dashboard/src/routes/today/*.tsx
 ```
 
 Likewise re-cite the `'/'` endpoint base (`:764`,
@@ -22864,15 +22893,17 @@ Replacement:
  * (services/staffOutreach.ts) returned as written, so Today's Quiet shares
  * drops the person on the refetch. Emitters: services/sendMessage.ts (a send
  * carrying the `staffOutreach` option - the 1:1 route's first batch and the
- * staff Retry of a non-share row), services/sendEmailMessage.ts (after SES
+ * staff Retry of a row that is neither a share nor automated),
+ * services/sendEmailMessage.ts (after SES
  * accepts), routes/webhooks/voice.ts stampOutboundDial (the outbound
  * whisper-gate dial, after the TwiML is sent, handed to `afterResponse`),
  * and routes/dev.ts touchFixtureReachedOut (the dev fixture seams' outbound
- * rows). Two INBOUND paths emit it too, right after their
+ * rows). Three INBOUND paths emit it too, right after their
  * `last_heard_from_at` touch returns 'written', because their
- * conversation.updated fires before that touch: services/inboundEmail.ts and
- * the masked relay call paths in routes/webhooks/voice.ts (refused and
- * bridged). A relay or group post emits NO contact.updated per member:
+ * conversation.updated fires before that touch or not at all:
+ * services/inboundEmail.ts, the founder-triage inbound call (an abandoned
+ * ring has no Dial summary) and the masked relay call paths (refused and
+ * bridged), both in routes/webhooks/voice.ts. A relay or group post emits NO contact.updated per member:
  * jobs/relayFanOut.ts (a team post's legs) and services/relayAnnouncements.ts
  * (a staff-edited intro) each emit ONE conversation.updated after their
  * member loop, built from a fresh consistent read

@@ -136,3 +136,30 @@ quality Sam trusts, then her review of it, then the two views.
   rebalancing"; the model asking for more information; flagging unsure
   candidates.
 - Still open: the go for a read-only prod count to size the pools.
+
+## Decisions, round 3 (Cameron, 2026-10-24)
+
+- D-no-tools: the model asking for more information (tool use) is NOT part
+  of WP1. Revisit after sharing exists: "work package 3: there's going to
+  be sharing ... questions that come back to us from a tenant asking about
+  the property. That's when we can start thinking about the tooling."
+- D-staged: the ranking engine is a staged pipeline. Stage one = one
+  listwise scoring call per ranking (anchor + all eligible candidates,
+  batched near 40), with a code-side completeness pass marking each
+  candidate's missing data before the call and the model scoring gaps as
+  uncertainty, streamed so rows fill in. Stage two = top-K refinement
+  (about 12) with full reasons. Cameron: two stages are "fine (as long as
+  the spec includes knowledge that that's the ultimate goal, so that we can
+  build in a forward-looking way)". Planner reading: the charter defines
+  both stages as the target; WP1 builds stage one and the seam (record
+  store holds both stages' output); stage two is the first addition once
+  Sam's review shows the top of the list needs it.
+- Budget and cache check accepted: about 600 rankings a month, ~5 cents
+  each on Sonnet 5.5, only if a ranking is reused rather than recomputed
+  on every open.
+- Cameron's re-rank idea (to settle): anchor-side change -> full re-rank;
+  one candidate changes -> re-score that candidate alone "using the rest
+  of the information as context and have it output only for that person".
+  He also floated "a blanket model for everybody once a day" (NOTE: the
+  signed A1 lists background re-rank as NOT included; WP1 is computed on
+  open).

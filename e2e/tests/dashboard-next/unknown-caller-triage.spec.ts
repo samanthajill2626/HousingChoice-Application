@@ -4,7 +4,8 @@
 // number must leave the caller reachable everywhere an unknown TEXTER would be:
 //
 //   1. a needs_review stub contact exists -> Contacts > Unknown lists the caller
-//   2. Today surfaces a needs_you_now "New unknown contact" row for them
+//   2. Today surfaces an identify "New unknown contact" row for them (the
+//      "Identify these contacts" section; Needs you now before tracker #31)
 //   3. the Inbox row deep-links to the CONTACT page (/contacts/:id), never the
 //      phone-fallback list URL
 //   4. the /contacts/unknown?phone= deep-link seeds the search box (the fallback
@@ -63,7 +64,9 @@ test('an inbound call from an unknown number is captured: Unknown list + Today +
     .toBeTruthy();
   expect(stub!.status).toBe('needs_review');
 
-  // (2) Today: a needs_you_now row anchored to the captured CONTACT.
+  // (2) Today: an identify row anchored to the captured CONTACT - and only
+  //     that one row for it (tracker #31 moved "New unknown contact" rows out
+  //     of needs_you_now; spec 2026-10-23-today-checklist-design.md 5.2).
   const today = await api.get(`${NEXT}/api/today`);
   expect(today.status(), await today.text()).toBe(200);
   const { items } = (await today.json()) as {
@@ -71,7 +74,8 @@ test('an inbound call from an unknown number is captured: Unknown list + Today +
   };
   const row = items.find((i) => i.refId === stub!.contactId);
   expect(row, `no Today item for ${stub!.contactId}: ${JSON.stringify(items)}`).toBeDefined();
-  expect(row!.group).toBe('needs_you_now');
+  expect(row!.group).toBe('identify');
+  expect(items.filter((i) => i.refId === stub!.contactId), JSON.stringify(items)).toHaveLength(1);
   expect(row!.refType).toBe('contact');
   expect(row!.why).toBe('New unknown contact');
 
@@ -84,7 +88,7 @@ test('an inbound call from an unknown number is captured: Unknown list + Today +
 
   await page.goto(`${NEXT}/`);
   const todayRow = page
-    .getByRole('list', { name: 'Needs you now' })
+    .getByRole('list', { name: 'Identify these contacts', exact: true })
     .getByRole('link')
     .filter({ hasText: callerDisplay })
     .filter({ hasText: 'New unknown contact' });

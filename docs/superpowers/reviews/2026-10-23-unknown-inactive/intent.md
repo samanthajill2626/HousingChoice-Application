@@ -39,10 +39,11 @@
 - VERDICT 2026-10-23 ~21:10: MERGE-READY, UNMERGED. Planner gates 0/0/0/0,
   lint 1 pre-existing; reviews adjudicated, no code wave; live QA passed
   (planner-verdict.md). Nothing in flight.
-- NEXT STEP: Cameron's answer on OR-1 (Contacts > Unknown order; default
-  keep) and his merge. Then: re-count (unknown, active) before deploy;
-  unregister compact-resume (--off) when the mission ends; cleanup only on
-  his go.
+- 2026-10-23 Cameron: "Keep it, and lets run the pre-deploy stuff". OR-1
+  kept. Pre-deploy re-count done: (unknown, active) 0 dev / 0 prod; W2
+  trigger not met.
+- NEXT STEP: Cameron's merge and deploy (his). Unregister compact-resume
+  (--off) when the mission ends; cleanup only on his go.
 - (superseded) gate results -> reviewer findings ->
   adjudicate -> live QA (hermetic e2e:session, after the gates) -> verdict.
 - (superseded) supervise. On each watchdog wake: CHECKPOINT -> ledger tail,

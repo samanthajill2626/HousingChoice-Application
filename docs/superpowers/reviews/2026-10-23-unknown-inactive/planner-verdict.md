@@ -83,3 +83,20 @@ Lane stopped; no lane-4 port listening.
   (W8), audit-failure path sends no live update, PATCH re-type not fenced on
   the form's base type (pre-existing), /tenant-status on a phone-pointer id
   returns 500 (API-only).
+
+## After the verdict (2026-10-23)
+
+- Cameron on OR-1 (Contacts > Unknown lists Needs review above Inactive):
+  "Keep it". The build stands as is.
+- Pre-deploy re-count (W7, read-only, profile housingchoice, account
+  938565869261), byTypeStatus GSI, type unknown:
+
+  | Env | active | needs_review | inactive |
+  |---|---|---|---|
+  | dev | 0 | 19 (0 deleted) | 0 |
+  | prod | 0 | 22 (10 deleted) | 0 |
+
+  No (unknown, active) rows: nothing to move. W2 trigger (100 live rows) not
+  met; recorded in unknown-queue-status-flip-duplicates-across-pages.md.
+  Re-run the active count only if a deploy is delayed: until it lands, the
+  old edit form can still create one.

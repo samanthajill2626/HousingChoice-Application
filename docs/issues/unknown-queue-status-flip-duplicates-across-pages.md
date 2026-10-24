@@ -175,3 +175,9 @@ being hypothetical. The count comes from
 attribute is the paged ordering's range key - `status` today,
 `last_activity_at` after the denormalization - so read the corrected option 2
 above before marking it resolved on the strength of that work landing.
+
+**Measured 2026-10-23 (pre-deploy, unknown-inactive W2/W7).** byTypeStatus
+counts (profile housingchoice): dev - needs_review 19 (0 deleted), active 0,
+inactive 0; prod - needs_review 22 (10 deleted, so 12 live), active 0,
+inactive 0. The whole partition, before any open-thread narrowing, is far
+below the 100-live-row trigger. Trigger NOT met.

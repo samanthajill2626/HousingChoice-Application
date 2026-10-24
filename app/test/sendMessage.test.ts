@@ -122,6 +122,9 @@ function makeFakes(
       if (overrides.getByIdError !== undefined) throw overrides.getByIdError;
       return id === conversation.conversationId ? conversation : undefined;
     },
+    getByIdConsistent: async () => {
+      throw new Error('getByIdConsistent: not used in this suite');
+    },
     findByParticipantPhone: async () => [conversation],
     findByParticipantEmail: async () => [],
     claimEmailForConversation: async (_email, conversationId) => ({ conversationId }),

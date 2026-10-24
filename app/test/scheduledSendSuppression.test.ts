@@ -154,6 +154,9 @@ function makeSendFakes(
   const conversationsRepo: ConversationsRepo = {
     createOrGetByParticipantPhone: async () => conversation,
     getById: async (id) => (id === conversation.conversationId ? conversation : undefined),
+    getByIdConsistent: async () => {
+      throw new Error('getByIdConsistent: not used in this suite');
+    },
     findByParticipantPhone: async () => [conversation],
     findByParticipantEmail: async () => [],
     claimEmailForConversation: async (_email, conversationId) => ({ conversationId }),

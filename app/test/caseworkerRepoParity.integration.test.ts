@@ -640,4 +640,23 @@ describe('contactsRepo.touchLastReachedOut (today-checklist PR2, PR7)', () => {
   });
 });
 
+// today-checklist PR6: S3's writer tests build their after-loop event through
+// the harness fake, so it answers exactly what the real consistent read does.
+describe('conversationsRepo.getByIdConsistent (today-checklist PR6)', () => {
+  parity('answers exactly what getById answers - the stored row, or undefined', async (w, id) => {
+    const row = {
+      conversationId: `${id}-conv`,
+      type: 'relay_group',
+      status: 'open',
+      last_activity_at: '2026-10-20T10:00:00.000Z',
+      unread_count: 2,
+    };
+    await w.putConversation(row);
+    const consistent = await w.conversations.getByIdConsistent(`${id}-conv`);
+    expect(consistent).toEqual(row);
+    expect(consistent).toEqual(await w.conversations.getById(`${id}-conv`));
+    expect(await w.conversations.getByIdConsistent(`${id}-missing`)).toBeUndefined();
+  });
+});
+
 // END OF PARITY CASES - Tasks 2.2-2.5 insert their describe blocks ABOVE this line.

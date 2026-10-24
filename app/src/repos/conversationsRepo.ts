@@ -560,6 +560,15 @@ export interface ConversationsRepo {
   createOrGetByParticipantPhone(phone: string, type: ConversationType): Promise<ConversationItem>;
   getById(conversationId: string): Promise<ConversationItem | undefined>;
   /**
+   * getById with `ConsistentRead: true` (today-checklist plan ruling PR6):
+   * the same key and the same raw item - no pointer or claim filtering,
+   * exactly as getById does none - at about twice the read cost. Used ONLY to
+   * build the after-loop `conversation.updated` payload of a staff relay or
+   * group post (spec 7.3): two dashboard consumers set unread_count straight
+   * from that event, so it must not be a stale snapshot.
+   */
+  getByIdConsistent(conversationId: string): Promise<ConversationItem | undefined>;
+  /**
    * All conversations for an external phone via the byParticipantPhone GSI
    * (M1.4 contact triage: when a contact's type is resolved, the linked
    * conversation's type is propagated). Filters out the phone-claim items
@@ -1126,6 +1135,14 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
     return Item as ConversationItem | undefined;
   }
 
+  /** getById, strongly consistent (PR6; see the interface). */
+  async function getByIdConsistent(conversationId: string): Promise<ConversationItem | undefined> {
+    const { Item } = await doc.send(
+      new GetCommand({ TableName: table, Key: { conversationId }, ConsistentRead: true }),
+    );
+    return Item as ConversationItem | undefined;
+  }
+
   /**
    * Create the real conversation row under an agreed (claimed) id. Losing
    * the conditional put just means another caller created it first — read
@@ -1273,6 +1290,7 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
 
   return {
     getById,
+    getByIdConsistent,
 
     async createOrGetByParticipantPhone(phone, type) {
       // Fast path: the byParticipantPhone GSI. Eventually consistent — a

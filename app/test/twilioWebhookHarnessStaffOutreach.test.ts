@@ -69,3 +69,14 @@ describe('harness contactsRepo.getRecipientDisplaysByIds records its options (PR
     expect(consistent.has('c-2')).toBe(false);
   });
 });
+
+describe('harness conversationsRepo.getByIdConsistent (PR6)', () => {
+  it('answers what getById answers (in memory every read is consistent)', async () => {
+    const world = createFakeWorld();
+    const conv = await world.conversationsRepo.createOrGetByParticipantPhone('+15550109901', 'tenant_1to1');
+    expect(await world.conversationsRepo.getByIdConsistent(conv.conversationId)).toBe(
+      await world.conversationsRepo.getById(conv.conversationId),
+    );
+    expect(await world.conversationsRepo.getByIdConsistent('conv-missing')).toBeUndefined();
+  });
+});

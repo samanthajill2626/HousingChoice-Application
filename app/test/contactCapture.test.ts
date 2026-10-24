@@ -165,6 +165,9 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     async getById(id) {
       return id === conversation.conversationId ? conversation : undefined;
     },
+    async getByIdConsistent() {
+      throw new Error('getByIdConsistent: not used in this suite');
+    },
     async findByParticipantPhone() {
       return [];
     },

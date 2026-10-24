@@ -686,6 +686,10 @@ export function createFakeWorld(): FakeWorld {
     async getById(conversationId) {
       return conversations.get(conversationId);
     },
+    // today-checklist PR6: in memory every read is consistent - same answer.
+    async getByIdConsistent(conversationId) {
+      return conversations.get(conversationId);
+    },
     async touchLastActivity(conversationId, previewText, ts) {
       touches.push({ conversationId, previewText, ts });
       const conv = conversations.get(conversationId);

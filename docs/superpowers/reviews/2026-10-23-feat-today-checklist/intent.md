@@ -2,22 +2,23 @@
 
 ## STATE (replace on every move)
 
-- Phase: PLAN REVIEW round 2. Spec r6 @a38bbe7d. Plan v2 @e04c578f
-  (`docs/superpowers/plans/2026-10-24-today-checklist.md`; rulings PR1-PR96,
-  PR41-PR93 written into slice text). Round 1 adjudicated in
-  `design-review/plan-adjudications.md` (18 findings, all accepted; three
-  changed decisions). Round 2 running: reviewer A continued, writing
-  `design-review/plan-r2-reviewer-a.md`.
+- Phase: LAUNCH GATE. Spec r7 and plan v3 FINAL @f3f85451 (plan review
+  closed after 2 rounds, 23 findings, no reject). Mission block:
+  `mission-block.md` beside this file.
 - Worktree `W:\tmp\today-checklist`, branch `feat/today-checklist`, cut from
   main @970a29b9. Nothing built; docs only.
-- Launch mode: not chosen yet.
-- For Cameron at the launch gate: PR64 - section headings carry counts,
-  which reverses the 2026-08-03 "no bare counts" ruling (commit 2f0db66f);
-  the spec and the mockup he and Sam saw have counts.
-- NEXT STEP: adjudicate round 2 into plan-adjudications.md; if it changed a
-  decision, run round 3 with the same reviewer (cap 4); when a round changes
-  none, write the mission block, show it, and ask the launch gate
-  (AskUserQuestion: "Go - AUTO dispatch" / "Go - MANUAL" / "Revise").
+- Launch mode: asked at the launch gate (AskUserQuestion AUTO / MANUAL /
+  Revise); not chosen yet.
+- For Cameron at the launch gate: PR64 heading counts (reverses the
+  2026-08-03 no-bare-counts ruling, commit 2f0db66f); spec r7's four
+  refinements (Retry of an automated row does not stamp; a provider-accepted
+  stranded relay leg stamps; one after-loop event per fan-out pass; backfill
+  retry and reconcile-leg rules).
+- NEXT STEP: on a Go pick, COMPACTION GATE B (confirm the registration with
+  --show, start the watcher, offer /compact), then AUTO: dispatch
+  abt:build-orchestrator in the background with mission-block.md verbatim,
+  arm the watchdog (30-min checkpoints, 55-min ceiling) and the mirror;
+  MANUAL: hand over the orchestration prompt. On Revise: take his changes.
 
 ## What Cameron asked for (verbatim, with dates)
 

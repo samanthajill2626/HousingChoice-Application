@@ -1,7 +1,7 @@
 # Today as the daily checklist - design (tracker #31)
 
-Status: r5. Design review closed after round 3; Cameron passed the spec gate
-2026-10-24 and added the backfill (7.5), reviewed in round 4. Branch `feat/today-checklist`,
+Status: r6. Design review closed after round 3; Cameron passed the spec gate
+2026-10-24 and added the backfill (7.5), reviewed in round 4 (folded in). Branch `feat/today-checklist`,
 cut from `main` @970a29b9. Tracker: HousingChoice Improvements Tracker item #31
 (Oct 16 meeting with Sam, Oct 18 and Oct 23 decisions). Mockups shared with
 Sam (Design canvas https://claude.ai/artifact/673Q7i9fjQ7zWAH1XydJ5v); Sam
@@ -532,33 +532,46 @@ people staff followed up with before the deploy do not show as quiet early.
   body), abort with a partial report and exit 1 on a 'failed' touch.
 - Window: outbound rows from the last 14 days only. A stamp matters only when
   it is later than a share's `sentAt`, and every candidate share is at most 14
-  days old (FOLLOW_UP_LOOKBACK_MS), so older rows can never change a row. This
-  also keeps the scan small.
+  days old (FOLLOW_UP_LOOKBACK_MS), so older rows can never change a row.
+- Read: the last-heard-from script's skeleton (scan every conversation,
+  pointer rows skipped), but each thread is read with a KEY-CONDITION Query on
+  the window (`tsMsgId >= <floor>`, `tsMsgId` = providerTs#sid, with a small
+  margin and a `normalizeInstant` re-check of each row), not its full history.
+  No pre-filter on `last_activity_at`: calls and queued relay posts do not
+  move it.
 - Writes: the latest qualifying instant per contact across threads, then ONE
   `touchLastReachedOut` per contact. The writer is forward-only, so a value a
-  live send wrote after the scan is never moved back, a second run writes
-  nothing, and running before or after the deploy is equally safe. It emits no
-  live events.
+  live send wrote after the scan is never moved back and a second run writes
+  nothing. It emits no live events. Run it AFTER the deploy: a run before it
+  would leave the sends between the run and the deploy stamped by nothing.
 - Which historical rows count. The rows carry no "who started this" marker
   (7.3), so the script applies the 7.2 rules through the fields each writer
   leaves behind. The plan verifies every filter against the writer's real row
-  shape, and the dry run reports a count per category so the human can see
-  what it would stamp:
-  - one-to-one SMS/MMS and email: `direction` outbound, `author` 'teammate',
-    `automated` not true, no `broadcast_id` (shares and their retries), no
-    automatic-retry fields (`retry_attempt` / `retry_window_start`), not a
-    failed email;
-  - relay and group posts: rows with `relay_sender_key` 'team' stamp each
-    member with a contactId (using the per-member slot state where the row has
-    one, so a member with no sent leg is skipped); rows with
-    `relay_sender_key` 'system' and relay retry rows (`relay_retry_of`) are
-    skipped;
-  - calls: `type` 'call', `direction` outbound, except calls refused before
-    the target was dialed (the canceled refusal stamp the whisper-gate writes);
-  - tour reminder and placement nudge "Send now" rows: skipped when the plan
-    finds a field that marks them; if no such field exists they are counted
-    and the dry run says how many could not be told apart (an approximation
-    that ages out in 14 days).
+  shape, and the dry run reports a count per category. Every category
+  requires `direction` outbound, `author` 'teammate' and no `imported_from`
+  (Quo rows never count, whatever their date):
+  - one-to-one text and email: `type` sms, mms or email; `automated` not
+    true; no `broadcast_id` (shares and their retries); no automatic-retry
+    fields (`retry_attempt` / `retry_window_start`); an email only once it
+    left for SES (not failed, and not still queued);
+  - relay posts: rows with `relay_sender_key` 'team', not relay retry rows
+    (`relay_retry_of`); a member counts only when their slot shows the leg
+    was SENT (the slot's sid / sent instant - not its status, which can stay
+    'queued' after a successful send);
+  - group-text posts: `relay_sender_key` 'team' on a group_text thread; each
+    member slot is keyed by phone, so it is resolved to a contact by phone;
+    slots whose transport state is 'excluded' (suppressed) are skipped;
+  - calls: `type` 'call' with evidence the contact's leg was dialed - an
+    `answered_at` (stamped at press-1) or a `call_outcome`. A call the staff
+    member never accepted stays 'ringing' with neither, and does not count;
+  - staff-edited relay intros: stored with `author` 'system', so the plan
+    picks one rule - match the row body against the thread's `intro_body`, or
+    skip them (an approximation that ages out in 14 days) - and the dry run
+    reports which;
+  - tour reminder and placement nudge "Send now" rows carry no marker. The
+    plan picks one rule - an approximate join of each reminder or nudge's
+    sent instant to the thread's row, or count them - and the dry run reports
+    how many it could not tell apart.
 - Recipient: the row's `recipient_contact_id` when present, else the
   one-to-one thread's contact; group rows as above.
 - Who runs it: an agent runs it only against a hermetic e2e lane (`--env local

@@ -91,3 +91,23 @@ Totals: round 1 37 findings (A 18, B 19, overlapping), round 2 12, round 3 4.
 One REJECT in total (A3/B10 Tours to book unbounded), conceded by reviewer A in
 round 2. Two findings went to Cameron as decisions (shares do not restart the
 clock; Identify unknown-only).
+
+## Round 4 (backfill section 7.5 only, added at the spec gate) - spec r5 @28d33501 -> r6
+
+Cameron added the backfill at the spec gate (2026-10-24); round 4 reviewed only
+section 7.5. All eight findings ACCEPTED and folded into 7.5:
+
+| Finding | Change |
+|---|---|
+| R4-1 call filter counts calls never dialed | calls count only with `answered_at` or a `call_outcome` |
+| R4-2 slot status does not mark a sent leg; group slots keyed by phone, 'excluded' marks suppression | relay: slot sid / sent instant; group text: resolve phone -> contact, skip 'excluded' |
+| R4-3 Quo rows pass relay and call categories | every category requires `author` 'teammate' and no `imported_from` |
+| R4-4 one-to-one category must be typed; queued emails | type sms/mms/email; email only once it left for SES |
+| R4-5 staff-edited intros are stored as 'system' | plan picks body-match or skip; dry run reports it |
+| R4-6 read the window by sort key, keep the full scan | key-condition Query `tsMsgId >= floor`; no last_activity_at pre-filter |
+| R4-7 pre-deploy run leaves a gap | run AFTER the deploy |
+| R4-8 Send-now rows: approximate join available | plan picks join or count; dry run reports it |
+
+R4-1 and R4-2 change what the backfill stamps, but both correct the filters
+inside the human's backfill decision; neither changes the design of the
+feature. Round 4 is the cap; the review ends here, and the spec stands as r6.

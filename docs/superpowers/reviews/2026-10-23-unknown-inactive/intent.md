@@ -25,7 +25,20 @@
 - Worktree: `W:\tmp\unknown-inactive`, branch `feat/unknown-inactive`, cut from
   main @916258ae. Issue `contacts-status-filter-tenants-only` committed @0957ed39.
   No node_modules yet (plan section 0 has the builder run `npm ci`).
-- NEXT STEP: supervise. On each watchdog wake: CHECKPOINT -> ledger tail,
+- HANDBACK 2026-10-23 ~20:55: orchestrator DONE, MERGE-READY claim at
+  gated 798de475 (HEAD 12db6876 records only), 0 recoveries. Mirror
+  stopped. Planner review in flight (started ~21:00): own five gates
+  (scratchpad planner-gates.sh, logs + exits in
+  .superpowers/sdd/planner-gates/), spec-conformance reviewer and
+  plan-blind adversarial reviewer (opus, background, reports to
+  code-review/planner-*.md). Do NOT commit while the planner's e2e runs.
+  Open planner calls from handback section 5: OR-1 Contacts > Unknown
+  order (Cameron's taste call), W8 second refetch, SPEC-F3 emit on audit
+  failure, SPEC-F4 importer issue note, SPEC-F2 porting wording, R3-2/R4-1
+  unfenced re-type (pre-existing).
+- NEXT STEP (after handback): gate results -> reviewer findings ->
+  adjudicate -> live QA (hermetic e2e:session, after the gates) -> verdict.
+- (superseded) supervise. On each watchdog wake: CHECKPOINT -> ledger tail,
   one "**Checkpoint:**" line, re-arm (55 min); QUESTION -> relay to
   Cameron; STALL -> ladder rung 0 (transcript probe). On DONE -> handback
   review (replay in full, own gates on a quiet tree, spec reviewer +

@@ -6,7 +6,7 @@ severity: low
 status: open
 area: app/import
 created: 2026-10-12
-updated: 2026-10-13
+updated: 2026-10-23
 refs: app/src/lib/import/apply.ts:883, app/src/lib/import/apply.ts:1065, app/src/lib/import/apply.ts:1110, app/src/lib/import/apply.ts:1137, app/src/lib/import/apply.ts:1519, app/src/lib/import/apply.ts:1552, app/src/repos/contactsRepo.ts:1501, app/src/repos/unitsRepo.ts:1331, app/src/jobs/placementNudges.ts:443, app/src/services/contactHoldings.ts
 ---
 
@@ -82,3 +82,17 @@ tenant, starts getting landlord nudges for U. The reviewer's two fix options:
 entirely - a property a human has touched never gets its owner from the
 import; or (2), if that is too strong, write it only when the matched
 contact's STORED type is `landlord`, read consistently before the write.
+
+**Update 2026-10-23 (tracker #30, `feat/unknown-inactive`).** Statuses are now
+per type (`statusAllowlistFor`, `app/src/lib/statusModel.ts`): unknown has no
+`active`, and partner, team member and unknown gain `inactive`. The importer's
+fresh-status path now falls back through `statusAllowlistFor`, but the
+`type_source: 'manual'` branch that keeps a staff-set status while it writes
+the workbook's type (`preserveStatus`, `app/src/lib/import/apply.ts`) checks
+the kept status against nothing. It can therefore store a pair the new lists
+forbid, such as (unknown, active) from a staff-set Active partner re-typed to
+unknown, or (landlord, inactive). An (unknown, active) contact is read by no
+inbox Unknown-tab block and no Today pass; it shows only on Contacts > Unknown.
+STATUS-MODEL.md section 5b names this as the one remaining writer of such a
+pair. Fix with the rest of this issue: when the kept status is not in
+`statusAllowlistFor(newType)`, write the new type's first status instead.

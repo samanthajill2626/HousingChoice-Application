@@ -710,8 +710,10 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   has it: tenant, partner (a caseworker or other partner), team member and
   unknown (code `inactive`, label "Inactive"). It means the same thing on
   each (Cameron, 2026-10-23): the contact is not chased (no **waiting on a
-  reply** row, not a listing-send recipient - `isEligibleRecipient`,
-  `app/src/lib/listingSendOutcome.ts`) but stays on the Contacts lists, in
+  reply** row, not eligible for follow-up on a property's listing sends -
+  `isEligibleRecipient`, `app/src/lib/listingSendOutcome.ts`; automatic
+  texts and hand-picked shares still reach it, by decision - STATUS-MODEL.md
+  section 5b) but stays on the Contacts lists, in
   search and in the inbox, where its texts and calls still show unread and
   its row carries a small muted "Inactive" tag and no "Needs triage" chip.
   An inbound text or call never moves it back to Needs review. An unknown

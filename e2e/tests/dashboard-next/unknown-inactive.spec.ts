@@ -3,12 +3,13 @@
 // Inactive for every contact type (tracker #30; spec
 // docs/superpowers/specs/2026-10-23-unknown-inactive-design.md, test 8):
 // staff mark an unknown Needs review contact Inactive from the contact page
-// HEADER DROPDOWN, without giving it a type. It leaves Today's Needs you now
-// (live, on an already-open Today page), stays on Contacts > Unknown (listed
-// after the Needs review contacts), sits on the inbox Unknown tab BELOW the
-// Needs review rows with an "Inactive" tag, and a new inbound text from it
-// shows unread in the inbox without putting it back in Needs you now or moving
-// its status.
+// HEADER DROPDOWN, without giving it a type. It leaves Today's Identify these
+// contacts (live, on an already-open Today page; the "New unknown contact"
+// rows moved there from Needs you now in tracker #31), stays on Contacts >
+// Unknown (listed after the Needs review contacts), sits on the inbox Unknown
+// tab BELOW the Needs review rows with an "Inactive" tag, and a new inbound
+// text from it shows unread in the inbox without putting it back in Identify
+// these contacts or moving its status.
 //
 // STATE. Every test reseeds first and last. The lean world holds ZERO unknown
 // contacts (unknown-caller-triage.spec.ts relies on that), so after the reseed
@@ -16,8 +17,8 @@
 // after keeps this test's Inactive contact and unread rows out of later
 // specs. The test builds two unknown contacts from inbound texts: A, the one
 // marked Inactive, and B, a Needs review POSITIVE CONTROL that must stay on
-// Needs you now and sit ABOVE A on the Unknown tab. No lean-seed contact is
-// added (plan AR12).
+// Identify these contacts and sit ABOVE A on the Unknown tab. No lean-seed
+// contact is added (plan AR12).
 //
 // THE TEXTS go straight to the app's signed SMS webhook (postInboundSms), so
 // no fake persona is needed: the inbound pipeline captures each new number as
@@ -48,7 +49,7 @@ const UI = {
   triageCard: 'Needs triage',
   typeUnknownCard: 'Type unknown',
   markAsTenant: 'Mark as Tenant',
-  needsYouNow: 'Needs you now',
+  identify: 'Identify these contacts',
   newUnknown: 'New unknown contact',
   inboxList: 'Conversations',
   unknownTab: 'Unknown',
@@ -126,13 +127,14 @@ interface TodayWireItem {
   refId: string;
 }
 
-/** The contact ids on Today's Needs you now, server truth. Throws on a
- *  non-200 so a failed read can never pass a "not in" check. */
-async function needsYouNowIds(api: APIRequestContext): Promise<string[]> {
+/** The contact ids on Today's Identify these contacts (the `identify` group
+ *  since tracker #31), server truth. Throws on a non-200 so a failed read can
+ *  never pass a "not in" check. */
+async function identifyIds(api: APIRequestContext): Promise<string[]> {
   const res = await api.get(`${NEXT}/api/today`);
   if (res.status() !== 200) throw new Error(`GET /api/today: ${res.status()} ${await res.text()}`);
   const { items } = (await res.json()) as { items: TodayWireItem[] };
-  return items.filter((i) => i.group === 'needs_you_now' && i.refType === 'contact').map((i) => i.refId);
+  return items.filter((i) => i.group === 'identify' && i.refType === 'contact').map((i) => i.refId);
 }
 
 interface InboxWireRow {
@@ -158,9 +160,13 @@ async function rowHrefs(list: Locator): Promise<string[]> {
   return list.getByRole('link').evaluateAll((els) => els.map((el) => el.getAttribute('href') ?? ''));
 }
 
-/** A "New unknown contact" row on Today's Needs you now, by the display phone. */
+/** A "New unknown contact" row on Today's Identify these contacts, by the
+ *  display phone. */
 function todayRow(page: Page, phone: string): Locator {
-  return page.getByRole('list', { name: UI.needsYouNow }).getByRole('link').filter({ hasText: displayOf(phone) });
+  return page
+    .getByRole('list', { name: UI.identify, exact: true })
+    .getByRole('link')
+    .filter({ hasText: displayOf(phone) });
 }
 
 function inboxList(page: Page): Locator {
@@ -186,7 +192,7 @@ test.describe('Inactive for an unknown contact', () => {
     await reseed(request);
   });
 
-  test('the header dropdown marks an unknown contact Inactive: off Needs you now, still in the inbox, status kept', async ({
+  test('the header dropdown marks an unknown contact Inactive: off Identify these contacts, still in the inbox, status kept', async ({
     page,
     request,
   }) => {
@@ -258,7 +264,7 @@ test.describe('Inactive for an unknown contact', () => {
     await today.close();
     await page.bringToFront();
     await expect(async () => {
-      const ids = await needsYouNowIds(api);
+      const ids = await identifyIds(api);
       expect(ids).not.toContain(idA);
       expect(ids).toContain(idB);
     }).toPass({ timeout: 10_000 });
@@ -318,9 +324,9 @@ test.describe('Inactive for an unknown contact', () => {
     await expect(inboxRow(page, idA).getByLabel(UI.unreadOne)).toBeVisible();
     await expect(inboxRow(page, idA).getByText(UI.inactiveTag, { exact: true })).toBeVisible();
 
-    // (9) ...but NOT back in Needs you now (D5); B still is.
+    // (9) ...but NOT back in Identify these contacts (D5); B still is.
     await expect(async () => {
-      const ids = await needsYouNowIds(api);
+      const ids = await identifyIds(api);
       expect(ids).not.toContain(idA);
       expect(ids).toContain(idB);
     }).toPass({ timeout: 10_000 });

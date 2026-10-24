@@ -205,3 +205,28 @@ quality Sam trusts, then her review of it, then the two views.
 - Prod pool count: APPROVED (read-only). "The number of properties in here
   isn't really that big, and the number of tenants isn't really that big,
   but we got to think about scale in general, just not now."
+
+## Decisions, round 6 (Cameron, 2026-10-24, after the prod pool count)
+
+- D-no-dormant: NO input is designed as dormant. "We shouldn't build or
+  make the charter treat anything as dormant when, in reality, it's Sam's
+  responsibility to make sure that we have captured all the data properly.
+  It's our responsibility to make sure that missing data doesn't break the
+  whole system." Rent, payment standard, tenant portion: built fully; the
+  completeness pass handles absence without breaking; the UI must push
+  Sam to add the data ("force Sam to actually add the data") - e.g. a
+  property's ranking view names what is missing with a link to fill it.
+- D-priority: on/off, USED by the ranking; nothing to migrate (no prod
+  values) - "it's just not filled out right now."
+- D-staleness: last heard from is BOTH a pool rule (a longer period, 90
+  days, configurable, toggle to include older) AND a model input that helps
+  rank within the window. "if it's 90 days old ... they're just going to be
+  noise." Future automation (WP3-era): reach out to tenants going dormant
+  ("still looking?"); a reply refreshes last heard from, no reply moves
+  them to inactive or the proper status. Not WP1.
+- Prod facts to carry into the charter: 670 searching / 22 live available;
+  property-side pools ~100 median, ~500 worst as recorded; tenant-side at
+  most 10; no rent/payment standard/subzone/priority on any available
+  unit; 10 of 22 live available lack a voucher size list; 29 searching
+  tenants carry voucher size 10 (ask Sam); `matches` table (tenantId,
+  unitId, byUnit, TTL) exists everywhere, unused.

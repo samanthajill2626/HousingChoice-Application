@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { expectTodayReady } from '../../support/today.js';
+import { expectTodayReady, showAllIn } from '../../support/today.js';
 
 // Tours e2e spec (:5174) — covers the three scenarios from the task brief:
 //
@@ -43,8 +43,9 @@ async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
   // `exact: true` — match ONLY the <h1>Today</h1> board title, never the
-  // <h2>Tours today</h2> section heading (both contain the substring "today", so a
-  // non-exact match trips Playwright strict mode once that section renders).
+  // <h3>Tours today</h3> heading under At a glance (an <h2> before tracker #31;
+  // both contain the substring "today", so a non-exact match trips Playwright
+  // strict mode once that section renders).
   await expectTodayReady(page);
 }
 
@@ -179,8 +180,9 @@ test.describe('Tours page', () => {
     // The Today board derives "today" from the browser clock (useToday →
     // localDayWindow) and IGNORES query params, so just navigate home; the pinned
     // clock guarantees our noon tour is inside the board's local-today window.
-    // `exact: true` matches ONLY the <h1>Today</h1> title, not the <h2>Tours
-    // today</h2> section heading that now renders (both contain "today").
+    // `exact: true` matches ONLY the <h1>Today</h1> title, not the <h3>Tours
+    // today</h3> heading (under At a glance) that now renders (both contain
+    // "today").
     await page.goto(`${NEXT}/`);
     await expectTodayReady(page);
 
@@ -256,11 +258,21 @@ test.describe('Tours page', () => {
     // A requested tour has no scheduledAt, so it is excluded from the tours_today
     // window regardless of the clock. The board derives "today" from the browser
     // clock (not query params), so navigate home. `exact: true` matches only the
-    // <h1>Today</h1> title, not the <h2>Tours today</h2> heading that the earlier
+    // <h1>Today</h1> title, not the <h3>Tours today</h3> heading that the earlier
     // scheduled-tour test leaves visible (its noon tour persists via the shared
     // once-per-file reseed).
     await page.goto(`${NEXT}/`);
     await expectTodayReady(page);
+
+    // Tracker #31: a requested tour IS Today work - the checklist's Tours to
+    // book section lists it (oldest request first, so expand on a shared lane).
+    // Asserted FIRST: it renders from the same GET /api/today as Tours today,
+    // so the isVisible() probe below reads a LOADED page. (Before, the probe
+    // could run before the queue loaded, and then the absence check never ran.)
+    await showAllIn(page, 'Tours to book');
+    await expect(
+      page.getByRole('list', { name: 'Tours to book', exact: true }).locator(`a[href="/tours/${tourId}"]`),
+    ).toBeVisible();
 
     // Either the "Tours today" section is absent entirely, or it doesn't contain
     // a link to the requested tour.
@@ -271,8 +283,10 @@ test.describe('Tours page', () => {
     // the link to our requested tourId must be absent.
     const hasTodaySection = await toursTodayList.isVisible().catch(() => false);
     if (hasTodaySection) {
-      // Assert that the link to /tours/<requestedTourId> is not present.
-      await expect(page.locator(`a[href="/tours/${tourId}"]`)).toHaveCount(0);
+      // Assert that the link to /tours/<requestedTourId> is not in Tours today.
+      // Scoped to that list: since tracker #31 the SAME tour links from the
+      // checklist's Tours to book section, so a page-wide count finds it there.
+      await expect(toursTodayList.locator(`a[href="/tours/${tourId}"]`)).toHaveCount(0);
     }
     // If the section is absent, there is nothing to assert — that also satisfies
     // the requirement.

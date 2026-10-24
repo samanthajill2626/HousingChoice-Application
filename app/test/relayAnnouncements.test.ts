@@ -565,3 +565,141 @@ describe('sendRelayAnnouncement - the optional per-member bodyFor (spec 9.6)', (
     expect(world.messages.filter((m) => m.conversationId === conv.conversationId)).toHaveLength(0);
   });
 });
+
+// today-checklist W7 (spec 2026-10-23-today-checklist-design.md 7.3): an
+// announcement whose body STAFF wrote (a relay intro's edited intro_body,
+// flagged staffAuthored by the relay.intro job) stamps last_reached_out_at for
+// each member with a contactId whose leg the provider accepted, then emits ONE
+// conversation.updated from a fresh read after the loop. Every other
+// announcement - and the dev intro replay (persist:false) - never stamps.
+describe('sendRelayAnnouncement - a staff-authored intro stamps last_reached_out_at (today-checklist W7)', () => {
+  const CAROL = '+15550100003';
+  const DAVE = '+15550100004';
+
+  it('stamps each member it reached at that leg\'s providerTs, then ONE conversation.updated from a FRESH read', async () => {
+    const world = createFakeWorld();
+    const conv = await openTransportGroup(world);
+    world.contacts.push({ contactId: 'c-a', type: 'tenant', phone: ALICE }, { contactId: 'c-b', type: 'tenant', phone: BOB });
+    // WL-6 (build worklist, D3-2): each leg returns its OWN fixed provider
+    // instant, far from the row's providerTs (minted at append time), so a
+    // stamp taken at the row's instant instead of the leg's cannot pass.
+    const legTs: Record<string, string> = { [ALICE]: '2026-01-02T03:04:05.001Z', [BOB]: '2026-01-02T03:04:05.002Z' };
+    const realSend = world.adapter.sendPreparedMessage.bind(world.adapter);
+    let replied = false;
+    vi.spyOn(world.adapter, 'sendPreparedMessage').mockImplementation(async (prepared) => {
+      if (!replied) {
+        replied = true;
+        // A member replies mid-loop: the table changes, not the snapshot object.
+        const current = world.conversations.get(conv.conversationId)!;
+        world.conversations.set(conv.conversationId, { ...current, unread_count: 2 });
+      }
+      return { ...(await realSend(prepared)), providerTs: legTs[prepared.params.to]! };
+    });
+    const freshRead = vi.spyOn(world.conversationsRepo, 'getByIdConsistent');
+
+    await sendRelayAnnouncement(deps(world), {
+      conversationId: conv.conversationId,
+      body: 'Hi both, this is Sam. Meet each other here.',
+      kind: 'relay.intro',
+      staffAuthored: true,
+    });
+
+    expect(world.reachedOutTouches.map((t) => [t.contactId, t.at, t.outcome]).sort()).toEqual(
+      [
+        ['c-a', legTs[ALICE], 'written'],
+        ['c-b', legTs[BOB], 'written'],
+      ].sort(),
+    );
+    expect(freshRead).toHaveBeenCalledTimes(1);
+    // WI4: the announcement's own two pre-loop events, then ONE post-stamp event.
+    expect(world.emitted.map((e) => e.event)).toEqual([
+      'conversation.updated',
+      'message.persisted',
+      'conversation.updated',
+    ]);
+    expect(world.emitted[2]!.payload).toMatchObject({ conversationId: conv.conversationId, unread_count: 2 });
+    expect(world.emitted.filter((e) => e.event === 'contact.updated')).toHaveLength(0);
+  });
+
+  it('skips a suppressed member, a phone-only member, and a member whose send threw', async () => {
+    const world = createFakeWorld();
+    const conv = await openTransportGroup(world, [
+      { phone: ALICE, contactId: 'c-a', name: 'Alice' },
+      { phone: BOB, contactId: 'c-b', name: 'Bob' },
+      { phone: CAROL, contactId: '', name: 'Carol' },
+      { phone: DAVE, contactId: 'c-d', name: 'Dave' },
+    ]);
+    world.contacts.push(
+      { contactId: 'c-a', type: 'tenant', phone: ALICE },
+      { contactId: 'c-b', type: 'tenant', phone: BOB, sms_opt_out: true },
+      { contactId: 'c-d', type: 'tenant', phone: DAVE },
+    );
+    const realSend = world.adapter.sendPreparedMessage.bind(world.adapter);
+    vi.spyOn(world.adapter, 'sendPreparedMessage').mockImplementation(async (prepared) => {
+      if (prepared.params.to === DAVE) throw Object.assign(new Error('rejected'), { code: 21211 });
+      return realSend(prepared);
+    });
+
+    await sendRelayAnnouncement(deps(world), {
+      conversationId: conv.conversationId,
+      body: 'Hi all, this is Sam.',
+      kind: 'relay.intro',
+      staffAuthored: true,
+    });
+
+    expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, CAROL].sort());
+    expect(world.reachedOutTouches.map((t) => t.contactId)).toEqual(['c-a']);
+  });
+
+  // WL-5 (build worklist, D3-1): the W7 twin of the W4 "every stamp skipped"
+  // case - stamps are collected but none is written (no contact items), so no
+  // post-stamp event and no fresh read (spec 7.3: only when one was written).
+  it('a staff intro whose every stamp is skipped (no contact items) emits no extra event and makes no fresh read', async () => {
+    const world = createFakeWorld();
+    const conv = await openTransportGroup(world);
+    const freshRead = vi.spyOn(world.conversationsRepo, 'getByIdConsistent');
+
+    await sendRelayAnnouncement(deps(world), {
+      conversationId: conv.conversationId,
+      body: 'Hi both, this is Sam.',
+      kind: 'relay.intro',
+      staffAuthored: true,
+    });
+
+    expect(world.reachedOutTouches.map((t) => t.outcome)).toEqual(['skipped', 'skipped']);
+    expect(world.emitted.map((e) => e.event)).toEqual(['conversation.updated', 'message.persisted']);
+    expect(freshRead).not.toHaveBeenCalled();
+  });
+
+  it('(PIN) without staffAuthored - the composed intro, member added, group closed, a tour reminder - nothing is stamped and no extra event', async () => {
+    for (const kind of ['relay.intro', 'relay.member_added', 'group_closed', 'tour.day_before']) {
+      const world = createFakeWorld();
+      const conv = await openTransportGroup(world);
+      world.contacts.push({ contactId: 'c-a', type: 'tenant', phone: ALICE }, { contactId: 'c-b', type: 'tenant', phone: BOB });
+
+      await sendRelayAnnouncement(deps(world), { conversationId: conv.conversationId, body: 'System copy.', kind });
+
+      expect(world.sent, kind).toHaveLength(2);
+      expect(world.reachedOutTouches, kind).toEqual([]);
+      expect(world.emitted.map((e) => e.event), kind).toEqual(['conversation.updated', 'message.persisted']);
+    }
+  });
+
+  it('(PIN) staffAuthored with persist:false (the dev intro replay) stamps nothing', async () => {
+    const world = createFakeWorld();
+    const conv = await openTransportGroup(world);
+    world.contacts.push({ contactId: 'c-a', type: 'tenant', phone: ALICE }, { contactId: 'c-b', type: 'tenant', phone: BOB });
+
+    await sendRelayAnnouncement(deps(world), {
+      conversationId: conv.conversationId,
+      body: 'Hi both, this is Sam.',
+      kind: 'relay.intro',
+      persist: false,
+      staffAuthored: true,
+    });
+
+    expect(world.sent).toHaveLength(2);
+    expect(world.reachedOutTouches).toEqual([]);
+    expect(world.emitted).toEqual([]);
+  });
+});

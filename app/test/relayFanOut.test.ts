@@ -4078,5 +4078,69 @@ describe('relay staff outreach - last_reached_out_at (today-checklist W4, W7)', 
     expect(freshRead).not.toHaveBeenCalled();
   });
 
-  // W7 cases (Task S3.3) are inserted above this line.
+  it('W7 an intro whose body staff EDITED stamps every member it reached, then ONE fresh-read conversation.updated', async () => {
+    seedRelay(world, { intro_body: 'Hi all, this is Sam. Meet each other here.' });
+    seedMemberContacts(DEFAULT_ROSTER);
+    const freshRead = vi.spyOn(world.conversationsRepo, 'getByIdConsistent');
+
+    await enqueueImmediate(RELAY_INTRO_JOB, { relayConversationId: 'conv-relay-1' });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(3);
+    expect(stampRows()).toEqual(
+      [
+        ['c-alice', legAt(ALICE), 'written'],
+        ['c-bob', legAt(BOB), 'written'],
+        ['c-carol', legAt(CAROL), 'written'],
+      ].sort(),
+    );
+    expect(freshRead).toHaveBeenCalledTimes(1);
+    // The job now hands its bus to the announcement (PR20): its two pre-loop
+    // events, then the ONE post-stamp event (WI4).
+    expect(world.emitted.map((e) => e.event)).toEqual([
+      'conversation.updated',
+      'message.persisted',
+      'conversation.updated',
+    ]);
+    expect(contactUpdates()).toHaveLength(0);
+  });
+
+  it('W7 the composed DEFAULT intro never stamps', async () => {
+    seedRelay(world);
+    seedMemberContacts(DEFAULT_ROSTER);
+
+    await enqueueImmediate(RELAY_INTRO_JOB, { relayConversationId: 'conv-relay-1' });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(3);
+    expect(world.reachedOutTouches).toEqual([]);
+    // Only the announcement's own pre-loop event - no post-stamp event.
+    expect(conversationUpdates()).toHaveLength(1);
+  });
+
+  it('W7 (PIN) an edited intro replayed with persist:false (POST /__dev/relay/replay-intros) never stamps', async () => {
+    seedRelay(world, { intro_body: 'Hi all, this is Sam. Meet each other here.' });
+    seedMemberContacts(DEFAULT_ROSTER);
+
+    await enqueueImmediate(RELAY_INTRO_JOB, { relayConversationId: 'conv-relay-1', persist: false });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(3);
+    expect(world.messages.filter((m) => m.conversationId === 'conv-relay-1')).toHaveLength(0);
+    expect(world.reachedOutTouches).toEqual([]);
+  });
+
+  it('W7 (PIN) a member-added announcement never stamps', async () => {
+    seedRelay(world);
+    seedMemberContacts(DEFAULT_ROSTER);
+
+    await enqueueImmediate(RELAY_MEMBER_ADDED_JOB, {
+      relayConversationId: 'conv-relay-1',
+      addedMemberKey: 'c-carol',
+    });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(3);
+    expect(world.reachedOutTouches).toEqual([]);
+  });
 });

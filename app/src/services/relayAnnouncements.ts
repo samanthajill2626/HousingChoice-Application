@@ -121,6 +121,17 @@ export interface RelayAnnouncementInput {
   /** false = legs-only (dev intro replay): send, persist nothing. Default true. */
   persist?: boolean;
   /**
+   * today-checklist W7 (spec 2026-10-23-today-checklist-design.md 7.3): the
+   * body is one STAFF wrote - a relay intro's operator-edited intro_body. Set
+   * ONLY by the relay.intro job's edited-intro branch (jobs/relayFanOut.ts).
+   * When true and the row persists, each member with a contactId whose leg the
+   * provider accepted gets last_reached_out_at at that leg's providerTs, and
+   * ONE conversation.updated follows the loop (stampRelayOutreach). The
+   * composed default intro, member added, group closed, tour reminders and the
+   * dev intro replay (persist:false) never stamp.
+   */
+  staffAuthored?: true;
+  /**
    * PER-RECIPIENT BODY (Phase B spec 9.6) - the member-added split's mechanism,
    * and the ONLY message in the product where recipients get different copy.
    *
@@ -317,6 +328,9 @@ export async function sendRelayAnnouncement(
   }
 
   let sentCount = 0;
+  // today-checklist W7: only a staff-written body that persists stamps.
+  const stampsOutreach = input.staffAuthored === true && persist;
+  const outreach: StaffOutreachStamp[] = [];
   for (const member of roster) {
     const memberKey = relayMemberKey(member);
     try {
@@ -374,6 +388,9 @@ export async function sendRelayAnnouncement(
           ? await deps.adapter.sendMessage(params)
           : await deps.adapter.sendPreparedMessage(prepared);
       sentCount += 1;
+      if (stampsOutreach && typeof member.contactId === 'string' && member.contactId.length > 0) {
+        outreach.push({ contactId: member.contactId, at: result.providerTs });
+      }
 
       if (!persist) {
         // Legs-only mode (the dev intro replay) skips the delivery slot AND the
@@ -432,6 +449,17 @@ export async function sendRelayAnnouncement(
         'relayAnnouncement: send failed for a member — continuing',
       );
     }
+  }
+
+  // today-checklist W7: the pre-loop conversation.updated above went out
+  // BEFORE any stamp, so a staff-edited intro takes the same after-loop,
+  // fresh-read event as a team post (W4). Never throws.
+  if (outreach.length > 0) {
+    await stampRelayOutreach(
+      { contacts: deps.contactsRepo, conversations: deps.conversationsRepo, events, log },
+      conversationId,
+      outreach,
+    );
   }
 
   log.info(

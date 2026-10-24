@@ -1080,6 +1080,7 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
   defineJobHandler(RELAY_INTRO_JOB, async (rawPayload) => {
     const payload = parseRelayIntroPayload(rawPayload);
     adapter ??= createMessagingAdapter({ logger: deps.logger });
+    events ??= appEvents;
     conversations ??= createConversationsRepo({ logger: deps.logger });
     messages ??= createMessagesRepo({ logger: deps.logger });
     contacts ??= createContactsRepo({ logger: deps.logger });
@@ -1104,10 +1105,14 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
     // it while a pinned one cannot. Edited text wins anyway: a human chose it.
     const edited = typeof conversation?.intro_body === 'string' ? conversation.intro_body : '';
     let body: string;
+    // today-checklist W7: true ONLY on the operator-edited branch - staff wrote
+    // this intro, so it counts as staff outreach. A composed intro never does.
+    let staffAuthored = false;
     if (edited.length > 0) {
       // PRECEDENCE 1 (spec 9.1), applied FIRST and verbatim: an operator-edited
       // body wins outright, so the four owner reads below are not even made.
       body = edited;
+      staffAuthored = true;
       log.info(
         { conversationId: payload.relayConversationId },
         'relay intro: sending the operator-edited body, not the composed default',
@@ -1144,6 +1149,7 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
         messagesRepo: messages,
         contactsRepo: contacts,
         adapter,
+        events,
         ...(deps.tokenBucket !== undefined && { tokenBucket: deps.tokenBucket }),
         ...(deps.logger !== undefined && { logger: deps.logger }),
       },
@@ -1152,6 +1158,7 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
         body,
         kind: 'relay.intro',
         ...(payload.persist === false && { persist: false }),
+        ...(staffAuthored && { staffAuthored: true as const }),
       },
     );
   });

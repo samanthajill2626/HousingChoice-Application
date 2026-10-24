@@ -2,19 +2,23 @@
 
 ## STATE (replace on every move)
 
-- Phase: DESIGN complete. Spec gate PASSED 2026-10-24; spec r6 @a38bbe7d
-  (`docs/superpowers/specs/2026-10-23-today-checklist-design.md`). Design
-  review closed (rounds 1-3 on the spec, round 4 on the added backfill 7.5;
-  adjudications in `design-review/adjudications.md`).
+- Phase: PLANNING. Spec r6 @a38bbe7d (spec gate PASSED 2026-10-24). Plan
+  `docs/superpowers/plans/2026-10-24-today-checklist.md`: binding sections
+  0-4 (rulings PR1-PR40) committed @c65ce88d. Seven opus drafters are
+  writing slice sections S1-S7 to `.superpowers/sdd/plan-drafts/S<n>.md`
+  (run state); S8 (final gates) is drafted there by the planner.
 - Worktree `W:	mp	oday-checklist`, branch `feat/today-checklist`, cut from
   main @970a29b9. Nothing built; docs only.
-- Launch mode: not chosen yet. Nothing in flight.
-- NEXT STEP: write the implementation plan at
-  `docs/superpowers/plans/2026-10-24-today-checklist.md` (TDD, zero-context
-  builder; enumerate every writer W1-W8, every no-stamp writer, every reader of
-  the old Today groups/headings, the backfill), run its adversarial review (2
-  opus reviewers round 1, spec + plan + repo), then the mission block and the
-  launch gate (AskUserQuestion: AUTO / MANUAL / Revise).
+- Launch mode: not chosen yet.
+- NEXT STEP: when all drafts are in, rule on each draft's Contradictions
+  (add rulings to section 4), assemble sections 5-12 verbatim into the plan,
+  commit; then the plan's adversarial review (2 opus reviewers round 1,
+  spec + plan + repo, design-review-briefs.md plan brief), adjudicate into
+  `design-review/plan-adjudications.md`; then the mission block and the
+  launch gate (AskUserQuestion: AUTO / MANUAL / Revise). If a drafter's
+  draft is missing after a compaction, re-dispatch that slice with the same
+  brief shape (plan 0-4 + spec + format example lines 333-1500 of the
+  unknown-inactive plan).
 
 ## What Cameron asked for (verbatim, with dates)
 

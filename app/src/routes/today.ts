@@ -95,6 +95,7 @@ import { createRateLimitedWarn } from '../lib/rateLimitedWarn.js';
 
 export type TodayGroup =
   | 'needs_you_now'
+  | 'identify'
   | 'tours_today'
   | 'unreplied'
   | 'follow_ups'
@@ -207,7 +208,7 @@ const HARD_CLOCK_DEADLINE_TYPES: ReadonlySet<PlacementDeadlineType> = new Set([
   'voucher_expiration',
 ]);
 
-/** The contact triage statuses that make an untriaged inbound (needs_you_now). */
+/** The contact triage statuses that make an untriaged inbound (identify, spec 2026-10-23 5.2). */
 const UNTRIAGED_CONTACT_STATUSES: ReadonlySet<string> = new Set(['needs_review']);
 
 /**
@@ -270,6 +271,19 @@ function nameFromContact(contact: ContactItem | undefined): string | undefined {
   const last = typeof contact.lastName === 'string' ? contact.lastName : '';
   const joined = `${first} ${last}`.trim();
   return joined.length > 0 ? joined : undefined;
+}
+
+/**
+ * The Identify sort key (spec 2026-10-23-today-checklist-design.md 5.2, plan
+ * PR27): the contact's created_at as epoch ms, so the oldest contact sorts
+ * first. A contact with no parseable created_at - or an unresolved contact -
+ * sorts LAST (+Infinity); ties break by refId in the shared comparator. Both
+ * reads are capped at 100, so "oldest" is over what was read.
+ */
+function createdAtRank(contact: ContactItem | undefined): number {
+  const raw = contact?.created_at;
+  const ms = typeof raw === 'string' ? Date.parse(raw) : Number.NaN;
+  return Number.isNaN(ms) ? Number.POSITIVE_INFINITY : ms;
 }
 
 /**
@@ -494,6 +508,8 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     const followUpsIds = new Set<string>();
 
     const needsYouNow: Ranked[] = [];
+    /** Identify these contacts (spec 2026-10-23 5.2): both unknown sources. */
+    const identify: Ranked[] = [];
     const toursToday: Ranked[] = [];
     const unreplied: Ranked[] = [];
     const followUps: Ranked[] = [];
@@ -766,7 +782,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       // duplicate cannot spend one of the 100 slots. Newest-activity-first
       // order means the FIRST thread seen wins, which is the row the operator
       // would want. Keyed PER DESTINATION GROUP, matching the per-group dedupe
-      // ruling above: an unknown thread emits into needs_you_now and a known
+      // ruling above: an unknown thread emits into identify and a known
       // 1:1 into unreplied, and Today renders those as separate <ul>s with
       // independent keyspaces, so one contact legitimately appearing in both is
       // not a duplicate.
@@ -887,33 +903,33 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       }
       for (const conv of unreadOneToOne) {
         const whoContactId = oneToOneContactId(conv);
-        const who = whoOfConversation(
-          conv,
-          whoContactId !== undefined ? await getContact(whoContactId) : undefined,
-        );
+        // Memoized: the collect loop's deleted-contact test already read it.
+        const whoContact = whoContactId !== undefined ? await getContact(whoContactId) : undefined;
+        const who = whoOfConversation(conv, whoContact);
         if (conv.type === 'unknown_1to1') {
-          // Untriaged inbound → link to the unknown CONTACT's page (the
-          // auto-captured needs_review contact), NOT /conversations/:id — the
-          // dashboard has no conversation route, so that was a DEAD link. When the
-          // roster isn't linked yet (auto-capture race), DEFER to the contacts
-          // triage pass below (it emits the proper contact row) rather than
-          // emitting a dead conversation ref — so we never produce a nowhere-link.
-          // The deleted-contact test has already run, ahead of the cap.
-          const contactId = oneToOneContactId(conv);
-          if (contactId !== undefined) {
+          // Untriaged inbound -> an Identify row (spec 2026-10-23 5.2) linking to
+          // the unknown CONTACT's page (the auto-captured needs_review contact),
+          // NOT /conversations/:id - the dashboard has no conversation route, so
+          // that was a DEAD link. When the roster isn't linked yet (auto-capture
+          // race), DEFER to the contacts triage pass below (it emits the proper
+          // contact row) rather than emitting a dead conversation ref - so we
+          // never produce a nowhere-link. The deleted-contact test has already
+          // run, ahead of the cap.
+          if (whoContactId !== undefined) {
             if (typeof conv.participant_phone === 'string') {
               emittedUnknownPhones.add(conv.participant_phone);
             }
-            needsYouNow.push({
+            identify.push({
               item: {
-                group: 'needs_you_now',
+                group: 'identify',
                 refType: 'contact',
-                refId: contactId,
+                refId: whoContactId,
                 who,
                 why: 'New unknown contact',
                 attention: true,
               },
-              at: now,
+              // Oldest contact first (spec 5.2); an unresolved owner sorts last.
+              at: createdAtRank(whoContact),
             });
           }
         } else if (
@@ -952,9 +968,10 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       }
     }
 
-    // --- contacts: untriaged (unknown / needs_review) → needs_you_now ---------
+    // --- contacts: untriaged (unknown / needs_review) -> identify --------------
     // The (type=unknown, status=needs_review) byTypeStatus partition IS the human
-    // triage queue — one bounded Query, never a Scan.
+    // triage queue - one bounded Query, never a Scan. Its rows are Identify rows
+    // (spec 2026-10-23 5.2), sorted together with the unread pass's rows.
     {
       // FILL THE PAGE PAST THE STUBS (fix wave 2, adversarial 6). DynamoDB
       // applies `Limit` at the index BEFORE any filter, and every row in the
@@ -1040,16 +1057,17 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         if (typeof contact.phone === 'string' && emittedUnknownPhones.has(contact.phone)) continue;
         const who =
           nameFromContact(contact) ?? formatPhoneForDisplay(contact.phone) ?? contact.contactId;
-        needsYouNow.push({
+        identify.push({
           item: {
-            group: 'needs_you_now',
+            group: 'identify',
             refType: 'contact',
             refId: contact.contactId,
             who,
             why: 'New unknown contact',
             attention: true,
           },
-          at: now,
+          // Oldest contact first (spec 5.2); no created_at sorts last.
+          at: createdAtRank(contact),
         });
       }
     }
@@ -1144,6 +1162,8 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       return a.item.refId < b.item.refId ? -1 : a.item.refId > b.item.refId ? 1 : 0;
     };
     needsYouNow.sort(byUrgency);
+    // identify: the contact's created_at ascending (createdAtRank), ties by refId.
+    identify.sort(byUrgency);
     // tours_today: by time, then tenant name, then refId (spec 2026-10-23 2.4).
     toursToday.sort((a, b) => {
       if (a.at !== b.at) return a.at - b.at;
@@ -1157,10 +1177,11 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       a.item.refId < b.item.refId ? -1 : a.item.refId > b.item.refId ? 1 : 0,
     );
 
-    // Group order matches the spec's reading order: Needs-you-now, Tours-today,
+    // Group order: Needs-you-now, Identify (spec 2026-10-23 2), Tours-today,
     // Unreplied, Follow-ups, AI-suggestions.
     const items: TodayItem[] = [
       ...needsYouNow.map((r) => r.item),
+      ...identify.map((r) => r.item),
       ...toursToday.map((r) => r.item),
       ...unreplied.map((r) => r.item),
       ...followUps.map((r) => r.item),
@@ -1170,6 +1191,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     log.info(
       {
         needs_you_now: needsYouNow.length,
+        identify: identify.length,
         tours_today: toursToday.length,
         unreplied: unreplied.length,
         follow_ups: followUps.length,
@@ -1214,7 +1236,7 @@ function oneToOneContactId(conv: ConversationItem): string | undefined {
  * plus the `${refType}:${refId}` pair Today.tsx uses as its React key.
  *
  * Deliberately mirrors the two emit branches of the unread pass - an
- * `unknown_1to1` goes to needs_you_now, every other 1:1-bucket type to
+ * `unknown_1to1` goes to identify, every other 1:1-bucket type to
  * unreplied, and both prefer the contact ref over the conversation ref. Two
  * threads of the SAME person therefore collide here, which is the point.
  *
@@ -1223,7 +1245,7 @@ function oneToOneContactId(conv: ConversationItem): string | undefined {
  * unknown branch drops it at emit time anyway.
  */
 function unreadRowKeyOf(conv: ConversationItem): string {
-  const group = conv.type === 'unknown_1to1' ? 'needs_you_now' : 'unreplied';
+  const group = conv.type === 'unknown_1to1' ? 'identify' : 'unreplied';
   const contactId = oneToOneContactId(conv);
   return contactId !== undefined
     ? `${group}:contact:${contactId}`

@@ -108,7 +108,7 @@ describe.skipIf(!reachable)('Today non-regression: unmatched_email rows never re
       ),
     );
     // Real Today content, so "identical" is a non-trivial assertion:
-    // an untriaged unknown contact (needs_you_now) + an unread tenant 1:1
+    // an untriaged unknown contact (identify) + an unread tenant 1:1
     // thread (unreplied).
     await contacts.create({
       type: 'unknown',
@@ -141,7 +141,7 @@ describe.skipIf(!reachable)('Today non-regression: unmatched_email rows never re
     expect(before.body.items.length).toBeGreaterThan(0);
     expect(
       before.body.items.map((i: { group: string }) => i.group).sort(),
-    ).toEqual(['needs_you_now', 'unreplied']);
+    ).toEqual(['identify', 'unreplied']);
 
     // Flood the side-door: one row per status the ingestion can write, plus a
     // route-transition status and a blocklist pointer - ALL invisible to Today.

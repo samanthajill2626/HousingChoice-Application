@@ -320,8 +320,8 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(follow[0]).toMatchObject({ refType: 'placement', refId: 'placement-follow', who: 'Sam Lee', why: 'Follow-up due' });
   });
 
-  it('untriaged inbounds (unknown_1to1 unread + unknown/needs_review contact) land in needs_you_now, linking to the contact page', async () => {
-    // unknown_1to1 conversation with unread → needs_you_now linking to the
+  it('untriaged inbounds (unknown_1to1 unread + unknown/needs_review contact) land in identify, linking to the contact page', async () => {
+    // unknown_1to1 conversation with unread -> an identify row linking to the
     // auto-captured contact (its participant roster), NOT /conversations/:id.
     seedConversation({
       conversationId: 'conv-unknown',
@@ -343,7 +343,9 @@ describe('today action-queue API (BE6/C7)', () => {
     });
 
     const items = await getItems();
-    const needs = items.filter((i) => i.group === 'needs_you_now');
+    // Today checklist (spec 2026-10-23 5.2): Identify, split from Needs you now.
+    expect(items.filter((i) => i.group === 'needs_you_now')).toEqual([]);
+    const needs = items.filter((i) => i.group === 'identify');
     // BOTH untriaged rows link to a contact page (never a dead conversation ref).
     expect(needs.every((i) => i.refType === 'contact')).toBe(true);
     const fromConv = needs.find((i) => i.refId === 'contact-from-conv');
@@ -1019,11 +1021,11 @@ describe('today action-queue API (BE6/C7)', () => {
       } as ConversationItem);
     const newUnknownRefIds = (items: TodayItem[]): string[] =>
       items
-        .filter((i) => i.group === 'needs_you_now' && i.why === 'New unknown contact')
+        .filter((i) => i.group === 'identify' && i.why === 'New unknown contact')
         .map((i) => i.refId)
         .sort();
 
-    it('RED: an unread thread from an INACTIVE unknown contact is NOT in needs_you_now (nor anywhere on Today)', async () => {
+    it('RED: an unread thread from an INACTIVE unknown contact is NOT an identify row (nor anywhere on Today)', async () => {
       world.contacts.push({ contactId: 'c-unk-off', type: 'unknown', status: 'inactive', phone: '+15550360001' });
       unknownThread('conv-unk-off', 'c-unk-off', '+15550360001', -30_000);
 
@@ -1032,7 +1034,7 @@ describe('today action-queue API (BE6/C7)', () => {
       expect(items.map((i) => i.refId)).not.toContain('c-unk-off');
     });
 
-    it('PIN: an unread thread from a NEEDS REVIEW unknown contact is in needs_you_now, once', async () => {
+    it('PIN: an unread thread from a NEEDS REVIEW unknown contact is in identify, once', async () => {
       world.contacts.push({ contactId: 'c-unk-nr', type: 'unknown', status: 'needs_review', phone: '+15550360002' });
       unknownThread('conv-unk-nr', 'c-unk-nr', '+15550360002', -30_000);
 
@@ -1053,7 +1055,7 @@ describe('today action-queue API (BE6/C7)', () => {
     // leaves Needs you now too (spec D5 "skip Inactive", Goal 4: Inactive means
     // the same thing for every type). Since FW2-1 the owner's type must also
     // be unknown or team_member (the cases at the end of this block).
-    it('RED: an unread unknown_1to1 thread from an INACTIVE team member is NOT in needs_you_now', async () => {
+    it('RED: an unread unknown_1to1 thread from an INACTIVE team member is NOT an identify row', async () => {
       world.contacts.push({ contactId: 'c-team-off', type: 'team_member', status: 'inactive', firstName: 'Tea', lastName: 'Gone', phone: '+15550360005' });
       unknownThread('conv-team-off', 'c-team-off', '+15550360005', -30_000);
 
@@ -1155,7 +1157,7 @@ describe('today action-queue API (BE6/C7)', () => {
       expect((await authedPatch('/api/contacts/c-two', { type: 'tenant' })).status).toBe(200);
       expect(world.conversations.get('conv-p1')?.type).toBe('tenant_1to1');
       expect(world.conversations.get('conv-p2')?.type).toBe('unknown_1to1');
-      const before = (await getItems()).filter((i) => i.group === 'needs_you_now');
+      const before = (await getItems()).filter((i) => i.group === 'identify');
       expect(before).toEqual([
         expect.objectContaining({ refType: 'contact', refId: 'c-two', why: 'New unknown contact', attention: true }),
       ]);
@@ -1169,7 +1171,7 @@ describe('today action-queue API (BE6/C7)', () => {
       expect((await world.contactsRepo.getById('c-two'))?.status).toBe('inactive');
 
       // The status write alone changes nothing on Today for this thread.
-      const after = (await getItems()).filter((i) => i.group === 'needs_you_now');
+      const after = (await getItems()).filter((i) => i.group === 'identify');
       expect(after).toEqual(before);
     });
 
@@ -1178,8 +1180,8 @@ describe('today action-queue API (BE6/C7)', () => {
       unknownThread('conv-cw-off', 'c-cw-off', '+15550360202', -30_000);
 
       const items = await getItems();
-      expect(items.filter((i) => i.group === 'needs_you_now')).toEqual([
-        { group: 'needs_you_now', refType: 'contact', refId: 'c-cw-off', who: 'Casey Worker', why: 'New unknown contact', attention: true },
+      expect(items.filter((i) => i.group === 'identify')).toEqual([
+        { group: 'identify', refType: 'contact', refId: 'c-cw-off', who: 'Casey Worker', why: 'New unknown contact', attention: true },
       ]);
     });
   });
@@ -1538,7 +1540,7 @@ describe('today action-queue API (BE6/C7)', () => {
   });
 
   // --- FIX C: de-dupe untriaged inbounds by phone (one item per person) ----------
-  it('an unknown inbound (unknown_1to1 unread + needs_review contact, same phone) yields ONE needs_you_now item linking to the contact', async () => {
+  it('an unknown inbound (unknown_1to1 unread + needs_review contact, same phone) yields ONE identify item linking to the contact', async () => {
     const phone = '+15550105555';
     // No participant roster on the conversation (auto-capture race) → the
     // conversation defers to the contacts triage pass, which emits the contact
@@ -1560,7 +1562,7 @@ describe('today action-queue API (BE6/C7)', () => {
       phone, // same phone as the unknown conversation
     });
 
-    const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
+    const needs = (await getItems()).filter((i) => i.group === 'identify');
     const untriaged = needs.filter(
       (i) => i.refId === 'conv-untriaged' || i.refId === 'contact-untriaged',
     );
@@ -1577,7 +1579,7 @@ describe('today action-queue API (BE6/C7)', () => {
       phone: '+15550104444',
     });
 
-    const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
+    const needs = (await getItems()).filter((i) => i.group === 'identify');
     const contact = needs.find((i) => i.refType === 'contact' && i.refId === 'contact-only');
     expect(contact).toMatchObject({
       refId: 'contact-only',
@@ -1955,7 +1957,7 @@ describe('today action-queue API (BE6/C7)', () => {
         phone, // SAME phone - the triage pass must skip it
       });
 
-      const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
+      const needs = (await getItems()).filter((i) => i.group === 'identify');
 
       const forPerson = needs.filter((i) => i.refId === 'c-unknown-dedupe');
       expect(forPerson).toHaveLength(1);
@@ -2175,6 +2177,94 @@ describe('today action-queue API (BE6/C7)', () => {
       await getItems();
 
       expect(spy.mock.calls.map((c) => c[0])).toEqual(['u-oak']);
+    });
+  });
+
+  // --- Today checklist (spec 2026-10-23 5.2, plan PR27): Identify these
+  // contacts - both unknown sources, oldest contact first --------------------
+  describe('Identify these contacts (today-checklist 5.2)', () => {
+    const unknownContact = (contactId: string, phone: string, createdAt?: string): void => {
+      world.contacts.push({
+        contactId,
+        type: 'unknown',
+        status: 'needs_review',
+        phone,
+        ...(createdAt !== undefined && { created_at: createdAt }),
+      });
+    };
+    const unknownThread = (contactId: string, phone: string, offset: number): void => {
+      seedConversation({
+        conversationId: `conv-${contactId}`,
+        participant_phone: phone,
+        participants: [{ contactId, phone }],
+        status: 'open',
+        last_activity_at: iso(offset),
+        type: 'unknown_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+      } as ConversationItem);
+    };
+
+    it('rows from BOTH sources land in identify, not needs_you_now, with the row shape unchanged', async () => {
+      unknownContact('c-unk-thread', '+15550370001');
+      unknownThread('c-unk-thread', '+15550370001', -30_000);
+      unknownContact('c-unk-triage', '+15550370002');
+
+      const items = await getItems();
+
+      expect(items.filter((i) => i.group === 'needs_you_now')).toEqual([]);
+      expect(items.filter((i) => i.group === 'identify')).toEqual([
+        { group: 'identify', refType: 'contact', refId: 'c-unk-thread', who: '(555) 037-0001', why: 'New unknown contact', attention: true },
+        { group: 'identify', refType: 'contact', refId: 'c-unk-triage', who: '(555) 037-0002', why: 'New unknown contact', attention: true },
+      ]);
+    });
+
+    it('orders oldest contact first by created_at across both sources; none or unparseable sorts last; ties by refId', async () => {
+      // Thread-sourced rows, newest thread activity FIRST - so the activity
+      // order the unread walk yields is NOT the identify order.
+      unknownContact('c-u-new', '+15550370101', '2026-10-20T10:00:00.000Z');
+      unknownThread('c-u-new', '+15550370101', -10_000);
+      unknownContact('c-u-none', '+15550370102');
+      unknownThread('c-u-none', '+15550370102', -20_000);
+      // No contact item at all: an unresolved owner (sorts as no created_at).
+      unknownThread('c-u-unresolved', '+15550370103', -30_000);
+      // Triage-sourced rows (no unread thread).
+      unknownContact('c-t-old', '+15550370104', '2026-10-01T10:00:00.000Z');
+      unknownContact('c-t-mid', '+15550370105', '2026-10-10T10:00:00.000Z');
+      unknownContact('c-t-tie', '+15550370106', '2026-10-10T10:00:00.000Z');
+      unknownContact('c-t-none', '+15550370107');
+      unknownContact('c-t-bad', '+15550370108', 'garbage');
+
+      const ids = (await getItems()).filter((i) => i.group === 'identify').map((i) => i.refId);
+
+      expect(ids).toEqual([
+        'c-t-old',
+        'c-t-mid',
+        'c-t-tie',
+        'c-u-new',
+        'c-t-bad',
+        'c-t-none',
+        'c-u-none',
+        'c-u-unresolved',
+      ]);
+    });
+
+    it('identify follows needs_you_now in the response order', async () => {
+      seedTenant('t-1', 'Keisha', 'Brown');
+      seedPlacement({
+        placementId: 'placement-needs',
+        tenantId: 't-1',
+        stage: 'awaiting_authority_approval',
+        next_deadline_type: 'rta_window',
+        next_deadline_at: iso(-3_600_000),
+      });
+      unknownContact('c-unk', '+15550370201');
+
+      expect((await getItems()).map((i) => [i.group, i.refId])).toEqual([
+        ['needs_you_now', 'placement-needs'],
+        ['identify', 'c-unk'],
+      ]);
     });
   });
 });

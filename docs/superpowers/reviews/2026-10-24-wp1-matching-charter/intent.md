@@ -11,15 +11,20 @@ cut from main @970a29b9. Docs only.
 
 ## STATE
 
-Phase: brainstorm (one question at a time), not yet started on the spec.
-Launch mode: none - this mission stops after Cameron's spec gate; the spec
-and these records merge as a docs-only branch. Nothing in flight.
-NEXT STEP: ask the first brainstorm question (ranking approach: LLM judgment
-vs a reranking model, after Cameron clarifies what "JEV" meant), then work
-through the charter questions below, write
-docs/superpowers/specs/2026-10-24-wp1-matching-charter-design.md, do a
-whole-spec re-read with Cameron BEFORE the adversarial document review (his
-request), then the review, then his gate.
+Phase: SPEC WRITTEN (2026-10-24) -
+docs/superpowers/specs/2026-10-24-wp1-matching-charter-design.md, 19
+sections, committed in the charter worktree. Brainstorm closed after 14
+rounds (all recorded below). Launch mode: none - this mission stops after
+Cameron's spec gate; the spec and records merge as a docs-only branch.
+Nothing in flight.
+NEXT STEP: Cameron's WHOLE-SPEC RE-READ (his request, before the
+adversarial review): he reads the spec; fold his changes in and commit.
+Then the adversarial document review (two Opus reviewers, round 1, briefs
+from design-review-briefs.md, adjudications to
+<records>/design-review/adjudications.md), then his spec gate, then
+COMPACTION GATE A is skipped (no plan phase in this mission) - instead:
+merge command for the docs-only branch, --off compact-resume, update
+memory. Questions for Sam are spec section 16.
 
 ## What Cameron asked for (verbatim where wording matters)
 

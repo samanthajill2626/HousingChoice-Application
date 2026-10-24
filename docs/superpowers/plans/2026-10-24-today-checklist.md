@@ -14,7 +14,7 @@
   verbatim, with every ruling PR41-PR93 that changes a step applied into
   the slice text and marked `[PRnn]` at the changed step (PR83); section 12
   (S8) is the planner's.
-  Section 4 (planner rulings PR1-PR105) wins over any slice text it
+  Section 4 (planner rulings PR1-PR106) wins over any slice text it
   contradicts. "Plan section N" always means this file's top-level sections.
 
 ## 0. Ground rules for this plan
@@ -807,6 +807,14 @@ where it differs from these, these win.
   retried row and root are both outside the window counts and is reported
   as residue. This replaces PR91's backfill rule and PR100's backfill
   residue. Tests cover each case and the report counter.
+- PR106 (amends PR37 for this one field) S2.1a also edits the harness
+  messages fake (`app/test/helpers/twilioWebhookHarness.ts`): its append maps
+  `systemCopy: true` onto the stored row as `system_copy: true` exactly as
+  the real repo does (true-only), with a one-line comment citing
+  PR104/PR106. The harness Retry and Send-now cases assert the marker on
+  the row the route actually wrote (the new row in `world.messages`), not
+  on a row the test set by hand - except where a test seeds a pre-existing
+  retried row, which it may still seed directly.
 
 ## 5. S1 - The signal: last_reached_out_at, touchLastReachedOut, recordStaffOutreach
 
@@ -3525,18 +3533,22 @@ gating: the send stays `automated: false`, a person's send. Only the W2
 Retry gate (S2.2) and the backfill (S6, PR105) read it. The callers that
 set it are S2.2's.
 
-The harness `messagesRepo` fake (`twilioWebhookHarness.ts` ~1285-1310) is
-NOT edited (PR37): it drops `systemCopy`, so a harness case that needs a
-stored `system_copy: true` row seeds it by mutating `world.messages`, and the
-mapping is proven here against DynamoDB Local and the service fake.
+[PR106] The harness `messagesRepo` fake (`twilioWebhookHarness.ts`
+~1285-1310) maps the marker too - true-only, exactly as the real repo - so
+S2.2's harness cases read `system_copy` off the row the route actually
+wrote. This one line is the PR106 exception to PR37's S1-only harness rule
+(beside S2.2's PR84 comment). The mapping is pinned against the fake in
+`twilioWebhookHarnessRetryFields.test.ts` and against DynamoDB Local here.
 
 Files:
 - `app/src/repos/messagesRepo.ts` (NewMessage ~768, MessageItem ~1079, the
   append mapping ~2641)
 - `app/src/services/sendMessage.ts` (the input field, the destructure, the
   append input)
+- `app/test/helpers/twilioWebhookHarness.ts` (the fake `append`'s field
+  allowlist ~1303, one mapping line [PR106])
 - Tests: `app/test/messagesRepoRetryLineage.integration.test.ts`,
-  `app/test/sendMessage.test.ts`
+  `app/test/sendMessage.test.ts`, `app/test/twilioWebhookHarnessRetryFields.test.ts` [PR106]
 
 #### Step 1 - failing tests
 
@@ -3605,17 +3617,57 @@ describe('system_copy marker (today-checklist PR104)', () => {
 });
 ```
 
+1c. [PR106] `app/test/twilioWebhookHarnessRetryFields.test.ts` - the fake's
+append allowlist must carry the marker (a dropped field would let S2.2's
+harness cases pass vacuously). At the end of the file. Edit:
+
+old:
+```ts
+      retry_outcome: 'unconfirmed',
+    });
+  });
+});
+```
+new:
+```ts
+      retry_outcome: 'unconfirmed',
+    });
+  });
+
+  // today-checklist PR104 / PR106: the fake maps systemCopy exactly as the
+  // real repo does - stored as system_copy ONLY when true, never as false.
+  it('append carries system_copy when systemCopy is true, and writes no field otherwise (PR106)', async () => {
+    const world = createFakeWorld();
+    const marked = await world.messagesRepo.append({
+      ...outbound('SMsyscopy0001', '2026-09-25T12:00:00.000Z'),
+      automated: false,
+      systemCopy: true,
+    });
+    expect(await world.messagesRepo.getByTsMsgId(CONV, marked.tsMsgId)).toMatchObject({
+      system_copy: true,
+      automated: false,
+    });
+    const plain = await world.messagesRepo.append({
+      ...outbound('SMsyscopy0002', '2026-09-25T12:00:01.000Z'),
+      automated: false,
+    });
+    expect(await world.messagesRepo.getByTsMsgId(CONV, plain.tsMsgId)).not.toHaveProperty('system_copy');
+  });
+});
+```
+
 #### Step 2 - RED
 
 Needs DynamoDB Local up (`npm run db:start` STARTS it; never restart it).
 ```
-cd W:/tmp/today-checklist/app; npx vitest run test/messagesRepoRetryLineage.integration.test.ts test/sendMessage.test.ts
+cd W:/tmp/today-checklist/app; npx vitest run test/messagesRepoRetryLineage.integration.test.ts test/sendMessage.test.ts test/twilioWebhookHarnessRetryFields.test.ts
 ```
 Expected failures, and why: "append persists system_copy ..." - the repo
 ignores `systemCopy`, so the stored row has no `system_copy`; "persists
 systemCopy on the appended row ..." - the service drops the option, so the
-append input has no `systemCopy`. "(PIN) writes no marker ..." passes
-already. Every pre-existing case stays green.
+append input has no `systemCopy`; "append carries system_copy ... (PR106)"
+- the harness fake's allowlist drops it [PR106]. "(PIN) writes no marker
+..." passes already. Every pre-existing case stays green.
 
 #### Step 3 - implementation
 
@@ -3680,6 +3732,29 @@ new:
           recipient_contact_id: message.recipientContactId,
         }),
 ```
+
+3c2. [PR106] `app/test/helpers/twilioWebhookHarness.ts` - the fake `append`
+(the one `automated` spread in the file, ~1303). The harness's only other
+change on this branch is S2.2's PR84 comment. Edit:
+
+old:
+```ts
+        ...(message.automated !== undefined && { automated: message.automated }),
+        ...(message.recipientContactId !== undefined && {
+          recipient_contact_id: message.recipientContactId,
+        }),
+```
+new:
+```ts
+        ...(message.automated !== undefined && { automated: message.automated }),
+        // today-checklist PR104/PR106: true-only, exactly as the real repo maps it.
+        ...(message.systemCopy === true && { system_copy: true }),
+        ...(message.recipientContactId !== undefined && {
+          recipient_contact_id: message.recipientContactId,
+        }),
+```
+(The same three-line anchor occurs in `messagesRepo.ts` - 3c - and here;
+each Edit names its own file.)
 
 3d. `app/src/services/sendMessage.ts` - the input field, after S2.1's
 `staffOutreach`. Edit:
@@ -3753,7 +3828,7 @@ Expect exit 0.
 #### Step 5 - ASCII check on added lines
 
 ```
-git -C W:/tmp/today-checklist diff -U0 -- app/src/repos/messagesRepo.ts app/src/services/sendMessage.ts app/test/messagesRepoRetryLineage.integration.test.ts app/test/sendMessage.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git -C W:/tmp/today-checklist diff -U0 -- app/src/repos/messagesRepo.ts app/src/services/sendMessage.ts app/test/helpers/twilioWebhookHarness.ts app/test/messagesRepoRetryLineage.integration.test.ts app/test/sendMessage.test.ts app/test/twilioWebhookHarnessRetryFields.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
 ```
 Expect `0`.
 
@@ -3762,8 +3837,8 @@ Expect `0`.
 ```
 git -C W:/tmp/today-checklist status
 ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
-git -C W:/tmp/today-checklist add app/src/repos/messagesRepo.ts app/src/services/sendMessage.ts app/test/messagesRepoRetryLineage.integration.test.ts app/test/sendMessage.test.ts
-git -C W:/tmp/today-checklist commit -m "feat(messages): system_copy row marker for a person's send of system copy (tracker #31 S2.1a)" -m "NewMessage.systemCopy / MessageItem.system_copy, written only when true; SendMessageInput.systemCopy is persisted by the send service and changes no gating. Read only by the W2 Retry gate and the backfill (spec r8 7.3, PR104)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/today-checklist add app/src/repos/messagesRepo.ts app/src/services/sendMessage.ts app/test/helpers/twilioWebhookHarness.ts app/test/messagesRepoRetryLineage.integration.test.ts app/test/sendMessage.test.ts app/test/twilioWebhookHarnessRetryFields.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(messages): system_copy row marker for a person's send of system copy (tracker #31 S2.1a)" -m "NewMessage.systemCopy / MessageItem.system_copy, written only when true, in the repo and the harness fake (PR106); SendMessageInput.systemCopy is persisted by the send service and changes no gating. Read only by the W2 Retry gate and the backfill (spec r8 7.3, PR104)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -4017,7 +4092,7 @@ describe('staff outreach through the default send service (today-checklist W1/W2
     const failedRow = (
       providerSid: string,
       agoMs: number,
-      extra: { broadcastId?: string; automated?: boolean } = {},
+      extra: { broadcastId?: string; automated?: boolean; systemCopy?: boolean } = {},
     ) => ({
       conversationId,
       providerSid,
@@ -4030,16 +4105,20 @@ describe('staff outreach through the default send service (today-checklist W1/W2
       errorCode: '30003',
       ...extra,
     });
-    await world.messagesRepo.append(failedRow('SMplainfail', 60_000));
+    const plainFail = await world.messagesRepo.append(failedRow('SMplainfail', 60_000));
     await world.messagesRepo.append(failedRow('SMsharefail', 50_000, { broadcastId: 'b-1' }));
     // A failed automated text (the missed-call auto text shape).
-    await world.messagesRepo.append(failedRow('SMautofail', 40_000, { automated: true }));
-    // PR104: a failed Send-now row (automated: false, system_copy: true). The
-    // harness messages fake does not map systemCopy (PR37: it is not edited),
-    // so the stored marker is set on the world row directly.
-    await world.messagesRepo.append(failedRow('SMsendnowfail', 30_000, { automated: false }));
-    world.messages.find((m) => m.provider_sid === 'SMsendnowfail')!.system_copy = true;
+    const autoFail = await world.messagesRepo.append(failedRow('SMautofail', 40_000, { automated: true }));
+    // PR104: a pre-existing failed Send-now row (automated: false,
+    // system_copy: true), seeded through the fake's append, which maps the
+    // marker like the real repo (PR106).
+    const sendNowFail = await world.messagesRepo.append(
+      failedRow('SMsendnowfail', 30_000, { automated: false, systemCopy: true }),
+    );
     const retry = (sid: string) => post(app, `/api/conversations/${conversationId}/messages/${sid}/retry`, {});
+    // The row the Retry route actually wrote (PR106): the new row naming the
+    // pressed row in retry_of.
+    const retryRowOf = (pressedTsMsgId: string) => world.messages.find((m) => m.retry_of === pressedTsMsgId);
 
     expect((await retry('SMsharefail')).status).toBe(201);
     expect(world.reachedOutTouches).toEqual([]);
@@ -4048,14 +4127,20 @@ describe('staff outreach through the default send service (today-checklist W1/W2
     expect((await retry('SMautofail')).status).toBe(201);
     expect(world.reachedOutTouches).toEqual([]);
     expect(contactUpdates(world)).toEqual([]);
+    // PR104/PR106: the Retry's own row inherits the marker, still a person's send.
+    expect(retryRowOf(autoFail.tsMsgId)).toMatchObject({ system_copy: true, automated: false });
 
     expect((await retry('SMsendnowfail')).status).toBe(201);
     expect(world.reachedOutTouches).toEqual([]);
     expect(contactUpdates(world)).toEqual([]);
+    expect(retryRowOf(sendNowFail.tsMsgId)).toMatchObject({ system_copy: true, automated: false });
 
     expect((await retry('SMplainfail')).status).toBe(201);
     expect(world.reachedOutTouches.map((t) => t.contactId)).toEqual(['c-1']);
     expect(contactUpdates(world)).toEqual([{ contactId: 'c-1' }]);
+    // A plain staff Retry writes no marker (PR104/PR106).
+    expect(retryRowOf(plainFail.tsMsgId)).toBeDefined();
+    expect(retryRowOf(plainFail.tsMsgId)).not.toHaveProperty('system_copy');
   });
 });
 ```
@@ -4152,7 +4237,7 @@ new:
   it('is idempotent on a repeat phone: NO second contact, NO second welcome text (no SMS spam)', async () => {
 ```
 
-1k. (PIN) Tour reminder Send now never stamps - through the REAL default send
+1k. Tour reminder Send now never stamps and writes the marker [PR106: no longer a PIN - the written row's `system_copy` is RED until S2.2 3c2] - through the REAL default send
 service (no spy). `app/test/tourRemindersApi.test.ts`, inside
 `describe('POST /api/tours/:tourId/reminders/:reminderId/send-now', ...)`.
 Edit:
@@ -4171,13 +4256,17 @@ new:
     const { app, world } = makeWebhookHarness();
     const { tourId, reminderId } = await seedSendNowTour(world);
 
-    const outboundBefore = world.messages.filter((m) => m.direction === 'outbound').length;
+    const outboundBefore = world.messages.filter((m) => m.direction === 'outbound');
     const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
 
     expect(res.status).toBe(200);
     // [PR94] the default service sends via the console driver under the
     // harness, so the proof the send happened is the persisted outbound row.
-    expect(world.messages.filter((m) => m.direction === 'outbound').length).toBe(outboundBefore + 1);
+    const written = world.messages.filter((m) => m.direction === 'outbound' && !outboundBefore.includes(m));
+    expect(written).toHaveLength(1);
+    // [PR104, PR106] the row Send now actually wrote carries the marker and
+    // stays a person's send.
+    expect(written[0]).toMatchObject({ system_copy: true, automated: false });
     expect(world.reachedOutTouches).toEqual([]);
   });
 
@@ -4219,7 +4308,7 @@ describe('today-checklist: the tour reminder poll never asks for a staff-outreac
 });
 ```
 
-1m. (PIN) Nudge Send now (real default service) and the nudge poll (input
+1m. Nudge Send now (real default service; RED on the written row's marker [PR106]) and the nudge poll (PIN, input
 seam, C8). `app/test/placementNudgesApi.test.ts` - imports. Edit:
 
 old:
@@ -4264,12 +4353,15 @@ new:
     const { app, world } = makeWebhookHarness();
     const { placementId, nudgeId } = await seedSendNowNudge(world);
 
-    const outboundBefore = world.messages.filter((m) => m.direction === 'outbound').length;
+    const outboundBefore = world.messages.filter((m) => m.direction === 'outbound');
     const res = await authed(app).post(`/api/placements/${placementId}/nudges/${nudgeId}/send-now`);
 
     expect(res.status).toBe(200);
     // [PR94] persisted outbound row, not world.sent (console driver).
-    expect(world.messages.filter((m) => m.direction === 'outbound').length).toBe(outboundBefore + 1);
+    const written = world.messages.filter((m) => m.direction === 'outbound' && !outboundBefore.includes(m));
+    expect(written).toHaveLength(1);
+    // [PR104, PR106] the row Send now actually wrote carries the marker.
+    expect(written[0]).toMatchObject({ system_copy: true, automated: false });
     expect(world.reachedOutTouches).toEqual([]);
   });
 
@@ -4353,10 +4445,14 @@ Expected failures, and why:
   `systemCopy`; the plain calls lack `staffOutreach`); the three harness
   cases (`world.reachedOutTouches` is `[]`: the default service never calls
   the world fake, and no caller passes the option - the Retry case goes red
-  on its plain half; its share, automated and system-copy halves are
-  absences).
+  on its first new-row marker check, `retryRowOf(autoFail...)` has no
+  `system_copy` [PR106], and on its plain half; its share, automated and
+  system-copy stamp halves are absences).
 - tourRemindersApi.test.ts and placementNudgesApi.test.ts: the two Send now
-  spy cases (1n) - `systemCopy` is undefined [PR104].
+  spy cases (1n) - `systemCopy` is undefined [PR104]; and the two Send now
+  cases through the real default service (1k, 1m) - the row Send now wrote
+  has no `system_copy` (S2.1a's fake maps it, but no caller passes it yet)
+  [PR106].
 - Every other new case is a (PIN) and passes already, the two polls'
   no-marker lines included. Every pre-existing case in these files stays
   green.
@@ -6676,9 +6772,11 @@ git -C W:/tmp/today-checklist diff -U0 <S2_BASE>..HEAD | grep '^+' | tr -d '\11\
 git -C W:/tmp/today-checklist diff --stat <S2_BASE>..HEAD
 ```
 and confirm no seed file is in the list (WI9) and that the only
-`twilioWebhookHarness.ts` change is S2.2's comment rewrite at ~5590-5596
+`twilioWebhookHarness.ts` changes are S2.1a's one `system_copy` mapping line
+(plus its comment) in the fake `append` [PR106] and S2.2's comment rewrite
+at ~5590-5596 [PR84]
 (`git -C W:/tmp/today-checklist diff <S2_BASE>..HEAD -- app/test/helpers/twilioWebhookHarness.ts`
-shows that comment block and nothing else) [PR84; PR37 otherwise stands].
+shows those two hunks and nothing else) [PR37 otherwise stands].
 
 #### Step 4 - write the report
 
@@ -6729,9 +6827,10 @@ pass `systemCopy: true`; the repo writes `system_copy` only when true
   closed by PR104.
 - PR100's residue (a second staff Retry of a failed automated text stamps):
   closed by PR104 (a Retry of a Retry inherits the marker).
-- The harness messages fake does not map `systemCopy` (PR37 leaves the
-  harness alone); the harness Retry case seeds `system_copy` on the world
-  row directly. Record whether any other test needed that.
+- [PR106] The harness messages fake maps `systemCopy` true-only like the
+  real repo (twilioWebhookHarness.ts:<line>, pinned by
+  twilioWebhookHarnessRetryFields.test.ts); the harness Retry and Send-now
+  cases assert the marker on the rows the routes wrote.
 
 ## WI3 - the whisper-gate no-await rule
 <The reviewer's line-by-line read of the outbound accept branch diff: nothing
@@ -6799,6 +6898,7 @@ git -C W:/tmp/today-checklist commit -m "docs(records): S2 slice report - direct
 | `system_copy` marker: field, true-only append mapping, `SendMessageInput.systemCopy` persisted, no gating change | PR104; spec r8 7.3 | S2.1a | messagesRepoRetryLineage.integration "append persists system_copy ...", sendMessage.test.ts "system_copy marker" |
 | W2 Retry passes the option except `broadcast_id`, automated and system-copy rows; passes `systemCopy` for automated / system-copy rows | PR11, PR104 (replaces PR91's gate; closes PR100's residue); spec r8 7.3 W2 | S2.2 | apiRoutes.test.ts spy case (share, automated, Send-now row, Retry of a Retry, plain) + harness Retry case |
 | Both Send now paths pass `systemCopy: true`; the polls write no marker | PR104 | S2.2 | the two Send now spy cases (1n); the two poll cases (1l, 1m) |
+| The harness fake maps `system_copy` true-only; harness Retry / Send now cases read it off the written rows | PR106 | S2.1a, S2.2 | twilioWebhookHarnessRetryFields.test.ts "append carries system_copy ..."; 1f, 1k, 1m |
 | Harness suites on the default 1:1 send path named; red-case rule; harness comment rewritten | PR84 | S2.2 | Step 3d/3e; S2 report WI2 |
 | No stamp: share fan-out, automatic retry, missed-call text, welcome text, tour reminder poll and Send now, nudge poll and Send now | spec 7.2, 7.3 no-stamp table, 9 | S2.2 | the (PIN) cases in broadcastFanOut, retrySendAttempt, missedCallAutoText, publicIntake, tourRemindersApi, placementNudgesApi |
 | W3 email: stamp after SES accepts, none on adapter throw, one `contact.updated` | PR12 | S2.3 | sendEmailMessage.test.ts "W3" |

@@ -19,6 +19,7 @@ import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { GROUP_TEXT_STATUS, type ConversationItem } from '../src/repos/conversationsRepo.js';
 import { unreadFlagFor } from './helpers/unreadIndexFake.js';
 import {
+  requestedUrgencyOf,
   urgencyOf,
   type RelayCloseNagItem,
   type TodayItem,
@@ -182,6 +183,7 @@ describe('today action-queue API (BE6/C7)', () => {
     const body = res.body as TodayResponse;
     expect(body.items).toEqual([]);
     expect(body.relayCloseNags).toEqual([]);
+    expect(body.toursToBook).toBe('ok');
     expect(typeof body.generatedAt).toBe('string');
     expect(new Date(body.generatedAt).toISOString()).toBe(body.generatedAt);
   });
@@ -459,7 +461,8 @@ describe('today action-queue API (BE6/C7)', () => {
     seedTenant('t-tom', 'To', 'Morrow');
     await seedTour({ tourId: 'tour-today', tenantId: 't-today', scheduledAt: todayNoonIso() });
     await seedTour({ tourId: 'tour-tomorrow', tenantId: 't-tom', scheduledAt: tomorrowNoonIso() });
-    // Time-less (requested) tours belong to the /tours "Needs booking" queue, never Today.
+    // Time-less (requested) tours are never Tours today; they are Tours to book
+    // (spec 2026-10-23 5.4), a separate group.
     await seedTour({ tourId: 'tour-requested', tenantId: 't-today' });
     // RETIREMENT: a placement with today's tour_date no longer yields a tours_today item.
     seedPlacement({ placementId: 'placement-legacy-tour', tenantId: 't-today', stage: 'awaiting_inspection', tour_date: todayYmd() });
@@ -1737,12 +1740,12 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(warned[0]).toMatchObject({ group: 'contacts:triage', found: 0 });
   });
 
-  it('the envelope is { items, relayCloseNags, generatedAt } with an ISO generatedAt when items exist', async () => {
+  it('the envelope is { items, relayCloseNags, toursToBook, generatedAt } with an ISO generatedAt when items exist', async () => {
     seedTenant('t-env', 'En', 'Velope');
     await seedTour({ tourId: 'tour-env', tenantId: 't-env', scheduledAt: todayNoonIso() });
     const res = await authedGet('/api/today');
     const body = res.body as TodayResponse;
-    expect(Object.keys(body).sort()).toEqual(['generatedAt', 'items', 'relayCloseNags']);
+    expect(Object.keys(body).sort()).toEqual(['generatedAt', 'items', 'relayCloseNags', 'toursToBook']);
     expect(new Date(body.generatedAt).toISOString()).toBe(body.generatedAt);
     expect(body.items.length).toBeGreaterThan(0);
   });
@@ -2359,6 +2362,131 @@ describe('today action-queue API (BE6/C7)', () => {
 
       expect(groups).toEqual(['identify']);
       expect(groups).not.toContain('unreplied');
+    });
+  });
+
+  // --- Today checklist (spec 2026-10-23 5.4, plan PR28): Tours to book -------
+  describe('Tours to book (today-checklist 5.4)', () => {
+    const DAY_MS = 86_400_000;
+    const OAK_LABEL = '12 Oak St, Atlanta, GA 30303';
+    const seedOak = (): void => {
+      world.units.set('u-oak', {
+        unitId: 'u-oak',
+        landlordId: 'c-ll',
+        status: 'available',
+        address: { line1: '12 Oak St', city: 'Atlanta', state: 'GA', zip: '30303' },
+      });
+    };
+
+    it('lists every REQUESTED tour, oldest request first (ties by tourId), with at = createdAt, the unit label and the request age', async () => {
+      seedOak();
+      seedTenant('t-amy', 'Amy', 'Able');
+      seedTenant('t-bea', 'Bea', 'Bold');
+      seedTenant('t-cal', 'Cal', 'Cole');
+      const now = Date.now();
+      const oldest = new Date(now - 9 * DAY_MS - 3_600_000).toISOString();
+      const yesterday = new Date(now - DAY_MS - 3_600_000).toISOString();
+      const fresh = new Date(now - 3_600_000).toISOString();
+      await seedTour({ tourId: 'tour-b', tenantId: 't-bea', unitId: 'u-oak', createdAt: yesterday });
+      await seedTour({ tourId: 'tour-c', tenantId: 't-cal', unitId: 'u-gone', createdAt: fresh });
+      await seedTour({ tourId: 'tour-a2', tenantId: 't-amy', unitId: 'u-oak', createdAt: oldest });
+      await seedTour({ tourId: 'tour-a1', tenantId: 't-amy', unitId: 'u-oak', createdAt: oldest });
+      // Not requested: a scheduled tour and a canceled request never appear.
+      await seedTour({ tourId: 'tour-sched', tenantId: 't-amy', unitId: 'u-oak', scheduledAt: tomorrowNoonIso() });
+      await seedTour({ tourId: 'tour-cxl', tenantId: 't-amy', unitId: 'u-oak', status: 'canceled', createdAt: oldest });
+
+      const rows = (await getItems()).filter((i) => i.group === 'tours_to_book');
+
+      const oak = { why: OAK_LABEL, unitLabel: OAK_LABEL };
+      expect(rows).toEqual([
+        { group: 'tours_to_book', refType: 'tour', refId: 'tour-a1', who: 'Amy Able', ...oak, urgency: 'Requested 9 days ago', at: oldest },
+        { group: 'tours_to_book', refType: 'tour', refId: 'tour-a2', who: 'Amy Able', ...oak, urgency: 'Requested 9 days ago', at: oldest },
+        { group: 'tours_to_book', refType: 'tour', refId: 'tour-b', who: 'Bea Bold', ...oak, urgency: 'Requested 1 day ago', at: yesterday },
+        // A unit with no item: the label degrades to the unitId (spec 2.5) -
+        // the section stays available.
+        { group: 'tours_to_book', refType: 'tour', refId: 'tour-c', who: 'Cal Cole', why: 'u-gone', unitLabel: 'u-gone', urgency: 'Requested today', at: fresh },
+      ]);
+      for (const row of rows) expect(row).not.toHaveProperty('tag');
+    });
+
+    it('skips a deleted tenant; a tenant with no contact item keeps the row with the id as who', async () => {
+      world.contacts.push({ contactId: 't-del', type: 'tenant', status: 'searching', firstName: 'Del', lastName: 'Eted', deleted_at: iso(-1_000) });
+      await seedTour({ tourId: 'tour-del', tenantId: 't-del' });
+      await seedTour({ tourId: 'tour-ghost', tenantId: 't-ghost' });
+
+      const rows = (await getItems()).filter((i) => i.group === 'tours_to_book');
+
+      expect(rows.map((r) => [r.refId, r.who])).toEqual([['tour-ghost', 't-ghost']]);
+    });
+
+    it('requestedUrgencyOf (pure): whole fixed 24h days - today, 1 day ago, N days ago', () => {
+      const now = Date.parse('2026-10-24T12:00:00.000Z');
+      const minus = (ms: number): string => new Date(now - ms).toISOString();
+      expect(requestedUrgencyOf(minus(0), now)).toBe('Requested today');
+      expect(requestedUrgencyOf(minus(DAY_MS - 1), now)).toBe('Requested today');
+      expect(requestedUrgencyOf(minus(DAY_MS), now)).toBe('Requested 1 day ago');
+      expect(requestedUrgencyOf(minus(2 * DAY_MS - 1), now)).toBe('Requested 1 day ago');
+      expect(requestedUrgencyOf(minus(2 * DAY_MS), now)).toBe('Requested 2 days ago');
+      expect(requestedUrgencyOf(minus(64 * DAY_MS), now)).toBe('Requested 64 days ago');
+      // Not calendar days: 23h ago, across a midnight, is still today.
+      expect(requestedUrgencyOf('2026-10-23T13:00:00.000Z', now)).toBe('Requested today');
+      // Defensive: an unparseable or future createdAt reads as today.
+      expect(requestedUrgencyOf('garbage', now)).toBe('Requested today');
+      expect(requestedUrgencyOf('2026-10-25T12:00:00.000Z', now)).toBe('Requested today');
+    });
+
+    it('a failed tours read makes ONLY Tours to book unavailable: 200, no rows, a WARN without names; the rest intact', async () => {
+      seedTenant('t-amy', 'Amy', 'Able');
+      await seedTour({ tourId: 'tour-req', tenantId: 't-amy' });
+      await seedTour({ tourId: 'tour-now', tenantId: 't-amy', scheduledAt: todayNoonIso() });
+      world.contacts.push({ contactId: 'c-unk', type: 'unknown', status: 'needs_review', phone: '+15550390001' });
+      vi.spyOn(world.toursRepo, 'listByStatus').mockRejectedValue(new Error('throttled'));
+
+      const res = await authedGet('/api/today');
+
+      expect(res.status).toBe(200);
+      const body = res.body as TodayResponse;
+      expect(body.toursToBook).toBe('unavailable');
+      expect(body.items.map((i) => [i.group, i.refId])).toEqual([
+        ['identify', 'c-unk'],
+        ['tours_today', 'tour-now'],
+      ]);
+      const warns = harness.capture.atLevel(40).filter((l) => l['section'] === 'tours_to_book');
+      expect(warns).toHaveLength(1);
+      expect(JSON.stringify(harness.capture.atLevel(40))).not.toContain('Amy');
+    });
+
+    it('items come in checklist order: needs_you_now, identify, tours_to_book, tours_today, follow_ups, ai_suggestions', async () => {
+      seedTenant('t-1', 'Keisha', 'Brown');
+      seedPlacement({
+        placementId: 'placement-needs',
+        tenantId: 't-1',
+        stage: 'awaiting_authority_approval',
+        next_deadline_type: 'rta_window',
+        next_deadline_at: iso(-3_600_000),
+      });
+      world.contacts.push({ contactId: 'c-unk', type: 'unknown', status: 'needs_review', phone: '+15550390101' });
+      seedTenant('t-2', 'Maria', 'Lopez');
+      await seedTour({ tourId: 'tour-req', tenantId: 't-2' });
+      await seedTour({ tourId: 'tour-today', tenantId: 't-2', scheduledAt: todayNoonIso() });
+      seedTenant('t-3', 'Sam', 'Lee');
+      seedPlacement({
+        placementId: 'placement-follow',
+        tenantId: 't-3',
+        stage: 'awaiting_approval',
+        next_deadline_type: 'follow_up',
+        next_deadline_at: iso(-60_000),
+      });
+      seedTenant('t-sug', 'Sug', 'Gest');
+      await world.extractionRepo.putSuggestion({
+        ownerContactId: 't-sug',
+        target: 'voucherSize',
+        suggestedValue: '3',
+        conversationId: 'conv-a',
+      });
+
+      const groups = (await getItems()).map((i) => i.group);
+      expect(groups).toEqual(['needs_you_now', 'identify', 'tours_to_book', 'tours_today', 'follow_ups', 'ai_suggestions']);
     });
   });
 });

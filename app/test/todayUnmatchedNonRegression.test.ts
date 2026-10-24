@@ -26,6 +26,7 @@ import { createConversationsRepo } from '../src/repos/conversationsRepo.js';
 import { createPlacementsRepo } from '../src/repos/placementsRepo.js';
 import { createPlacementDeadlinesRepo } from '../src/repos/placementDeadlinesRepo.js';
 import { createToursRepo } from '../src/repos/toursRepo.js';
+import { createUnitsRepo } from '../src/repos/unitsRepo.js';
 import { createExtractionRepo } from '../src/repos/extractionRepo.js';
 import { createUnmatchedEmailRepo } from '../src/repos/unmatchedEmailRepo.js';
 import { createTodayRouter } from '../src/routes/today.js';
@@ -58,6 +59,7 @@ const TODAY_TABLES = [
   'placements',
   'placementDeadlines',
   'tours',
+  'units',
   'ai_extraction',
   'unmatched_email',
 ] as const;
@@ -85,6 +87,7 @@ describe.skipIf(!reachable)('Today non-regression: unmatched_email rows never re
 
   const conversations = createConversationsRepo(repoDeps);
   const contacts = createContactsRepo(repoDeps);
+  const tours = createToursRepo(repoDeps);
   const unmatched = createUnmatchedEmailRepo(repoDeps);
 
   const app = express();
@@ -96,7 +99,10 @@ describe.skipIf(!reachable)('Today non-regression: unmatched_email rows never re
       contactsRepo: contacts,
       placementsRepo: createPlacementsRepo(repoDeps),
       placementDeadlinesRepo: createPlacementDeadlinesRepo(repoDeps),
-      toursRepo: createToursRepo(repoDeps),
+      toursRepo: tours,
+      // Today checklist: the tour-row labels read units. Injected on the
+      // suite's prefix - the router's default would read the UNPREFIXED table.
+      unitsRepo: createUnitsRepo(repoDeps),
       extractionRepo: createExtractionRepo(repoDeps),
     }),
   );
@@ -124,6 +130,15 @@ describe.skipIf(!reachable)('Today non-regression: unmatched_email rows never re
       'hi, checking in',
       new Date().toISOString(),
     );
+    // A requested tour (Tours to book). Its unit has no item, so its label is
+    // the unitId - a failed label is never a failure (spec 2026-10-23 2.5).
+    const tenant = await contacts.create({
+      type: 'tenant',
+      status: 'searching',
+      firstName: 'Tina',
+      phone: '+15550003333',
+    });
+    await tours.create({ tenantId: tenant.contactId, unitId: 'unit-nonregression', tourType: 'self_guided' });
   }, 120_000);
 
   afterAll(async () => {
@@ -142,7 +157,8 @@ describe.skipIf(!reachable)('Today non-regression: unmatched_email rows never re
     expect(before.body.items.length).toBeGreaterThan(0);
     expect(
       before.body.items.map((i: { group: string }) => i.group).sort(),
-    ).toEqual(['identify']);
+    ).toEqual(['identify', 'tours_to_book']);
+    expect(before.body.toursToBook).toBe('ok');
 
     // Flood the side-door: one row per status the ingestion can write, plus a
     // route-transition status and a blocklist pointer - ALL invisible to Today.
@@ -159,5 +175,6 @@ describe.skipIf(!reachable)('Today non-regression: unmatched_email rows never re
     // generatedAt is a timestamp; the CONTENT must be identical.
     expect(after.body.items).toEqual(before.body.items);
     expect(after.body.relayCloseNags).toEqual(before.body.relayCloseNags);
+    expect(after.body.toursToBook).toBe(before.body.toursToBook);
   });
 });

@@ -95,6 +95,7 @@ import { createRateLimitedWarn } from '../lib/rateLimitedWarn.js';
 export type TodayGroup =
   | 'needs_you_now'
   | 'identify'
+  | 'tours_to_book'
   | 'tours_today'
   | 'follow_ups'
   | 'ai_suggestions';
@@ -164,6 +165,12 @@ export interface QuietShareProperty {
 export interface TodayResponse {
   items: TodayItem[];
   relayCloseNags: RelayCloseNagItem[];
+  /**
+   * Tours to book (spec 2026-10-23 3, 5.4): whether the tours_to_book group was
+   * computed. 'unavailable' when its read threw - the dashboard shows the
+   * section's error and never claims "All caught up".
+   */
+  toursToBook: 'ok' | 'unavailable';
   generatedAt: string;
 }
 
@@ -304,6 +311,20 @@ export function urgencyOf(deadlineAt: string, now: number): string {
 }
 
 /**
+ * Tours to book (spec 2026-10-23-today-checklist-design.md 5.4, plan PR28): how
+ * long a requested tour has waited, in WHOLE fixed 24h days (floor), like the
+ * route's other fixed durations - not calendar days. Deterministic for a fixed
+ * `now`. An unparseable or future createdAt reads as today.
+ */
+export function requestedUrgencyOf(createdAt: string, now: number): string {
+  const at = Date.parse(createdAt);
+  const days = Number.isNaN(at) ? 0 : Math.max(0, Math.floor((now - at) / 86_400_000));
+  if (days === 0) return 'Requested today';
+  if (days === 1) return 'Requested 1 day ago';
+  return `Requested ${days} days ago`;
+}
+
+/**
  * A placement's sort priority within needs_you_now: attention/overdue (the most
  * urgent) sort before soon-due. We key by the deadline instant (epoch ms) when
  * present, with attention-without-a-deadline treated as "now" (overdue-ish), so
@@ -311,7 +332,11 @@ export function urgencyOf(deadlineAt: string, now: number): string {
  */
 interface Ranked {
   item: TodayItem;
-  /** Sort key: smaller = more urgent (epoch ms of the deadline, or now for attention-only). */
+  /**
+   * Sort key, ascending; ties by refId. needs_you_now / follow_ups: the
+   * deadline instant (now for attention-only). identify: the contact's
+   * created_at (none last). tours_today: scheduledAt. tours_to_book: createdAt.
+   */
   at: number;
 }
 
@@ -654,6 +679,47 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         // (the sort below). The range read yields dated tours only.
         toursToday.push({ item, at: Number.isNaN(scheduledMs) ? Number.POSITIVE_INFINITY : scheduledMs });
       }
+    }
+
+    // --- tours_to_book: every REQUESTED tour (spec 2026-10-23 5.4, PR28) -----
+    // The Tours page's Needs booking list, read server-side: one byStatus
+    // Query, paged to completion by the repo. No age limit and no tenant-status
+    // filter - an unbooked request needs a decision (book it or cancel it),
+    // however old. Deleted tenants are skipped (the Today rule). Its OWN
+    // try/catch (spec 2.5): any throw makes only this section unavailable, the
+    // WARN carries the section and the error, never a name, and the route still
+    // answers 200. A failed unit LABEL is not a failure - unitLabelOf degrades
+    // to the unitId - and getContact never throws.
+    const toursToBookRows: Ranked[] = [];
+    let toursToBookStatus: TodayResponse['toursToBook'] = 'ok';
+    try {
+      const requested = await tours.listByStatus('requested');
+      for (const t of requested) {
+        if (t.status !== 'requested') continue; // the index is the truth; defense in depth
+        if (await isDeletedContact(t.tenantId)) continue; // deleted tenant -> off the boards
+        const who = (await resolveContactLabel(t.tenantId)) ?? t.tenantId;
+        const unitLabel = await unitLabelOf(t.unitId);
+        const createdMs = Date.parse(t.createdAt);
+        toursToBookRows.push({
+          item: {
+            group: 'tours_to_book',
+            refType: 'tour',
+            refId: t.tourId,
+            who,
+            why: unitLabel,
+            urgency: requestedUrgencyOf(t.createdAt, now),
+            at: t.createdAt,
+            unitLabel,
+          },
+          // Oldest request first; an unparseable createdAt sorts last.
+          at: Number.isNaN(createdMs) ? Number.POSITIVE_INFINITY : createdMs,
+        });
+      }
+    } catch (err) {
+      // No partial section: a throw part-way leaves no rows behind.
+      toursToBookStatus = 'unavailable';
+      toursToBookRows.length = 0;
+      log.warn({ err, section: 'tours_to_book' }, 'today: tours to book could not be read - section unavailable');
     }
 
     // (follow_ups is assembled above: due `follow_up` deadlines from the byDueAt
@@ -1126,6 +1192,8 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     needsYouNow.sort(byUrgency);
     // identify: the contact's created_at ascending (createdAtRank), ties by refId.
     identify.sort(byUrgency);
+    // tours_to_book: oldest request first (createdAt), ties by refId (tourId).
+    toursToBookRows.sort(byUrgency);
     // tours_today: by time, then tenant name, then refId (spec 2026-10-23 2.4).
     toursToday.sort((a, b) => {
       if (a.at !== b.at) return a.at - b.at;
@@ -1138,11 +1206,13 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       a.item.refId < b.item.refId ? -1 : a.item.refId > b.item.refId ? 1 : 0,
     );
 
-    // Group order: Needs-you-now, Identify, Tours-today, Follow-ups,
-    // AI-suggestions (spec 2026-10-23 2).
+    // Group order (spec 2026-10-23 2, plan PR30): needs_you_now, identify,
+    // tours_to_book, tours_today, follow_ups, ai_suggestions. The dashboard
+    // renders tours_today and ai_suggestions under "At a glance".
     const items: TodayItem[] = [
       ...needsYouNow.map((r) => r.item),
       ...identify.map((r) => r.item),
+      ...toursToBookRows.map((r) => r.item),
       ...toursToday.map((r) => r.item),
       ...followUps.map((r) => r.item),
       ...aiSuggestions.map((r) => r.item),
@@ -1152,6 +1222,8 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       {
         needs_you_now: needsYouNow.length,
         identify: identify.length,
+        tours_to_book: toursToBookRows.length,
+        tours_to_book_status: toursToBookStatus,
         tours_today: toursToday.length,
         follow_ups: followUps.length,
         ai_suggestions: aiSuggestions.length,
@@ -1160,7 +1232,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       'today queue assembled',
     );
 
-    const body: TodayResponse = { items, relayCloseNags, generatedAt: nowIso };
+    const body: TodayResponse = { items, relayCloseNags, toursToBook: toursToBookStatus, generatedAt: nowIso };
     res.json(body);
   });
 

@@ -278,7 +278,20 @@ describe('contactsRepo.getRecipientDisplaysByIds - requireComplete (last-heard-f
     expect(projection).toContain('#status');
     expect(names['#status']).toBe('status');
     expect(Object.values(names)).toEqual(
-      expect.arrayContaining(['last_heard_from_at', 'sms_opt_out', 'sms_unreachable', 'type', 'role', 'deleted_at', 'phone']),
+      expect.arrayContaining([
+        'last_heard_from_at',
+        'last_reached_out_at',
+        'sms_opt_out',
+        'sms_unreachable',
+        'type',
+        'role',
+        'deleted_at',
+        'phone',
+      ]),
     );
+    // today-checklist PR1: the quiet clock's outbound half rides the same
+    // projection, through its own placeholder.
+    expect(projection).toContain('#lastReachedOutAt');
+    expect(names['#lastReachedOutAt']).toBe('last_reached_out_at');
   });
 });

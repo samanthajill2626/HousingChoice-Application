@@ -443,7 +443,9 @@ describe('contactsRepo.getRecipientDisplaysByIds (plan 3.3; R3-F4)', () => {
     expect(map.has(`${id}-missing`)).toBe(false);
   });
 
-  parity('projects last_heard_from_at, sms_opt_out and sms_unreachable (last-heard-from spec 5.5)', async (w, id) => {
+  // today-checklist PR1 (spec 7.3): last_reached_out_at joins the projection
+  // - the Today quiet clock reads it from this batch. Updated deliberately.
+  parity('projects last_heard_from_at, last_reached_out_at, sms_opt_out and sms_unreachable (last-heard-from spec 5.5; today-checklist PR1)', async (w, id) => {
     const phone = nextPhone();
     await w.putContact({
       contactId: id,
@@ -454,6 +456,7 @@ describe('contactsRepo.getRecipientDisplaysByIds (plan 3.3; R3-F4)', () => {
       sms_opt_out: true,
       sms_unreachable: false,
       last_heard_from_at: '2026-10-01T12:00:00.000Z',
+      last_reached_out_at: '2026-10-02T12:00:00.000Z',
       notes: 'not projected',
     });
     expect((await w.contacts.getRecipientDisplaysByIds([id])).get(id)).toEqual({
@@ -465,6 +468,7 @@ describe('contactsRepo.getRecipientDisplaysByIds (plan 3.3; R3-F4)', () => {
       sms_opt_out: true,
       sms_unreachable: false,
       last_heard_from_at: '2026-10-01T12:00:00.000Z',
+      last_reached_out_at: '2026-10-02T12:00:00.000Z',
     });
   });
 

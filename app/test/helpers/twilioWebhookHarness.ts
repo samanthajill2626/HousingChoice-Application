@@ -2232,7 +2232,8 @@ export function createFakeWorld(): FakeWorld {
   /**
    * MODELS THE REAL RECIPIENT PROJECTION (plan 3.3): projectDisplay plus
    * `type` and `role` - and, for last-heard-from (spec 5.5), `status`,
-   * `last_heard_from_at`, `sms_opt_out` and `sms_unreachable` - exactly as
+   * `last_heard_from_at`, `sms_opt_out` and `sms_unreachable`, and for the
+   * Today quiet clock (today-checklist PR1) `last_reached_out_at` - exactly as
    * stored, nothing else, so a recipients caller reading another attribute
    * fails here as it would against DynamoDB. (A fake pointer row would show
    * its 'unknown' sentinel; recipients are never pointer ids.)
@@ -2245,6 +2246,7 @@ export function createFakeWorld(): FakeWorld {
       ...(typeof role === 'string' && { role }),
       ...(typeof contact.status === 'string' && { status: contact.status }),
       ...(typeof contact.last_heard_from_at === 'string' && { last_heard_from_at: contact.last_heard_from_at }),
+      ...(typeof contact.last_reached_out_at === 'string' && { last_reached_out_at: contact.last_reached_out_at }),
       ...(typeof contact.sms_opt_out === 'boolean' && { sms_opt_out: contact.sms_opt_out }),
       ...(typeof contact.sms_unreachable === 'boolean' && { sms_unreachable: contact.sms_unreachable }),
     };

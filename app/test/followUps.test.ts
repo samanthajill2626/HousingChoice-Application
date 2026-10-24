@@ -43,7 +43,7 @@ function requestedTour(unitId: string, tenantId: string, createdAt: string): Tou
  *  attributes only (repos/contactsRepo.ts), so every case below runs on
  *  projected data - a builder reading an unprojected attribute would see
  *  undefined (review ADV-2). */
-const RECIPIENT_ATTRS = ['contactId', 'firstName', 'lastName', 'phone', 'deleted_at', 'type', 'role', 'status', 'last_heard_from_at', 'sms_opt_out', 'sms_unreachable'] as const;
+const RECIPIENT_ATTRS = ['contactId', 'firstName', 'lastName', 'phone', 'deleted_at', 'type', 'role', 'status', 'last_heard_from_at', 'last_reached_out_at', 'sms_opt_out', 'sms_unreachable'] as const;
 function projectRecipient(contact: ContactItem): RecipientDisplay {
   const picked = Object.fromEntries(RECIPIENT_ATTRS.filter((key) => contact[key] !== undefined).map((key) => [key, contact[key]]));
   return { ...picked, contactId: contact.contactId } as RecipientDisplay;

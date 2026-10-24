@@ -232,6 +232,12 @@ export interface ContactItem {
    *  Absent = never heard from (or not yet backfilled). Written ONLY by
    *  touchLastHeardFrom (and the seed derivation). NOT an index key. */
   last_heard_from_at?: string;
+  /** ISO. The latest instant staff followed up with this contact (message,
+   *  email, call). Outbound only; shares and automated sends never move it.
+   *  Written only by touchLastReachedOut. See spec
+   *  2026-10-23-today-checklist-design.md 7. NOT an index key; never
+   *  displayed (spec 7.4). */
+  last_reached_out_at?: string;
   /**
    * A2P/CTIA consent model (spec §2). All OPTIONAL so a fast add stays fast; the
    * flexible-doc create/update path persists them without any special wiring.
@@ -404,6 +410,8 @@ export type RecipientDisplay = ContactDisplayItem & {
   /** last-heard-from spec 5.5 (one eligibility rule, lib/listingSendOutcome.ts). */
   status?: string;
   last_heard_from_at?: string;
+  /** today-checklist spec 6.1: the quiet clock's outbound half (ContactItem). */
+  last_reached_out_at?: string;
   sms_opt_out?: boolean;
   sms_unreachable?: boolean;
 };
@@ -1093,17 +1101,20 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
   /**
    * The recipient projection (plan 3.3; R3-F4): the display fields plus `type`
    * and `role` - both DynamoDB reserved words, hence placeholders - plus
-   * status (reserved - placeholder) and the last-heard-from reachability facts.
+   * status (reserved - placeholder) and the last-heard-from reachability facts,
+   * plus last_reached_out_at (today-checklist spec 6.1/7.3: the Today quiet
+   * clock reads both halves from this one batch).
    */
   const RECIPIENT_PROJECTION = {
     ProjectionExpression:
-      '#contactId, #firstName, #lastName, #phone, #deletedAt, #type, #role, #status, #lastHeardFromAt, #smsOptOut, #smsUnreachable',
+      '#contactId, #firstName, #lastName, #phone, #deletedAt, #type, #role, #status, #lastHeardFromAt, #lastReachedOutAt, #smsOptOut, #smsUnreachable',
     ExpressionAttributeNames: {
       ...DISPLAY_PROJECTION.ExpressionAttributeNames,
       '#type': 'type',
       '#role': 'role',
       '#status': 'status',
       '#lastHeardFromAt': 'last_heard_from_at',
+      '#lastReachedOutAt': 'last_reached_out_at',
       '#smsOptOut': 'sms_opt_out',
       '#smsUnreachable': 'sms_unreachable',
     },

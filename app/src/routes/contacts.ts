@@ -307,13 +307,16 @@ function isContactType(value: unknown): value is ContactType {
  * stamp and the conversion. A client value is REFUSED, loudly, on both
  * contact writers (one helper both parsers call), like consent_captured_by.
  * `last_heard_from_at` is written only by contactsRepo.touchLastHeardFrom
- * (spec 5.1, invariant I1).
+ * (spec 5.1, invariant I1); `last_reached_out_at` only by
+ * contactsRepo.touchLastReachedOut (today-checklist spec 7.3 - the
+ * staff-outreach helper and the one-time backfill).
  */
 const SERVER_OWNED_CONTACT_FIELDS = [
   'caseworker_review',
   'caseworker_conversion',
   'type_source',
   'last_heard_from_at',
+  'last_reached_out_at',
 ] as const;
 
 function refuseServerOwnedFields(b: Record<string, unknown>): { error: string } | undefined {

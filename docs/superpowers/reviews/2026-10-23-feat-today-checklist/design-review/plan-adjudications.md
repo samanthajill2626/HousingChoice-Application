@@ -32,3 +32,19 @@ complete. Nothing BLOCKING.
 
 Round 1 changed decisions (A1, A5/B4, B3), so round 2 runs. Reviewer A is
 continued (all 10 of its findings accepted, including the surface-level A1).
+
+### Write-through (PR83) results, before round 2
+
+The amender applied 23 rulings into slice text and found 30 already matched
+(`plan-r1-amendments.md`), and raised three items, all ruled:
+
+- S2.2 route-level cases asserted `world.sent`, but the /api router's
+  default send service has no injected adapter (`api.ts:694-703`) and the
+  harness api deps inject none (`twilioWebhookHarness.ts:5682-5700`), so it
+  sends via the console driver. Verified. PR94: those cases prove the send by
+  the persisted outbound row in `world.messages`; no adapter is wired in.
+- PR95: PR89's terminals go in the ERROR group (precedent at
+  `e2e/performance/routes.ts:506`).
+- PR96: PR86 makes PR24's units `isDeleted` alias unnecessary.
+
+Plan v2 @e04c578f. Round 2: reviewer A continued with the RE-REVIEW CHARGE.

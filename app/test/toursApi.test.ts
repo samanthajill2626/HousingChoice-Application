@@ -582,7 +582,11 @@ describe('PATCH status precondition - a concurrent change is refused, never merg
     ).toHaveLength(0);
     expect(world.auditEvents.filter((e) => e.event_type === 'tour_took_place')).toHaveLength(0);
     expect(rowCount(world, tourId)).toBe(rowsBefore);
-    expect(world.emitted.filter((e) => e.event === 'tour.updated')).toHaveLength(0);
+    // The create's own emit (today-checklist PR16) is the ONLY tour.updated:
+    // the refused PATCH adds none.
+    expect(world.emitted.filter((e) => e.event === 'tour.updated').map((e) => e.payload)).toEqual([
+      { tourId, status: 'scheduled' },
+    ]);
   });
 
   it('(PIN) a PATCH whose tour vanished between its read and its write still answers 404 tour_not_found', async () => {
@@ -1392,11 +1396,14 @@ describe('tour.updated bus emissions', () => {
     const { app, world } = makeWebhookHarness();
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     const tourId = created.body.tour.tourId as string;
-    expect(tourUpdates(world)).toHaveLength(0); // create does not emit (1a scope)
+    // INVERTED deliberately (today-checklist PR16, spec 8): a create emits too -
+    // a new tour is live news for Today's Tours to book. Was "create does not
+    // emit (1a scope)".
+    expect(tourUpdates(world).map((e) => e.payload)).toEqual([{ tourId, status: 'scheduled' }]);
 
     await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' }).expect(200);
-    expect(tourUpdates(world)).toHaveLength(1);
-    expect(tourUpdates(world)[0]!.payload).toEqual({ tourId, status: 'toured' });
+    expect(tourUpdates(world)).toHaveLength(2);
+    expect(tourUpdates(world)[1]!.payload).toEqual({ tourId, status: 'toured' });
   });
 
   it('a reschedule PATCH emits tour.updated with the post-patch status', async () => {
@@ -1408,8 +1415,9 @@ describe('tour.updated bus emissions', () => {
       .patch(`/api/tours/${tourId}`)
       .send({ scheduledAt: '2026-07-22T10:00:00.000Z' })
       .expect(200);
-    expect(tourUpdates(world)).toHaveLength(1);
-    expect(tourUpdates(world)[0]!.payload).toEqual({ tourId, status: 'scheduled' });
+    // The create's own emit (today-checklist PR16) first, then the PATCH's.
+    expect(tourUpdates(world)).toHaveLength(2);
+    expect(tourUpdates(world)[1]!.payload).toEqual({ tourId, status: 'scheduled' });
   });
 
   it('a REJECTED patch (409 illegal transition / 400 invalid field) emits nothing', async () => {
@@ -1422,6 +1430,27 @@ describe('tour.updated bus emissions', () => {
     await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'scheduled' }).expect(409);
     await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'bogus' }).expect(400);
     expect(tourUpdates(world)).toHaveLength(afterClose);
+  });
+
+  it('today-checklist PR16: a REQUESTED create (no scheduledAt) emits ONE tour.updated { tourId, status: requested }', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send({
+      tenantId: BASE_CREATE_BODY.tenantId,
+      unitId: BASE_CREATE_BODY.unitId,
+      tourType: BASE_CREATE_BODY.tourType,
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.tour.status).toBe('requested');
+    expect(tourUpdates(world).map((e) => e.payload)).toEqual([
+      { tourId: created.body.tour.tourId, status: 'requested' },
+    ]);
+  });
+
+  it('today-checklist PR16: a refused create (400) emits nothing', async () => {
+    const { app, world } = makeWebhookHarness();
+    const res = await authed(app).post('/api/tours').send({ ...BASE_CREATE_BODY, tourType: 'bogus' });
+    expect(res.status).toBe(400);
+    expect(tourUpdates(world)).toEqual([]);
   });
 });
 

@@ -414,6 +414,12 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       await recordTourEvent(tour, 'tour_scheduled', 'tour_scheduled', 'Tour scheduled');
     }
 
+    // today-checklist PR16 (spec 8): a create is a live change too - a new
+    // requested tour appears in Today's Tours to book and the pair leaves Quiet
+    // shares. The final `tour` (after the ladder pointer write). ID + status
+    // only (PII), the PATCH emit's shape.
+    events.emit('tour.updated', { tourId: tour.tourId, status: tour.status });
+
     log.info({ tourId: tour.tourId, tenantId: tour.tenantId, unitId: tour.unitId }, 'tour created via api');
     res.status(201).json({ tour });
   });

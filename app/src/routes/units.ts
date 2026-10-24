@@ -21,6 +21,7 @@ import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { Router } from 'express';
 import { mergeContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import { appEvents, type EventBus } from '../lib/events.js';
 import { validateUnitBody } from '../lib/unitFields.js';
 import {
   depositConflictAfter,
@@ -165,6 +166,12 @@ export interface UnitsRouterDeps {
    * createApiRouter and threaded down.
    */
   orgNamesService?: OrgNamesService;
+  /**
+   * today-checklist PR16 (spec 8): the live bus. The Interested outcome route
+   * emits tour.updated when it CREATES the requested tour. Defaults to the
+   * process singleton.
+   */
+  events?: EventBus;
 }
 
 /** BE3/C3: a valid roster role (C3 `UnitContact.role`). */
@@ -591,6 +598,9 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   const mediaStore = deps.mediaStore;
   const transcodeGate = deps.transcodeGate ?? sharedTranscodeGate;
   const orgNames = deps.orgNamesService ?? createOrgNamesService({ logger: deps.logger });
+  // Named eventBus, not events: the activity handler below holds a local
+  // `events` (its rows).
+  const eventBus = deps.events ?? appEvents;
 
   const router = Router();
 
@@ -1653,6 +1663,10 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
         if (!existing && tourType !== undefined) {
           createdTour = await tours.create({ tenantId: contactId, unitId, tourType, status: 'requested' });
           wrote = true;
+          // today-checklist PR16 (spec 8): the new requested tour is live news -
+          // Today's Tours to book gains it and the pair leaves Quiet shares. ID
+          // + status only (PII), the tours PATCH emit's shape.
+          eventBus.emit('tour.updated', { tourId: createdTour.tourId, status: createdTour.status });
           await recordListingOutcomeEvent(eventDeps, {
             type: 'listing_interested',
             contactId,

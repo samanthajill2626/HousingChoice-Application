@@ -1030,6 +1030,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.transcodeGate !== undefined && { transcodeGate: deps.transcodeGate }),
       // Organization names (spec 2026-10-06 D5): the ONE service built above.
       orgNamesService: orgNames,
+      // today-checklist PR16: the Interested create emits tour.updated here.
+      events,
     }),
   );
   // Tours CRUD (Tours feature; requireAuth — VAs schedule tours, no admin gate).

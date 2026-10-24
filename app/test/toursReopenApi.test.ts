@@ -489,7 +489,8 @@ describe('POST /api/tours/:tourId/reopen - side effects', () => {
     // Exactly ONE reopen happened. A reopen also pins the tenant and writes a
     // units# row, so count the tour's own tours# row.
     expect(tourReopenedRows(world, tourId)).toHaveLength(1);
-    expect(world.emitted.filter((e) => e.event === 'tour.updated')).toHaveLength(1);
+    // The create's own emit (today-checklist PR16) plus exactly ONE reopen.
+    expect(world.emitted.filter((e) => e.event === 'tour.updated')).toHaveLength(2);
     expect(world.toursMap.get(tourId)).toMatchObject({ status: 'scheduled', lastMarkedAt: NOW });
   });
 });

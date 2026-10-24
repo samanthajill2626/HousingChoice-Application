@@ -733,3 +733,43 @@ describe('flyer-leads D8: a signed_up pair takes the same outcome actions as a w
     expect(world.toursMap.size).toBe(1);
   });
 });
+
+// today-checklist PR16 (spec 8): an Interested that CREATES the requested tour
+// is live news - Today's Tours to book gains the row and the pair leaves Quiet
+// shares - so it emits ONE tour.updated (ID + status only). Nothing that
+// creates no tour emits one (Not interested adds no event, spec 8).
+describe('outcome route - tour.updated on the Interested create (today-checklist PR16)', () => {
+  const tourUpdates = (world: FakeWorld) =>
+    world.emitted.filter((e) => e.event === 'tour.updated').map((e) => e.payload);
+
+  it('an Interested that creates the requested tour emits ONE tour.updated { tourId, status: requested }', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, { tour_type: 'landlord_led' });
+    seedContact(world, 'c-1');
+    await seedSend(world);
+    const res = await post(app, { outcome: 'interested' });
+    expect(res.status).toBe(200);
+    const tourId = [...world.toursMap.values()][0]!.tourId;
+    expect(tourUpdates(world)).toEqual([{ tourId, status: 'requested' }]);
+  });
+
+  it('an Interested that finds a tour, a Not interested and an Undo create nothing and emit nothing', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, { tour_type: 'landlord_led' });
+    seedContact(world, 'c-1');
+    await seedSend(world);
+    await world.toursRepo.create({
+      tourId: 't-held',
+      tenantId: 'c-1',
+      unitId: 'unit-1',
+      tourType: 'landlord_led',
+      status: 'scheduled',
+      createdAt: '2026-06-20T00:00:00.000Z',
+    });
+    expect((await post(app, { outcome: 'interested' })).status).toBe(200);
+    expect((await post(app, { outcome: 'not_interested' })).status).toBe(200);
+    expect((await post(app, { outcome: 'clear' })).status).toBe(200);
+    expect(world.toursMap.size).toBe(1);
+    expect(tourUpdates(world)).toEqual([]);
+  });
+});

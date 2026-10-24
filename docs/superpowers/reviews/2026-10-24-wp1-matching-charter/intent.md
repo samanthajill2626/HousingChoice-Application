@@ -262,3 +262,16 @@ quality Sam trusts, then her review of it, then the two views.
   standard field today, and where does she get the number?
 - Hard exclusion wording in A1 vs the soft demotion built: a tenant who
   fails a requirement still appears, at the bottom, with the reason.
+
+## Decisions, round 8 (Cameron, 2026-10-24)
+
+- D-priority-final: priority is DETERMINISTIC ONLY; "the model never sees
+  the priority tag." Two mechanisms: (1) a strength setting that moves
+  priority properties between bands (within band / one band up / always
+  first - default is Sam's call); (2) a priority-only VIEW on the ranked
+  list that "shows only the priority properties and basically hides
+  everything else that has been matched and sorted", so she sees the
+  highest-ranked priority property while everything is still ranked.
+  Applies where properties are the candidates (a tenant's find-properties
+  view). A cross-property "which priority property has the best tenants"
+  view is not WP1.

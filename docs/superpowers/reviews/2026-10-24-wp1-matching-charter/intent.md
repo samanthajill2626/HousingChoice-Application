@@ -11,20 +11,44 @@ cut from main @970a29b9. Docs only.
 
 ## STATE
 
-Phase: SPEC WRITTEN (2026-10-24) -
-docs/superpowers/specs/2026-10-24-wp1-matching-charter-design.md, 19
-sections, committed in the charter worktree. Brainstorm closed after 14
-rounds (all recorded below). Launch mode: none - this mission stops after
-Cameron's spec gate; the spec and records merge as a docs-only branch.
-Nothing in flight.
-NEXT STEP: Cameron's WHOLE-SPEC RE-READ (his request, before the
-adversarial review): he reads the spec; fold his changes in and commit.
-Then the adversarial document review (two Opus reviewers, round 1, briefs
-from design-review-briefs.md, adjudications to
-<records>/design-review/adjudications.md), then his spec gate, then
-COMPACTION GATE A is skipped (no plan phase in this mission) - instead:
-merge command for the docs-only branch, --off compact-resume, update
-memory. Questions for Sam are spec section 16.
+If you are reading this after a compaction: DO NOTHING until Cameron says
+go. Cameron (2026-10-24): "I don't want you to replay all the messages or
+continue. I want to do that once I give you the go-ahead." On his go:
+re-invoke the Skill abt:feature-mission with the argument "RESUME WP1
+charter", read this file and the pool-count record, run the replay
+(command in the feature-mission skill, output
+W:/tmp/wp1-matching-charter/.superpowers/sdd/conversation.md) and READ
+ALL OF IT, report back in one line, then continue below.
+
+Phase: SPEC WRITTEN and sent to Cameron for his WHOLE-SPEC RE-READ
+(2026-10-24) - docs/superpowers/specs/2026-10-24-wp1-matching-charter-
+design.md, 19 sections, committed (18445409). Brainstorm closed after 14
+rounds, all recorded below. Launch mode: none - this mission stops after
+Cameron's spec gate; spec + records merge as a docs-only branch. Nothing
+in flight. Worktree W:/tmp/wp1-matching-charter, branch
+feat/wp1-matching-charter from main 970a29b9; the shared checkout stays
+on main.
+
+Planner's own re-read notes (message of 2026-10-24, not yet edits): pair
+scores are calibrated in different company per direction (say so
+explicitly near 7.2/10.3?); a review should keep the reviewed score and
+rubric version (B2 detail); B2 hours are tight, the Rankings page could
+move to B3; 6.1 'tenant address as city/zip only' is a planner instinct
+not a decision; properties have no staleness rule (asymmetry, by design).
+
+NEXT STEP after his go: take Cameron's re-read changes (if any), fold
+them into the spec, commit. Then the ADVERSARIAL DOCUMENT REVIEW: round 1
+= two independent Opus reviewers in parallel, same brief
+(W:/AI Projects/claude-plugins/abt/skills/feature-mission/design-review-briefs.md),
+spec + repo only, blind to this file and the brainstorm; adjudicate every
+finding (accept/reject/defer), write
+docs/superpowers/reviews/2026-10-24-wp1-matching-charter/design-review/adjudications.md
+and commit; rounds 2+ continue the better reviewer with SendMessage;
+stop when a round changes no decision, cap 4. Then Cameron's spec gate
+(show counts and every REJECT inline). Then: merge command for the
+docs-only branch (he merges), register-session --off, memory update. No
+plan, no build in this mission. Cameron's list: testing API key from
+Sam (before B2); WP1 hours log.
 
 ## What Cameron asked for (verbatim where wording matters)
 

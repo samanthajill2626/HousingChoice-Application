@@ -28,7 +28,7 @@ import { reseed } from '../../fixtures/reseed.js';
 import { addOrg } from '../../fixtures/orgFixture.js';
 import { extractionTick, sendExtractSms } from '../../fixtures/extraction.js';
 import { ORG_PICKER } from '../../scenarios/steps.js';
-import { expectTodayReady } from '../../support/today.js';
+import { expectNoAiSuggestionFor, expectTodayReady } from '../../support/today.js';
 import { WIDE_RESTORE, expectNoHorizontalOverflowIn } from '../../support/viewport.js';
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
@@ -85,7 +85,6 @@ const UI = {
   },
   triageHeading: 'Needs triage',
   markAsCaseworker: 'Mark as Caseworker',
-  todayReview: 'AI suggestions to review',
 };
 
 /** Sign in as the seeded VA (the "Continue as dev user" identity). */
@@ -544,14 +543,11 @@ test.describe('Caseworkers - the Unknown card', () => {
     // The AI's partner suggestion is resolved by the conversion (accepted
     // through the canonicalizer, D16): nothing pending, Today's review clear.
     expect(await pendingSuggestionTargets(req, contactId)).not.toContain('type');
-    await page.goto(`${NEXT}/`);
-    await expectTodayReady(page);
-    await expect(
-      page
-        .getByRole('list', { name: UI.todayReview })
-        .getByRole('listitem')
-        .filter({ hasText: formattedPhone(phone) }),
-    ).toHaveCount(0);
+    // Today's AI suggestions are one collapsed line under At a glance
+    // (tracker #31). The original intent - this contact has no AI row left -
+    // is checked on server truth, then on the page: the line ABSENT when Today
+    // holds no AI rows at all, else the opened list without this contact.
+    await expectNoAiSuggestionFor(page, contactId, formattedPhone(phone));
   });
 });
 

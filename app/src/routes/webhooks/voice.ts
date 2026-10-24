@@ -95,6 +95,7 @@ import {
 } from '../../lib/voiceMasking.js';
 import type { AuditRepo } from '../../repos/auditRepo.js';
 import { createContactCapture } from '../../services/contactCapture.js';
+import { recordStaffOutreach } from '../../services/staffOutreach.js';
 import { createOurNumberKind } from '../../services/ourNumberKind.js';
 import { resolveRelayInbound } from '../../services/relayInboundResolution.js';
 import { createPushService, type PushService } from '../../services/pushService.js';
@@ -351,6 +352,14 @@ export interface TwilioVoiceWebhookDeps {
    * the bound; production always uses VOICEMAIL_GREETING_LOOKUP_BUDGET_MS.
    */
   voicemailGreetingLookupBudgetMs?: number;
+  /**
+   * today-checklist W6 (spec 7.3): receives work a handler starts AFTER its
+   * TwiML response is sent - the outbound press-1 staff-outreach stamp. The
+   * production default attaches a .catch that logs and drops the promise.
+   * Tests pass a collector and await it: supertest resolves when the response
+   * ends, so an immediate assertion would race the post-response work.
+   */
+  afterResponse?: (work: Promise<void>) => void;
 }
 
 export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Router {
@@ -382,6 +391,18 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
   const ourNumberKind = createOurNumberKind({ config, conversations });
   const baseUrl = config.publicBaseUrl ?? '';
   const greetingLookupBudgetMs = deps.voicemailGreetingLookupBudgetMs ?? VOICEMAIL_GREETING_LOOKUP_BUDGET_MS;
+  // today-checklist W6: post-response work (the outbound press-1 stamp). The
+  // default keeps a rejection from going unhandled and drops the promise.
+  const afterResponse =
+    deps.afterResponse ??
+    ((work: Promise<void>): void => {
+      work.catch((err: unknown) => {
+        log.error(
+          { errName: err instanceof Error ? err.name : typeof err },
+          'voice: post-response work failed (best-effort)',
+        );
+      });
+    });
 
   // Voicemail greeting (spec 4.6). The LOOKUP returns a result and touches
   // nothing - no TwiML, no log line - so a lookup that resolves AFTER the
@@ -1304,7 +1325,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
    */
   async function resolveOutboundTarget(
     conversationId: string,
-  ): Promise<{ targetPhone: string; label: string; optedOut: boolean } | undefined> {
+  ): Promise<{ targetPhone: string; label: string; optedOut: boolean; contactId?: string } | undefined> {
     if (conversationId.length === 0) return undefined;
     const conversation = await conversations.getById(conversationId);
     const targetPhone =
@@ -1317,7 +1338,39 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       targetPhone,
       label: maskedCallerLabel(contact),
       optedOut: contact?.voice_opt_out === true,
+      // today-checklist W6: the contact the press-1 stamp moves - the SAME
+      // read, no extra round trip. Absent when no contact holds the number.
+      ...(contact !== undefined && { contactId: contact.contactId }),
     };
+  }
+
+  /**
+   * today-checklist W6 (spec 7.3, PR13): an outbound call counts as staff
+   * outreach once the CONTACT's leg is dialed - the press-1 accept that returns
+   * the <Dial>, never originate (that rings the staff cell first). Started
+   * only AFTER the TwiML is sent and never awaited by the handler: nothing may
+   * be awaited between press-1 and the <Dial> (fix wave 4, N-1). Never
+   * rejects: recordStaffOutreach never throws, and the emit is guarded.
+   */
+  async function stampOutboundDial(
+    stampDeps: { contacts: Pick<ContactsRepo, 'touchLastReachedOut'>; log: Logger; events: EventBus },
+    contactId: string | undefined,
+    dialAt: string,
+  ): Promise<void> {
+    if (contactId === undefined) return;
+    const written = await recordStaffOutreach(
+      { contacts: stampDeps.contacts, log: stampDeps.log },
+      [{ contactId, at: dialAt }],
+    );
+    if (!written.includes(contactId)) return;
+    try {
+      stampDeps.events.emit('contact.updated', { contactId });
+    } catch (err) {
+      stampDeps.log.warn(
+        { contactId, errName: err instanceof Error ? err.name : typeof err },
+        'outbound whisper gate: contact.updated emit failed (best-effort) - the stamp itself COMMITTED',
+      );
+    }
   }
 
   /**
@@ -1667,13 +1720,16 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         return;
       }
       // Mark the bridge accepted NOW (press-1 is the authoritative "answered"
-      // signal, same as the inbound legs). Best-effort.
+      // signal, same as the inbound legs). Best-effort. `dialAt` is the ONE
+      // press-1 instant: the row's answered_at AND the staff-outreach stamp
+      // after the response (today-checklist W6), so the two always agree.
+      const dialAt = new Date().toISOString();
       if (parentCallSid.length > 0) {
         let stamp: CallStatusUpdate | undefined;
         try {
           stamp = await messages.updateCallStatus(parentCallSid, {
             callStatus: 'in-progress',
-            answeredAt: new Date().toISOString(),
+            answeredAt: dialAt,
           });
         } catch (err) {
           log.warn(
@@ -1725,6 +1781,11 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         'outbound whisper gate: accepted (1) — dialing target from the business number',
       );
       sendTwiml(res, vr);
+      // today-checklist W6 (spec 7.3, PR13): the contact's leg is now dialed -
+      // staff reached out. Started only HERE, after the TwiML went out, and
+      // handed off un-awaited: nothing may be awaited between press-1 and the
+      // <Dial> (fix wave 4, N-1).
+      afterResponse(stampOutboundDial({ contacts, log, events }, target.contactId, dialAt));
       return;
     }
     if (digits === '1') {

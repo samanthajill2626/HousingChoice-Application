@@ -30,7 +30,11 @@ import {
   ORIGIN_SECRET,
   OUR_NUMBER,
   type FakeWorld,
+  type Harness,
 } from './helpers/twilioWebhookHarness.js';
+import express, { type Express, type Response } from 'express';
+import { buildApp } from '../src/app.js';
+import { createLogger } from '../src/lib/logger.js';
 import {
   TEST_ADMIN_COOKIE,
   TEST_ADMIN_USER,
@@ -1350,5 +1354,255 @@ describe('POST /api/contacts/:contactId/voice-opt-out (spec §8)', () => {
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ optOut: true });
     expect(res.status).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// today-checklist W6 (spec 7.3, ruling PR13): the outbound press-1 that dials
+// the CONTACT is staff outreach. The stamp runs AFTER the TwiML is sent,
+// through the voice router's afterResponse seam, which these cases capture and
+// await - supertest resolves when the response ends, so an immediate
+// assertion would race the post-response work. The harness has no option for
+// the seam (it is S1-owned), so gateApp builds a SECOND app over the SAME
+// world with the harness's config, which signedTwilioPost signs for.
+// PR87: with a ResponseProbe, gateApp wraps that app in an outer express app
+// whose first middleware remembers the response being served, so the seam
+// (and a wrapped touch) can read whether the TwiML had already gone out.
+// ---------------------------------------------------------------------------
+describe('outbound press-1 - the staff-outreach stamp (today-checklist W6)', () => {
+  /** PR87: what the seam and the touch saw of the response when they ran. */
+  interface ResponseProbe {
+    res?: Response;
+    /** One entry per afterResponse hand-off: was the response finished? */
+    handOffSawFinished: boolean[];
+    /** One entry per touchLastReachedOut call: was the response finished? */
+    touchSawFinished: boolean[];
+  }
+  const finished = (probe: ResponseProbe): boolean =>
+    probe.res !== undefined && probe.res.headersSent && probe.res.writableEnded;
+
+  function gateApp(harness: Harness, works: Promise<void>[], probe?: ResponseProbe): Express {
+    const { world } = harness;
+    const inner = buildApp({
+      config: harness.config,
+      logger: createLogger({ level: 'info', destination: harness.capture.stream }),
+      auth: { usersRepo: harness.fakeUsers.repo },
+      webhooks: {
+        adapter: world.adapter,
+        conversationsRepo: world.conversationsRepo,
+        messagesRepo: world.messagesRepo,
+        contactsRepo: world.contactsRepo,
+        auditRepo: world.auditRepo,
+        settingsRepo: world.settingsRepo,
+        usersRepo: harness.fakeUsers.repo,
+        pushService: world.pushService,
+        events: world.events,
+        extractionRepo: world.extractionRepo,
+        afterResponse: (work) => {
+          if (probe !== undefined) probe.handOffSawFinished.push(finished(probe));
+          works.push(work);
+        },
+      },
+    });
+    if (probe === undefined) return inner;
+    const outer = express();
+    outer.use((_req, res, next) => {
+      probe.res = res;
+      next();
+    });
+    outer.use(inner);
+    return outer;
+  }
+
+  /** Originate through the harness so a ringing outbound row + its thread exist. */
+  async function originate(): Promise<{
+    world: FakeWorld;
+    harness: ReturnType<typeof makeWebhookHarness>;
+    conversationId: string;
+    callSid: string;
+  }> {
+    const world = createFakeWorld();
+    const contactId = seedContact(world);
+    const harness = makeWebhookHarness({ world });
+    seedNavigatorCell(harness);
+    const res = await request(harness.app)
+      .post(`/api/contacts/${contactId}/call`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(res.status).toBe(200);
+    const twimlUrl = world.initiatedCalls[0]!.twimlUrl;
+    const conversationId = new URL(twimlUrl).searchParams.get('conversationId')!;
+    return { world, harness, conversationId, callSid: res.body.callSid };
+  }
+
+  const outboundGate = (conversationId: string, callSid: string): string =>
+    `/webhooks/twilio/voice/whisper-gate?conversationId=${encodeURIComponent(conversationId)}&parentCallSid=${encodeURIComponent(callSid)}&outbound=1`;
+  const contactUpdates = (world: FakeWorld) =>
+    world.emitted.filter((e) => e.event === 'contact.updated').map((e) => e.payload);
+
+  it('originating a call never stamps (it rings the staff cell first)', async () => {
+    const { world } = await originate();
+    expect(world.reachedOutTouches).toEqual([]);
+    expect(contactUpdates(world)).toEqual([]);
+  });
+
+  it('press-1 that dials the contact stamps at the press-1 instant (= answered_at) and emits ONE contact.updated', async () => {
+    const { world, harness, conversationId, callSid } = await originate();
+    const works: Promise<void>[] = [];
+
+    const res = await signedTwilioPost(gateApp(harness, works), outboundGate(conversationId, callSid), {
+      Digits: '1',
+      CallSid: 'CAnav-leg',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain(`<Number>${TARGET}</Number>`);
+    expect(works).toHaveLength(1);
+    await Promise.all(works);
+    const entry = world.messages.find((m) => m.provider_sid === callSid)!;
+    expect(typeof entry.answered_at).toBe('string');
+    expect(world.reachedOutTouches).toEqual([{ contactId: 'c-target', at: entry.answered_at, outcome: 'written' }]);
+    expect(contactUpdates(world)).toEqual([{ contactId: 'c-target' }]);
+    // last_heard_from_at never moves on outbound (spec 7.1).
+    expect(world.heardFromTouches).toEqual([]);
+  });
+
+  it('PR87: the work reaches afterResponse only once the TwiML is sent, and the touch never runs before it', async () => {
+    const { world, harness, conversationId, callSid } = await originate();
+    const works: Promise<void>[] = [];
+    const probe: ResponseProbe = { handOffSawFinished: [], touchSawFinished: [] };
+    const realTouch = world.contactsRepo.touchLastReachedOut;
+    world.contactsRepo.touchLastReachedOut = async (contactId, at) => {
+      probe.touchSawFinished.push(finished(probe));
+      return realTouch(contactId, at);
+    };
+
+    const res = await signedTwilioPost(gateApp(harness, works, probe), outboundGate(conversationId, callSid), {
+      Digits: '1',
+      CallSid: 'CAnav-leg',
+    });
+
+    expect(res.text).toContain(`<Number>${TARGET}</Number>`);
+    await Promise.all(works);
+    // The hand-off saw a finished response, and so did the one touch: an
+    // implementation that started the stamp BEFORE sendTwiml fails here.
+    expect(probe.handOffSawFinished).toEqual([true]);
+    expect(probe.touchSawFinished).toEqual([true]);
+    expect(world.reachedOutTouches.map((t) => t.contactId)).toEqual(['c-target']);
+  });
+
+  it('the response does not wait for the stamp: a parked stamp still lets the <Dial> answer (WI3)', async () => {
+    const { world, harness, conversationId, callSid } = await originate();
+    let release!: () => void;
+    const parked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const realTouch = world.contactsRepo.touchLastReachedOut;
+    world.contactsRepo.touchLastReachedOut = async (contactId, at) => {
+      await parked;
+      return realTouch(contactId, at);
+    };
+    const works: Promise<void>[] = [];
+
+    const res = await signedTwilioPost(gateApp(harness, works), outboundGate(conversationId, callSid), {
+      Digits: '1',
+      CallSid: 'CAnav-leg',
+    });
+
+    expect(res.text).toContain('<Dial');
+    expect(world.reachedOutTouches).toEqual([]);
+    release();
+    await Promise.all(works);
+    expect(world.reachedOutTouches.map((t) => t.contactId)).toEqual(['c-target']);
+  });
+
+  it('no refusal stamps: an unresolvable target, a voice opt-out at press-1, and a timeout', async () => {
+    for (const refusal of ['unresolved', 'opted_out', 'timeout'] as const) {
+      const { world, harness, conversationId, callSid } = await originate();
+      if (refusal === 'opted_out') world.contacts.find((c) => c.contactId === 'c-target')!.voice_opt_out = true;
+      const works: Promise<void>[] = [];
+
+      const res = await signedTwilioPost(
+        gateApp(harness, works),
+        outboundGate(refusal === 'unresolved' ? 'conv-does-not-exist' : conversationId, callSid),
+        refusal === 'timeout' ? { CallSid: 'CAnav-leg' } : { Digits: '1', CallSid: 'CAnav-leg' },
+      );
+
+      expect(res.text, refusal).toContain('<Hangup');
+      expect(res.text, refusal).not.toContain('<Dial');
+      await Promise.all(works);
+      expect(world.reachedOutTouches, refusal).toEqual([]);
+      expect(contactUpdates(world), refusal).toEqual([]);
+    }
+  });
+
+  it('an INBOUND-leg press-1 (no outbound=1) stamps nothing', async () => {
+    const { world, harness, conversationId, callSid } = await originate();
+    const works: Promise<void>[] = [];
+
+    const res = await signedTwilioPost(
+      gateApp(harness, works),
+      `/webhooks/twilio/voice/whisper-gate?conversationId=${encodeURIComponent(conversationId)}&parentCallSid=${encodeURIComponent(callSid)}`,
+      { Digits: '1', CallSid: 'CAcallee-leg' },
+    );
+
+    expect(res.text).toContain('<Pause');
+    expect(works).toEqual([]);
+    expect(world.reachedOutTouches).toEqual([]);
+  });
+
+  it('a dial to a number no contact holds runs the work and stamps nobody', async () => {
+    const { world, harness, conversationId, callSid } = await originate();
+    world.contacts.find((c) => c.contactId === 'c-target')!.phone = '+15550199999';
+    const works: Promise<void>[] = [];
+
+    const res = await signedTwilioPost(gateApp(harness, works), outboundGate(conversationId, callSid), {
+      Digits: '1',
+      CallSid: 'CAnav-leg',
+    });
+
+    expect(res.text).toContain('<Dial');
+    await Promise.all(works);
+    expect(world.reachedOutTouches).toEqual([]);
+    expect(contactUpdates(world)).toEqual([]);
+  });
+
+  it('a stamp that throws never breaks the dial, and the handed-off work never rejects', async () => {
+    const { world, harness, conversationId, callSid } = await originate();
+    world.contactsRepo.touchLastReachedOut = async () => {
+      throw new Error('dynamo down');
+    };
+    const works: Promise<void>[] = [];
+
+    const res = await signedTwilioPost(gateApp(harness, works), outboundGate(conversationId, callSid), {
+      Digits: '1',
+      CallSid: 'CAnav-leg',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Dial');
+    await expect(Promise.all(works)).resolves.toBeDefined();
+    expect(contactUpdates(world)).toEqual([]);
+  });
+
+  it('the production default seam (no injected afterResponse): press-1 still dials and the stamp lands', async () => {
+    const { world, harness, conversationId, callSid } = await originate();
+
+    const res = await signedTwilioPost(harness.app, outboundGate(conversationId, callSid), {
+      Digits: '1',
+      CallSid: 'CAnav-leg',
+    });
+
+    expect(res.text).toContain('<Dial');
+    // The harness fake settles within microtasks; a status callback round
+    // trip is more than enough for the dropped promise to finish.
+    await signedTwilioPost(harness.app, '/webhooks/twilio/voice/status', {
+      CallSid: callSid,
+      DialCallStatus: 'completed',
+      DialCallDuration: '12',
+      ApiVersion: '2010-04-01',
+    });
+    expect(world.reachedOutTouches.map((t) => t.contactId)).toEqual(['c-target']);
   });
 });

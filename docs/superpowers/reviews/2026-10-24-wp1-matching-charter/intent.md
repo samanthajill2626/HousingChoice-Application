@@ -334,3 +334,29 @@ quality Sam trusts, then her review of it, then the two views.
   model-comparison option first). Deterministic fake driver for e2e,
   modeled on the extraction fake. Every run records cost from a price
   table in configuration.
+
+## Decisions, round 13 (Cameron, 2026-10-24)
+
+- D-cards-denylist: the tenant and property cards are EVERYTHING on the
+  record except an explicit exclusion list - "include everything we can as
+  information and let the LLM sort it out." Excluded: priority (decided),
+  raw/direct messages, other people's data on a record (e.g. the other
+  tenants a property was sent to - "unaffiliated people"; pair history is
+  scoped to THIS pair), and internal plumbing (ids, media, status_source,
+  import bookkeeping).
+- HOLE named by Cameron: facts learned in LANDLORD conversations
+  (accessibility, washer/dryer hookups) have no path onto the property
+  card. Verified: extraction writes only contact-level targets (8 tenant
+  profile fields + address/status/type/phone); nothing writes a unit; the
+  landlord requirement keys reach a property only by staff "Apply to
+  properties" (copy-only rule, GLOSSARY). Proposal in the message of
+  2026-10-24: (b) WP1 property card also carries the landlord-of-record's
+  facts; (a) landlord-conversation extraction targeting the property is
+  a scope addition for Cameron to place (B1, or priced separately).
+- D-extraction-open: extraction gets AUTONOMY to pull "anything that might
+  matter to the matcher" - an open list of matching facts (label, value,
+  confidence, source) - IN ADDITION to the fixed fields the system needs
+  structurally (max tenant portion as a number for the completeness pass
+  and the edit form). Cameron: "The former is really what we need to do
+  because we can't think of all of the pieces of information that might be
+  relevant."

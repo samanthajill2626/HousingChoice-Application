@@ -3748,3 +3748,335 @@ describe('relay.fanOut token-bucket acquire (retry-send-window D4)', () => {
     expect(source.delivery_recipients?.['c-bob']).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// today-checklist (spec 2026-10-23-today-checklist-design.md 7.3): the relay
+// writers of last_reached_out_at. W4 - a TEAM post stamps every contact
+// member whose leg the provider accepted, at that leg's own provider instant,
+// and the pass ends with ONE conversation.updated built from a FRESH
+// consistent read of the thread. W7 - a relay intro whose body staff edited
+// stamps the same way; no other announcement does. Its own registration, so
+// the job's bus is the harness bus (world.emitted).
+// ---------------------------------------------------------------------------
+describe('relay staff outreach - last_reached_out_at (today-checklist W4, W7)', () => {
+  const DAVE = '+15550100004';
+  let world: FakeWorld;
+  let outbound: InProcessOutboundQueueAdapter;
+  let capture: LogCapture;
+
+  beforeEach(() => {
+    _resetForTests();
+    capture = createLogCapture();
+    const logger = createLogger({ level: 'info', destination: capture.stream });
+    configureJobsLogger(logger);
+    configureScheduler(new InMemorySchedulerAdapter());
+    world = createFakeWorld();
+    registerRelayFanOutJobHandler({
+      sendAttemptsRepo: world.sendAttemptsRepo,
+      adapter: world.adapter,
+      conversationsRepo: world.conversationsRepo,
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      events: world.events,
+      logger,
+    });
+    outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob, logger });
+    configureOutboundQueue(outbound);
+  });
+
+  afterEach(() => {
+    _resetForTests();
+    vi.restoreAllMocks();
+  });
+
+  const DEFAULT_ROSTER = [
+    { contactId: 'c-alice', phone: ALICE },
+    { contactId: 'c-bob', phone: BOB },
+    { contactId: 'c-carol', phone: CAROL },
+  ];
+  /** Contact rows for roster members, so a stamp is 'written' (the harness answers 'skipped' for an unknown contact). */
+  function seedMemberContacts(members: { contactId: string; phone: string }[]): void {
+    for (const m of members) {
+      if (m.contactId.length > 0) world.contacts.push({ contactId: m.contactId, type: 'tenant', phone: m.phone });
+    }
+  }
+  /** The provider instant the harness adapter returned for the leg sent to `phone`. */
+  const legAt = (phone: string): string => world.sentDetails.find((d) => d.params.to === phone)!.providerTs;
+  const stampRows = () => world.reachedOutTouches.map((t) => [t.contactId, t.at, t.outcome]).sort();
+  const conversationUpdates = () => world.emitted.filter((e) => e.event === 'conversation.updated');
+  const contactUpdates = () => world.emitted.filter((e) => e.event === 'contact.updated');
+  async function runTeamPost(source: MessageItem, extra: Record<string, unknown> = {}): Promise<void> {
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: TEAM_SENDER_KEY,
+      senderNameOverride: TEAM_SENDER_LABEL,
+      ...extra,
+    });
+    await outbound.settle();
+  }
+
+  it('W4 a team post stamps every member with a contactId at that leg\'s provider instant, then ONE conversation.updated', async () => {
+    seedRelay(world);
+    seedMemberContacts(DEFAULT_ROSTER);
+    const source = seedTeamSource(world, 'Open house Saturday', ['c-alice', 'c-bob', 'c-carol']);
+
+    await runTeamPost(source);
+
+    expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, BOB, CAROL].sort());
+    expect(stampRows()).toEqual(
+      [
+        ['c-alice', legAt(ALICE), 'written'],
+        ['c-bob', legAt(BOB), 'written'],
+        ['c-carol', legAt(CAROL), 'written'],
+      ].sort(),
+    );
+    expect(world.contacts.find((c) => c.contactId === 'c-bob')?.last_reached_out_at).toBe(legAt(BOB));
+    // WI4: ONE event for the whole pass - never one per leg - and no per-contact event.
+    expect(conversationUpdates()).toHaveLength(1);
+    expect(conversationUpdates()[0]!.payload).toMatchObject({ conversationId: 'conv-relay-1', type: 'relay_group' });
+    expect(contactUpdates()).toHaveLength(0);
+    // A stamp is not thread activity: no touchLastActivity.
+    expect(world.touches).toHaveLength(0);
+  });
+
+  it('W4 the after-loop event is built from a FRESH consistent read: a reply that lands mid-fan-out keeps its unread count', async () => {
+    seedRelay(world);
+    seedMemberContacts(DEFAULT_ROSTER);
+    const source = seedTeamSource(world, 'Open house Saturday', ['c-alice', 'c-bob', 'c-carol']);
+    const realSend = world.adapter.sendPreparedMessage.bind(world.adapter);
+    let replied = false;
+    vi.spyOn(world.adapter, 'sendPreparedMessage').mockImplementation(async (prepared) => {
+      if (!replied) {
+        replied = true;
+        // A member replies while the legs go out. The inbound path writes the
+        // TABLE, never the job's start-of-run snapshot object - modelled by
+        // replacing the stored item rather than mutating the one the job holds.
+        const current = world.conversations.get('conv-relay-1')!;
+        world.conversations.set('conv-relay-1', { ...current, unread_count: 1 });
+      }
+      return realSend(prepared);
+    });
+    const stampsAtRead: number[] = [];
+    const realRead = world.conversationsRepo.getByIdConsistent.bind(world.conversationsRepo);
+    const freshRead = vi.spyOn(world.conversationsRepo, 'getByIdConsistent').mockImplementation(async (id) => {
+      stampsAtRead.push(world.reachedOutTouches.length);
+      return realRead(id);
+    });
+
+    await runTeamPost(source);
+
+    expect(freshRead).toHaveBeenCalledTimes(1);
+    expect(freshRead).toHaveBeenCalledWith('conv-relay-1');
+    // Read AFTER every stamp of the pass.
+    expect(stampsAtRead).toEqual([3]);
+    expect(conversationUpdates()).toHaveLength(1);
+    // The job's snapshot carried no unread count; the event carries the table's.
+    expect(conversationUpdates()[0]!.payload).toMatchObject({ conversationId: 'conv-relay-1', unread_count: 1 });
+  });
+
+  it('W4 a suppressed member (no leg) and a phone-only member (no contact item) are never stamped', async () => {
+    seedRelay(world, {
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+        { contactId: '', phone: DAVE },
+      ],
+    });
+    world.contacts.push({ contactId: 'c-alice', type: 'tenant', phone: ALICE });
+    world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: BOB, sms_opt_out: true });
+    const source = seedTeamSource(world, 'Open house Saturday', ['c-alice', 'c-bob', `phone#${DAVE}`]);
+
+    await runTeamPost(source);
+
+    expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, DAVE].sort());
+    expect(world.reachedOutTouches.map((t) => t.contactId)).toEqual(['c-alice']);
+    expect(conversationUpdates()).toHaveLength(1);
+  });
+
+  it('W4 (PIN) a MEMBER inbound relay never stamps and emits nothing', async () => {
+    seedRelay(world);
+    seedMemberContacts(DEFAULT_ROSTER);
+    const source = seedSource(world, 'is the unit still available?', 'c-alice');
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+
+    expect(world.sent.map((s) => s.to).sort()).toEqual([BOB, CAROL].sort());
+    expect(world.reachedOutTouches).toEqual([]);
+    expect(conversationUpdates()).toHaveLength(0);
+  });
+
+  it('W4 sent_unrecorded and a stranded leg whose send is KNOWN both stamp; an UNKNOWN outcome does not', async () => {
+    seedRelay(world);
+    seedMemberContacts(DEFAULT_ROSTER);
+    const source = seedTeamSource(world, 'Open house Saturday', ['c-alice', 'c-bob', 'c-carol']);
+    const realSend = world.adapter.sendPreparedMessage.bind(world.adapter);
+    vi.spyOn(world.adapter, 'sendPreparedMessage').mockImplementation(async (prepared) => {
+      // carol: the request may have reached the provider - an UNKNOWN outcome.
+      if (prepared.params.to === CAROL) throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+      return realSend(prepared);
+    });
+    const toOf = (sid: string) => world.sentDetails.find((d) => d.sid === sid)?.params.to;
+    // alice: accepted, then the pointer write throws -> sent_unrecorded (handed off with the SID).
+    // bob: the same, AND the hand-off of his SID throws -> stranded, afterSend.
+    const realPointer = world.messagesRepo.claimRelaySidPointer.bind(world.messagesRepo);
+    vi.spyOn(world.messagesRepo, 'claimRelaySidPointer').mockImplementation(async (sid, ref) => {
+      const to = toOf(sid);
+      if (to === ALICE || to === BOB) throw new Error('dynamo blip');
+      return realPointer(sid, ref);
+    });
+    const realHand = world.sendAttemptsRepo.handToReconcile.bind(world.sendAttemptsRepo);
+    vi.spyOn(world.sendAttemptsRepo, 'handToReconcile').mockImplementation(async (owner, ref, sid) => {
+      if (sid !== undefined && toOf(sid) === BOB) throw new Error('dynamo down');
+      return realHand(owner, ref, sid);
+    });
+
+    await runTeamPost(source);
+
+    expect(world.reachedOutTouches.map((t) => [t.contactId, t.at]).sort()).toEqual(
+      [
+        ['c-alice', legAt(ALICE)],
+        ['c-bob', legAt(BOB)],
+      ].sort(),
+    );
+    expect(conversationUpdates()).toHaveLength(1);
+  });
+
+  it('W4 a post queued while the group connected stamps when its legs go out (the relayQueuedMessages flush), not when it was composed', async () => {
+    seedRelay(world);
+    seedMemberContacts(DEFAULT_ROSTER);
+    const source = seedTeamSource(world, 'Composed while connecting', ['c-alice', 'c-bob', 'c-carol']);
+    const composedAt = new Date(Date.now() - 60 * 60_000).toISOString();
+    source.provider_ts = composedAt;
+    source.created_at = composedAt;
+    source.delivery_status = 'queued_pending';
+
+    await flushQueuedMessages('conv-relay-1', {
+      messagesRepo: world.messagesRepo,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+    });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(3);
+    for (const [contactId, phone] of [
+      ['c-alice', ALICE],
+      ['c-bob', BOB],
+      ['c-carol', CAROL],
+    ] as const) {
+      const touch = world.reachedOutTouches.find((t) => t.contactId === contactId);
+      expect(touch?.at, contactId).toBe(legAt(phone));
+      expect(touch?.at, contactId).not.toBe(composedAt);
+    }
+    expect(conversationUpdates()).toHaveLength(1);
+  });
+
+  it('WI6 a team leg the reconcile re-drives (the enqueueRedrive envelope) stamps that member: the staff post reaching them for the first time', async () => {
+    seedRelay(world);
+    seedMemberContacts(DEFAULT_ROSTER);
+    const source = seedTeamSource(world, 'Open house Saturday', ['c-alice', 'c-bob', 'c-carol']);
+    source.fanout_attempt = 3;
+    const owner: SendAttemptOwner = {
+      kind: 'relay_leg',
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      memberKey: 'c-bob',
+    };
+    // The record the reconcile ruled never_sent and re-drove (redriven, redriveCount 1).
+    const at = new Date().toISOString();
+    await world.sendAttemptsRepo.claim(
+      owner,
+      { recipientDigest: 'd'.repeat(32), sender: POOL, bodyHash: 'h'.repeat(64), bodyShort: false, mediaCount: 0 },
+      at,
+    );
+    await world.sendAttemptsRepo.handToReconcile(owner, { attemptNo: 1, attemptedAt: at });
+    await world.sendAttemptsRepo.markRedriven(owner, at);
+
+    // Exactly the payload sendReconcile's enqueueRedrive builds for a team leg
+    // (pinned by sendReconcile.test.ts "15 relay never_sent").
+    await runTeamPost(source, { recipientKeys: ['c-bob'], attempt: 4, redrive: true });
+
+    expect(world.sent.map((s) => s.to)).toEqual([BOB]);
+    expect(await world.sendAttemptsRepo.get(owner)).toMatchObject({ state: 'done', outcome: 'sent', attemptNo: 2, redriveCount: 1 });
+    expect(world.reachedOutTouches.map((t) => [t.contactId, t.at])).toEqual([['c-bob', legAt(BOB)]]);
+    expect(conversationUpdates()).toHaveLength(1);
+  });
+
+  it('WI5 a 30-member team post goes out in ONE pass with ONE event; a transient continuation is its own pass with its own event', async () => {
+    const roster = Array.from({ length: 30 }, (_, i) => {
+      const n = String(i + 1).padStart(2, '0');
+      return { contactId: `c-m${n}`, phone: `+155501020${n}`, name: `Member ${n}` };
+    });
+    seedRelay(world, { participants: roster });
+    seedMemberContacts(roster);
+    const source = seedTeamSource(world, 'Open house Saturday', roster.map((m) => m.contactId));
+    // The first leg is rate-limited once (429 = transient): carried to a continuation.
+    vi.spyOn(world.adapter, 'sendPreparedMessage').mockRejectedValueOnce(
+      Object.assign(new Error('rate limited'), { code: 429 }),
+    );
+
+    await runTeamPost(source);
+
+    expect(world.sent).toHaveLength(29);
+    expect(world.reachedOutTouches).toHaveLength(29);
+    expect(conversationUpdates()).toHaveLength(1);
+    const continuations = outbound.delayed.filter((d) => d.envelope.jobName === RELAY_FANOUT_JOB);
+    expect(continuations).toHaveLength(1);
+    expect(continuations[0]!.envelope.payload).toMatchObject({ recipientKeys: ['c-m01'], attempt: 2 });
+
+    const [item] = outbound.delayed.splice(outbound.delayed.indexOf(continuations[0]!), 1);
+    await dispatchJob(JSON.parse(JSON.stringify(item!.envelope)));
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(30);
+    expect(new Set(world.reachedOutTouches.map((t) => t.contactId)).size).toBe(30);
+    expect(world.reachedOutTouches.find((t) => t.contactId === 'c-m01')?.at).toBe(legAt('+15550102001'));
+    expect(conversationUpdates()).toHaveLength(2);
+    expect(outbound.delayed.filter((d) => d.envelope.jobName === RELAY_FANOUT_JOB)).toHaveLength(0);
+  });
+
+  it.each(['returns nothing', 'throws'] as const)(
+    'W4 a fresh read that %s skips the event with ONE WARN; the stamps stand',
+    async (mode) => {
+      seedRelay(world);
+      seedMemberContacts(DEFAULT_ROSTER);
+      const source = seedTeamSource(world, 'Open house Saturday', ['c-alice', 'c-bob', 'c-carol']);
+      const read = vi.spyOn(world.conversationsRepo, 'getByIdConsistent');
+      if (mode === 'throws') read.mockRejectedValueOnce(new Error('dynamo blip'));
+      else read.mockResolvedValueOnce(undefined);
+
+      await runTeamPost(source);
+
+      expect(world.sent).toHaveLength(3);
+      expect(world.reachedOutTouches.filter((t) => t.outcome === 'written')).toHaveLength(3);
+      expect(conversationUpdates()).toHaveLength(0);
+      const warns = capture.atLevel(40).filter((l) => String(l['msg']).includes('relay staff outreach'));
+      expect(warns).toHaveLength(1);
+      expect(warns[0]).toMatchObject({ conversationId: 'conv-relay-1', written: 3 });
+      expect(capture.atLevel(50)).toHaveLength(0);
+    },
+  );
+
+  // WL-5 (build worklist, D3-1): the "no stamp written, no event" branch. Every
+  // stamp the pass collects comes back 'skipped' (no contact items), so the
+  // pass emits NO after-loop event and makes no fresh read (spec 7.3: only
+  // when any member's stamp was written).
+  it('W4 a team post whose every stamp is skipped (no contact items) emits NO conversation.updated and makes no fresh read', async () => {
+    seedRelay(world);
+    const source = seedTeamSource(world, 'Open house Saturday', ['c-alice', 'c-bob', 'c-carol']);
+    const freshRead = vi.spyOn(world.conversationsRepo, 'getByIdConsistent');
+
+    await runTeamPost(source);
+
+    expect(world.sent).toHaveLength(3);
+    expect(world.reachedOutTouches.map((t) => t.outcome)).toEqual(['skipped', 'skipped', 'skipped']);
+    expect(conversationUpdates()).toHaveLength(0);
+    expect(freshRead).not.toHaveBeenCalled();
+  });
+
+  // W7 cases (Task S3.3) are inserted above this line.
+});

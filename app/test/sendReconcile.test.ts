@@ -2203,6 +2203,28 @@ describe('send.reconcile (spec D11-D16)', () => {
       expect(capture.atLevel(40).some((l) => String(l['msg']).includes('adopted terminal failure'))).toBe(false);
     });
 
+    // today-checklist (PR21): the reconcile's relay-leg ADOPTION records a leg
+    // that already went out. It never stamps last_reached_out_at, even for a
+    // team post (a rare recovery path, accepted best-effort - spec 7.3 W4).
+    it('a relay-leg adoption of a TEAM post never stamps last_reached_out_at (PIN)', async () => {
+      register();
+      seedRelay();
+      world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: BOB });
+      const source = seedSource({ direction: 'outbound' });
+      source.relay_sender_key = 'team';
+      source.author = 'teammate';
+      const owner = legOwner(source);
+      const at = await reconciling(owner, legFacts());
+      plantLeg('SMleg-team-1', { providerStatus: 'delivered', createdAt: new Date().toISOString() });
+
+      await runCheck(legPayload(owner, at, 0, { senderKey: 'team', senderNameOverride: 'HousingChoice' }));
+
+      expect(slotAt(source)).toMatchObject({ status: 'delivered', sid: 'SMleg-team-1' });
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMleg-team-1' });
+      expect(world.reachedOutTouches).toEqual([]);
+      expect(world.emitted.filter((e) => e.event === 'contact.updated')).toHaveLength(0);
+    });
+
     it('A1 every relay-leg close the job makes tells the thread, in the source row\'s direction; a close that moved nothing tells nobody', async () => {
       register();
       seedRelay();

@@ -63,6 +63,7 @@ import {
 } from '../adapters/messaging.js';
 import { createMediaStore, type MediaStore } from '../adapters/mediaStore.js';
 import { getContext } from '../lib/context.js';
+import { appEvents, type EventBus } from '../lib/events.js';
 import { guardWrite } from '../lib/guardWrite.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { bodyFingerprint, recipientDigest, safeRecipientKey } from '../lib/sendFingerprint.js';
@@ -120,7 +121,9 @@ import {
   isMemberSuppressed,
   logSafeMemberKey,
   sendRelayAnnouncement,
+  stampRelayOutreach,
 } from '../services/relayAnnouncements.js';
+import type { StaffOutreachStamp } from '../services/staffOutreach.js';
 import { resolveMessage } from '../messages/index.js';
 import { defineJobHandler, enqueue } from './jobs.js';
 import { enqueueSendReconcile, reconcileDelayMs, toOwnerRef } from './sendReconcile.js';
@@ -887,6 +890,15 @@ export interface RelayFanOutJobDeps {
    * been written as a "far-future" constant.
    */
   nowIso?: string;
+  /**
+   * The live-update bus (today-checklist spec 7.3, W4 and W7): the ONE
+   * conversation.updated a team post's pass - and a staff-edited intro -
+   * emits after its staff-outreach stamps. Defaulted to the appEvents
+   * singleton on the first job run, the jobs/relayRetryLeg.ts pattern; in the
+   * worker process attachEventBridge (worker.ts) forwards every emit on that
+   * singleton to the app's SSE clients. A test injects its fake world's bus.
+   */
+  events?: EventBus;
   logger?: Logger;
 }
 
@@ -907,6 +919,7 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
   let mediaStore = deps.mediaStore;
   let mediaStoreInit = deps.mediaStore !== undefined;
   let sendAttempts = deps.sendAttemptsRepo;
+  let events = deps.events;
 
   /**
    * The owner-routed copy inputs for both announcement handlers (spec 9.3).
@@ -958,6 +971,7 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
     messages ??= createMessagesRepo({ logger: deps.logger });
     contacts ??= createContactsRepo({ logger: deps.logger });
     sendAttempts ??= createSendAttemptsRepo({ logger: deps.logger });
+    events ??= appEvents;
     if (!mediaStoreInit) {
       mediaStore = createMediaStore();
       mediaStoreInit = true;
@@ -1045,6 +1059,7 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
       tokenBucket: deps.tokenBucket,
       sendAttempts: attempts,
       consistent,
+      events,
       log,
     };
     if (sourceMessage.transport_schema_version !== TRANSPORT_SCHEMA_VERSION) {
@@ -1229,6 +1244,8 @@ interface RelayFanOutExecutionDeps {
   sendAttempts: SendAttemptsRepo;
   /** A continuation or a re-drive: every source re-read is strongly consistent (SOR D11). */
   consistent: boolean;
+  /** The live-update bus for the after-loop staff-outreach event (today-checklist W4); appEvents when absent. */
+  events?: EventBus;
   log: Logger;
 }
 
@@ -1517,6 +1534,17 @@ async function runRelayFanOutExecution(
   let unknownStreak = 0;
   let braked = false;
   let untried = 0;
+  // today-checklist W4 (spec 2026-10-23-today-checklist-design.md 7.3): a TEAM
+  // post is staff following up with every member it reaches, so each member
+  // with a contactId whose leg the provider ACCEPTED (sent, sent_unrecorded, or
+  // stranded after a known send) is stamped at that leg's own provider
+  // instant - a post queued while the group connected stamps when its legs
+  // actually go out. Collected HERE, in the loop, never inside
+  // sendOneRelayLeg: the 30003 retry rung also calls that unit, and a machine
+  // resend never stamps. A member's inbound relay never stamps. A suppressed
+  // member gets no leg and no stamp.
+  const teamPost = payload.senderKey === TEAM_SENDER_KEY;
+  const outreach: StaffOutreachStamp[] = [];
   for (const member of recipients) {
     const memberKey = relayMemberKey(member);
     // Already terminal - never re-sent. Checked BEFORE the brake, so a
@@ -1551,6 +1579,17 @@ async function runRelayFanOutExecution(
         owner,
       });
       unknown = isUnknownOutcome(outcome);
+      if (
+        teamPost &&
+        typeof member.contactId === 'string' &&
+        member.contactId.length > 0 &&
+        outcome.sentAt !== undefined &&
+        (outcome.kind === 'sent' ||
+          outcome.kind === 'sent_unrecorded' ||
+          (outcome.kind === 'stranded' && outcome.afterSend === true))
+      ) {
+        outreach.push({ contactId: member.contactId, at: outcome.sentAt });
+      }
       switch (outcome.kind) {
         case 'sent':
           sentCount += 1;
@@ -1641,6 +1680,19 @@ async function runRelayFanOutExecution(
     },
     'relay fan-out complete',
   );
+
+  // today-checklist W4 (spec 7.3): this pass's staff-outreach stamps, then ONE
+  // conversation.updated built from a fresh consistent read
+  // (stampRelayOutreach). AFTER the loop and BEFORE any continuation is
+  // scheduled, so every pass - the first, a transient continuation, a
+  // re-drive - announces its own legs exactly once (WI5). Never throws.
+  if (outreach.length > 0) {
+    await stampRelayOutreach(
+      { contacts, conversations, events: deps.events ?? appEvents, log },
+      payload.relayConversationId,
+      outreach,
+    );
+  }
 
   if (transientRemaining.length === 0) return;
   if (claim === undefined) {
@@ -1787,6 +1839,13 @@ export interface RelayLegSendOutcome {
   deferredByClaim?: true;
   /** On `stranded`: the send is known to have happened. */
   afterSend?: true;
+  /**
+   * On `sent`, `sent_unrecorded`, and `stranded` with `afterSend`: the
+   * provider-accepted instant (`result.providerTs`). The fan-out loop stamps a
+   * team post's member with it (today-checklist W4); this unit only reports
+   * it. Absent on every other arm.
+   */
+  sentAt?: string;
 }
 
 /**
@@ -2237,7 +2296,7 @@ export async function sendOneRelayLeg(args: {
         'relayFanOut: attempt fence lost after the slot write; the takeover reconcile repairs',
       );
     }
-    return { kind: 'sent', providerSid: result.providerSid };
+    return { kind: 'sent', providerSid: result.providerSid, sentAt: result.providerTs };
   } catch (err) {
     if (phase === 'prepare') {
       if (ref === undefined) {
@@ -2299,9 +2358,9 @@ export async function sendOneRelayLeg(args: {
         'relayFanOut: sent_unrecorded - member sent but not recorded; its SID goes to reconcile',
       );
       const handed = await handToReconcile(held, providerSid);
-      if (handed === 'handed') return { kind: 'sent_unrecorded', providerSid, attemptRef: held.ref };
+      if (handed === 'handed') return { kind: 'sent_unrecorded', providerSid, attemptRef: held.ref, sentAt: result!.providerTs };
       if (handed === 'fence_lost') return { kind: 'skipped_terminal' };
-      return { kind: 'stranded', afterSend: true };
+      return { kind: 'stranded', afterSend: true, sentAt: result!.providerTs };
     }
 
     // phase === 'sending': the provider call threw. Every TERMINAL arm below

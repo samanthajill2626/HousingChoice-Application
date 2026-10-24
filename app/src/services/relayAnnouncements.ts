@@ -38,6 +38,7 @@ import {
   type TransportMutationOutcome,
 } from '../repos/messagesRepo.js';
 import { SendRefusedError } from './sendMessage.js';
+import { recordStaffOutreach, type StaffOutreachStamp } from './staffOutreach.js';
 
 /**
  * relay_sender_key sentinel for a SYSTEM announcement: matches no member and
@@ -158,6 +159,59 @@ export function logSafeMemberKey(member: { contactId?: string }): string {
   return member.contactId !== undefined && member.contactId.length > 0
     ? member.contactId
     : 'phone-only-member';
+}
+
+/**
+ * today-checklist (spec 2026-10-23-today-checklist-design.md 7.3, writers W4
+ * and W7): stamp last_reached_out_at for the contacts a relay group post
+ * reached, then tell the thread ONCE. Called AFTER a member loop, never per
+ * member: by the relay fan-out (a team post, jobs/relayFanOut.ts) and by
+ * sendRelayAnnouncement below (a staff-edited intro).
+ *
+ * The event is built from a FRESH strongly consistent read of the thread,
+ * never from the caller's start-of-run snapshot: ThreadUnreadToggle.tsx and
+ * ContactDetail.tsx set unread_count straight from the event, so a stale
+ * payload would mark a reply that landed mid-fan-out as read. No
+ * touchLastActivity: a stamp is not thread activity. No event when nothing
+ * was written. A read that returns nothing or throws skips the event with
+ * ONE WARN; the stamps stand and Today sees them on its next refetch.
+ *
+ * Never throws (recordStaffOutreach never does, the read is caught, and the
+ * bus isolates its listeners), so a caller's continuation or reply is never
+ * held back. Returns the contactIds written. PII: ids and counts only.
+ */
+export async function stampRelayOutreach(
+  deps: {
+    contacts: Pick<ContactsRepo, 'touchLastReachedOut'>;
+    conversations: Pick<ConversationsRepo, 'getByIdConsistent'>;
+    events: EventBus;
+    log: Logger;
+  },
+  conversationId: string,
+  stamps: readonly StaffOutreachStamp[],
+): Promise<string[]> {
+  if (stamps.length === 0) return [];
+  const written = await recordStaffOutreach({ contacts: deps.contacts, log: deps.log }, stamps);
+  if (written.length === 0) return written;
+  let fresh: Awaited<ReturnType<ConversationsRepo['getByIdConsistent']>>;
+  try {
+    fresh = await deps.conversations.getByIdConsistent(conversationId);
+  } catch (err) {
+    deps.log.warn(
+      { err, conversationId, written: written.length },
+      'relay staff outreach: the fresh thread read failed - no conversation.updated (the stamps stand)',
+    );
+    return written;
+  }
+  if (fresh === undefined) {
+    deps.log.warn(
+      { conversationId, written: written.length },
+      'relay staff outreach: the thread is missing on the fresh read - no conversation.updated (the stamps stand)',
+    );
+    return written;
+  }
+  deps.events.emit('conversation.updated', toConversationUpdatedEvent(fresh));
+  return written;
 }
 
 /**

@@ -728,6 +728,30 @@ describe('relay.retryLeg (30003 ladder)', () => {
     expect(world.sent.map((s) => s.to)).toEqual([BOB]);
   });
 
+  // today-checklist (spec 2026-10-23-today-checklist-design.md 7.2/7.3, PR17,
+  // PR21, WI6): the 30003 rung is a MACHINE resend of a leg that already
+  // counted, so it never stamps last_reached_out_at - not even for a staff
+  // (team) post. It calls sendOneRelayLeg directly; the fan-out loop's stamp
+  // collection never runs here.
+  it('a rung that resends a TEAM post leg never stamps last_reached_out_at (PIN)', async () => {
+    seedRelay(world);
+    world.contacts.push({ contactId: BOB_KEY, type: 'tenant', phone: BOB });
+    const row = seedRetryRow(world, { legBody: 'HousingChoice: Open house Saturday' });
+    Object.assign(row, {
+      direction: 'outbound',
+      author: 'teammate',
+      relay_sender_key: 'team',
+      relay_retry_origin_direction: 'outbound',
+    });
+    register();
+
+    await runHandler(payloadFor(row));
+
+    expect(world.sent.map((s) => s.to)).toEqual([BOB]);
+    expect(world.reachedOutTouches).toEqual([]);
+    expect(world.emitted.filter((e) => e.event === 'contact.updated')).toHaveLength(0);
+  });
+
   // --- D16: the bump orders the inbox WITHOUT writing status ---
 
   it('bumps a group closed mid-backoff without reopening it, and rewrites no preview', async () => {

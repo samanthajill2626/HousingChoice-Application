@@ -275,3 +275,18 @@ quality Sam trusts, then her review of it, then the two views.
   Applies where properties are the candidates (a tenant's find-properties
   view). A cross-property "which priority property has the best tenants"
   view is not WP1.
+
+## Decisions, round 9 (Cameron, 2026-10-24)
+
+- D-rankings-page: KEEP the staff Rankings page ("I like the rankings
+  page").
+- D-entry-points: the ranking opens from a "Send property" action in both
+  places, replacing the blast as the way to send: "instead of a blast, we
+  would basically go to the properties page and click 'Send Property' in
+  order to send it to tenants, and that would bring up this matching. The
+  opposite way: from the tenants page, click 'Send Property', and that
+  would bring up the matching." The thing sent is always a property; the
+  verb is the same on both records. B4 = Send property from a property
+  (ranked tenants); B3 = Send property from a tenant (ranked properties).
+- Pair rows: Cameron did not follow the storage explanation; shown with a
+  worked example in the message of 2026-10-24; pending his read.

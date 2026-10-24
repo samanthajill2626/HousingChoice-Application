@@ -14,7 +14,7 @@
   verbatim, with every ruling PR41-PR93 that changes a step applied into
   the slice text and marked `[PRnn]` at the changed step (PR83); section 12
   (S8) is the planner's.
-  Section 4 (planner rulings PR1-PR106) wins over any slice text it
+  Section 4 (planner rulings PR1-PR107) wins over any slice text it
   contradicts. "Plan section N" always means this file's top-level sections.
 
 ## 0. Ground rules for this plan
@@ -120,7 +120,7 @@
 | S3 | Relay and group writers W4, W5, W7; an event bus in `relayFanOut`; the after-loop fresh-read `conversation.updated`; no-stamp tests (30003 rung, non-intro announcements, reconcile adoption, dev intro replay) | S1 |
 | S4 | Today server: Follow up core split; quiet-shares builder; `today.ts` (Unreplied removal, type-filter-first unread pass, `identify`, `tours_to_book`, tours_today `at`/`unitLabel`, unit labels, quiet shares, failure isolation); router deps and wiring; server tests | S1 |
 | S5 | Dashboard Today: types mirror, `useToday` statuses, section components, 5-row limit, option C, At a glance, help lines, All caught up, fallback (`buildToday`), past-tours order and labeling; dashboard tests | S4 |
-| S6 | Backfill script `app/scripts/backfill-last-reached-out.ts` + tests + RUNBOOK entry | S1 |
+| S6 | Backfill script `app/scripts/backfill-last-reached-out.ts` + tests + RUNBOOK entry | S1, S2 (reads `MessageItem.system_copy` from S2.1a - PR105, R3-2) |
 | S7 | e2e: new Today checklist spec, every existing spec that pins the old page, perf route terminals; a lane rehearsal of the backfill; docs (GLOSSARY, 2026-06-16 spec note, issues, events doc comments) | S1-S6 |
 | S8 | Final: one main sync, the five bare gates, gate report | S1-S7 |
 
@@ -815,6 +815,20 @@ where it differs from these, these win.
   the row the route actually wrote (the new row in `world.messages`), not
   on a row the test set by hand - except where a test seeds a pre-existing
   retried row, which it may still seed directly.
+- PR107 (closes R3-1) The `system_copy` marker is carried by every writer
+  that re-sends an existing row. (a) The automatic 30003 retry
+  (`app/src/jobs/retrySend.ts` ~551-566) passes `systemCopy: true` to the
+  send service when the retried row has `system_copy === true` (beside the
+  existing `automated` pass-through). (b) The reconcile's retry adoption
+  (`app/src/jobs/sendReconcile.ts` `adoptRetry` ~867-943) writes
+  `systemCopy: true` on the adopted row when its source row is system copy,
+  mirroring how it carries `automated`. Neither writer stamps (unchanged).
+  Tests, each RED first: an automatic retry of a system-copy row writes the
+  marker on the new row; the reconcile adoption of one does too; and end to
+  end through the harness - a Send-now row, its automatic 30003 retry row,
+  then a staff Retry of THAT newest row - does not stamp and writes the
+  marker. Section 2's work map: S6 depends on S1 and S2 (R3-2). S2 carries
+  it as Task S2.2a.
 
 ## 5. S1 - The signal: last_reached_out_at, touchLastReachedOut, recordStaffOutreach
 
@@ -3053,8 +3067,10 @@ Spec surfaces:
 
 Scope: plan section 2 row S2; rulings PR8-PR16 and PR37 (binding), with
 PR46-PR53, PR81, PR84, PR87, PR94 and the launch-gate ruling PR104 (the
-`system_copy` marker, new Task S2.1a; the W2 gate in S2.2, replacing PR91's)
-applied into the task text below [PR83]. Spec r8 7.2,
+`system_copy` marker, new Task S2.1a; the W2 gate in S2.2, replacing PR91's),
+PR106 (the harness fake maps the marker) and PR107 (the marker survives the
+automatic retry and the reconcile adoption, new Task S2.2a) applied into
+the task text below [PR83]. Spec r8 7.2,
 7.3 (writers W1, W2, W3, W6, W8 and the no-stamp table), 8 (live updates), 9
 (writer tests). Every line number below is a hint against main @970a29b9;
 the QUOTED text is the anchor. S1 is built first and provides, with exactly
@@ -4713,6 +4729,230 @@ git -C W:/tmp/today-checklist status
 ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
 git -C W:/tmp/today-checklist add app/src/routes/api.ts app/src/jobs/tourReminders.ts app/src/jobs/placementNudges.ts app/test/helpers/twilioWebhookHarness.ts app/test/apiRoutes.test.ts app/test/broadcastFanOut.test.ts app/test/retrySendAttempt.test.ts app/test/missedCallAutoText.test.ts app/test/publicIntake.test.ts app/test/tourRemindersApi.test.ts app/test/placementNudgesApi.test.ts
 git -C W:/tmp/today-checklist commit -m "feat(api): staff send and Retry stamp last_reached_out_at; the send service reads the router's contacts repo (tracker #31 S2.2)" -m "W1 passes staffOutreach on the first MMS batch only; W2 on every Retry except a share text, an automated row or a system-copy row, and a Retry of automated or system copy is marked systemCopy; both Send now paths mark systemCopy (PR104). The contacts repo is built before the send service and passed in (PR9, WI2); the harness comment that described the old default is rewritten (PR84). No-stamp pins for the share fan-out, automatic retry, missed-call and welcome texts, both polls and both Send now routes." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S2.2a - The marker survives machine resends: the automatic 30003 retry and the reconcile's retry adoption [PR107]
+
+PR107 (closes plan review R3-1). PR104 marks a Send-now row and a staff
+Retry of automated or system copy, and W2 judges the PRESSED row's marker.
+But the dashboard offers Retry only on the NEWEST row of a chain, and two
+writers append rows of a chain without the marker: the automatic 30003
+retry (`retrySend.ts` ~551-566, `automated: retried.automated ?? true`) and
+the reconcile's retry adoption (`sendReconcile.ts` `adoptRetry`,
+`const automated = retried.automated ?? true;` ~898). A Send now that hits
+30003 would leave an unmarked automatic retry row on top, and a staff Retry
+of it would stamp. Both writers now carry the marker exactly where they
+carry `automated`. Neither stamps (machine resends; unchanged). Builds on
+S2.1a (the field and both mappings) and S2.2 (the W2 gate).
+
+Files:
+- `app/src/jobs/retrySend.ts` (the send input, ~551-566)
+- `app/src/jobs/sendReconcile.ts` (`adoptRetry`'s append, ~918-943)
+- Tests: `app/test/retrySendAttempt.test.ts`, `app/test/sendReconcile.test.ts`
+
+#### Step 1 - failing tests
+
+1a. `app/test/retrySendAttempt.test.ts` - after S2.2's 1h case (the "never
+stamps" case S2.2 inserted before the `7b` case). Edit:
+
+old:
+```ts
+    expect(world.emitted.filter((e) => e.event === 'contact.updated')).toEqual([]);
+  });
+
+  it('7b a record-phase fence LOST after a recorded send is a WARN, never sent_unrecorded: the row exists, the takeover reconcile repairs', async () => {
+```
+new:
+```ts
+    expect(world.emitted.filter((e) => e.event === 'contact.updated')).toEqual([]);
+  });
+
+  // today-checklist PR107 (spec r8 7.2): the automatic 30003 retry re-sends
+  // the retried row's copy, so it carries the system_copy marker the way it
+  // carries `automated` - and, a machine resend, it never stamps.
+  it('today-checklist PR107: an automatic retry of a system-copy row writes system_copy on the new row; a plain row writes none', async () => {
+    wire();
+    const marked = await seedRetried('SMsyscopy-auto1', { systemCopy: true });
+    const plain = await seedRetried('SMsyscopy-auto2');
+    await run(marked);
+    await run(plain);
+    expect(world.sent).toHaveLength(2);
+    expect(world.messages.find((m) => m.retry_of === marked.tsMsgId)).toMatchObject({
+      system_copy: true,
+      automated: false,
+      retry_attempt: 1,
+    });
+    expect(world.messages.find((m) => m.retry_of === plain.tsMsgId)).not.toHaveProperty('system_copy');
+    expect(world.reachedOutTouches).toEqual([]);
+  });
+
+  it('7b a record-phase fence LOST after a recorded send is a WARN, never sent_unrecorded: the row exists, the takeover reconcile repairs', async () => {
+```
+
+1b. Same file - the end-to-end chain, beside the A-6 route cases (it uses
+their `pressRetry`, the REAL Retry route and send wrapper over the same
+world). Edit (the A-6 section's first case title is the anchor):
+
+old:
+```ts
+  it('FW1 A-6 (pending): the REAL job leaves a reconciling record (an unknown outcome) on a retried row with NO retry_outcome, no live promise and no child - the REAL route over the same world answers 409 retry_pending from that record alone', async () => {
+```
+new:
+```ts
+  // today-checklist PR107 end to end: a Send-now row (system copy) fails with
+  // 30003; the automatic retry re-sends it and carries the marker; staff then
+  // press Retry on THAT newest row - the only row the dashboard offers Retry
+  // on. W2 (S2.2) reads the pressed row's marker: no stamp, and the staff
+  // Retry's own row is marked too.
+  it('today-checklist PR107: Send-now row -> automatic retry -> staff Retry of the newest row never stamps, and the chain stays system copy', async () => {
+    wire();
+    const sendNow = await seedRetried('SMsendnow-chain', { systemCopy: true });
+    await run(sendNow);
+    const autoRow = world.messages.find((m) => m.retry_of === sendNow.tsMsgId)!;
+    expect(autoRow).toMatchObject({ system_copy: true, automated: false, retry_attempt: 1 });
+    // The automatic retry's own send fails too; it holds no promise and no
+    // child, so the Retry button is offered on it.
+    autoRow.delivery_status = 'undelivered';
+
+    const res = await pressRetry(autoRow);
+
+    expect(res.status).toBe(201);
+    const staffRow = world.messages.find((m) => m.retry_of === autoRow.tsMsgId)!;
+    expect(staffRow).toMatchObject({ system_copy: true, automated: false });
+    expect(staffRow).not.toHaveProperty('retry_attempt');
+    expect(world.reachedOutTouches).toEqual([]);
+    expect(world.emitted.filter((e) => e.event === 'contact.updated')).toEqual([]);
+  });
+
+  it('FW1 A-6 (pending): the REAL job leaves a reconciling record (an unknown outcome) on a retried row with NO retry_outcome, no live promise and no child - the REAL route over the same world answers 409 retry_pending from that record alone', async () => {
+```
+
+1c. `app/test/sendReconcile.test.ts`, inside `describe('retry_send owner
+(retry-send-adoption R4)', ...)`. First, case 10's absent-field list gains
+the marker (stricter; a plain adoption writes none). Edit:
+
+old:
+```ts
+      for (const absent of ['broadcast_id', 'error_code', 'media_attachments', 'mediaUrls', 'retry_due_at', 'retry_outcome']) {
+```
+new:
+```ts
+      for (const absent of ['broadcast_id', 'error_code', 'media_attachments', 'mediaUrls', 'retry_due_at', 'retry_outcome', 'system_copy']) {
+```
+Then a new case directly before case 10. Edit:
+
+old:
+```ts
+    it('10 a listed orphan adopts as the retry row sendMessage would have appended - the full R4 field set, its retrychild# pointer, one audit row, the emits, the inbox moved forward - and NO promise write', async () => {
+```
+new:
+```ts
+    // today-checklist PR107: the adoption appends the retry row sendMessage
+    // would have appended, so a retry of a system-copy row is adopted with
+    // the marker (as `automated` is carried) - and adoption never stamps.
+    it('today-checklist PR107: adopting the retry of a system-copy row writes system_copy on the adopted row', async () => {
+      register();
+      await seedOneToOne();
+      const root = await seedRow('SMroot-sc', { providerTs: iso(Date.now() - 20_000), systemCopy: true });
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      plant({ providerSid: 'SMorphan-sc', providerStatus: 'delivered', to: TENANT_PHONE });
+      await runCheck(payloadOf(owner, at));
+      expect(retryRow(root.tsMsgId, 1)).toMatchObject({
+        provider_sid: 'SMorphan-sc',
+        system_copy: true,
+        automated: false,
+        retry_root: root.tsMsgId,
+      });
+      expect(world.reachedOutTouches).toEqual([]);
+    });
+
+    it('10 a listed orphan adopts as the retry row sendMessage would have appended - the full R4 field set, its retrychild# pointer, one audit row, the emits, the inbox moved forward - and NO promise write', async () => {
+```
+
+#### Step 2 - RED
+
+Needs DynamoDB Local up (`npm run db:start` STARTS it; never restart it).
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/retrySendAttempt.test.ts test/sendReconcile.test.ts
+```
+Expected failures, and why: "an automatic retry of a system-copy row ..." -
+the job passes no `systemCopy`, so the new row has no `system_copy`; "Send-now
+row -> automatic retry -> staff Retry ..." - the automatic retry row has no
+`system_copy` (its first expectation), and without it W2 would stamp the
+staff Retry; "adopting the retry of a system-copy row ..." - `adoptRetry`
+writes no marker. Case 10's added `system_copy` absence passes already
+(PIN). Every pre-existing case stays green.
+
+#### Step 3 - implementation
+
+3a. `app/src/jobs/retrySend.ts` - the send input. Edit:
+
+old:
+```ts
+        retryRoot,
+        ...(retried.broadcast_id !== undefined && { broadcastId: retried.broadcast_id }),
+        beforeProviderSend: async () => {
+```
+new:
+```ts
+        retryRoot,
+        ...(retried.broadcast_id !== undefined && { broadcastId: retried.broadcast_id }),
+        // today-checklist PR107 (spec r8 7.2): the copy is the retried row's,
+        // so its system-copy marker rides along like `automated` does - a
+        // later staff Retry of this row is judged by the first send.
+        ...(retried.system_copy === true && { systemCopy: true as const }),
+        beforeProviderSend: async () => {
+```
+
+3b. `app/src/jobs/sendReconcile.ts` - `adoptRetry`'s append (the one
+`retryRoot: o.retryRoot,` followed by the broadcast spread and the closing
+`});` in the file). Edit:
+
+old:
+```ts
+    retryRoot: o.retryRoot,
+    ...(retried.broadcast_id !== undefined && { broadcastId: retried.broadcast_id }),
+  });
+```
+new:
+```ts
+    retryRoot: o.retryRoot,
+    ...(retried.broadcast_id !== undefined && { broadcastId: retried.broadcast_id }),
+    // today-checklist PR107: the adopted row is the retry sendMessage would
+    // have appended, so it carries the retried row's system-copy marker as it
+    // carries `automated`.
+    ...(retried.system_copy === true && { systemCopy: true }),
+  });
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/retrySendAttempt.test.ts test/sendReconcile.test.ts test/sendReconcile.integration.test.ts test/twilioStatusWebhook.test.ts
+```
+Expect all green. Then (bare):
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0.
+
+#### Step 5 - ASCII check on added lines
+
+```
+git -C W:/tmp/today-checklist diff -U0 -- app/src/jobs/retrySend.ts app/src/jobs/sendReconcile.ts app/test/retrySendAttempt.test.ts app/test/sendReconcile.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0`.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add app/src/jobs/retrySend.ts app/src/jobs/sendReconcile.ts app/test/retrySendAttempt.test.ts app/test/sendReconcile.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(retry): the system_copy marker survives the automatic retry and the reconcile adoption (tracker #31 S2.2a)" -m "retrySend passes systemCopy when the retried row is system copy, and adoptRetry writes it on the adopted row, beside the automated pass-through; neither stamps. A Send-now row's automatic retry, then a staff Retry of that newest row, stays system copy and never stamps (PR107, R3-1)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -6827,6 +7067,11 @@ pass `systemCopy: true`; the repo writes `system_copy` only when true
   closed by PR104.
 - PR100's residue (a second staff Retry of a failed automated text stamps):
   closed by PR104 (a Retry of a Retry inherits the marker).
+- [PR107] The marker also survives the machine resends of a chain: the
+  automatic 30003 retry (retrySend.ts:<line>) and the reconcile's retry
+  adoption (sendReconcile.ts:<line>) carry it beside `automated`; the
+  end-to-end case (Send-now row -> automatic retry -> staff Retry of the
+  newest row) stamps nothing (retrySendAttempt.test.ts:<line>).
 - [PR106] The harness messages fake maps `systemCopy` true-only like the
   real repo (twilioWebhookHarness.ts:<line>, pinned by
   twilioWebhookHarnessRetryFields.test.ts); the harness Retry and Send-now
@@ -6899,6 +7144,7 @@ git -C W:/tmp/today-checklist commit -m "docs(records): S2 slice report - direct
 | W2 Retry passes the option except `broadcast_id`, automated and system-copy rows; passes `systemCopy` for automated / system-copy rows | PR11, PR104 (replaces PR91's gate; closes PR100's residue); spec r8 7.3 W2 | S2.2 | apiRoutes.test.ts spy case (share, automated, Send-now row, Retry of a Retry, plain) + harness Retry case |
 | Both Send now paths pass `systemCopy: true`; the polls write no marker | PR104 | S2.2 | the two Send now spy cases (1n); the two poll cases (1l, 1m) |
 | The harness fake maps `system_copy` true-only; harness Retry / Send now cases read it off the written rows | PR106 | S2.1a, S2.2 | twilioWebhookHarnessRetryFields.test.ts "append carries system_copy ..."; 1f, 1k, 1m |
+| The marker survives the automatic 30003 retry and the reconcile's retry adoption; neither stamps; the Send-now -> automatic retry -> staff Retry chain never stamps | PR107 (R3-1) | S2.2a | retrySendAttempt.test.ts "PR107: an automatic retry ...", "PR107: Send-now row -> automatic retry -> ..."; sendReconcile.test.ts "PR107: adopting the retry ..." |
 | Harness suites on the default 1:1 send path named; red-case rule; harness comment rewritten | PR84 | S2.2 | Step 3d/3e; S2 report WI2 |
 | No stamp: share fan-out, automatic retry, missed-call text, welcome text, tour reminder poll and Send now, nudge poll and Send now | spec 7.2, 7.3 no-stamp table, 9 | S2.2 | the (PIN) cases in broadcastFanOut, retrySendAttempt, missedCallAutoText, publicIntake, tourRemindersApi, placementNudgesApi |
 | W3 email: stamp after SES accepts, none on adapter throw, one `contact.updated` | PR12 | S2.3 | sendEmailMessage.test.ts "W3" |

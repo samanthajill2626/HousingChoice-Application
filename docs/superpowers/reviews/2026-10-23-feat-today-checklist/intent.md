@@ -2,23 +2,23 @@
 
 ## STATE (replace on every move)
 
-- Phase: PLANNING. Spec r6 @a38bbe7d (spec gate PASSED 2026-10-24). Plan
-  `docs/superpowers/plans/2026-10-24-today-checklist.md`: binding sections
-  0-4 (rulings PR1-PR40) committed @c65ce88d. Seven opus drafters are
-  writing slice sections S1-S7 to `.superpowers/sdd/plan-drafts/S<n>.md`
-  (run state); S8 (final gates) is drafted there by the planner.
+- Phase: PLAN REVIEW. Spec r6 @a38bbe7d. Plan v1 assembled @05519039
+  (`docs/superpowers/plans/2026-10-24-today-checklist.md`, 23.5k lines:
+  sections 0-4 planner, PR1-PR80; slices S1-S7 opus drafts verbatim; S8
+  planner). Round 1 plan review running: two opus reviewers writing
+  `design-review/plan-r1-reviewer-a.md` and `-b.md`.
 - Worktree `W:	mp	oday-checklist`, branch `feat/today-checklist`, cut from
   main @970a29b9. Nothing built; docs only.
 - Launch mode: not chosen yet.
-- NEXT STEP: when all drafts are in, rule on each draft's Contradictions
-  (add rulings to section 4), assemble sections 5-12 verbatim into the plan,
-  commit; then the plan's adversarial review (2 opus reviewers round 1,
-  spec + plan + repo, design-review-briefs.md plan brief), adjudicate into
-  `design-review/plan-adjudications.md`; then the mission block and the
-  launch gate (AskUserQuestion: AUTO / MANUAL / Revise). If a drafter's
-  draft is missing after a compaction, re-dispatch that slice with the same
-  brief shape (plan 0-4 + spec + format example lines 333-1500 of the
-  unknown-inactive plan).
+- For Cameron at the launch gate: PR64 - section headings carry counts,
+  which reverses the 2026-08-03 "no bare counts" ruling (commit 2f0db66f);
+  the spec and the mockup he and Sam saw have counts.
+- NEXT STEP: adjudicate both round-1 reports into
+  `design-review/plan-adjudications.md` (verify load-bearing claims in the
+  code), edit the plan, commit; continue the reviewer with more accepted
+  findings via SendMessage with the RE-REVIEW CHARGE until a round changes
+  no decision (cap 4); then the mission block and the launch gate
+  (AskUserQuestion: AUTO / MANUAL / Revise).
 
 ## What Cameron asked for (verbatim, with dates)
 

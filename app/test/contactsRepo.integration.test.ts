@@ -21,6 +21,7 @@ import {
   EmptyIndexKeyError,
   INDEX_KEY_ATTRIBUTES,
   IndexKeyWriteError,
+  phoneRefId,
   PrimaryPhoneRemovalError,
   REQUIRED_INDEX_KEY_ATTRIBUTES,
   RequiredIndexKeyRemovalError,
@@ -331,6 +332,40 @@ describe.skipIf(!reachable)('contactsRepo multi-phone against DynamoDB Local (th
     // A LATER instant moves it forward.
     await expect(contacts.touchLastHeardFrom(c.contactId, '2026-09-02T10:00:00.000Z')).resolves.toBe('written');
     expect((await contacts.getById(c.contactId))?.last_heard_from_at).toBe('2026-09-02T10:00:00.000Z');
+  });
+
+  // Today checklist (spec 2026-10-23 section 7.3, plan PR2): the OUTBOUND
+  // twin - the same guard and forward-only condition on its own attribute.
+  // It never moves last_heard_from_at, never creates a row, and a real pointer
+  // row is refused before any write.
+  it('touchLastReachedOut is guarded, forward-only, normalizing and independent of last_heard_from_at', async () => {
+    await expect(
+      contacts.touchLastReachedOut('contact-never-existed-lro', '2026-10-20T10:00:00.000Z'),
+    ).resolves.toBe('skipped');
+    expect(await contacts.getById('contact-never-existed-lro')).toBeUndefined();
+
+    const c = await contacts.create({ type: 'tenant', phone: nextPhone() });
+    await expect(contacts.touchLastHeardFrom(c.contactId, '2026-10-19T10:00:00.000Z')).resolves.toBe('written');
+    await expect(contacts.touchLastReachedOut(c.contactId, '2026-10-20T06:00:00-04:00')).resolves.toBe('written');
+    let read = await contacts.getById(c.contactId);
+    expect(read?.last_reached_out_at).toBe('2026-10-20T10:00:00.000Z');
+    expect(read?.last_heard_from_at).toBe('2026-10-19T10:00:00.000Z');
+
+    // An EARLIER instant never moves it back; the SAME instant is not a move.
+    await expect(contacts.touchLastReachedOut(c.contactId, '2026-10-20T09:00:00.000Z')).resolves.toBe('skipped');
+    await expect(contacts.touchLastReachedOut(c.contactId, '2026-10-20T10:00:00.000Z')).resolves.toBe('skipped');
+    // A LATER instant moves it forward - and only it.
+    await expect(contacts.touchLastReachedOut(c.contactId, '2026-10-21T10:00:00.000Z')).resolves.toBe('written');
+    read = await contacts.getById(c.contactId);
+    expect(read?.last_reached_out_at).toBe('2026-10-21T10:00:00.000Z');
+    expect(read?.last_heard_from_at).toBe('2026-10-19T10:00:00.000Z');
+
+    // A REAL pointer row (a non-primary number) exists and is never stamped.
+    const second = nextPhone();
+    await contacts.addPhone(c.contactId, { phone: second });
+    expect(await contacts.getById(phoneRefId(second))).toBeDefined();
+    await expect(contacts.touchLastReachedOut(phoneRefId(second), '2026-10-22T10:00:00.000Z')).resolves.toBe('skipped');
+    expect((await contacts.getById(phoneRefId(second)))?.last_reached_out_at).toBeUndefined();
   });
 
   // Voice Phase 1 (spec §8): the voice_opt_out do-not-call flag routes through

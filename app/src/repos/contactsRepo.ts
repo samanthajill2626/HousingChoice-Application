@@ -988,6 +988,14 @@ export interface ContactsRepo {
    *  is unparseable; 'failed' on any other error (logged by the CALLER); never
    *  throws. */
   touchLastHeardFrom(contactId: string, at: string): Promise<'written' | 'skipped' | 'failed'>;
+  /** Forward-only, best-effort bump of last_reached_out_at - the OUTBOUND twin
+   *  of touchLastHeardFrom (today-checklist spec 7.3). Same outcomes:
+   *  'skipped' when the contact row does not exist, the stored value is
+   *  already as late, `at` is unparseable or the id is a pointer row;
+   *  'failed' on any other error (logged by the CALLER); never throws. Live
+   *  send paths reach it ONLY through services/staffOutreach.ts
+   *  recordStaffOutreach; the one-time backfill script is the other caller. */
+  touchLastReachedOut(contactId: string, at: string): Promise<'written' | 'skipped' | 'failed'>;
 }
 
 export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
@@ -2047,6 +2055,45 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
         if (err instanceof ConditionalCheckFailedException) {
           // "No such contact" and "already as late" share one exception.
           log.debug({ contactId }, 'contacts: last_heard_from_at not moved (no row, or already as late)');
+          return 'skipped';
+        }
+        return 'failed';
+      }
+    },
+
+    async touchLastReachedOut(contactId, at) {
+      // The outbound twin of touchLastHeardFrom (today-checklist spec 7.3):
+      // the same pointer guard, normalization and forward-only condition, on
+      // its own attribute. Pointer rows are never stamp targets.
+      if (contactId.startsWith(PHONE_REF_PREFIX) || contactId.startsWith(EMAIL_REF_PREFIX)) {
+        return 'skipped';
+      }
+      // The condition compares stored strings lexically, so the one writer
+      // stores the canonical ISO form.
+      const normalized = normalizeInstant(at);
+      if (normalized === undefined) {
+        log.warn({ contactId }, 'contacts: touchLastReachedOut refused an unparseable instant - skipped');
+        return 'skipped';
+      }
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { contactId },
+            UpdateExpression: 'SET #lro = :at',
+            // attribute_exists is LOAD-BEARING, as in touchLastHeardFrom:
+            // UpdateItem on an absent key CREATES the item, and stamp targets
+            // come from rosters and member keys that can outlive a contact.
+            ConditionExpression: 'attribute_exists(contactId) AND (attribute_not_exists(#lro) OR #lro < :at)',
+            ExpressionAttributeNames: { '#lro': 'last_reached_out_at' },
+            ExpressionAttributeValues: { ':at': normalized },
+          }),
+        );
+        return 'written';
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          // "No such contact" and "already as late" share one exception.
+          log.debug({ contactId }, 'contacts: last_reached_out_at not moved (no row, or already as late)');
           return 'skipped';
         }
         return 'failed';

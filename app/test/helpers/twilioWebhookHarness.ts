@@ -533,6 +533,11 @@ export interface FakeWorld {
    *  `at` the caller passed and the outcome the fake answered. A test that
    *  replaces world.contactsRepo.touchLastHeardFrom bypasses this record. */
   heardFromTouches: { contactId: string; at: string; outcome: 'written' | 'skipped' | 'failed' }[];
+  /** Every contactsRepo.touchLastReachedOut call, in order (today-checklist
+   *  PR7): the raw `at` the caller passed and the outcome the fake answered -
+   *  the outbound twin of heardFromTouches. Writer tests read stamps here. A
+   *  test that replaces world.contactsRepo.touchLastReachedOut bypasses it. */
+  reachedOutTouches: { contactId: string; at: string; outcome: 'written' | 'skipped' | 'failed' }[];
 }
 
 /** One pair's ledger balance in the fake world. See crossCheckBalances. */
@@ -568,6 +573,7 @@ export function createFakeWorld(): FakeWorld {
   const failAuditAppendFor: FakeWorld['failAuditAppendFor'] = new Set<string>();
   const touches: FakeWorld['touches'] = [];
   const heardFromTouches: FakeWorld['heardFromTouches'] = [];
+  const reachedOutTouches: FakeWorld['reachedOutTouches'] = [];
   const contactCreates: string[] = [];
   const unreadIncrements: string[] = [];
   const unreadResets: string[] = [];
@@ -2645,6 +2651,26 @@ export function createFakeWorld(): FakeWorld {
         outcome = 'written';
       }
       heardFromTouches.push({ contactId, at, outcome });
+      return outcome;
+    },
+    // Today checklist (spec 2026-10-23 section 7.3, plan PR7): the outbound
+    // twin of touchLastHeardFrom above - the same outcomes on its own
+    // attribute. Every call is recorded in world.reachedOutTouches with the
+    // RAW `at` the caller passed. Like its twin it does not model the real
+    // repo's pointer-id refusal; writers stamp real contact ids only.
+    async touchLastReachedOut(contactId, at) {
+      const normalized = normalizeInstant(at);
+      const contact = contacts.find((c) => c.contactId === contactId);
+      let outcome: 'written' | 'skipped' = 'skipped';
+      if (
+        normalized !== undefined &&
+        contact !== undefined &&
+        !(typeof contact.last_reached_out_at === 'string' && contact.last_reached_out_at >= normalized)
+      ) {
+        contact.last_reached_out_at = normalized;
+        outcome = 'written';
+      }
+      reachedOutTouches.push({ contactId, at, outcome });
       return outcome;
     },
   };
@@ -5480,6 +5506,7 @@ export function createFakeWorld(): FakeWorld {
     crossCheckPending,
     crossCheckBalances,
     heardFromTouches,
+    reachedOutTouches,
     groupRailEnqueuer,
   };
 }

@@ -614,4 +614,30 @@ describe('unit lists - paging and the deleted scope (plan 3.3 as amended)', () =
   });
 });
 
+// today-checklist PR2/PR7: writer tests (S2, S3) stamp through the harness
+// twin, so it must answer exactly what the real conditional write answers.
+describe('contactsRepo.touchLastReachedOut (today-checklist PR2, PR7)', () => {
+  parity('forward-only on its own attribute; never creates a row; never moves last_heard_from_at', async (w, id) => {
+    await expect(w.contacts.touchLastReachedOut(`${id}-missing`, '2026-10-20T10:00:00.000Z')).resolves.toBe('skipped');
+    expect(await w.readContact(`${id}-missing`)).toBeUndefined();
+
+    await w.putContact({
+      contactId: id,
+      type: 'tenant',
+      status: 'searching',
+      phone: nextPhone(),
+      last_heard_from_at: '2026-10-19T10:00:00.000Z',
+    });
+    await expect(w.contacts.touchLastReachedOut(id, '2026-10-20T06:00:00-04:00')).resolves.toBe('written');
+    expect((await w.readContact(id))?.last_reached_out_at).toBe('2026-10-20T10:00:00.000Z');
+    await expect(w.contacts.touchLastReachedOut(id, '2026-10-20T09:00:00.000Z')).resolves.toBe('skipped');
+    await expect(w.contacts.touchLastReachedOut(id, '2026-10-20T10:00:00.000Z')).resolves.toBe('skipped');
+    await expect(w.contacts.touchLastReachedOut(id, 'not a time')).resolves.toBe('skipped');
+    await expect(w.contacts.touchLastReachedOut(id, '2026-10-21T10:00:00.000Z')).resolves.toBe('written');
+    const stored = await w.readContact(id);
+    expect(stored?.last_reached_out_at).toBe('2026-10-21T10:00:00.000Z');
+    expect(stored?.last_heard_from_at).toBe('2026-10-19T10:00:00.000Z');
+  });
+});
+
 // END OF PARITY CASES - Tasks 2.2-2.5 insert their describe blocks ABOVE this line.

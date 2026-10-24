@@ -156,6 +156,9 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     touchLastHeardFrom: async () => {
       throw new Error('touchLastHeardFrom: not used in this suite');
     },
+    touchLastReachedOut: async () => {
+      throw new Error('touchLastReachedOut: not used in this suite');
+    },
   };
 
   const conversationsRepo: ConversationsRepo = {

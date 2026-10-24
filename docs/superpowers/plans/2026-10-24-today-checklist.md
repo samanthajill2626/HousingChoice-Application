@@ -11,7 +11,9 @@
   `docs/superpowers/reviews/2026-10-23-feat-today-checklist/design-review/adjudications.md`.
 - Status: PLAN v2 (2026-10-24), after plan review round 1. Sections 0-4 are BINDING and written by the
   planner; slice sections 5-11 (S1-S7) are opus section drafts assembled
-  verbatim; section 12 (S8) is the planner's.
+  verbatim, with every ruling PR41-PR93 that changes a step applied into
+  the slice text and marked `[PRnn]` at the changed step (PR83); section 12
+  (S8) is the planner's.
   Section 4 (planner rulings PR1-PR93) wins over any slice text it
   contradicts. "Plan section N" always means this file's top-level sections.
 
@@ -144,11 +146,19 @@ tree).
 - WI6 Reconcile re-drive (S3, PR17): a re-driven team-post leg stamps
   (it is the staff post going out for the first time to that member).
   Record that the test proves a manual 30003 rung does NOT.
-- WI7 Today read budget (S4): record the Query counts one Today load makes
-  in the harness for the spec 6.5 cost note and the new issue (S7).
-- WI8 Eventual consistency (S4): Today's contacts batch is consistent
-  (PR6); the units and listing-sends reads are not. DynamoDB Local is
-  always consistent, so no test can see this; record it only.
+- WI7 Today read budget (S4): record the Query counts (and the unread pages,
+  PR92) one Today load makes in the harness for the spec 6.5 cost note and
+  the new issue (S7).
+- WI8 Eventual consistency (S4, replaced by PR90): Today's contacts batch is
+  consistent (PR30). The eventually consistent reads that matter are GSI
+  Queries: the tours byStatus GSI (Tours to book), and the tours byUnit GSI
+  and the units byStatus GSI (Quiet shares, via the Follow up core); listing
+  sends is a base-table Query. A tour create's single refetch can miss a
+  not-yet-propagated GSI; no mechanism is added (the same residue Today
+  carries for `conversation.updated` over the byUnread GSI). DynamoDB Local
+  is always consistent, so no test can see this: the S4 report and the S7
+  cost issue record it, and no e2e result is read as proof of prod
+  liveness.
 - WI9 Lean seed byte-stability: no seed file is edited by this plan. If a
   test seems to need one, STOP and report.
 - WI10 `TODAY_PAST_TOURS_CAP` (S5, PR35): record whether it is still used
@@ -853,8 +863,9 @@ No other ruling conflicts with the code.
   records only `requireComplete` into `calls.batches`; S4 widens it if a
   `collectWaitingFollowUps` unit test must see `consistentRead`.
   `RECIPIENT_ATTRS` there already carries the new field after S1.1.
-- `app/test/helpers/twilioWebhookHarness.ts` is S1-only (PR37). If S2-S4
-  need another harness seam, that is a planner call.
+- `app/test/helpers/twilioWebhookHarness.ts` is S1-only (PR37), except the
+  one comment S2.2 rewrites [PR84]. If S2-S4 need another harness seam, that
+  is a planner call.
 - S1 does not touch `app/src/lib/events.ts` (S7 owns the
   `ContactUpdatedEvent` doc comment, PR8). S1 edits the comments in
   `app/test/contactTriage.test.ts:61-65` and `app/test/sse.test.ts:217-218`.
@@ -3073,10 +3084,12 @@ touch at :833, and masked calls emit no `conversation.updated`
   written last-heard-from touch (PR15). S2 changes no comment there.
 - After S2.2, the `/api` router's DEFAULT send service reads the router's
   contacts repo. In the harness that is `world.contactsRepo` (complete fake),
-  where before it was a real DynamoDB repo (harness comment
-  `twilioWebhookHarness.ts:5591-5596` describes the old behavior and becomes
-  stale; it is S1-owned per PR37 - the planner may fold a one-line comment
-  fix into S7 or leave it).
+  where before it was a real DynamoDB repo. [PR84] S2.2 itself rewrites the
+  harness comment at `twilioWebhookHarness.ts:5591-5596` that described the
+  old behavior (a comment-only edit; the one exception to PR37's S1-only
+  harness rule), names the harness suites that reach the default 1:1 send
+  path, and applies the red-case rule (seed consent on the world contact,
+  name it in the S2 report, never weaken the assertion).
 - The W6 post-response stamp in harness-based tests (no injected
   `afterResponse`) settles within microtasks: it has finished before the
   next supertest request in the same test resolves. Existing
@@ -3424,11 +3437,16 @@ PR9 (wiring, WI2), PR10, PR11, and the no-stamp half of spec 9 for every
 other `sendMessage` caller: the share fan-out, the automatic 30003 retry, the
 missed-call text, the housing-fair welcome, the tour reminder poll and Send
 now, the nudge poll and Send now. The cases marked (PIN) are green on
-unchanged code; the harness W1/W2 cases are the RED.
+unchanged code; the harness W1/W2 cases are the RED. [PR91] W2 also skips a
+Retry of an automated row (`original.automated === true`). [PR84] The task
+names the harness suites that reach the default 1:1 send path (Step 3e),
+states the red-case rule, and rewrites the stale harness comment.
 
 Files:
 - `app/src/routes/api.ts` (contacts construction order; the 1:1 send loop;
   the Retry call)
+- `app/test/helpers/twilioWebhookHarness.ts` (the `sendMessageService`
+  option's doc comment ~5590-5596 ONLY - comment-only, [PR84])
 - Tests: `app/test/apiRoutes.test.ts`, `app/test/broadcastFanOut.test.ts`,
   `app/test/retrySendAttempt.test.ts`, `app/test/missedCallAutoText.test.ts`,
   `app/test/publicIntake.test.ts`, `app/test/tourRemindersApi.test.ts`,
@@ -3515,8 +3533,9 @@ new:
   });
 ```
 
-1e. W2 share exception at the input seam. Edit (the end of the existing
-"the route's append carries retryRoot and broadcastId" case):
+1e. W2 share and automated exceptions at the input seam [PR91]. Edit (the
+end of the existing "the route's append carries retryRoot and broadcastId"
+case):
 
 old:
 ```ts
@@ -3528,15 +3547,27 @@ new:
     expect(plain.calls[0]).not.toHaveProperty('broadcastId');
   });
 
-  it('today-checklist W2 (PR11): a Retry passes staffOutreach, EXCEPT a retry of a share text (broadcast_id)', async () => {
+  it('today-checklist W2 (PR11, PR91): a Retry passes staffOutreach, EXCEPT a retry of a share text (broadcast_id) or of an automated row', async () => {
     const share = makeRetryApp({ ...FAILED_ORIGINAL, broadcast_id: 'b-1' });
     expect((await press(share.app)).status).toBe(201);
     expect(share.calls[0]).toMatchObject({ broadcastId: 'b-1' });
     expect(share.calls[0]).not.toHaveProperty('staffOutreach');
 
+    // PR91: a failed automated text (missed-call, welcome, reminder, nudge)
+    // retried by staff is still the system's copy - no stamp.
+    const automated = makeRetryApp({ ...FAILED_ORIGINAL, automated: true });
+    expect((await press(automated.app)).status).toBe(201);
+    expect(automated.calls[0]).not.toHaveProperty('staffOutreach');
+
     const plain = makeRetryApp(FAILED_ORIGINAL);
     expect((await press(plain.app)).status).toBe(201);
     expect(plain.calls[0]?.staffOutreach).toBe(true);
+
+    // A person's send stored automated:false (a reminder / nudge Send-now row
+    // is stored this way too - PR91 accepts that residue) still stamps.
+    const manual = makeRetryApp({ ...FAILED_ORIGINAL, automated: false });
+    expect((await press(manual.app)).status).toBe(201);
+    expect(manual.calls[0]?.staffOutreach).toBe(true);
   });
 ```
 
@@ -3598,10 +3629,14 @@ describe('staff outreach through the default send service (today-checklist W1/W2
     expect(contactUpdates(world)).toEqual([{ contactId: 'c-1' }]);
   });
 
-  it('a staff Retry of a failed text stamps; a Retry of a share text (broadcast_id) does not (PR11)', async () => {
+  it('a staff Retry of a failed text stamps; a Retry of a share text (broadcast_id) or of an automated row does not (PR11, PR91)', async () => {
     const { app, world } = makeWebhookHarness();
     const conversationId = await seedThread(world);
-    const failedRow = (providerSid: string, agoMs: number, extra: { broadcastId?: string } = {}) => ({
+    const failedRow = (
+      providerSid: string,
+      agoMs: number,
+      extra: { broadcastId?: string; automated?: boolean } = {},
+    ) => ({
       conversationId,
       providerSid,
       providerTs: new Date(Date.now() - agoMs).toISOString(),
@@ -3615,9 +3650,15 @@ describe('staff outreach through the default send service (today-checklist W1/W2
     });
     await world.messagesRepo.append(failedRow('SMplainfail', 60_000));
     await world.messagesRepo.append(failedRow('SMsharefail', 50_000, { broadcastId: 'b-1' }));
+    // PR91: a failed automated text (the missed-call auto text shape).
+    await world.messagesRepo.append(failedRow('SMautofail', 40_000, { automated: true }));
     const retry = (sid: string) => post(app, `/api/conversations/${conversationId}/messages/${sid}/retry`, {});
 
     expect((await retry('SMsharefail')).status).toBe(201);
+    expect(world.reachedOutTouches).toEqual([]);
+    expect(contactUpdates(world)).toEqual([]);
+
+    expect((await retry('SMautofail')).status).toBe(201);
     expect(world.reachedOutTouches).toEqual([]);
     expect(contactUpdates(world)).toEqual([]);
 
@@ -3872,9 +3913,11 @@ Expected failures, and why:
 - apiRoutes.test.ts: the three edited call-shape pins (no `staffOutreach` in
   the call); "only the FIRST batch carries staffOutreach" (`calls[0]
   .staffOutreach` undefined); "a Retry passes staffOutreach, EXCEPT ..." (the
-  plain call lacks it); the three harness cases (`world.reachedOutTouches` is
+  plain and the `automated: false` calls lack it; the share and automated
+  halves already pass); the three harness cases (`world.reachedOutTouches` is
   `[]`: the default service never calls the world fake, and no caller passes
-  the option).
+  the option - the Retry case goes red on its plain half; its share and
+  automated halves are absences [PR91]).
 - Every other new case is a (PIN) and passes already. Every pre-existing case
   in these files stays green.
 
@@ -3955,7 +3998,8 @@ new:
         if (i === 0) first = outcome;
 ```
 
-3c. W2 - the Retry passes it except for a share text (PR11). Edit:
+3c. W2 - the Retry passes it except for a share text (PR11) or an automated
+row [PR91]. Edit:
 
 old:
 ```ts
@@ -3971,10 +4015,14 @@ new:
         ...(original.broadcast_id !== undefined && { broadcastId: original.broadcast_id }),
         // retry-send-window D14: the recorded recipient, when it still exists.
         ...(recipient !== undefined && { recipient }),
-        // today-checklist W2 (spec 7.3, PR11): a staff Retry is staff outreach -
-        // EXCEPT a retry of a share text (broadcast_id), which is a share, and
-        // shares never move last_reached_out_at (spec 7.2).
-        ...(original.broadcast_id === undefined && { staffOutreach: true as const }),
+        // today-checklist W2 (spec 7.3, PR11, PR91): a staff Retry is staff
+        // outreach - EXCEPT a retry of a share text (broadcast_id), which is a
+        // share (shares never move last_reached_out_at, spec 7.2), and a retry
+        // of an AUTOMATED row (stored automated: true), whose copy is the
+        // system's. A reminder / nudge Send-now row is stored automated: false
+        // and still stamps - rare, accepted (PR91).
+        ...(original.broadcast_id === undefined &&
+          original.automated !== true && { staffOutreach: true as const }),
       });
 ```
 
@@ -3987,17 +4035,76 @@ nothing between the old and new positions referenced `contacts` (a `const`
 read before its line would throw), so every other consumer gets the same
 repo object as before. In production the only change is one fewer client
 object. In tests the default send service now reads an injected
-`deps.contactsRepo`; a scan of every test that drives a 1:1 send, Retry or
-Send now WITHOUT `sendMessageService` found only harness-based ones
-(`world.contactsRepo`, a complete fake) - list them in the report from
-`grep -rln "conversations/.*/messages\|send-now" app/test`.
+`deps.contactsRepo`; Step 3e lists the suites that reach it.
+
+3d. [PR84] `app/test/helpers/twilioWebhookHarness.ts` - the stale doc
+comment on the `sendMessageService` option (~5590-5596). Comment-only; no
+other harness line changes. Edit:
+
+old:
+```ts
+  /**
+   * Inject the /api router's send service (quiet-hours send-now, Task 6).
+   * The api router otherwise DEFAULT-constructs one, which resolves its own
+   * contacts repo against real DynamoDB - fine for suites that never drive an
+   * outbound send, useless for the ones that do. Pass a spy to assert what the
+   * route sent (body/author/automated) with no provider and no network.
+   */
+  sendMessageService?: SendMessageService;
+```
+new:
+```ts
+  /**
+   * Inject the /api router's send service (quiet-hours send-now, Task 6).
+   * The api router otherwise DEFAULT-constructs one over the router's own
+   * repos. Since today-checklist S2.2 (PR9) that includes the router's
+   * contacts repo - here world.contactsRepo - so the default service's
+   * deleted / opt-out / consent gates and its staff-outreach stamp judge
+   * world.contacts (it no longer builds a second contacts repo against real
+   * DynamoDB). Pass a spy to assert what the route sent
+   * (body/author/automated) with no provider and no network.
+   */
+  sendMessageService?: SendMessageService;
+```
+
+3e. [PR84] The harness suites that reach the `/api` router's DEFAULT 1:1
+send service (no injected `sendMessageService`), verified by reading the
+code at main @970a29b9. Only four api.ts call sites use that service: the
+1:1 send loop (~1564), the Retry (~1872), and the two Send-now routers it is
+handed to (`createTourRemindersRouter` ~1084, `createPlacementNudgesRouter`
+~1213).
+- `app/test/apiRoutes.test.ts` - the R6 harness case (~1369, "makeWebhookHarness
+  threads the world's send-attempt fake ...": refused 409 BEFORE the send, so
+  the gates are never reached) and this task's 1f describe (W1/W2).
+- `app/test/tourRemindersApi.test.ts` - this task's 1k Send-now case only;
+  every pre-existing send-now case injects `makeSendSpy` (~1716-2471).
+- `app/test/placementNudgesApi.test.ts` - this task's 1m Send-now case only;
+  the pre-existing send-now cases (~665-794) inject a spy.
+- NOT on that path: `rateLimit`, `groupSendRoute`, `retrySendAttempt` (~1506)
+  build an app with an injected service; `relayApi`, `relayQueuedMessages`
+  post to `relay_group` threads, which branch to the relay path before
+  `sendMessage` (api.ts ~1431); `broadcastFanOut`, `missedCallAutoText`,
+  `retrySendAttempt` (job cases) and `publicIntake` (the harness public mount,
+  ~5801) build their own send services over the world fakes.
+Re-run that read on the current tree (a test added since main may join the
+list) and record the final list in the S2 report (WI2).
+
+Red-case rule [PR84]: after 3a those cases' deleted / opt-out / JIT consent
+gates (`sendMessage.ts` ~487-559) judge `world.contacts`. A case that goes
+red because its world contact lacks consent is a fixture that relied on the
+old real-DynamoDB miss: seed consent on THAT world contact (for example
+`consent_method: 'inbound_text'`), name the case in the S2 report under
+"Deliberate test changes", and never weaken or delete the assertion.
 
 #### Step 4 - GREEN
 
 ```
-cd W:/tmp/today-checklist/app; npx vitest run test/apiRoutes.test.ts test/broadcastFanOut.test.ts test/retrySendAttempt.test.ts test/missedCallAutoText.test.ts test/publicIntake.test.ts test/tourRemindersApi.test.ts test/placementNudgesApi.test.ts test/rateLimit.test.ts test/relayApi.test.ts test/groupSendRoute.test.ts test/emailRoute.test.ts
+cd W:/tmp/today-checklist/app; npx vitest run test/apiRoutes.test.ts test/broadcastFanOut.test.ts test/retrySendAttempt.test.ts test/missedCallAutoText.test.ts test/publicIntake.test.ts test/tourRemindersApi.test.ts test/placementNudgesApi.test.ts test/rateLimit.test.ts test/relayApi.test.ts test/groupSendRoute.test.ts test/emailRoute.test.ts test/relayQueuedMessages.test.ts
 ```
-Expect all green. Then (bare):
+Expect all green. A case on the Step 3e list that goes red on a consent /
+opt-out / deleted refusal follows the [PR84] red-case rule above (seed the
+world contact, name it in the report) - never an assertion change. Then
+(bare):
 ```
 cd W:/tmp/today-checklist; npm run typecheck
 ```
@@ -4006,17 +4113,19 @@ Expect exit 0.
 #### Step 5 - ASCII check on added lines
 
 ```
-git -C W:/tmp/today-checklist diff -U0 -- app/src/routes/api.ts app/test/apiRoutes.test.ts app/test/broadcastFanOut.test.ts app/test/retrySendAttempt.test.ts app/test/missedCallAutoText.test.ts app/test/publicIntake.test.ts app/test/tourRemindersApi.test.ts app/test/placementNudgesApi.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git -C W:/tmp/today-checklist diff -U0 -- app/src/routes/api.ts app/test/helpers/twilioWebhookHarness.ts app/test/apiRoutes.test.ts app/test/broadcastFanOut.test.ts app/test/retrySendAttempt.test.ts app/test/missedCallAutoText.test.ts app/test/publicIntake.test.ts app/test/tourRemindersApi.test.ts app/test/placementNudgesApi.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
 ```
-Expect `0`.
+Expect `0`. Also confirm the harness diff is the 3d comment only:
+`git -C W:/tmp/today-checklist diff --stat -- app/test/helpers/twilioWebhookHarness.ts`
+shows one file, about 9 lines [PR84].
 
 #### Step 6 - commit
 
 ```
 git -C W:/tmp/today-checklist status
 ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
-git -C W:/tmp/today-checklist add app/src/routes/api.ts app/test/apiRoutes.test.ts app/test/broadcastFanOut.test.ts app/test/retrySendAttempt.test.ts app/test/missedCallAutoText.test.ts app/test/publicIntake.test.ts app/test/tourRemindersApi.test.ts app/test/placementNudgesApi.test.ts
-git -C W:/tmp/today-checklist commit -m "feat(api): staff send and Retry stamp last_reached_out_at; the send service reads the router's contacts repo (tracker #31 S2.2)" -m "W1 passes staffOutreach on the first MMS batch only; W2 on every Retry except a share text. The contacts repo is built before the send service and passed in (PR9, WI2). No-stamp pins for the share fan-out, automatic retry, missed-call and welcome texts, both polls and both Send now routes." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/today-checklist add app/src/routes/api.ts app/test/helpers/twilioWebhookHarness.ts app/test/apiRoutes.test.ts app/test/broadcastFanOut.test.ts app/test/retrySendAttempt.test.ts app/test/missedCallAutoText.test.ts app/test/publicIntake.test.ts app/test/tourRemindersApi.test.ts app/test/placementNudgesApi.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(api): staff send and Retry stamp last_reached_out_at; the send service reads the router's contacts repo (tracker #31 S2.2)" -m "W1 passes staffOutreach on the first MMS batch only; W2 on every Retry except a share text or an automated row (PR91). The contacts repo is built before the send service and passed in (PR9, WI2); the harness comment that described the old default is rewritten (PR84). No-stamp pins for the share fan-out, automatic retry, missed-call and welcome texts, both polls and both Send now routes." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -4270,7 +4379,9 @@ PR13, WI3. `resolveOutboundTarget` carries the contactId; the press-1 instant
 is hoisted into `dialAt` (used for `answeredAt` and the stamp); the stamp
 starts only AFTER `sendTwiml` and is handed, un-awaited, to the new
 `afterResponse` dep. No stamp on any refusal branch, on an inbound press-1,
-or in `originateCall`.
+or in `originateCall`. [PR87] The injected `afterResponse` (through a
+response probe) asserts the response had finished when it received the
+work, and the fake touch asserts the same when it is called.
 
 Files:
 - `app/src/routes/webhooks/voice.ts`
@@ -4302,9 +4413,12 @@ import {
   type FakeWorld,
   type Harness,
 } from './helpers/twilioWebhookHarness.js';
+import express, { type Express, type Response } from 'express';
 import { buildApp } from '../src/app.js';
 import { createLogger } from '../src/lib/logger.js';
 ```
+(`express` is the [PR87] response probe's outer app; the file has no express
+import today.)
 
 1b. Append at the end of the file:
 ```ts
@@ -4317,11 +4431,25 @@ import { createLogger } from '../src/lib/logger.js';
 // assertion would race the post-response work. The harness has no option for
 // the seam (it is S1-owned), so gateApp builds a SECOND app over the SAME
 // world with the harness's config, which signedTwilioPost signs for.
+// PR87: with a ResponseProbe, gateApp wraps that app in an outer express app
+// whose first middleware remembers the response being served, so the seam
+// (and a wrapped touch) can read whether the TwiML had already gone out.
 // ---------------------------------------------------------------------------
 describe('outbound press-1 - the staff-outreach stamp (today-checklist W6)', () => {
-  function gateApp(harness: Harness, works: Promise<void>[]): ReturnType<typeof buildApp> {
+  /** PR87: what the seam and the touch saw of the response when they ran. */
+  interface ResponseProbe {
+    res?: Response;
+    /** One entry per afterResponse hand-off: was the response finished? */
+    handOffSawFinished: boolean[];
+    /** One entry per touchLastReachedOut call: was the response finished? */
+    touchSawFinished: boolean[];
+  }
+  const finished = (probe: ResponseProbe): boolean =>
+    probe.res !== undefined && probe.res.headersSent && probe.res.writableEnded;
+
+  function gateApp(harness: Harness, works: Promise<void>[], probe?: ResponseProbe): Express {
     const { world } = harness;
-    return buildApp({
+    const inner = buildApp({
       config: harness.config,
       logger: createLogger({ level: 'info', destination: harness.capture.stream }),
       auth: { usersRepo: harness.fakeUsers.repo },
@@ -4337,10 +4465,19 @@ describe('outbound press-1 - the staff-outreach stamp (today-checklist W6)', () 
         events: world.events,
         extractionRepo: world.extractionRepo,
         afterResponse: (work) => {
+          if (probe !== undefined) probe.handOffSawFinished.push(finished(probe));
           works.push(work);
         },
       },
     });
+    if (probe === undefined) return inner;
+    const outer = express();
+    outer.use((_req, res, next) => {
+      probe.res = res;
+      next();
+    });
+    outer.use(inner);
+    return outer;
   }
 
   /** Originate through the harness so a ringing outbound row + its thread exist. */
@@ -4395,6 +4532,30 @@ describe('outbound press-1 - the staff-outreach stamp (today-checklist W6)', () 
     expect(contactUpdates(world)).toEqual([{ contactId: 'c-target' }]);
     // last_heard_from_at never moves on outbound (spec 7.1).
     expect(world.heardFromTouches).toEqual([]);
+  });
+
+  it('PR87: the work reaches afterResponse only once the TwiML is sent, and the touch never runs before it', async () => {
+    const { world, harness, conversationId, callSid } = await originate();
+    const works: Promise<void>[] = [];
+    const probe: ResponseProbe = { handOffSawFinished: [], touchSawFinished: [] };
+    const realTouch = world.contactsRepo.touchLastReachedOut;
+    world.contactsRepo.touchLastReachedOut = async (contactId, at) => {
+      probe.touchSawFinished.push(finished(probe));
+      return realTouch(contactId, at);
+    };
+
+    const res = await signedTwilioPost(gateApp(harness, works, probe), outboundGate(conversationId, callSid), {
+      Digits: '1',
+      CallSid: 'CAnav-leg',
+    });
+
+    expect(res.text).toContain(`<Number>${TARGET}</Number>`);
+    await Promise.all(works);
+    // The hand-off saw a finished response, and so did the one touch: an
+    // implementation that started the stamp BEFORE sendTwiml fails here.
+    expect(probe.handOffSawFinished).toEqual([true]);
+    expect(probe.touchSawFinished).toEqual([true]);
+    expect(world.reachedOutTouches.map((t) => t.contactId)).toEqual(['c-target']);
   });
 
   it('the response does not wait for the stamp: a parked stamp still lets the <Dial> answer (WI3)', async () => {
@@ -4520,6 +4681,8 @@ cd W:/tmp/today-checklist/app; npx vitest run test/voiceOutbound.test.ts
 ```
 Expected failures, and why: "press-1 that dials the contact ..." (`works`
 is `[]` - nothing calls `afterResponse` - and `reachedOutTouches` is `[]`),
+"PR87: the work reaches afterResponse only once ..." (`handOffSawFinished`
+and `touchSawFinished` are `[]`) [PR87],
 "the response does not wait ..." (`reachedOutTouches` stays `[]` after the
 release) and "the production default seam" (no stamp). The other five cases
 assert only absences and pass already (PIN): "originating a call never
@@ -4728,7 +4891,9 @@ WI3 record (for the S2 report): between the press-1 `updateCallStatus` stamp
 and `sendTwiml` the diff adds NOTHING; the only new line before the stamp is
 the synchronous `const dialAt`. The new code after `sendTwiml` is one
 synchronous call that starts the promise. The reviewer reads this handler's
-diff line by line and records it.
+diff line by line and records it. [PR87] The "PR87: the work reaches
+afterResponse only once ..." case is the mechanical half of WI3: a stamp
+started before `sendTwiml` records `false` in the probe.
 
 #### Step 4 - GREEN
 
@@ -5332,16 +5497,18 @@ git -C W:/tmp/today-checklist commit -m "feat(dev): outbound fixture rows stamp 
 
 ### Task S2.6 - Inbound order fixes: inbound email and masked relay calls emit `contact.updated` after a written touch
 
-PR15. Spec 8: an inbound path whose last-heard-from touch lands after its
-`conversation.updated` (inbound email) or that emits no event Today hears
-(masked relay calls, refused and bridged) gains a post-touch
-`contact.updated` when the touch answered 'written'. Existing emits are not
-reordered.
+PR15, PR81. Spec 8: an inbound path whose last-heard-from touch lands after
+its `conversation.updated` (inbound email) or that emits no event Today
+hears (masked relay calls, refused and bridged; [PR81] the founder-triage
+inbound call, whose ring time emits only `message.persisted` and whose
+abandoned ring has no Dial summary) gains a post-touch `contact.updated`
+when the touch answered 'written'. Existing emits are not reordered.
 
 Files:
 - `app/src/services/inboundEmail.ts`
 - `app/src/routes/webhooks/voice.ts`
-- Tests: `app/test/inboundEmail.test.ts`, `app/test/voiceWebhook.test.ts`
+- Tests: `app/test/inboundEmail.test.ts`, `app/test/voiceWebhook.test.ts`,
+  `app/test/founderTriage.test.ts` [PR81]
 
 #### Step 1 - failing tests
 
@@ -5459,15 +5626,62 @@ new:
 describe('whisper + press-1/press-0/timeout gate (M1.9a)', () => {
 ```
 
+1c. [PR81] `app/test/founderTriage.test.ts` - inside `describe('founder
+call-triage - the inbound bridge (M1.9b)', ...)` (its title holds a
+non-ASCII dash; the anchor below does not), at its end. Edit:
+
+old:
+```ts
+    const at = splitTsMsgId(m.tsMsgId).providerTs;
+    expect(world.heardFromTouches).toEqual([{ contactId: 'c-caller', at, outcome: 'written' }]);
+  });
+});
+
+describe('founder whisper leg (M1.9b)', () => {
+```
+new:
+```ts
+    const at = splitTsMsgId(m.tsMsgId).providerTs;
+    expect(world.heardFromTouches).toEqual([{ contactId: 'c-caller', at, outcome: 'written' }]);
+  });
+
+  // today-checklist PR81 (spec 8): at ring time this path emits only
+  // message.persisted, which Today does not hear, and a caller who abandons
+  // during the ring produces no Dial summary - so a WRITTEN touch is followed
+  // by ONE contact.updated. A redelivery (skipped touch) adds none.
+  it('today-checklist PR81: a written ring-time touch is followed by ONE contact.updated; its redelivery adds none', async () => {
+    const world = createFakeWorld();
+    world.contacts.push({ contactId: 'c-caller', type: 'tenant', phone: CALLER });
+    const { app } = founderHarness(world);
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+    await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+
+    expect(world.heardFromTouches.map((t) => t.outcome)).toEqual(['written', 'skipped']);
+    expect(world.emitted.filter((e) => e.event === 'contact.updated').map((e) => e.payload)).toEqual([
+      { contactId: 'c-caller' },
+    ]);
+  });
+});
+
+describe('founder whisper leg (M1.9b)', () => {
+```
+(The existing "a REDELIVERED call touches again at the same instant" case
+asserts the ids and instants only; this case pins the outcomes. If the
+harness answers the redelivery 'written', re-read its `touchLastHeardFrom`
+fake - forward-only, ~2633-2647 - before changing the expectation, and
+record it in the S2 report.)
+
 #### Step 2 - RED
 
 ```
-cd W:/tmp/today-checklist/app; npx vitest run test/inboundEmail.test.ts test/voiceWebhook.test.ts
+cd W:/tmp/today-checklist/app; npx vitest run test/inboundEmail.test.ts test/voiceWebhook.test.ts test/founderTriage.test.ts
 ```
 Expected failures, and why: inboundEmail.test.ts - "a written touch is
 followed by ONE contact.updated" and "the unmatched-email re-ingest" (no
 `contact.updated` emit). voiceWebhook.test.ts - the refused and bridged
-cases (`contactUpdates` is `[]`). The skipped/failed, deduped and unmatched
+cases (`contactUpdates` is `[]`). founderTriage.test.ts - the PR81 case
+(no `contact.updated`) [PR81]. The skipped/failed, deduped and unmatched
 cases pass already (PIN). Every pre-existing case stays green.
 
 #### Step 3 - implementation
@@ -5541,9 +5755,44 @@ new:
 (The founder-triage touch at `voice.ts:834` has the same `log.error({
 callSid: CallSid }, ...)` line but is followed by `      } catch (err) {\n
 log.error({ err, callSid: CallSid }, ...` - the trailing comment line above
-makes this anchor unique. It needs no change: its thread's
-`conversation.updated` comes later, from the Dial summary's
-`stampCallActivity`.)
+makes this anchor unique. It is changed in 3d [PR81].)
+
+3d. [PR81] The founder-triage inbound call (`voice.ts` ~834). Its ring time
+emits only `message.persisted` (~809-814) and an abandoned ring produces no
+Dial summary, so the thread's later `conversation.updated` (the Dial
+summary's `stampCallActivity`) is not guaranteed. Edit (the `log.error({
+err, ...` line after `} catch (err) {` makes this anchor unique; 3c's anchor
+continues with a comment line instead):
+
+old:
+```ts
+          const outcome = await contacts.touchLastHeardFrom(heardFromId, splitTsMsgId(appended.tsMsgId).providerTs);
+          if (outcome === 'failed') {
+            log.error({ callSid: CallSid }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
+          }
+        }
+      } catch (err) {
+        log.error({ err, callSid: CallSid }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
+```
+new:
+```ts
+          const outcome = await contacts.touchLastHeardFrom(heardFromId, splitTsMsgId(appended.tsMsgId).providerTs);
+          if (outcome === 'failed') {
+            log.error({ callSid: CallSid }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
+          }
+          // today-checklist PR81 (spec 8): ring time emits only
+          // message.persisted, and an abandoned ring has no Dial summary, so
+          // Today would never hear this touch. ONE contact.updated after a
+          // written touch.
+          if (outcome === 'written') events.emit('contact.updated', { contactId: heardFromId });
+        }
+      } catch (err) {
+        log.error({ err, callSid: CallSid }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
+```
+(The anchor's last line occurs once in `voice.ts` (~840), so it matches only
+the founder-triage site. `events` is the router's bus, the same one the
+ring-time `message.persisted` emit (~809) uses; a throwing emit lands in
+the existing catch, which logs and keeps the bridge.)
 
 #### Step 4 - GREEN
 
@@ -5560,7 +5809,7 @@ Expect exit 0.
 
 ```
 tr -d '\11\12\15\40-\176' < W:/tmp/today-checklist/app/src/services/inboundEmail.ts | wc -c
-git -C W:/tmp/today-checklist diff -U0 -- app/src/routes/webhooks/voice.ts app/test/inboundEmail.test.ts app/test/voiceWebhook.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git -C W:/tmp/today-checklist diff -U0 -- app/src/routes/webhooks/voice.ts app/test/inboundEmail.test.ts app/test/voiceWebhook.test.ts app/test/founderTriage.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
 ```
 Expect `0` twice.
 
@@ -5569,8 +5818,8 @@ Expect `0` twice.
 ```
 git -C W:/tmp/today-checklist status
 ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
-git -C W:/tmp/today-checklist add app/src/services/inboundEmail.ts app/src/routes/webhooks/voice.ts app/test/inboundEmail.test.ts app/test/voiceWebhook.test.ts
-git -C W:/tmp/today-checklist commit -m "fix(live): inbound email and masked relay calls emit contact.updated after a written last-heard-from touch (tracker #31 S2.6)" -m "Inbound email fired conversation.updated before its touch; masked calls fire none Today hears. Each now emits ONE contact.updated when the touch answered written; existing emits keep their order (spec 8, PR15)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/today-checklist add app/src/services/inboundEmail.ts app/src/routes/webhooks/voice.ts app/test/inboundEmail.test.ts app/test/voiceWebhook.test.ts app/test/founderTriage.test.ts
+git -C W:/tmp/today-checklist commit -m "fix(live): inbound email, masked relay calls and the founder-triage call emit contact.updated after a written last-heard-from touch (tracker #31 S2.6)" -m "Inbound email fired conversation.updated before its touch; masked calls fire none Today hears; the founder-triage ring emits only message.persisted and an abandoned ring has no Dial summary. Each now emits ONE contact.updated when the touch answered written; existing emits keep their order (spec 8, PR15, PR81)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -5935,8 +6184,10 @@ git -C W:/tmp/today-checklist diff -U0 <S2_BASE>..HEAD | grep '^+' | tr -d '\11\
 ```
 git -C W:/tmp/today-checklist diff --stat <S2_BASE>..HEAD
 ```
-and confirm no seed file and no `twilioWebhookHarness.ts` line is in the list
-(WI9, PR37).
+and confirm no seed file is in the list (WI9) and that the only
+`twilioWebhookHarness.ts` change is S2.2's comment rewrite at ~5590-5596
+(`git -C W:/tmp/today-checklist diff <S2_BASE>..HEAD -- app/test/helpers/twilioWebhookHarness.ts`
+shows that comment block and nothing else) [PR84; PR37 otherwise stands].
 
 #### Step 4 - write the report
 
@@ -5960,7 +6211,7 @@ S2_BASE: <sha>. Commits: <S2.1 .. S2.7 shas>.
 | relay member inbound | twilio.ts:961 (handleRelayInbound) | conversation.updated :1076 | touch first | none |
 | closed-group inbound (sender's 1:1) | twilio.ts:1388 | conversation.updated :1421 | touch first | none |
 | group text inbound | twilio.ts:2192 | conversation.updated :2225 | touch first | none |
-| founder-triage inbound call | routes/webhooks/voice.ts:834 (ring) | conversation.updated from the Dial summary's stampCallActivity (:2014) | touch first | none |
+| founder-triage inbound call | routes/webhooks/voice.ts:834 (ring) | none at ring time (message.persisted only, :809-814); the Dial summary's stampCallActivity (:2014) is not guaranteed - an abandoned ring has none | no event | contact.updated after a written touch (S2.6, PR81) |
 | masked relay call, refused | voice.ts:1122 | none (announceCallStamp emits message.persisted only, :1359-1362) | no event | contact.updated after a written touch (S2.6) |
 | masked relay call, bridged | voice.ts:1220 | none | no event | contact.updated after a written touch (S2.6) |
 | inbound email (and the unmatched re-ingest) | services/inboundEmail.ts:833 | conversation.updated :770 | emit BEFORE touch | contact.updated after a written touch (S2.6) |
@@ -5970,8 +6221,16 @@ S2_BASE: <sha>. Commits: <S2.1 .. S2.7 shas>.
 
 ## WI2 - sendMessage contacts wiring
 <The before/after construction order from S2.2 Step 3 (the WI2 record),
-the list of tests that drive a 1:1 send / Retry / Send now through the
-DEFAULT send service, and the result of the app-workspace run.>
+the S2.2 Step 3e list of harness suites that reach the DEFAULT 1:1 send
+service (re-verified on the tree) [PR84], every case that went red under
+the red-case rule and the consent seeded for it (or "none"), and the
+result of the app-workspace run.>
+
+## W2 Retry gate (PR91)
+W2 stamps only when `original.broadcast_id === undefined &&
+original.automated !== true` (api.ts:<line>). Accepted residue: a staff
+Retry of a reminder / nudge Send-now row (stored automated: false) still
+stamps - rare, recorded here, no mechanism added.
 
 ## WI3 - the whisper-gate no-await rule
 <The reviewer's line-by-line read of the outbound accept branch diff: nothing
@@ -5983,12 +6242,13 @@ the stamp starts after sendTwiml via afterResponse, un-awaited.>
 |---|---|---|
 | W1 staff text | apiRoutes.test.ts harness case | 1 contact.updated, after conversation.updated |
 | W1 multi-batch MMS | apiRoutes.test.ts harness case | 1 contact.updated for N batches |
-| W2 staff Retry | apiRoutes.test.ts harness case | 1 (plain); 0 (share text) |
+| W2 staff Retry | apiRoutes.test.ts harness case | 1 (plain); 0 (share text); 0 (automated row, PR91) |
 | W3 email | sendEmailMessage.test.ts | 1 contact.updated, last |
 | W6 outbound press-1 | voiceOutbound.test.ts | 1 contact.updated |
 | W8 dev fixtures | devTranscriptFixture / devMessageTransportFixture | 1 contact.updated |
 | inbound email (PR15) | inboundEmail.test.ts | 1 contact.updated per written touch |
 | masked calls (PR15) | voiceWebhook.test.ts | 1 per written touch; 0 on the skipped redelivery |
+| founder-triage call (PR81) | founderTriage.test.ts | 1 per written touch; 0 on the skipped redelivery |
 | tour create (PR16) | toursApi / listingSendOutcomeApi | 1 tour.updated per create |
 <Confirm each count from the green run.>
 
@@ -5997,15 +6257,17 @@ the stamp starts after sendTwiml via afterResponse, un-awaited.>
 - toursApi.test.ts ~1395 - INVERTED: create now emits (PR16).
 - toursApi.test.ts ~1402-1412, ~585; toursReopenApi.test.ts ~492 - counts
   include the create's emit (C4).
+- <Each fixture seeded with consent under the S2.2 red-case rule: file,
+  case title, the world contact and the field seeded - or "none"> [PR84].
 
 ## Gate results
 <typecheck exit code; app workspace run (files, tests, duration, exit code);
 any re-run-and-compare evidence.>
 
 ## Risks and follow-ups
-<Anything observed; e.g. the stale harness comment at
-twilioWebhookHarness.ts:5591-5596 (S1-owned) now that the default send
-service reads world.contactsRepo.>
+<Anything observed. The harness comment at twilioWebhookHarness.ts:5590-5596
+was rewritten in S2.2 (PR84); confirm it matches what the default send
+service now reads.>
 ```
 
 #### Step 5 - ASCII check
@@ -6033,16 +6295,19 @@ git -C W:/tmp/today-checklist commit -m "docs(records): S2 slice report - direct
 | `staffOutreach` option; stamp judged contact at providerTs; `contact.updated` after `conversation.updated`, only when written; best-effort | PR9; spec 7.3 | S2.1 | sendMessage.test.ts "staff outreach stamp" (held recipient, phone contact, moved recipient, no option, no contact, written-only, failed/rejecting, refused/append failure) |
 | api.ts builds `contacts` before the send service and passes it | PR9; WI2 | S2.2 | apiRoutes.test.ts harness cases move `world.reachedOutTouches`; WI2 record in the report |
 | W1 1:1 send passes the option, first batch only | PR10 | S2.2 | apiRoutes.test.ts spy batch case + harness multi-batch case (1 stamp, 1 event) |
-| W2 Retry passes the option except `broadcast_id` rows | PR11; spec 7.3 W2 | S2.2 | apiRoutes.test.ts spy case + harness Retry case |
+| W2 Retry passes the option except `broadcast_id` rows and automated rows | PR11, PR91; spec 7.3 W2 | S2.2 | apiRoutes.test.ts spy case + harness Retry case (share, automated, plain) |
+| Harness suites on the default 1:1 send path named; red-case rule; harness comment rewritten | PR84 | S2.2 | Step 3d/3e; S2 report WI2 |
 | No stamp: share fan-out, automatic retry, missed-call text, welcome text, tour reminder poll and Send now, nudge poll and Send now | spec 7.2, 7.3 no-stamp table, 9 | S2.2 | the (PIN) cases in broadcastFanOut, retrySendAttempt, missedCallAutoText, publicIntake, tourRemindersApi, placementNudgesApi |
 | W3 email: stamp after SES accepts, none on adapter throw, one `contact.updated` | PR12 | S2.3 | sendEmailMessage.test.ts "W3" |
 | W6: contactId from `resolveOutboundTarget`, `dialAt` hoist, post-response stamp via `afterResponse`, none on refusals / inbound legs / originate | PR13; WI3; spec 9 | S2.4 | voiceOutbound.test.ts "outbound press-1 - the staff-outreach stamp" |
+| W6 stamp starts only after the TwiML is sent (response probe) | PR87 | S2.4 | voiceOutbound.test.ts "PR87: the work reaches afterResponse only once ..." |
 | W8 dev seams outbound twin, `oneToOneThreadContactId`, `heardFromRepos` type | PR14 | S2.5 | heardFrom, devTranscriptFixture, devMessageTransportFixture tests |
 | PR15(a) inbound email post-touch `contact.updated` (re-ingest inherits) | PR15; spec 8 | S2.6 | inboundEmail.test.ts PR15 cases |
 | PR15(b) masked relay call (refused, bridged) post-touch `contact.updated` | PR15; spec 8 | S2.6 | voiceWebhook.test.ts PR15 cases |
+| Founder-triage inbound call post-touch `contact.updated` | PR81; spec 8 | S2.6 | founderTriage.test.ts PR81 case |
 | Inbound order table for every other path | PR15 | S2.8 | S2 report table |
 | `tour.updated` on POST /api/tours and the Interested create; `UnitsRouterDeps.events`; api.ts pass-through; ~1395 inverted | PR16; spec 8 | S2.7 | toursApi, toursReopenApi, listingSendOutcomeApi |
-| Shared api.ts (S4 re-reads after S2); harness untouched | PR37 | S2.2, S2.7, S2.8 | diff --stat in S2.8 Step 3 |
+| Shared api.ts (S4 re-reads after S2); harness untouched except the PR84 comment | PR37, PR84 | S2.2, S2.7, S2.8 | diff in S2.8 Step 3 |
 | WI4 one event per send, counted | plan section 3 | S2.1-S2.7 | every writer test counts events; report table |
 | typecheck, app workspace, ASCII, report | plan section 0 | S2.8 | S2 report |
 
@@ -6092,14 +6357,13 @@ precedent PR18 names passes nothing either: `registerHandlers.ts:76`
 registers relay.retryLeg with no `events`, and the job defaults it
 (`app/src/jobs/relayRetryLeg.ts:410`, `:418` `events ??= appEvents;`). The
 worker's bridge is attached to that same singleton (`app/src/worker.ts:45-61`,
-`attachEventBridge(appEvents, ...)`). Proposed resolution (S3.1): the
-default IS the wiring - `events ??= appEvents` in the handler, exactly the
-relayRetryLeg pattern; NO edit to `worker.ts` or `registerHandlers.ts`. In
-the worker the singleton's emits reach the app through the bridge; in the
-local in-process path the singleton is the app's own SSE bus. S3.4 records
-this. If the planner wants the dependency explicit anyway, the one-line
-alternative is `events: appEvents` in `registerHandlers.ts:64` (an
-`appEvents` import there), which changes both processes identically.
+`attachEventBridge(appEvents, ...)`). Resolution (S3.1), RULED by [PR54]:
+the default IS the wiring - `events ??= appEvents` in the handler, exactly
+the relayRetryLeg pattern; NO edit to `worker.ts` or `registerHandlers.ts`.
+In the worker the singleton's emits reach the app through the bridge; in
+the local in-process path the singleton is the app's own SSE bus. S3.4
+records this. (The explicit `events: appEvents` alternative in
+`registerHandlers.ts:64` was NOT taken - PR54.)
 
 C2. PR17: "`RelayLegSendOutcome` gains `sentAt` ... NOTHING is added inside
 `sendOneRelayLeg`". The outcome is BUILT inside `sendOneRelayLeg`
@@ -7851,7 +8115,14 @@ must record at least:
   test world (the loop has no per-pass member cap; `relayFanOut.ts` loop
   ~1520-1617) and emits one event; each transient continuation is its own
   job and emits its own after-loop event (the test proves 2 passes, 2
-  events). Cite the test name.
+  events). Cite the test name. [PR88] Record the ruling with the count: one
+  after-loop `conversation.updated` per fan-out PASS is the accepted reading
+  of spec 7.3's "one per staff send" - continuation passes exist only for
+  deferred members and are bounded.
+- [PR93] Stamping the `stranded` + `afterSend: true` arm is a deliberate
+  widening of spec 7.3 W4 (the provider accepted the text; only the slot
+  write failed). The backfill (S6) cannot see such a leg (no slot `sid`);
+  the S6 RUNBOOK entry notes it. Cite the S3.1 test that proves the stamp.
 - WI6: the re-driven team leg (the exact `enqueueRedrive` payload,
   `sendReconcile.ts:1710-1722`, pinned by `sendReconcile.test.ts` "15 relay
   never_sent") stamps once; the 30003 rung (`relayRetryLeg.ts:836` calls
@@ -7943,7 +8214,8 @@ S4 assumes these S1 names exactly (plan section 4 PR1, PR3, PR7):
 `RecipientDisplay.last_reached_out_at?: string`, `ContactItem.last_reached_out_at?: string`,
 `getRecipientDisplaysByIds(ids, opts?: { requireComplete?: boolean; consistentRead?: boolean })`,
 the harness `projectRecipient` copying the field, `world.recipientDisplayCalls`
-(see Contradiction C4 for the element shape S4 assumes) and the
+with S1's element shape `{ contactIds: string[]; opts?: { requireComplete?; consistentRead? } }`
+(`opts` present only when the caller passed one; C4, [PR60], [PR82]) and the
 `app/test/followUps.test.ts` `RECIPIENT_ATTRS` entry.
 
 ### Contradictions
@@ -7962,16 +8234,18 @@ and `listingSendsRepo: createListingSendsRepo(repoDeps)` there, and assert
 `quietShares.status === 'ok'` and `toursToBook === 'ok'` before the flood,
 so a mis-wired repo goes red instead of green.
 
-C2. PR25 ("a throw or a missing/deleted unit logs WARN `{ unitId }`"), PR28
-and PR30 ("WARN on throw with counts only") versus the route's own
+C2. PR25 ("a throw or a missing/deleted unit logs WARN `{ unitId }`" -
+replaced by [PR86]: only a throw or an ABSENT unit WARNs; a soft-deleted unit
+shows its address), PR28 and PR30 ("WARN on throw with counts only") versus
+the route's own
 best-effort WARNs, which all carry the thrown `err`
 (`app/src/routes/today.ts:365` contact hydration, `:395` placement
 hydration). Resolution: the new throw-path WARNs log `{ err, unitId }` /
 `{ err, section }` like their siblings - an AWS SDK error or
 `IncompleteBatchReadError` carries ids/counts, never a contact's name or
 phone - and every failure test asserts the WARN carries the id/section and
-that NO seeded name appears in any WARN line. The missing/deleted-unit WARN
-(no throw) is exactly `{ unitId }`.
+that NO seeded name appears in any WARN line. The absent-unit WARN (no
+throw) is exactly `{ unitId }` [PR58, PR86].
 
 C3. PR40 names the #30 inversions and "every Unreplied assertion", but many
 OTHER existing `todayApi.test.ts` cases observe the unread pass ONLY through
@@ -7989,13 +8263,15 @@ the unread pass can produce it and the case still proves the pass. A2 and
 FIX B become "emits NO Today row" (Inbox only). Each is named in the report.
 
 C4. PR7 says the harness `getRecipientDisplaysByIds` "records the opts into a
-new `world.recipientDisplayCalls` array" without fixing the element shape
-(S1 is not built yet). S4 assumes ONE entry per call holding the opts
-argument as passed (`{ requireComplete?: boolean; consistentRead?: boolean } | undefined`).
-If S1 lands another shape (for example `{ ids, opts }`), adapt exactly these
-assertions and record it in the S4 report: S4.1 Step 1d (one loop line) and
-S4.7 Step 1 (two lines in "quietShares groups by property ..."). Never weaken
-them to `toBeDefined()`.
+new `world.recipientDisplayCalls` array" without fixing the element shape.
+RULED [PR60, PR82]: S1's shape binds - one entry per call,
+`{ contactIds, opts? }` (S1.3) - and every assertion reads
+`call.opts?.consistentRead` / `call.opts?.requireComplete`. The two places
+that read the entry (S4.1 Step 1d, S4.7 Step 1 "quietShares groups by
+property ...") are written that way below; the S4.1 WI1 pin also asserts
+`call.opts?.requireComplete === true` on every call so it cannot pass
+vacuously, and S4.1 Step 4 proves it can go red. Never weaken them to
+`toBeDefined()`.
 
 C5. PR26 leaves the unread pass's deleted-contact skip first after the type
 filter; `isOneToOneBucket` (`app/src/routes/today.ts:80`, imported from
@@ -8079,8 +8355,9 @@ git -C W:/tmp/today-checklist grep -n "recipientDisplayCalls\|last_reached_out_a
 Write the first line's hash down as `S4_BASE` (the slice report and S4.8 use
 it). The grep must show the S1 field in `contactsRepo.ts`, the harness
 `recipientDisplayCalls` declaration, and `last_reached_out_at` in
-`followUps.test.ts` `RECIPIENT_ATTRS`. Read the harness declaration: if an
-element is not the opts argument as passed, follow Contradiction C4.
+`followUps.test.ts` `RECIPIENT_ATTRS`. Read the harness declaration: an
+element is `{ contactIds, opts? }` (S1.3, [PR60]); if S1 landed another shape,
+STOP and report - the assertions below read `call.opts?.*` [PR82].
 
 #### Step 1 - failing tests
 
@@ -8223,7 +8500,9 @@ new:
   // WI1 (today-checklist plan): last_reached_out_at feeds ONLY Today's quiet
   // clock. The Follow up tab keeps its inbound-only clock and its read (spec
   // 6.4): a set field changes nothing in the body, and the tab's contacts
-  // batch never asks for a consistent read.
+  // batch never asks for a consistent read. Each recorded call is
+  // { contactIds, opts? } (S1.3); the requireComplete line proves the opts
+  // are really read, so the consistentRead line cannot pass vacuously (PR82).
   it('(PIN, WI1) a set last_reached_out_at changes NOTHING in the body; the tab reads contacts without consistentRead', async () => {
     const world = createFakeWorld();
     seed(world);
@@ -8235,7 +8514,10 @@ new:
     expect(after.status).toBe(200);
     expect(after.text).toBe(before.text);
     expect(world.recipientDisplayCalls.length).toBeGreaterThan(0);
-    for (const opts of world.recipientDisplayCalls) expect(opts?.consistentRead).toBeUndefined();
+    for (const call of world.recipientDisplayCalls) {
+      expect(call.opts?.requireComplete).toBe(true);
+      expect(call.opts?.consistentRead).toBeUndefined();
+    }
   });
 });
 ```
@@ -8397,6 +8679,15 @@ cd W:/tmp/today-checklist; npm run typecheck
 ```
 Expect all green and exit 0 (`listingSendsApi.test.ts` exercises the
 broadcasts router that mounts the tab).
+
+Mutation check [PR82] (proves the followUpsApi WI1 pin can go red; nothing
+is committed): temporarily change `buildFollowUps`'s first line to
+`await collectWaitingFollowUps(deps, { consistentRead: true })`, run
+`cd W:/tmp/today-checklist/app; npx vitest run test/followUpsApi.test.ts`,
+and confirm the "(PIN, WI1) a set last_reached_out_at changes NOTHING ..."
+case FAILS on `call.opts?.consistentRead`. Revert the line and confirm
+`git -C W:/tmp/today-checklist diff -- app/src/services/followUps.ts` shows
+only this task's intended change. Record the red run in the S4 report (WI1).
 
 #### Step 5 - ASCII check on added lines
 
@@ -8890,11 +9181,16 @@ git -C W:/tmp/today-checklist commit -m "feat(today): quiet-shares builder and i
 
 ---
 
-### Task S4.3 - Today's units dependency, the unit-label cache, and tours_today `at` / `unitLabel` / time order (PR24 units half, PR25, PR29)
+### Task S4.3 - Today's units dependency, the unit-label cache, and tours_today `at` / `unitLabel` / time order (PR24 units half, PR25 as amended by PR86, PR29)
 
 The Today router gains a units repo (wired from `api.ts`), a per-request
 memoized `unitLabelOf`, and the `TodayItem.at` / `unitLabel` fields;
 tours_today rows carry them and sort by time, then tenant, then tourId.
+[PR86] `unitLabelOf` returns `formatAddress(unit.address) || unitId` for ANY
+unit `getById` returns, soft-deleted or not; ONLY a throw or an absent item
+yields the unitId and a WARN `{ unitId }` (once per unit per request). With
+no deletion test left, the units repo's `isDeleted` is not imported (PR24's
+alias would be an unused import - gate 5).
 
 Files:
 - `app/src/routes/today.ts`
@@ -9016,21 +9312,34 @@ new:
       expect(tours[3]).toMatchObject({ at: three, unitLabel: OAK_LABEL });
     });
 
-    it('a missing or soft-deleted unit labels the row with its unitId and WARNs once per unit - never a 500', async () => {
+    // PR86: a soft-deleted unit is still a present item with its address -
+    // the label is the address and nothing WARNs. Only an ABSENT unit (or a
+    // throw, below) degrades to the unitId, with ONE WARN per unit per request.
+    it('a soft-deleted unit still shows its address, with no WARN (PR86)', async () => {
       seedUnit('u-del', { address: OAK, deleted_at: '2026-10-01T00:00:00.000Z' });
       seedTenant('t-amy', 'Amy', 'Able');
-      await seedTour({ tourId: 'tour-g1', tenantId: 't-amy', unitId: 'u-gone', scheduledAt: todayNoonIso() });
-      await seedTour({ tourId: 'tour-g2', tenantId: 't-amy', unitId: 'u-gone', scheduledAt: todayNoonIso() });
       await seedTour({ tourId: 'tour-d', tenantId: 't-amy', unitId: 'u-del', scheduledAt: todayNoonIso() });
 
       const tours = (await getItems()).filter((i) => i.group === 'tours_today');
 
+      expect(tours.map((i) => [i.refId, i.unitLabel])).toEqual([['tour-d', OAK_LABEL]]);
+      expect(labelWarns()).toEqual([]);
+    });
+
+    it('an absent unit labels the row with its unitId and WARNs once per unit - never a 500 (PR86)', async () => {
+      seedTenant('t-amy', 'Amy', 'Able');
+      await seedTour({ tourId: 'tour-g1', tenantId: 't-amy', unitId: 'u-gone', scheduledAt: todayNoonIso() });
+      await seedTour({ tourId: 'tour-g2', tenantId: 't-amy', unitId: 'u-gone', scheduledAt: todayNoonIso() });
+
+      const tours = (await getItems()).filter((i) => i.group === 'tours_today');
+
       expect(tours.map((i) => [i.refId, i.unitLabel])).toEqual([
-        ['tour-d', 'u-del'],
         ['tour-g1', 'u-gone'],
         ['tour-g2', 'u-gone'],
       ]);
-      expect(labelWarns().map((l) => l['unitId']).sort()).toEqual(['u-del', 'u-gone']);
+      expect(labelWarns()).toHaveLength(1);
+      expect(labelWarns()[0]).toMatchObject({ unitId: 'u-gone' });
+      expect(JSON.stringify(labelWarns())).not.toContain('Amy');
     });
 
     it('a unit read that THROWS degrades to the unitId and WARNs with the unitId - the route still answers 200', async () => {
@@ -9070,11 +9379,13 @@ new:
 ```
 cd W:/tmp/today-checklist/app; npx vitest run test/todayApi.test.ts
 ```
-Expected failures, and why (all four new cases):
+Expected failures, and why (all five new cases):
 - "tours_today rows carry at ...": the order is `['tour-3', 'tour-4', 'tour-5', 'tour-2']`
   (tenant first) and the row has no `at` / `unitLabel`.
-- "a missing or soft-deleted unit ...": `unitLabel` is undefined and no
-  "unit label" WARN exists.
+- "a soft-deleted unit still shows its address ..." [PR86]: `unitLabel` is
+  undefined (its no-WARN half already holds).
+- "an absent unit labels the row with its unitId ..." [PR86]: `unitLabel`
+  is undefined and no "unit label" WARN exists.
 - "a unit read that THROWS ...": `unitLabel` undefined, no WARN.
 - "labels are memoized ...": `getById` is never called (`[]`).
 Every other case stays green (`seedTour`'s new options default to the old
@@ -9099,12 +9410,13 @@ import {
 } from '../repos/toursRepo.js';
 import {
   createUnitsRepo,
-  // contactsRepo's own isDeleted is imported above under that name (PR24).
-  isDeleted as isUnitDeleted,
   type UnitsRepo,
 } from '../repos/unitsRepo.js';
 import { formatAddress } from '../lib/address.js';
 ```
+[PR86] No `isDeleted as isUnitDeleted` import: `unitLabelOf` no longer tests
+deletion and nothing else in `today.ts` needs it (PR24's alias applies only
+if a later edit imports it; contactsRepo's `isDeleted` stays as is).
 
 3b. `TodayItem` gains the two tour-row fields. Edit:
 
@@ -9179,12 +9491,13 @@ new:
       return placement;
     };
 
-    // Unit labels for the tour rows (spec 2026-10-23 3, plan PR25): a
-    // per-request memoized point read, modeled on the placement cache above.
-    // formatAddress(unit.address) || unitId - the Follow up tab's formatter. A
-    // failed LABEL is never a failure (spec 2.5): a throw, a missing unit or a
-    // soft-deleted one logs one WARN with the unitId and the row shows the
-    // unitId. The memo makes that WARN once per unit per request.
+    // Unit labels for the tour rows (spec 2026-10-23 3, plan PR25 as amended
+    // by PR86): a per-request memoized point read, modeled on the placement
+    // cache above. formatAddress(unit.address) || unitId - the Follow up tab's
+    // formatter - for ANY unit the read returns, soft-deleted or not (its
+    // address is intact). A failed LABEL is never a failure (spec 2.5): only a
+    // throw or an absent item logs one WARN with the unitId and the row shows
+    // the unitId. The memo makes that WARN once per unit per request.
     const unitLabelCache = new Map<string, string>();
     const unitLabelOf = async (unitId: string): Promise<string> => {
       const cached = unitLabelCache.get(unitId);
@@ -9192,8 +9505,8 @@ new:
       let label = unitId;
       try {
         const unit = await units.getById(unitId);
-        if (unit === undefined || isUnitDeleted(unit)) {
-          log.warn({ unitId }, 'today: unit label lookup found no live unit - showing the unitId');
+        if (unit === undefined) {
+          log.warn({ unitId }, 'today: unit label lookup found no unit - showing the unitId');
         } else {
           label = formatAddress(unit.address) || unitId;
         }
@@ -9307,7 +9620,7 @@ Expect `0`.
 git -C W:/tmp/today-checklist status
 ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
 git -C W:/tmp/today-checklist add app/src/routes/today.ts app/src/routes/api.ts app/test/todayApi.test.ts
-git -C W:/tmp/today-checklist commit -m "feat(today): unit labels and time order on Tours today (today-checklist S4.3)" -m "The Today router takes the shared units repo; a per-request memoized unitLabelOf labels tour rows (unitId on a throw or a missing/deleted unit, WARN once). TodayItem gains at/unitLabel; tours_today sorts by time, then tenant, then tourId." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/today-checklist commit -m "feat(today): unit labels and time order on Tours today (today-checklist S4.3)" -m "The Today router takes the shared units repo; a per-request memoized unitLabelOf labels tour rows (the address for any present unit, deleted or not; the unitId and one WARN on a throw or an absent unit - PR86). TodayItem gains at/unitLabel; tours_today sorts by time, then tenant, then tourId." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -12331,7 +12644,10 @@ git -C W:/tmp/today-checklist commit -m "feat(today): Tours to book - every requ
 `GET /api/today` gains `quietShares`: the Follow up core with a CONSISTENT
 contacts batch, then `buildQuietShares`, in its own try/catch. The router
 takes the listing-sends repo from `api.ts`. The header comment cites the new
-spec as superseding the grouping rules. WI7's read budget is pinned by a test.
+spec as superseding the grouping rules. WI7's read budget is pinned by a test
+(pre-existing counts may take the observed value, both numbers recorded;
+the six S4-owned counts never move - [PR62]); the unread walk's page count is
+recorded for the cost issue [PR92]. WI8 is recorded as PR90 states it.
 
 Files:
 - `app/src/routes/today.ts`
@@ -12498,10 +12814,11 @@ new:
         ],
       });
       // Spec 6.1 / PR30: a refetch fired by a stamp's event must see the
-      // stamp - the ONE contacts batch is consistent (Contradiction C4 names
-      // the element shape assumed here).
+      // stamp - the ONE contacts batch is consistent. Each recorded call is
+      // { contactIds, opts? } (S1.3; PR60, PR82), so the options are read
+      // off `.opts`.
       expect(world.recipientDisplayCalls).toHaveLength(1);
-      expect(world.recipientDisplayCalls[0]).toMatchObject({ requireComplete: true, consistentRead: true });
+      expect(world.recipientDisplayCalls[0]?.opts).toMatchObject({ requireComplete: true, consistentRead: true });
     });
 
     it('staff outreach restarts the clock: last_reached_out_at later than the send holds the person back until the quiet resumes', async () => {
@@ -12763,11 +13080,17 @@ failure cases on `{ status: 'unavailable' }`; the tours-read case on
 `status: 'ok'`) and the non-regression file fail. WI7 fails on
 `unitsWalk: 0`, `sendsByUnit: 0`, `toursByUnit: 0`, `recipientBatch: 0`.
 
-WI7 note: the eight pre-existing counts are the harness's real cost of one
-load. If one of THEM differs from the expectation above, read that code path,
-confirm the observed value is that load's real count, set the expectation to
-it and record both numbers in the report. Never change one of the six S4
-counts to make the test pass - those are this task's behavior.
+WI7 note [PR62]: the eight pre-existing counts are the harness's real cost of
+one load. If one of THEM differs from the expectation above, read that code
+path, confirm the observed value is that load's real count, set the
+expectation to it and record both numbers in the report. Never change one of
+the six S4 counts to make the test pass - those are this task's behavior.
+[PR92] `unreadPages: 1` is this near-empty world only: with the type filter
+first (S4.5) the unread walk keeps no typed thread, so it no longer stops at
+its 100-row cap and reads the byUnread index up to its raw budget
+(`UNREAD_WALK_LIMIT`, 2000 items) on a busy index. Record in the S4 report
+the unread pages this load read and the pages the S4.5 byUnread budget case
+reads (its `queryUnreadPage` call count), for the S7 cost issue.
 
 #### Step 3 - implementation
 
@@ -12865,8 +13188,10 @@ new:
     // GET /api/broadcasts/follow-ups projects - with the quiet rule on top
     // (services/quietShares.ts). The ONE contacts batch is CONSISTENT here
     // (spec 6.1): a refetch fired by a staff-outreach stamp's contact.updated
-    // must see the stamp. The units walk and the listing-sends / tours reads
-    // are not (plan WI8): a property's own state can lag by index replication.
+    // must see the stamp. The units byStatus walk and the per-property tours
+    // byUnit reads are GSI Queries and cannot be consistent (plan WI8, PR90;
+    // listing sends is a base-table Query): a just-written tour can lag by
+    // index replication until the next refetch.
     // Its OWN try/catch (spec 2.5): a throw in the walk, a per-unit read or the
     // contacts batch makes only this section unavailable; the WARN carries the
     // section and the error, never a name; the route still answers 200.
@@ -13090,8 +13415,8 @@ Write `W:/tmp/today-checklist/docs/superpowers/reviews/2026-10-23-feat-today-che
 (ASCII, findings only, code cited by `file:line`). It must record at least:
 - `S4_BASE` and the commit range.
 - Contradictions C1-C5 and how each landed (C4: the observed
-  `world.recipientDisplayCalls` element shape, and whether any assertion was
-  adapted).
+  `world.recipientDisplayCalls` element shape - `{ contactIds, opts? }` per
+  PR60 - and that every assertion reads `call.opts?.*` [PR82]).
 - Every PR40 inversion, by its new test title and `file:line`:
   the Active team member (was "PIN: ... is still in needs_you_now
   (unchanged)", ~1037), the D5 cap case's team member / tenant rows
@@ -13109,18 +13434,35 @@ Write `W:/tmp/today-checklist/docs/superpowers/reviews/2026-10-23-feat-today-che
 - WI1: `followUps.test.ts` and `followUpsApi.test.ts` green with only S1's
   additive fake changes plus S4.1's batch-recording widening; the two `(PIN,
   WI1)` case titles; the Follow up route still sends exactly
-  `{ requireComplete: true }`.
+  `{ requireComplete: true }`; and the S4.1 Step 4 mutation run in which the
+  followUpsApi WI1 pin went red [PR82].
+- Unit labels [PR86]: a present unit (soft-deleted included) shows its
+  address with no WARN; only a throw or an absent unit shows the unitId and
+  WARNs `{ unitId }` once per request; the two S4.3 case titles.
 - WI7: the committed `counts` object from the S4.7 WI7 test, with the formula
   per load: 1 units walk page per 100 available properties; 1 listing-sends
   Query per kept property; 1 tours Query per property with a share in the
   last 14 days; 1 contacts BatchGet (DynamoDB pages it per 100 keys); 1
   requested-tours Query (paged); 1 unit GetItem per distinct tour unit.
-  State any pre-existing count that differed from the plan's expectation.
-- WI8: Today's contacts batch is consistent (`collectWaitingFollowUps(..., { consistentRead: true })`,
-  pinned by "quietShares groups by property ...", `todayApi.test.ts:<line>`);
-  the units byStatus walk, the listing-sends and tours Queries and the
-  requested-tours Query are eventually consistent; DynamoDB Local is always
-  consistent, so no test can observe the difference - recorded only.
+  State any pre-existing count that differed from the plan's expectation,
+  with both numbers [PR62].
+- WI7, the unread walk [PR92]: with the type filter first the walk no longer
+  stops at its 100-row cap; it reads the byUnread index to its raw budget
+  (`UNREAD_WALK_LIMIT`, 2000 items) on a busy index, every load and every
+  SSE refetch, and the "underfilled" WARN fires whenever the index exceeds
+  that budget. Record the unread pages the WI7 load read (`unreadPages`)
+  and the pages the S4.5 byUnread budget case read, for the S7 cost issue.
+- WI8 [PR90]: Today's contacts batch is consistent (`collectWaitingFollowUps(..., { consistentRead: true })`,
+  pinned by "quietShares groups by property ...", `todayApi.test.ts:<line>`).
+  The eventually consistent reads that matter are GSI Queries: the tours
+  byStatus GSI (Tours to book, `toursRepo.ts:<line>`), and the tours byUnit
+  GSI and the units byStatus GSI (Quiet shares, via the Follow up core);
+  listing sends is a base-table Query (`listingSendsRepo.ts:<line>`). A tour
+  create's single refetch can miss a not-yet-propagated GSI; no mechanism is
+  added - the same residue Today carries for `conversation.updated` over the
+  byUnread GSI. DynamoDB Local is always consistent, so no test (and no e2e
+  result) is proof of prod liveness - recorded only; S7's cost issue repeats
+  it.
 - Any red file from Step 3 and its adjudication.
 - Untrimmed input paths: none new (Today takes no new input).
 
@@ -13142,11 +13484,11 @@ Spec sections and rulings covered:
 |---|---|---|
 | 6.1 mechanism, PR22, WI1 | Follow up core `collectWaitingFollowUps` (rows + recipient, `consistentRead` pass-through), `buildFollowUps` byte-identical, route-level regression with `last_reached_out_at` set | S4.1 |
 | 6.1, 6.2 order, 6.3 order, 3 (`people`), PR23 | `buildQuietShares`: both thresholds, both boundaries (exactly 48h / 120h and 1 ms before), heard later, reached later, reached EARLIER ignored, unparseable values, per-row clock, in-property and property order, distinct people, a person on two properties, non-waiting outcomes excluded; wire types | S4.2 |
-| 3 (`TodayItem.at` / `unitLabel`, units dep), 2.4, PR24 (units), PR25, PR29 | unit-label cache (memo, missing / deleted / throwing unit -> unitId + one WARN), tours_today `at` / `unitLabel`, time-then-tenant-then-tourId order, `api.ts` wiring | S4.3 |
+| 3 (`TodayItem.at` / `unitLabel`, units dep), 2.4, PR24 (units), PR25 as amended by PR86, PR29 | unit-label cache (memo; a soft-deleted unit keeps its address, no WARN; an absent or throwing unit -> unitId + one WARN), tours_today `at` / `unitLabel`, time-then-tenant-then-tourId order, `api.ts` wiring | S4.3 |
 | 5.2 (group + order), PR27 | `identify` from both sources, row shape unchanged, created_at order (none / unparseable last, ties refId), position after needs_you_now | S4.4 |
 | 4, 5.2 (owner rule), PR26, PR40 | type filter FIRST (no contact read, no cap slot for known threads), owner rule replacing the #30 skip, unresolved owner unchanged, Unreplied removed everywhere (union, array, branch, row key, log, comments), every inversion and re-expression, `seed-smoke.mjs` comment | S4.5 |
 | 5.4, 2.5 (Tours to book), 3 (`toursToBook`), PR28 | requested tours, deleted-tenant skip, urgency copy and pure boundaries, order, `at` / `unitLabel`, no `tag`, failure isolation, full group order | S4.6 |
-| 6 (in the route), 2.5 (Quiet shares), 3 (`quietShares`), 6.5, PR24 (listing sends), PR30, WI7, WI8 | quiet shares in the route with a consistent batch, each drop-off, staff outreach restarting the clock, second share not restarting the first, truncated, failure isolation from the units walk / listing sends / per-unit tours / contacts batch (and tours.listByStatus the other way), WARN without names, header comment, read budget | S4.7 |
+| 6 (in the route), 2.5 (Quiet shares), 3 (`quietShares`), 6.5, PR24 (listing sends), PR30, PR60/PR82 (`call.opts`), PR62, WI7 (+ PR92 unread pages), WI8 (PR90) | quiet shares in the route with a consistent batch, each drop-off, staff outreach restarting the clock, second share not restarting the first, truncated, failure isolation from the units walk / listing sends / per-unit tours / contacts batch (and tours.listByStatus the other way), WARN without names, header comment, read budget | S4.7, S4.8 report |
 | 9 (server tests), PR24 (`TODAY_TABLES`), C1 | `todayApi.test.ts` and `todayUnmatchedNonRegression.test.ts` updated deliberately; the non-regression test injects the units and listing-sends repos and asserts both sections `ok` | S4.4-S4.7 |
 
 Not in S4 (by the work map): the dashboard (S5), the writers that move
@@ -13227,7 +13569,8 @@ also exposes `generatedAt` (the server's, already on the wire,
 render stays pure (the React Compiler lint forbids `Date.now()` in render)
 and N is measured from the same instant the server applied the 48h/120h rule
 at, so it can never read below the threshold. A fallback load sets it to its
-own `now`. Additive; flagged for the planner (see the S4 note below).
+own `now`. Additive; RULED by [PR66] (the route derives `now` from `nowIso`,
+so the server threshold and the shown N share one instant).
 
 C5. Spec 2.1 keeps the Past tours link "See all N on the Past tab" / "Open
 the Past tab". Its rule today is "See all N" when the Past tab holds more
@@ -13237,8 +13580,8 @@ skipped a deleted tenant's tours; with 23 rows the footer reads "Show all
 23" + "Open the Past tab". Resolution: keep the rule (it names what the
 click lands on without repeating the button's number). S7's
 `today-past-tours` spec asserts it this way (PR39 says "the Past-tab
-link"). If the planner wants "See all N" whenever the Past tab holds more
-than 5, it is one line in `PastToursSection`.
+link"). RULED by [PR67]: the rule stays (`total > rows.length`); no change
+to `PastToursSection`.
 
 C6. The approved mockup's copy differs from the spec in three places: the
 AI line reads "AI suggestions - 22 contacts have details the AI heard..."
@@ -13251,7 +13594,8 @@ plain-text request age, dashed divider, compact time-first tour rows,
 property line with a Show/Hide word) is followed.
 
 C7. Plan WI10 cites "(S5, PR30)" for `TODAY_PAST_TOURS_CAP`; the ruling is
-PR35 (PR30 is quiet shares in the route). Typo only.
+PR35 (PR30 is quiet shares in the route). Typo only. RULED by [PR80]: WI10's
+ruling is PR35 as amended by PR63.
 
 No other ruling conflicts with the tree. `buildToday.ts` keeps its fallback
 copy `'New inbound [U+2014] untriaged'` (`buildToday.ts:297`, PR36 "copy and
@@ -13316,10 +13660,12 @@ For S7 (accessible names the e2e specs and the perf terminal select on):
   right now." and never "All caught up". The page subtitle is "Clear every
   section above the line and today's checklist is done. New messages are in
   the Inbox."
-- `e2e/performance/routes.ts` `TODAY_TERMINAL`: the AI list cannot be a
-  terminal (absent until opened); use the eight lists above minus 'AI
-  suggestions', "All caught up", the queue error alert, and the fallback
-  line.
+- `e2e/performance/routes.ts` `TODAY_TERMINAL` (RULED by [PR77] and
+  [PR89]; S7.11 owns it): the SEVEN checklist lists ('Needs you now'
+  through 'Placements' - NOT 'Tours today' and NOT 'AI suggestions'; At a
+  glance is not a terminal), the "All caught up" text, the queue load-error
+  alert, "We couldn't load " (contains - the per-section unavailable
+  alerts) and the fallback line "Some sections can't load right now.".
 - `e2e/support/selectors.md` rows to update: line 18 (the h1/"Tours today"
   ambiguity still holds - "Tours today N" is now an `<h3>` and still
   substring-matches "Today"; `expectTodayReady` stays) and line 65 (the AI
@@ -17694,8 +18040,10 @@ browser QA (S7).
 
 ## 10. S6 - Backfill: last_reached_out_at from the last 14 days
 
-Scope: plan section 2 row S6; ruling PR38 (binding); watch item WI12. Spec
-7.2, 7.3 and 7.5. Depends on S1 (`contactsRepo.touchLastReachedOut`, PR2).
+Scope: plan section 2 row S6; ruling PR38 (binding), with PR70-PR72 (this
+draft's C1-C3), PR91 (the manual-retry rule) and PR93 (C1 amended; the
+stranded-leg note) applied into the task text below [PR83]; watch item
+WI12. Spec 7.2, 7.3 and 7.5. Depends on S1 (`contactsRepo.touchLastReachedOut`, PR2).
 Every line number below is a hint against main @970a29b9; the QUOTED text is
 the anchor.
 
@@ -17724,10 +18072,14 @@ adoption writes the slot as `sid: m.providerSid, sentAt: m.sentAt ?? m.createdAt
 rule counts ("slots keyed by contactId ... with a `sid` and `sentAt`").
 Resolution: COUNT it. Spec 7.2 counts every staff relay post to every member
 it reached; the live skip is a best-effort choice for a rare recovery path
-("a rare recovery path; best-effort"), not a 7.2 exclusion. The same holds for
-the reconcile's adoption of a ONE-TO-ONE staff send whose append failed: the
-adopted row is an ordinary staff row and counts. S6.4 records both in the
-slice report. No code difference from PR38.
+("a rare recovery path; best-effort"), not a 7.2 exclusion. RULED [PR70 as
+amended by PR93]: the backfill counts reconcile RELAY-LEG adoptions only.
+There is no one-to-one reconcile adoption: the reconcile's owner kinds are
+`broadcast`, `relay_leg`, `relay_rung` and `retry_send`
+(`jobs/sendReconcile.ts:184-201`), and `adoptRetry` rows carry
+`retry_attempt` / `retry_window_start` - machine retries, which the planner
+skips as `machine_retry`. S6.4 records this in the slice report and S6.3 in
+the RUNBOOK entry. No code difference from PR38.
 
 C2. Spec 7.5 / PR38: "1:1 text/email recipient: `recipient_contact_id`, else
 the thread's contact". The live W3 (PR12) stamps `input.contactId`, the
@@ -18049,6 +18401,48 @@ describe('planThreadPage - one-to-one texts (spec 7.5)', () => {
     ]);
     expect(nonZero(plan)).toEqual({ automated: 1, share: 2, machine_retry: 2, text: 1 });
     expect([...plan.latest]).toEqual([['c-a', '2026-10-20T15:00:00.000Z']]);
+    // PR91: the staff Retry's retried row (#F2) is not among the window rows
+    // here, so it counts and is reported as residue.
+    expect(plan.retryOriginOutsideWindow).toBe(1);
+  });
+
+  // PR91 (the live W2 gate, mirrored): a staff Retry (retry_of alone) of a row
+  // whose copy is the system's - automated, or a Send-now body - is not staff
+  // outreach. The retried row is judged only when it is among this thread's
+  // window rows; one that is not (older than the window) counts, as residue.
+  it('PR91: a staff Retry of an in-window automated or Send-now row is excluded; of a staff row, or of a row outside the window, it counts', async () => {
+    const nudge = MESSAGE_CATALOG['nudge.receipt_check'].default;
+    const plan = await planRows(ONE, [
+      text('2026-10-20T10:00:00.000Z#AF', { automated: true, body: 'Sorry we missed your call.' }),
+      text('2026-10-20T10:05:00.000Z#AR', { retry_of: '2026-10-20T10:00:00.000Z#AF', body: 'Sorry we missed your call.' }),
+      text('2026-10-20T11:00:00.000Z#NF', { body: nudge }),
+      text('2026-10-20T11:05:00.000Z#NR', { retry_of: '2026-10-20T11:00:00.000Z#NF', body: nudge }),
+      text('2026-10-20T12:00:00.000Z#SF'),
+      text('2026-10-20T12:05:00.000Z#SR', { retry_of: '2026-10-20T12:00:00.000Z#SF' }),
+      // The retried row is older than the window: never read, so never judged.
+      text('2026-10-20T13:05:00.000Z#OR', { retry_of: '2026-10-01T09:00:00.000Z#OLD' }),
+    ]);
+    expect(nonZero(plan)).toEqual({ automated: 1, excluded_nudge_body: 1, retry_of_system_copy: 2, text: 3 });
+    expect(plan.retryOriginOutsideWindow).toBe(1);
+    expect([...plan.latest]).toEqual([['c-a', '2026-10-20T13:05:00.000Z']]);
+  });
+
+  it('PR91: the retried row is judged whether it sits on an earlier page or later in the same page', async () => {
+    const plan = newPlan();
+    await planThreadPage(plan, ONE, [text('2026-10-20T10:00:00.000Z#AF', { automated: true })], ctx());
+    await planThreadPage(
+      plan,
+      ONE,
+      [
+        text('2026-10-20T11:05:00.000Z#BR', { retry_of: '2026-10-20T11:00:00.000Z#BF' }),
+        text('2026-10-20T11:00:00.000Z#BF', { automated: true }),
+        text('2026-10-20T10:05:00.000Z#AR', { retry_of: '2026-10-20T10:00:00.000Z#AF' }),
+      ],
+      ctx(),
+    );
+    expect(nonZero(plan)).toEqual({ automated: 2, retry_of_system_copy: 2 });
+    expect(plan.retryOriginOutsideWindow).toBe(0);
+    expect(plan.latest.size).toBe(0);
   });
 
   it('names the row recipient_contact_id before the thread contact', async () => {
@@ -18454,8 +18848,12 @@ Create `app/scripts/backfill-last-reached-out.ts` with exactly:
 //   - one-to-one sms/mms/email/call: automated not true; no broadcast_id (a
 //     share, or a Retry of one); no retry_attempt / retry_window_start (the
 //     automatic 30003 retry - a staff Retry carries retry_of alone and
-//     counts); an email once it left for SES (not failed; queued only with an
-//     SES id); a call once the contact's leg was dialed (answered_at or
+//     counts, EXCEPT a Retry of a row in this thread's window whose copy is
+//     the system's - automated, or a Send-now body (plan PR91, the live W2
+//     gate); a Retry whose row is older than the window counts and is
+//     reported as retryOriginOutsideWindow); an email once it left for SES
+//     (not failed; queued only with an SES id); a call once the contact's
+//     leg was dialed (answered_at or
 //     call_outcome), at answered_at when present. Recipient:
 //     recipient_contact_id, else the thread's contact (the attributeInbound
 //     one-to-one order).
@@ -18553,6 +18951,8 @@ export const SKIP_KINDS = [
   'automated',
   'share',
   'machine_retry',
+  // PR91: a staff Retry of an in-window automated or Send-now row.
+  'retry_of_system_copy',
   'call_not_dialed',
   'email_failed',
   'email_queued',
@@ -18582,9 +18982,21 @@ export interface ReachedOutPlan {
   rowsSkipped: Record<SkipKind, number>;
   /** Of rowsSkipped.excluded_reminder_body: rows also within REMINDER_TIME_MATCH_MS after that reminder's sentAt. */
   reminderBodyTimeMatched: number;
+  /**
+   * PR91: of the COUNTED one-to-one rows, the staff Retries (retry_of set)
+   * whose retried row was not among the thread's window rows, so it could not
+   * be judged - counted, reported as residue.
+   */
+  retryOriginOutsideWindow: number;
   unparseableInstants: number;
   /** contactId -> the latest normalized instant, across every thread. */
   latest: Map<string, string>;
+  /**
+   * PR91: every in-window one-to-one outbound row seen so far, keyed
+   * `<conversationId>|<tsMsgId>`, -> whether its copy is the system's
+   * (automated, or a Send-now body). A later staff Retry is judged by it.
+   */
+  windowOneToOne: Map<string, boolean>;
 }
 
 export function newPlan(): ReachedOutPlan {
@@ -18595,8 +19007,10 @@ export function newPlan(): ReachedOutPlan {
     counted: zeroed(COUNTED_KINDS),
     rowsSkipped: zeroed(SKIP_KINDS),
     reminderBodyTimeMatched: 0,
+    retryOriginOutsideWindow: 0,
     unparseableInstants: 0,
     latest: new Map(),
+    windowOneToOne: new Map(),
   };
 }
 
@@ -18656,7 +19070,10 @@ export function indexReminderSends(items: readonly ReminderSendRow[], windowStar
  * Plan ONE page of a thread's window rows into `plan`: each row (or member
  * slot) lands in exactly one counted or skipped category, and every counted
  * one folds its instant into `plan.latest`. The Query filters inbound rows
- * out; the planner re-checks so it is right on any input.
+ * out; the planner re-checks so it is right on any input. The page is
+ * INDEXED first (PR91), so a staff Retry can be judged against a retried row
+ * later in the same page; the window Query reads a thread in key order, so
+ * a retried row (an earlier key) on another page was indexed before.
  */
 export async function planThreadPage(
   plan: ReachedOutPlan,
@@ -18665,7 +19082,25 @@ export async function planThreadPage(
   ctx: ReachedOutContext,
 ): Promise<void> {
   plan.messagesRead += rows.length;
+  for (const row of rows) indexOneToOneRow(plan, thread, row, ctx);
   for (const row of rows) await planRow(plan, thread, row, ctx);
+}
+
+const windowRowKey = (conversationId: string, tsMsgId: string): string => `${conversationId}|${tsMsgId}`;
+
+/** PR91: the copy is the system's - automated, or one of the Send-now bodies. */
+function isSystemCopy(row: MessageItem, ctx: ReachedOutContext): boolean {
+  if (row.automated === true) return true;
+  const body = row.body;
+  return typeof body === 'string' && (ctx.nudgeBodies.has(body) || ctx.reminderSends.has(body));
+}
+
+/** PR91: remember each in-window one-to-one outbound row for the manual-retry rule. */
+function indexOneToOneRow(plan: ReachedOutPlan, thread: ReachedOutThread, row: MessageItem, ctx: ReachedOutContext): void {
+  if (GROUP_THREAD_TYPES.has(thread.type) || row.direction !== 'outbound') return;
+  const at = normalizeInstant(splitTsMsgId(row.tsMsgId).providerTs);
+  if (at === undefined || at < ctx.windowStart) return;
+  plan.windowOneToOne.set(windowRowKey(thread.conversationId, row.tsMsgId), isSystemCopy(row, ctx));
 }
 
 function skip(plan: ReachedOutPlan, kind: SkipKind): void {
@@ -18777,6 +19212,16 @@ async function planOneToOneRow(
   if (row.automated === true) return skip(plan, 'automated');
   if (nonEmpty(row.broadcast_id)) return skip(plan, 'share');
   if (row.retry_attempt !== undefined || nonEmpty(row.retry_window_start)) return skip(plan, 'machine_retry');
+  // PR91 (the live W2 gate): a staff Retry (retry_of alone) of an in-window
+  // row whose copy is the system's is not staff outreach. A retried row that
+  // is not among the window rows cannot be judged: the Retry counts, as
+  // reported residue.
+  let retryOriginUnseen = false;
+  if (nonEmpty(row.retry_of)) {
+    const origin = plan.windowOneToOne.get(windowRowKey(thread.conversationId, row.retry_of));
+    if (origin === true) return skip(plan, 'retry_of_system_copy');
+    if (origin === undefined) retryOriginUnseen = true;
+  }
   let kind: 'text' | 'email' | 'call';
   let instant = at;
   if (row.type === 'call') {
@@ -18812,6 +19257,7 @@ async function planOneToOneRow(
     : await oneToOneContactOf(thread, ctx.lookup);
   if (contactId === undefined) return skip(plan, 'no_recipient');
   plan.counted[kind] += 1;
+  if (retryOriginUnseen) plan.retryOriginOutsideWindow += 1;
   fold(plan, contactId, instant);
 }
 
@@ -18833,7 +19279,8 @@ function oneToOneContactOf(thread: ReachedOutThread, lookup: HeardFromLookup): P
 ```
 cd W:/tmp/today-checklist/app; ALLOW_SKIP_DYNAMO_TESTS=1 npx vitest run test/backfillLastReachedOut.test.ts
 ```
-Expect every case green (23 cases). Then the compile check (bare):
+Expect every case green (25 cases: the drafted 23 plus the two PR91 cases).
+Then the compile check (bare):
 ```
 cd W:/tmp/today-checklist; npm run typecheck
 ```
@@ -19167,6 +19614,8 @@ describe('backfillLastReachedOut - the runner', () => {
       messagesRead: 8,
       remindersInWindow: 1,
       reminderBodyTimeMatched: 1,
+      // PR91: the fixture holds no staff Retry.
+      retryOriginOutsideWindow: 0,
       unparseableInstants: 0,
       planned: 5,
       written: 0,
@@ -19360,6 +19809,8 @@ export interface BackfillResult {
   counted: Record<CountedKind, number>;
   rowsSkipped: Record<SkipKind, number>;
   reminderBodyTimeMatched: number;
+  /** PR91: counted staff Retries whose retried row was outside the window (residue). */
+  retryOriginOutsideWindow: number;
   unparseableInstants: number;
   /** Contacts with a planned instant (dry run: would touch). */
   planned: number;
@@ -19390,6 +19841,7 @@ function syncCounts(plan: ReachedOutPlan, result: BackfillResult): void {
   result.counted = { ...plan.counted };
   result.rowsSkipped = { ...plan.rowsSkipped };
   result.reminderBodyTimeMatched = plan.reminderBodyTimeMatched;
+  result.retryOriginOutsideWindow = plan.retryOriginOutsideWindow;
   result.unparseableInstants = plan.unparseableInstants;
   result.planned = plan.latest.size;
 }
@@ -19410,6 +19862,7 @@ export async function backfillLastReachedOut(opts: BackfillOpts): Promise<Backfi
     counted: zeroed(COUNTED_KINDS),
     rowsSkipped: zeroed(SKIP_KINDS),
     reminderBodyTimeMatched: 0,
+    retryOriginOutsideWindow: 0,
     unparseableInstants: 0,
     planned: 0,
     written: 0,
@@ -19660,9 +20113,11 @@ new:
 
 What `app/scripts/backfill-last-reached-out.ts` does: from the deploy on, every staff text, email, call, relay group post and group text moves the contacted people's `last_reached_out_at` - the staff follow-up clock behind Today's Quiet shares (shares and automated sends never move it, and it is shown nowhere). People staff followed up with BEFORE the deploy have no value until this backfill runs, so Quiet shares would list them too early. The script reads the last 14 days of outbound messages of every conversation (a share older than 14 days is never a Quiet shares candidate, so older rows cannot matter), applies the same rules the live sends follow, keeps the latest instant per contact across all threads, and makes one conditional, forward-only write per contact. It never moves a value backward, so a contact staff reached after the deploy keeps that newer value. It emits no live events.
 
-Which rows count (a stored row does not say who started it, so the script reads the fields each sender leaves): outbound, author `teammate`, never a Quo import row; one-to-one texts that are not automated, not a share (`broadcast_id`) and not an automatic retry (a staff Retry counts); emails once they left for SES; calls once the contact's phone was dialed (`answered_at` or `call_outcome` - a call the staff member never picked up does not count); relay team posts, per contact member whose text was sent; group texts, per member not suppressed; and a relay intro staff edited before creating the group (matched by its text). Excluded by text: the four placement nudge texts, and any text equal to a tour reminder sent in the window - their "Send now" sends carry no marker, so a staff text with exactly the same words is excluded too.
+Which rows count (a stored row does not say who started it, so the script reads the fields each sender leaves): outbound, author `teammate`, never a Quo import row; one-to-one texts that are not automated, not a share (`broadcast_id`) and not an automatic retry (a staff Retry counts - except a Retry of an automated text, or of a "Send now" text, that is itself in the window); emails once they left for SES; calls once the contact's phone was dialed (`answered_at` or `call_outcome` - a call the staff member never picked up does not count); relay team posts, per contact member whose text was sent; group texts, per member not suppressed; and a relay intro staff edited before creating the group (matched by its text). Excluded by text: the four placement nudge texts, and any text equal to a tour reminder sent in the window - their "Send now" sends carry no marker, so a staff text with exactly the same words is excluded too.
 
 Known gap, accepted: a relay team post queued on a still-connecting group MORE than 14 days ago whose texts went out inside the window is not read (the read starts at the post's own time). Those contacts get no value from the backfill; their next staff send sets it.
+
+Two more differences from the live stamps, both accepted: a relay member text the send reconcile adopted after a crash IS counted (it was a staff send; the live path skips that rare recovery), and only relay legs are adopted that way - there is no one-to-one adoption. A relay member text the provider accepted but whose delivery record failed to save (a "stranded" leg) is stamped live but has no recorded sid, so the backfill cannot see it; that contact's value comes from their next staff send.
 
 Per environment, in this order:
 
@@ -19673,7 +20128,8 @@ Per environment, in this order:
    - `conversationsWalked` - conversations read (`pointerRows` are claim rows, skipped);
    - `messagesRead` - outbound rows of the window read;
    - `counted` - per category: `text`, `email`, `call` (messages) and `relay_team_slot`, `group_text_slot`, `edited_intro_slot` (one per member reached);
-   - `rowsSkipped` - per reason, for example `automated`, `share`, `machine_retry`, `imported`, `call_not_dialed`, `slot_not_sent`, `outside_window` (inside the margin, before the window). `excluded_nudge_body` and `excluded_reminder_body` are the "Send now" texts the script cannot tell apart from a staff text; `reminderBodyTimeMatched` says how many of the latter also went out within 10 minutes of a reminder (most should). `no_recipient` and `group_unresolved_slot` are messages with no contact to name (a handful is normal);
+   - `rowsSkipped` - per reason, for example `automated`, `share`, `machine_retry`, `imported`, `call_not_dialed`, `slot_not_sent`, `outside_window` (inside the margin, before the window). `excluded_nudge_body` and `excluded_reminder_body` are the "Send now" texts the script cannot tell apart from a staff text; `reminderBodyTimeMatched` says how many of the latter also went out within 10 minutes of a reminder (most should). `retry_of_system_copy` is a staff Retry of an automated or "Send now" text in the window. `no_recipient` and `group_unresolved_slot` are messages with no contact to name (a handful is normal);
+   - `retryOriginOutsideWindow` - staff Retries that were counted although the text they retried is older than the window, so the script could not check it (rare; expected near 0);
    - `introRule: body_match` and `sendNowRule: exclude_by_body` - the rules applied;
    - `remindersInWindow` - tour reminders sent in the window, the input of the reminder exclusion;
    - `planned` - contacts that will get a value;
@@ -19755,8 +20211,11 @@ Expect `0`.
 
 Write `W:/tmp/today-checklist/docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S6-report.md`
 (ASCII, findings only, code cited by `file:line`). It must record at least:
-- C1 (the reconcile's relay-leg and one-to-one adoptions are COUNTED by the
-  backfill though the live writers skip them; `jobs/sendReconcile.ts:1037-1038`),
+- C1 as ruled by PR70 amended by PR93 (the reconcile's RELAY-LEG adoption is
+  COUNTED by the backfill though the live writer skips it,
+  `jobs/sendReconcile.ts:1037-1038`; there is no one-to-one reconcile
+  adoption - `adoptRetry` rows are machine retries, skipped as
+  `machine_retry`, `jobs/sendReconcile.ts:867-930`),
   C2 (email and call rows carry no `recipient_contact_id`, so the backfill
   names the thread contact where live W3 names the addressed contact;
   `services/sendEmailMessage.ts:395-410`), C3 (the `author: 'system'`
@@ -19770,6 +20229,15 @@ Write `W:/tmp/today-checklist/docs/superpowers/reviews/2026-10-23-feat-today-che
   Send now sends the catalog default with no override; Quo rows carry author
   `staff` and `imported_from`).
 - The accepted queued-relay gap (in the RUNBOOK entry).
+- [PR93] The stranded-after-send relay leg: stamped live (S3, a deliberate
+  widening of spec 7.3 W4) but invisible to the backfill (no slot `sid`);
+  noted in the RUNBOOK entry.
+- [PR91] The manual-retry rule as built: `retry_of_system_copy` (a staff
+  Retry of an in-window automated or Send-now row) and the
+  `retryOriginOutsideWindow` residue counter, with the two case titles; the
+  accepted live residue (a Retry of a Send-now row, stored automated:false,
+  still stamps live - the backfill excludes it only when the retried row is
+  in the window).
 - WI12: the agent did NOT run the CLI in S6 (against anything); the RUNBOOK
   says Cameron runs dev then prod after the deploy, dry run first; the lane
   rehearsal is S7's.
@@ -19802,6 +20270,7 @@ Spec 7.5 and PR38, each item to the case that pins it
 | No `last_activity_at` pre-filter | S6.2 runner reads every non-pointer thread ("a dry run" conversationsWalked 5) |
 | 1:1 sms/mms counted (automated false or absent) | "counts a staff sms and mms ..." |
 | automated / broadcast_id / retry_attempt / retry_window_start skipped; manual retry_of counts | "skips automated sends, shares ..." |
+| PR91: a manual retry_of of an in-window automated / Send-now row skipped (`retry_of_system_copy`); retried row outside the window counts (`retryOriginOutsideWindow`); same-page and earlier-page origins | "PR91: a staff Retry of an in-window automated ...", "PR91: the retried row is judged whether ..." |
 | Email: sent/delivered/undelivered or SES id counts; failed and queued-without-SES skipped | "counts an email once it left for SES ..." |
 | Calls: answered_at or call_outcome; instant rule; ringing-only skipped | "counts a call once the contact leg was dialed ..." |
 | Relay team: contact-keyed sid+sentAt at slot.sentAt; phone# skipped; status ignored; relay_retry_of skipped | "counts each CONTACT member ...", "skips a relay 30003 retry row ..." |
@@ -19890,17 +20359,23 @@ the link reads "Open the Past tab", not the "See all 7 on the Past tab" the
 spec asserts today (`today-past-tours.spec.ts:188`). Which text shows
 depends on S5's as-built `more` condition. Resolution: S7.8 asserts
 "Open the Past tab" (the existing rule applied to all-labeled rows) through
-ONE constant, `PAST_TAB_LINK_AT_SEVEN`; if S5 made the link compare against
-the shown 5 rows, change only that constant to `See all 7 on the Past tab`
-and record it in the S7 report.
+ONE constant, `PAST_TAB_LINK_AT_SEVEN`. RULED by [PR76] (and [PR67]: S5
+keeps the `total > rows.length` rule): `PAST_TAB_LINK_AT_SEVEN` = "Open the
+Past tab". If the as-built S5 link reads otherwise, that is an S5 deviation
+from PR67 to report, not a constant to change.
 
 C5. PR39: `e2e/performance/routes.ts` `TODAY_TERMINAL` "(new headings)". The
 At a glance parts must NOT be populated terminals: "All caught up" renders
 WITH At a glance below it (spec 2.3, 2.4), and the profiler reads populated
 and empty together as `contradictory_terminal`
 (`e2e/performance/cli.ts:497`, `if (populated && empty) return
-'contradictory_terminal';`). Resolution (S7.11): populated = the seven
-checklist lists only. Also `e2e/performance/routes.test.ts` does not pin
+'contradictory_terminal';`). Resolution (S7.11), RULED by [PR77] and
+[PR89]: populated = the seven checklist lists only; empty = "All caught
+up"; the error group = the queue load-error alert plus "We couldn't load "
+(contains - the per-section unavailable alerts) and the fallback line
+"Some sections can't load right now." (in the error group by the
+`routes.ts` precedent, `:506`, where "Couldn't load our number." is an
+error terminal). Also `e2e/performance/routes.test.ts` does not pin
 `TODAY_TERMINAL` at all (grep: no Today terminal assertion; the citation
 check at `:451-464` is format-only), so S7.11 adds that pin - it is the
 task's RED.
@@ -19916,10 +20391,11 @@ gitignored, lane-only helper (`.superpowers/s7/lane-reached-out.ts`, built on
 the backfill's own pinned `resolveStageClient('local', {}, { lane })`) to
 stand for a contact staff reached before the deploy. Expected: dry run
 planned 2; apply written 1, skipped 1; second apply written 0, skipped 2;
-the restored value equals the live stamp. PLANNER: this writes to the lane's
-DynamoDB Local database outside the app; approve or strike the helper step
-(without it, expect written 0 / skipped 2 on both applies and record that
-the write path was not exercised).
+the restored value equals the live stamp. RULED by [PR78]: APPROVED. The
+helper lives under `.superpowers/` (gitignored) and refuses to run unless
+the client's endpoint host is `localhost` or `127.0.0.1` AND the table
+prefix is exactly the lane's `hc-local-<L>-` - both asserted in the helper
+code BEFORE any read or its UpdateCommand (S7.15 step 1).
 
 C7. Spec 10 lists three GLOSSARY entries and two issue edits. The tree holds
 more text that this branch makes FALSE: `documentation/GLOSSARY.md:699-703`
@@ -19976,8 +20452,9 @@ No other conflict with plan sections 0-4 or the spec.
     `failed` (the twin's names) plus the PR38 per-category counts. If S6
     named the counters differently, record the as-built names; the expected
     VALUES in S7.15 still hold.
-  - S4 report carries the WI7 Query counts; S7.14 cites them in the new
-    issue. If the S4 report has none, STOP S7.14 and ask the planner.
+  - S4 report carries the WI7 Query counts, the PR92 unread-pages record and
+    the PR90 WI8 record; S7.14 cites them in the new issue. If the S4 report
+    has none, STOP S7.14 and ask the planner.
 - S7.2 moves five helpers out of `e2e/tests/dashboard-next/follow-up-tab.spec.ts`
   (not a PR39 file) into `e2e/support/followUpFixtures.ts`, verbatim, because
   the new spec needs the same ones (brief: extract when both need them). The
@@ -19998,7 +20475,8 @@ No other conflict with plan sections 0-4 or the spec.
   as a pin in S7.17.
 - S7 does NOT touch RUNBOOK.md (S6 owns the backfill entry) and does NOT
   record the tracker #31 decisions (spec 10, last bullet): that is the
-  planner's handback item (Google Docs connector).
+  planner's handback item (Google Docs connector). [PR85] The S8 report
+  template carries that line and the post-merge backfill obligation.
 - S8 runs the five bare gates; S7 runs only subsets plus
   `npm run typecheck -w @housingchoice/e2e` and `npm run test -w @housingchoice/e2e`.
 
@@ -21944,8 +22422,10 @@ nohup bash W:/tmp/today-checklist/.superpowers/s7/run-spec.sh s78 tests/dashboar
 ```
 
 Expected: exit `0`, `1 passed`. If it fails ONLY at the `pastTab` locator
-and the page shows `See all 7 on the Past tab` beside the button, apply C4
-(change `PAST_TAB_LINK_AT_SEVEN` only), re-run, and record it in the report.
+and the page shows `See all 7 on the Past tab` beside the button, do NOT
+change the constant: [PR76] fixes it at "Open the Past tab" and [PR67]
+keeps S5's link rule, so that page is an S5 deviation - STOP and report it
+to the planner with the run's evidence.
 
 Commit (no run alive; bare `git status` first, MERGE_HEAD absent):
 
@@ -22135,7 +22615,11 @@ git commit -m "test(e2e): tours-page checks the requested tour is absent from To
 
 ### Task S7.11 - perf: TODAY_TERMINAL names the checklist; a pin in routes.test.ts
 
-PR39 (`TODAY_TERMINAL`, the stale 'Group texts to close'); C5.
+PR39 (`TODAY_TERMINAL`, the stale 'Group texts to close'); C5; [PR77] (the
+seven checklist lists, "All caught up", the load-error alert; At a glance
+is not a terminal); [PR89] (the per-section "We couldn't load " alerts and
+the fallback line are terminals too - placed in the ERROR group, as the
+`routes.ts:506` precedent places "Couldn't load our number.").
 
 Files:
 - Modify `e2e/performance/routes.ts` (ASCII file)
@@ -22167,7 +22651,10 @@ describe('Today terminal copy', () => {
   // "All caught up" the empty one. At a glance (Tours today, the AI line) is
   // NOT a terminal: "All caught up" renders with At a glance below it, and the
   // profiler reads populated plus empty as contradictory_terminal
-  // (cli.ts terminalStateFor). Every name must be a string the Today page
+  // (cli.ts terminalStateFor). The error group holds the queue load error,
+  // the per-section "We couldn't load <section>." alerts (contains) and the
+  // fallback line (PR89), so a page that can only say a section failed is a
+  // terminal, not an unknown. Every name must be a string the Today page
   // source actually carries.
   it('waits for the checklist lists or All caught up, never an At a glance part', () => {
     const today = ROUTES.find((candidate) => candidate.surfaceId === '/')!;
@@ -22181,6 +22668,11 @@ describe('Today terminal copy', () => {
       ['list', 'Placements', 'exact'],
     ]);
     expect(today.terminal.empty.map((c) => [c.role, c.name])).toEqual([['text', 'All caught up']]);
+    expect(today.terminal.error.map((c) => [c.role, c.name, c.exactness])).toEqual([
+      ['alert', "We couldn't load your queue", 'contains'],
+      ['alert', "We couldn't load ", 'contains'],
+      ['text', "Some sections can't load right now.", 'exact'],
+    ]);
     expect(today.terminal.populatedAlternatives).toHaveLength(7);
     const dir = fileURLToPath(new URL('../../dashboard/src/routes/today/', import.meta.url));
     const source = readdirSync(dir)
@@ -22193,6 +22685,11 @@ describe('Today terminal copy', () => {
         [`'${name}'`, `"${name}"`, `>${name}<`].some((needle) => source.includes(needle)),
         `the Today page source carries "${name}"`,
       ).toBe(true);
+    }
+    // The error copy is matched by substring (a template literal builds the
+    // per-section line), so its source check is a substring check too.
+    for (const contract of today.terminal.error) {
+      expect(source.includes(contract.name!), `the Today page source carries "${contract.name!}"`).toBe(true);
     }
   });
 });
@@ -22229,17 +22726,22 @@ Replacement:
 // 2): the seven CHECKLIST lists, in page order, are the populated terminal.
 // The At a glance parts (Tours today, the collapsed AI suggestions line) are
 // deliberately NOT: "All caught up" renders WITH At a glance below it (spec
-// 2.3), so listing them would read a done page as contradictory_terminal. A
-// page whose only content is a section's "We couldn't load <section>." line
-// matches neither and samples unknown; the hermetic perf world never fails a
-// section.
+// 2.3), so listing them would read a done page as contradictory_terminal. The
+// ERROR group (plan PR89) also holds the per-section "We couldn't load
+// <section>." alerts (contains) and the fallback line, so a page whose
+// checklist is empty and a section failed - or the 404 fallback - is a
+// terminal, not an unknown (the "Couldn't load our number." precedent below).
 const TODAY_TERMINAL = terminal(
   [
     'Needs you now', 'Identify these contacts', 'Past tours needing an outcome', 'Tours to book',
     'Quiet shares', 'Relay groups to close', 'Placements',
   ].map((name) => locator('list', name)),
   [locator('text', 'All caught up')],
-  [locator('alert', "We couldn't load your queue", 'contains')],
+  [
+    locator('alert', "We couldn't load your queue", 'contains'),
+    locator('alert', "We couldn't load ", 'contains'),
+    locator('text', "Some sections can't load right now."),
+  ],
 );
 ```
 
@@ -22248,13 +22750,14 @@ Step 4 - re-cite the `'/'` terminal source. In `CONTRACT_SOURCE_LEDGER.terminals
 `    '/': 'dashboard/src/routes/today/Today.tsx:36-48,226-261,278-291',`
 cites the old GROUP_META, PastToursSection and empty-state ranges. Replace
 the value with the AS-BUILT ranges (S5) of: the section heading labels, the
-"All caught up" block and the queue error alert, in the same
+"All caught up" block, the queue error alert, the per-section unavailable
+line and the fallback line [PR89], in the same
 `<file>:<a>-<b>,<c>-<d>` form; if the labels live in a separate section
 component file, add it after `; ` (the citation regex at
 `routes.test.ts:452` allows `; <file>:<ranges>`). Find them with:
 
 ```
-grep -n -E "Identify these contacts|All caught up|We couldn't load your queue" dashboard/src/routes/today/*.tsx
+grep -n -E "Identify these contacts|All caught up|We couldn't load|Some sections can't load" dashboard/src/routes/today/*.tsx
 ```
 
 Likewise re-cite the `'/'` endpoint base (`:764`,
@@ -22279,7 +22782,7 @@ cd W:/tmp/today-checklist
 git diff -U0 -- e2e/performance/routes.ts e2e/performance/routes.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
 git status
 git add e2e/performance/routes.ts e2e/performance/routes.test.ts
-git commit -m "test(perf): Today's terminal is the seven checklist lists or All caught up" -m "Tracker #31 renamed and reordered Today: Identify these contacts, Tours to book, Quiet shares and Placements join; Unreplied, Follow-ups due, AI suggestions to review and the stale Group texts to close leave. At a glance stays out of the terminal because All caught up renders with it. A new routes.test case pins the names against the Today page source." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "test(perf): Today's terminal is the seven checklist lists or All caught up" -m "Tracker #31 renamed and reordered Today: Identify these contacts, Tours to book, Quiet shares and Placements join; Unreplied, Follow-ups due, AI suggestions to review and the stale Group texts to close leave. At a glance stays out of the terminal because All caught up renders with it. The error group adds the per-section We couldn't load alerts and the fallback line (PR89). A new routes.test case pins the names against the Today page source." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -22630,7 +23133,9 @@ git commit -m "docs(glossary,status-model): Quiet shares, last reached out, At a
 
 ### Task S7.14 - the 2026-06-16 spec note, the issue updates, the new quiet-shares cost issue, `npm run issues` (docs-only)
 
-Spec 10, 6.5, 5.2; WI7; C7. Docs-only: RED/GREEN are greps.
+Spec 10, 6.5, 5.2; WI7; C7; [PR92] (the cost issue names the unread walk
+that now runs to its budget); [PR90] (the cost issue records the GSI
+eventual-consistency residue, WI8). Docs-only: RED/GREEN are greps.
 
 Files:
 - Modify `docs/superpowers/specs/2026-06-16-new-dashboard-design.md` (pre-existing non-ASCII; added lines ASCII)
@@ -22641,8 +23146,9 @@ Files:
 Step 0 - the WI7 numbers. Read
 `docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S4-report.md`
 and find the WI7 record (the Query and BatchGet counts one Today load made in
-the harness). If it is absent, STOP this task and ask the planner (the issue
-must cite measured counts, spec 6.5).
+the harness), its PR92 unread-walk record (the unread pages per load) and
+its PR90 WI8 record. If any is absent, STOP this task and ask the planner
+(the issue must cite measured counts, spec 6.5).
 
 RED:
 
@@ -22760,7 +23266,7 @@ severity: low
 status: open
 area: app/today
 created: 2026-10-24
-refs: app/src/routes/today.ts, app/src/services/followUps.ts, app/src/services/quietShares.ts, dashboard/src/routes/today/useToday.ts
+refs: app/src/routes/today.ts, app/src/services/followUps.ts, app/src/services/quietShares.ts, app/src/repos/toursRepo.ts, dashboard/src/routes/today/useToday.ts
 ---
 
 **Problem.** Today's Quiet shares section (tracker #31, spec
@@ -22782,6 +23288,25 @@ Measured in the test harness by the build (S4 report, watch item WI7):
 available properties, the BatchGet count and keys, and the harness world they
 were measured in>. Prod holds tens of available properties (spec 6.5), so a
 load is tens of small Queries.
+
+The unread walk grew too (plan PR92): Today's unread pass now keeps only
+`unknown_1to1` threads (spec 4), so it no longer stops at its 100-row cap
+and reads the byUnread index up to its raw budget (`UNREAD_WALK_LIMIT`,
+2000 items, `app/src/routes/today.ts`) on every load and every refetch; the
+"underfilled" WARN fires whenever the index holds more than that budget.
+Measured: <fill: the unread pages per load from the S4 report's PR92
+record>.
+
+Not a cost, but the same reads (plan PR90, WI8): Tours to book reads the
+tours byStatus GSI, and Quiet shares reads the units byStatus and tours
+byUnit GSIs (listing sends is a base-table Query). A GSI cannot be read
+consistently, so the single refetch after a tour create can miss a
+not-yet-propagated index entry - a new request not yet in Tours to book, or
+an Interested person still in Quiet shares - until the next event or a
+reload: the same residue Today carries for `conversation.updated` over the
+byUnread GSI. No mechanism was added. DynamoDB Local is always consistent,
+so no e2e run is proof of prod liveness here. A cache (below) must not
+widen this window.
 
 **Suggested fix.** Only if load grows (Today p95, or consumed read units on
 the units, listing_sends and contacts tables): a short-lived per-process
@@ -22826,7 +23351,7 @@ staged):
 cd W:/tmp/today-checklist
 git status
 git add docs/superpowers/specs/2026-06-16-new-dashboard-design.md docs/issues/imported-unknown-threads-surface-as-unknown-on-today.md docs/issues/public-signup-abuse-hardening.md docs/issues/today-quiet-shares-read-cost.md
-git commit -m "docs(specs,issues): Today checklist supersedes the 2026-06-16 grouping; issue updates; quiet-shares read cost filed" -m "The old Today action queue spec points at the tracker #31 spec. The imported-unknown-threads issue records that Today no longer shows those rows (the thread type and the fallback remain). The public sign-up issue records that made-up-phone sign-ups no longer reach Today. A new low issue files the per-load Follow up core cost with the measured harness counts (spec 6.5, WI7)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "docs(specs,issues): Today checklist supersedes the 2026-06-16 grouping; issue updates; quiet-shares read cost filed" -m "The old Today action queue spec points at the tracker #31 spec. The imported-unknown-threads issue records that Today no longer shows those rows (the thread type and the fallback remain). The public sign-up issue records that made-up-phone sign-ups no longer reach Today. A new low issue files the per-load Follow up core cost with the measured harness counts (spec 6.5, WI7), the unread walk that now runs to its budget (PR92) and the GSI eventual-consistency residue (PR90, WI8)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -22847,7 +23372,7 @@ Files:
 - Create (gitignored, never committed) `W:/tmp/today-checklist/.superpowers/s7/lane-reached-out.ts`
 - Modify `docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S7-report.md`
 
-Step 1 - the lane helper (C6; planner-approved or struck). Create
+Step 1 - the lane helper (C6; APPROVED by [PR78] with its guard). Create
 `W:/tmp/today-checklist/.superpowers/s7/lane-reached-out.ts`:
 
 ```ts
@@ -22855,7 +23380,10 @@ Step 1 - the lane helper (C6; planner-approved or struck). Create
 // removes, ONE contact's last_reached_out_at in a hermetic e2e lane's own
 // DynamoDB Local database (hclane<L>, tables hc-local-<L>-*), through the
 // same pinned client the backfill uses. It refuses anything but a positive
-// lane number, so it can never reach the live local stack or AWS.
+// lane number, and (plan PR78) it refuses to touch anything unless the
+// client's endpoint host is localhost / 127.0.0.1 AND its table prefix is
+// exactly this lane's hc-local-<L>- - checked BEFORE the first read and the
+// UpdateCommand - so it can never reach the live local stack or AWS.
 //   npx tsx .superpowers/s7/lane-reached-out.ts <lane> get <contactId>
 //   npx tsx .superpowers/s7/lane-reached-out.ts <lane> unstamp <contactId>
 import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
@@ -22872,7 +23400,22 @@ void (async () => {
   }
   const stage = await resolveStageClient('local', {}, { lane });
   try {
+    // PR78 guard: assert the target BEFORE any command is sent.
+    const host = new URL(stage.endpoint).hostname;
+    const lanePrefix = `hc-local-${lane}-`;
+    if ((host !== 'localhost' && host !== '127.0.0.1') || stage.prefix !== lanePrefix) {
+      console.error(
+        `refusing: endpoint host ${host} / prefix ${stage.prefix} is not localhost or 127.0.0.1 with ${lanePrefix}`,
+      );
+      process.exitCode = 1;
+      return;
+    }
     const TableName = tableName('contacts', stage.env);
+    if (!TableName.startsWith(lanePrefix)) {
+      console.error(`refusing: table ${TableName} is not under ${lanePrefix}`);
+      process.exitCode = 1;
+      return;
+    }
     console.log(`${stage.describe} table ${TableName}`);
     if (mode === 'unstamp') {
       await stage.doc.send(
@@ -23000,9 +23543,9 @@ exit 0, `written 0`, `skipped 2`, `failed 0`; afterwards A still holds
 writer stamps - PR9 and PR38 agree). Any other result: STOP, keep the lane
 up, report to the planner.
 
-If the planner struck the helper (C6), skip steps 1 and 5 and expect
-`planned 2`, then `written 0`, `skipped 2` on both applies; record that the
-write path was not exercised.
+(The helper was APPROVED by [PR78]; there is no struck-helper path. If the
+helper prints a `refusing:` line, STOP before step 5 and report: the lane
+is not the one step 3 proved.)
 
 Step 8 - record. Add to the S7 report (counts and ids only - never a name,
 phone or body):
@@ -23245,8 +23788,9 @@ Step 5 - finish the report. Append:
 - WI9: no seed file changed (git diff --name-only main...HEAD -- app/src/lib/seed empty).
 - WI12: backfill run on lane <L> only (S7.15); RUNBOOK entry at RUNBOOK.md:<line>.
 - WI13: no re-run-to-green; <fill: any failure, its diagnosis, both runs>.
-- Plan deviations: <fill: each UI constant changed for an as-built name,
-  C4 if applied, C6 as approved or struck; or "none">.
+- Plan deviations: <fill: each UI constant changed for an as-built name;
+  or "none">. (C4 is ruled by PR76 and C6 approved by PR78 - neither is a
+  deviation.)
 ```
 
 Step 6 - commit (no run alive; bare `git status` first, MERGE_HEAD absent;
@@ -23555,7 +24099,15 @@ Step 2 - write
 (main/github/origin SHAs, merged or already contained, any conflict
 dry-run result), any remote main ahead of local main, and anything the
 tree held that the plan got wrong. Nothing else to report -> one line
-saying so beside the overlap and sync lines.
+saying so beside the overlap and sync lines. [PR85] Whatever else it holds,
+the report ENDS with these two handback lines, verbatim:
+
+```
+## Handback obligations
+
+- POST-MERGE OBLIGATION: run the last_reached_out_at backfill AFTER the deploy - Cameron, dev then prod, dry run first (RUNBOOK entry)
+- Tracker #31: the planner records the Oct 23 decisions and Sam's option C pick
+```
 
 Step 3 - ASCII checks and commit (no gate running; bare `git status`
 first; MERGE_HEAD absent; exactly the two reports new):
@@ -23580,3 +24132,5 @@ deploys, and deletes no branch or worktree.
   together under the five AGENTS.md completion gates.
 - Spec section 9: every listed test runs inside gates 2 and 4.
 - Overlap re-checked at S8 (S8-report.md).
+- Handback obligations (spec 7.5 post-merge backfill; spec 10 tracker #31):
+  the two lines S8.4 step 2 writes [PR85].

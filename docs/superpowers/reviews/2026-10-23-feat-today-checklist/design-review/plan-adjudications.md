@@ -71,3 +71,18 @@ R2-4 is recorded. Round 2 is TERMINAL; the plan review ends after 2 rounds.
 
 Totals: round 1 18 findings (A 10, B 8, overlapping), round 2 5. No REJECT.
 Plan v3 FINAL.
+
+## Launch-gate revision (Cameron, 2026-10-24) and round 3 (plan v4)
+
+Cameron revised two decisions at the launch gate: no counts in section
+headings (PR102; the quiet-shares wire drops `people`, PR103); a staff Retry
+or Send now of anything automated from its first send never counts (spec r8;
+the `system_copy` marker, PR104-PR106). Round 3 reviewed only that delta
+(reviewer A continued).
+
+| Finding | Verdict | What changed / why |
+|---|---|---|
+| R3-1 `system_copy` is lost on the automatic 30003 retry and the reconcile retry adoption, so a staff Retry of the newest row in a Send-now chain stamps | ACCEPT | PR107: both writers carry the marker forward; RED tests per writer and one end-to-end chain case. DECISION CHANGED (two new marker writers). |
+| R3-2 work map: S6 also depends on S2 (it reads `MessageItem.system_copy`) | ACCEPT | Plan section 2 amended. |
+
+Round 3 added two writer surfaces, so round 4 (the cap) reviews PR107 only.

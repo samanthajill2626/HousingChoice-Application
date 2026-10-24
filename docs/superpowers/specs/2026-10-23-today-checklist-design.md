@@ -1,6 +1,7 @@
 # Today as the daily checklist - design (tracker #31)
 
-Status: r4, design review CLOSED (round 3 terminal); awaiting the human spec gate. Branch `feat/today-checklist`,
+Status: r5. Design review closed after round 3; Cameron passed the spec gate
+2026-10-24 and added the backfill (7.5), reviewed in round 4. Branch `feat/today-checklist`,
 cut from `main` @970a29b9. Tracker: HousingChoice Improvements Tracker item #31
 (Oct 16 meeting with Sam, Oct 18 and Oct 23 decisions). Mockups shared with
 Sam (Design canvas https://claude.ai/artifact/673Q7i9fjQ7zWAH1XydJ5v); Sam
@@ -35,7 +36,7 @@ The VA uses a normal staff login. No roles or permissions change.
 
 - The Matching page's Follow up tab, its 24-hour rule and its wire shape.
 - "Last heard from" and `last_heard_from_at` (inbound only, unchanged).
-- Showing `last_reached_out_at` anywhere, or a backfill of it.
+- Showing `last_reached_out_at` anywhere.
 - Interested / Not interested actions on Today rows.
 - A Properties sent list on the unknown contact page.
 - New roles or permissions for the VA.
@@ -503,7 +504,7 @@ Writers that do NOT stamp:
 | Tour reminder and placement nudge "Send now" | staff pick only the time; the copy is the automated reminder or nudge, even though the row carries `automated:false` |
 | Missed-call auto text, housing-fair welcome text, tour reminder poll, nudge poll | automated |
 | Relay announcements with system copy (default intro, member added, group closed, group tour reminder) | system messages |
-| Quo importer (`lib/import/apply.ts`) | historical data with no staff/automated split; consistent with no backfill |
+| Quo importer (`lib/import/apply.ts`) | historical data with no staff/automated split; Quo rows are older than the backfill window (7.5) anyway |
 | Reseed (lean, full) and the performance seed | no seeded contact carries the field; tests that need it drive a real staff send (9) |
 
 Edge rules:
@@ -514,13 +515,59 @@ Edge rules:
 - A member or contact with no contactId is skipped: there is no contact item
   to stamp, and quiet shares are keyed by contactId.
 
-### 7.4 No display, no backfill
+### 7.4 No display
 
-- The field is not shown anywhere in this mission.
-- No backfill (recommended; Cameron to confirm at the spec gate). Every
-  candidate share ages out in 14 days, so the gap closes on its own two weeks
-  after deploy; until then a person staff texted before the deploy can show a
-  few days early. A backfill would be an ops script against prod.
+The field is not shown anywhere in this mission; it only feeds the quiet
+clock.
+
+### 7.5 Backfill (Cameron, 2026-10-24)
+
+A one-time script seeds `last_reached_out_at` from recent message history, so
+people staff followed up with before the deploy do not show as quiet early.
+
+- Script: `app/scripts/backfill-last-reached-out.ts`, built on
+  `app/scripts/backfill-last-heard-from.ts` (same shape): `--env
+  local|dev|prod` through `scripts/lib/stageClient.ts`, DRY RUN by default,
+  `--apply` writes, counts-and-ids-only logging (never a name, phone or
+  body), abort with a partial report and exit 1 on a 'failed' touch.
+- Window: outbound rows from the last 14 days only. A stamp matters only when
+  it is later than a share's `sentAt`, and every candidate share is at most 14
+  days old (FOLLOW_UP_LOOKBACK_MS), so older rows can never change a row. This
+  also keeps the scan small.
+- Writes: the latest qualifying instant per contact across threads, then ONE
+  `touchLastReachedOut` per contact. The writer is forward-only, so a value a
+  live send wrote after the scan is never moved back, a second run writes
+  nothing, and running before or after the deploy is equally safe. It emits no
+  live events.
+- Which historical rows count. The rows carry no "who started this" marker
+  (7.3), so the script applies the 7.2 rules through the fields each writer
+  leaves behind. The plan verifies every filter against the writer's real row
+  shape, and the dry run reports a count per category so the human can see
+  what it would stamp:
+  - one-to-one SMS/MMS and email: `direction` outbound, `author` 'teammate',
+    `automated` not true, no `broadcast_id` (shares and their retries), no
+    automatic-retry fields (`retry_attempt` / `retry_window_start`), not a
+    failed email;
+  - relay and group posts: rows with `relay_sender_key` 'team' stamp each
+    member with a contactId (using the per-member slot state where the row has
+    one, so a member with no sent leg is skipped); rows with
+    `relay_sender_key` 'system' and relay retry rows (`relay_retry_of`) are
+    skipped;
+  - calls: `type` 'call', `direction` outbound, except calls refused before
+    the target was dialed (the canceled refusal stamp the whisper-gate writes);
+  - tour reminder and placement nudge "Send now" rows: skipped when the plan
+    finds a field that marks them; if no such field exists they are counted
+    and the dry run says how many could not be told apart (an approximation
+    that ages out in 14 days).
+- Recipient: the row's `recipient_contact_id` when present, else the
+  one-to-one thread's contact; group rows as above.
+- Who runs it: an agent runs it only against a hermetic e2e lane (`--env local
+  --lane <L>`). Cameron runs it against dev and prod after the deploy, dry run
+  first. A RUNBOOK entry gives the commands, and the handback lists it as a
+  post-merge obligation.
+- Tests: the classification per category (each counted and each skipped kind),
+  the 14-day window, latest-per-contact across threads, the forward-only
+  re-run writing nothing, and the abort on 'failed'.
 
 ## 8. Live updates
 
@@ -540,7 +587,7 @@ Edge rules:
   and the person leaves Quiet shares live.
 - Not interested emits no event. Staff mark it on the contact page, and
   returning to Today remounts and refetches it; a second open Today tab picks
-  it up on its next refetch. No event is added (open question 2).
+  it up on its next refetch. No event is added (Cameron, spec gate 2026-10-24).
 - Rows that appear only because time passes (a share crossing 2 or 5 days, a
   property becoming unavailable) show on the next refetch or reload, as due
   deadlines already do.
@@ -606,12 +653,11 @@ Edge rules:
 - `docs/issues/imported-unknown-threads-surface-as-unknown-on-today.md`:
   record that Today no longer shows those rows (5.2).
 - `docs/issues/`: a new entry for the Today quiet-shares read cost (6.5).
+- RUNBOOK.md: the backfill commands (7.5), dry run first.
 - Tracker #31: record the Oct 23 decisions and Sam's option C pick when the
   build ends.
 
-## 11. Open questions for the spec gate
+## 11. Spec gate
 
-1. No backfill of `last_reached_out_at` (7.4) - confirm.
-2. No live event from Not interested (8) - confirm.
-</content>
-</invoke>
+Both settled at the spec gate (Cameron, 2026-10-24): a backfill of
+`last_reached_out_at` runs once (7.5); Not interested adds no live event (8).

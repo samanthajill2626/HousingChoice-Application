@@ -49,8 +49,6 @@ recommended option on both:
 Round 1 changed decisions (two by Cameron, five by adjudication), so round 2
 runs. Reviewer A is continued for round 2 (both landed similar accepted
 counts; A found the unique relay-intro and suppressed-member surfaces).
-</content>
-</invoke>
 <invoke name="Bash">
 <parameter name="command">cd W:/tmp/today-checklist && git status --short && git add docs/superpowers/specs/2026-10-23-today-checklist-design.md docs/superpowers/reviews/2026-10-23-feat-today-checklist/design-review/spec-r1-reviewer-a.md docs/superpowers/reviews/2026-10-23-feat-today-checklist/design-review/spec-r1-reviewer-b.md docs/superpowers/reviews/2026-10-23-feat-today-checklist/design-review/adjudications.md && git commit -q -m "docs(spec,records): today-checklist spec r2 after design review round 1 - shares stop restarting the clock, Identify unknown-only (Cameron), call/relay stamp points, live emits, wire fields
 

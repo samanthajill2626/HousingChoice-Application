@@ -70,3 +70,57 @@ items for the planner at the end.
 - S2.2 draft defect, outside every ruling: the harness cases 1f (three), 1k and 1m (Send now) assert `world.sent` / `world.sentDetails`, but api.ts builds its default `createSendMessageService` with no `adapter` (api.ts:694-703; S2.2 3a keeps that), so the service builds its own driver from config (sendMessage.ts:424) - the console driver under the harness (`MESSAGING_DRIVER: 'console'`, twilioWebhookHarness.ts:5631). World.sent stays empty and those cases fail at GREEN. Needs a ruling (for example pass the router's `adapter` into the service in 3a, which in production is the same config-built adapter) before S2.2 can be built. Not changed.
 - PR89 placement: the ruling names the two locators but not the terminal group. Applied in the ERROR group, following `e2e/performance/routes.ts:506` (a plain "Couldn't load our number." text is an error terminal there); populated would mislabel and empty would make a fallback page with rows contradictory_terminal. Confirm or re-rule.
 - PR86 vs PR24: with no deletion test left in `unitLabelOf`, nothing in today.ts uses the units repo's `isDeleted`, so S4.3 no longer imports it (an unused alias would fail gate 5). PR24's alias rule is moot, not reversed.
+
+## Launch-gate write-through (PR102-PR105)
+
+Plan v4 @74a7a886 -> this commit. Spec r8. Every changed step is marked with its ruling id.
+
+Sections 0-4:
+- PR102 - section 1 "Every section shows 5 rows" bullet: headings carry no count; PR33 rewritten to a bare `<h2>` with the count in "Show all N"; PR35's "section's count" names Show all; PR64 marked "(superseded by PR102)".
+- PR103 - PR23's builder signature returns `{ properties }` and its "Order and `people`" sentence; PR30's response drops `people`.
+- PR104/PR105 - PR91 marked "(gate and backfill rule superseded by PR104 / PR105)"; PR100 marked "(superseded by PR104, PR105)".
+
+S2 (PR104):
+- S2 scope line names PR104 and the new task (and the round-1 rulings the earlier scope edit missed).
+- NEW Task S2.1a - `NewMessage.systemCopy` / `MessageItem.system_copy` with doc comments; true-only append mapping beside `automated` (the `received_on_closed_thread` pattern); `SendMessageInput.systemCopy` destructured and persisted; DynamoDB Local round-trip case and two sendMessage.test.ts cases; RED/GREEN/ASCII/commit. The harness messages fake is NOT edited (PR37).
+- S2.2 header and Files - the PR104 gate, the marker writers, the two job files.
+- S2.2 1b/1c - comments: a plain Retry stamps and carries no marker (the exact toEqual pins it).
+- S2.2 1e - PR91's case replaced: share (no stamp, no marker), automated (no stamp, systemCopy), Send-now row (no stamp, systemCopy), Retry of a manual retry of an automated text (no stamp, systemCopy; stored retry_root so no parent walk), plain x2 (stamps, no marker).
+- S2.2 1f - the harness Retry case adds a failed Send-now row (system_copy seeded on the world row) that does not stamp.
+- S2.2 1l/1m - the poll cases assert no systemCopy marker.
+- S2.2 new 1n - both Send now spy cases assert `systemCopy: true` and no staffOutreach.
+- S2.2 RED list, 3c (Retry: systemCopy when automated or system_copy; the new W2 gate replacing PR91's), new 3c2 (forceSendReminder / forceSendNudge pass `systemCopy: true`), GREEN adds the two jobs suites, ASCII/add/commit file lists and message.
+- S2.8 report - "W2 Retry gate" section rewritten to PR104 (PR91's and PR100's residues "closed by PR104"; the harness-fake note); WI4 row adds the system-copy Retry.
+- S2 coverage - three rows (S2.1a marker; W2 gate; Send now marker and poll no-marker).
+- S7.12 - the ContactUpdatedEvent doc text: Retry of a row "neither a share, automated nor system copy".
+
+S4 (PR103):
+- S4 cross-slice wire note - `TodayQuietShares` without `people`.
+- S4.2 - description, test header, the two `out.people` asserts removed, the distinct test renamed to "a row under each; properties only", empty results `{ properties: [] }`, wire-row toEqual without `people`, builder doc/signature/`distinct` set removed, commit message.
+- S4.7 - header note; `{ status, properties, truncated }` everywhere (EMPTY and three toEquals); the two full toEquals drop `people`; the three `people: 1` matches become a one-person `properties` match; "counts once" title; RED text; `TodayQuietShares` type, route body and the `quiet_share_people` log field removed.
+- S4 coverage row - PR103.
+
+S5 (PR102, PR103):
+- S5 C2 - ruled by PR102 (no `.count`, pins stay); C6 "not its count chip"; S7 cross-slice notes - bare headings, exact names.
+- S5.1 - description and Files; tests: bare-label heading (`toHaveTextContent(/^Tours to book$/)`), failed-section case renamed, h3 name bare; component: no `count` prop or element; 3b struck (`.groupHeading` untouched); 3c drops `.count`; GREEN notes the untouched 08-03 pins; commit message.
+- S5.3 - two comments: Show all N counts the rows, no heading count.
+- S5.4 - probe string `ok:<properties>:<truncated>` and expectation `ok:1:false`; QUIET fixture drops `people`; `TodayQuietShares` mirror drops `people`.
+- S5.5 - description; `ok()` helper drops `people`; heading test asserts the bare "Quiet shares"; component comment; `TodaySection` without count.
+- S5.6 - fate table rows (bare labels kept; nag case and past-tours-alone case unchanged); a note that the 2026-08-03 pin lines ~166-169 are copied byte-for-byte (line ~167's em dash as `[U+2014]`); every counted heading name made bare; `quietOk` drops `people`; the Quiet shares page case; RED bullet; Today.tsx's four `TodaySection` calls drop `count` and the header comment; ASCII step checks Today.test.tsx on added lines plus a grep that the pin line survived; commit message.
+- S5.7 report C2 line and risks; S5 coverage row.
+
+S6 (PR105):
+- S6 scope line - PR105 replaces PR91's rule; depends on S2.1a.
+- S6.1 tests - the PR91 case replaced by the PR105 case (a marked row skipped; retried row OR chain root judged; root-only exclusion; retried-row-seen-root-absent counts without residue; both-absent residue); page case retitled; existing case's residue comment.
+- S6.1 code - header comment; SKIP_KINDS gains `system_copy`; `retryOriginOutsideWindow` and `windowOneToOne` docs; `isSystemCopy` reads `system_copy`; planOneToOneRow skips a marked row and checks `retry_root` beside `retry_of`; planThreadPage doc; result-field doc; GREEN count note.
+- S6.3 RUNBOOK - the rows-count sentence, the `retry_of_system_copy` / `system_copy` counter text, the `retryOriginOutsideWindow` text.
+- S6.4 report line and S6 coverage row - PR105 replaces PR91's rule and PR100's residue.
+
+S7 (PR102, PR103):
+- Cross-slice note (heading accessible name is the heading text), relay-lifecycle note, `todayList` doc comment, selectors.md row text.
+- S7.2 - the wire type drops `people`; both `wire.quietShares?.people` asserts become `not.toHaveProperty('people')`; the two Quiet shares heading `toContainText` count checks become exact-name visibility.
+- S7.8 - the Past tours heading `toContainText('7')` becomes an exact-name check (the count is in "Show all 7").
+- S7.13 GLOSSARY text - no heading count; S7.16 live QA - the heading reads exactly "Quiet shares".
+
+Not applied / for the planner:
+- None of PR102-PR105 left unapplied. Two choices to confirm: (1) PR104 does not name the harness messages fake; it is left as is (PR37), so it drops `systemCopy` and the harness case sets `system_copy` on the world row directly. A planner may prefer mapping it there too. (2) PR102 "pins stay exactly as they are" inside a whole-file rewrite: the pin comment line ~167 holds an em dash, so S5.6 tells the builder to copy that one line from the current file, and the Today.test.tsx ASCII check moves to added lines.

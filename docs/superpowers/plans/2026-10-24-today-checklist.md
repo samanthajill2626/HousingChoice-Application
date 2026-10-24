@@ -82,7 +82,9 @@
   help line on the others.
 - Every section shows 5 rows; "Show all N" expands in place, then "Show
   fewer". Quiet shares counts PROPERTY lines. Past tours keeps its Past-tab
-  link beside its Show all button. Expansion is page state only.
+  link beside its Show all button. Expansion is page state only. Section
+  headings carry NO count; the "Show all N" button names it (spec r8 2.1,
+  PR102).
 - "All caught up" only when every checklist section (1-7) is empty AND
   settled AND none is unavailable AND the load is not the fallback. At a
   glance never blocks it and still renders below it.
@@ -373,7 +375,7 @@ tree).
   export const QUIET_REPLIED_MS = 48 * 60 * 60 * 1000;
   export const QUIET_NO_REPLY_MS = 120 * 60 * 60 * 1000;
   export function buildQuietShares(rows: readonly WaitingFollowUp[], now: number):
-    { properties: QuietShareProperty[]; people: number }
+    { properties: QuietShareProperty[] }   // PR103: no `people`
   ```
   For each row with `item.outcome` 'replied' or 'no_reply': quietSince =
   max of `item.sentAt`, `recipient.last_heard_from_at` when later,
@@ -381,8 +383,8 @@ tree).
   shown when `now - quietSince >= threshold`. Person = `{ contactId, name:
   item.name, type: item.type, role: item.role, state: item.outcome,
   quietSince: <ISO> }` (omit `role` when undefined). Group by
-  `item.unitId` with `unitLabel: item.unitLabel`. Order and `people`
-  exactly spec 6.2/6.3/3. The wire types `QuietShareProperty` /
+  `item.unitId` with `unitLabel: item.unitLabel`. Order exactly spec
+  6.2/6.3/3 (PR103: no distinct-people count). The wire types `QuietShareProperty` /
   `QuietSharePerson` are declared in `routes/today.ts` beside
   `TodayResponse` and imported by the builder (type-only import).
 - PR24 `TodayRouterDeps` gains `unitsRepo?` and `listingSendsRepo?`
@@ -430,7 +432,7 @@ tree).
 - PR30 Quiet shares in the route: in its own try/catch,
   `collectWaitingFollowUps({ units, listingSends, tours, contacts, log, now }, { consistentRead: true })`
   then `buildQuietShares`; response `quietShares: { status: 'ok',
-  properties, people, truncated }` or `{ status: 'unavailable' }`. WARN on
+  properties, truncated }` (PR103: no `people`) or `{ status: 'unavailable' }`. WARN on
   throw with counts only. Response item order: needs_you_now, identify,
   tours_to_book, tours_today, follow_ups, ai_suggestions. The header
   comment's spec citation (~9-11) adds this spec as superseding the
@@ -447,12 +449,12 @@ tree).
   unavailable. Its SSE subscriptions already cover placement,
   conversation, suggestion, tour and contact events; no new subscription.
 - PR33 One shared section component (in `dashboard/src/routes/today/`)
-  renders heading `<h2>` with the count, the optional help line, the list
-  with accessible name = the heading text WITHOUT the count (so
+  renders heading `<h2>` (the bare label, NO count - PR102), the optional
+  help line, the list with accessible name = the heading text (so
   `getByRole('list', { name: 'Tours to book' })` works), the first 5 rows,
-  and the "Show all N" / "Show fewer" button (`aria-expanded`). Every
-  checklist section and both At a glance parts use it. The heading text
-  includes the count as a separate element so the list name stays exact.
+  and the "Show all N" / "Show fewer" button (`aria-expanded`), which is
+  where the count shows. Every checklist section and both At a glance parts
+  use it.
   Headings: "Needs you now", "Identify these contacts", "Past tours needing
   an outcome", "Tours to book", "Quiet shares", "Relay groups to close",
   "Placements"; At a glance: "Tours today"; the AI line reads "AI
@@ -471,8 +473,8 @@ tree).
   order. "In-range" uses the SAME predicate `selectPastTours`
   (`dashboard/src/routes/tours/useTours.ts` ~200-212) uses - export it or a
   helper from `useTours.ts` rather than re-deriving; the Past tab's own
-  order is unchanged. The section's count = labeled rows; the Past-tab
-  link keeps `past.total`.
+  order is unchanged. The section's "Show all N" count = labeled rows
+  (PR102: not shown in the heading); the Past-tab link keeps `past.total`.
 - PR36 `buildToday.ts` (fallback): drop `unreplied` (and its GROUP_ORDER
   entry), emit the unknown_1to1 rows with `group: 'identify'` (copy and
   rule unchanged), and give GROUP_ORDER the new groups.
@@ -616,7 +618,7 @@ where it differs from these, these win.
 - PR63 (S5 C1) PR35 amended: export the off-range rule as
   `isOffRangePastTour` from `useTours.ts` and have `selectOffRangeTours`
   call it; Today splits on it.
-- PR64 (S5 C2) Section headings carry the count (spec 2.1, the mockup
+- PR64 (S5 C2) (superseded by PR102) Section headings carry the count (spec 2.1, the mockup
   Cameron and Sam saw). This reverses the 2026-08-03 "no bare counts" pins
   (commit 2f0db66f, `Today.test.tsx` ~167-168), deliberately; the planner
   raises it with Cameron at the launch gate.
@@ -711,7 +713,7 @@ where it differs from these, these win.
   Today carries for `conversation.updated` over the byUnread GSI). The S4
   report and the S7 cost issue record it; no e2e result is read as proof of
   prod liveness.
-- PR91 (B3) W2 (PR11) passes `staffOutreach: true` only when
+- PR91 (B3) (gate and backfill rule superseded by PR104 / PR105) W2 (PR11) passes `staffOutreach: true` only when
   `original.broadcast_id === undefined && original.automated !== true`. A
   Retry of a reminder / nudge Send-now row (stored `automated: false`)
   still stamps: rare, accepted, recorded. The backfill (S6) excludes a
@@ -754,7 +756,7 @@ where it differs from these, these win.
   any doubt" holds without exception.
 - PR99 (R2-3) The `ContactUpdatedEvent` doc comment (S7.12) names three
   inbound emitters (PR81) and the PR91 Retry gate; slice text amended.
-- PR100 (R2-4) A second staff Retry of a failed automated text (retrying a
+- PR100 (R2-4) (superseded by PR104, PR105) A second staff Retry of a failed automated text (retrying a
   manual-retry row that is stored `automated: false`) stamps; the backfill
   does the same. Accepted residue (a twice-failed automated text that staff
   retry twice), recorded in the S2 report and the RUNBOOK entry; no chain
@@ -3041,7 +3043,10 @@ Spec surfaces:
 
 ## 6. S2 - Direct writers W1, W2, W3, W6, W8, inbound order fixes, tour-create events
 
-Scope: plan section 2 row S2; rulings PR8-PR16 and PR37 (binding). Spec 7.2,
+Scope: plan section 2 row S2; rulings PR8-PR16 and PR37 (binding), with
+PR46-PR53, PR81, PR84, PR87, PR94 and the launch-gate ruling PR104 (the
+`system_copy` marker, new Task S2.1a; the W2 gate in S2.2, replacing PR91's)
+applied into the task text below [PR83]. Spec r8 7.2,
 7.3 (writers W1, W2, W3, W6, W8 and the no-stamp table), 8 (live updates), 9
 (writer tests). Every line number below is a hint against main @970a29b9;
 the QUOTED text is the anchor. S1 is built first and provides, with exactly
@@ -3509,20 +3514,281 @@ git -C W:/tmp/today-checklist commit -m "feat(send): staffOutreach option stamps
 
 ---
 
+### Task S2.1a - The `system_copy` row marker: the field, the append mapping, `SendMessageInput.systemCopy` persisted [PR104]
+
+PR104 (spec r8 7.3). A person pressed send but the copy is the system's:
+tour reminder / placement nudge Send now, and a staff Retry of an automated
+or system-copy row. The row records it as `system_copy: true` (absent
+otherwise - a true-only marker, written the way the repo writes
+`received_on_closed_thread` and `group_ambiguous_origin`). It changes NO
+gating: the send stays `automated: false`, a person's send. Only the W2
+Retry gate (S2.2) and the backfill (S6, PR105) read it. The callers that
+set it are S2.2's.
+
+The harness `messagesRepo` fake (`twilioWebhookHarness.ts` ~1285-1310) is
+NOT edited (PR37): it drops `systemCopy`, so a harness case that needs a
+stored `system_copy: true` row seeds it by mutating `world.messages`, and the
+mapping is proven here against DynamoDB Local and the service fake.
+
+Files:
+- `app/src/repos/messagesRepo.ts` (NewMessage ~768, MessageItem ~1079, the
+  append mapping ~2641)
+- `app/src/services/sendMessage.ts` (the input field, the destructure, the
+  append input)
+- Tests: `app/test/messagesRepoRetryLineage.integration.test.ts`,
+  `app/test/sendMessage.test.ts`
+
+#### Step 1 - failing tests
+
+1a. `app/test/messagesRepoRetryLineage.integration.test.ts` - at the end of
+`describe('one-to-one retry lineage (retry-send-adoption)', ...)`, which is
+the end of the file. Edit:
+
+old:
+```ts
+      expect(await messages.getByTsMsgIdConsistent(ONE_CONV, missing)).toBeUndefined();
+    });
+  });
+});
+```
+new:
+```ts
+      expect(await messages.getByTsMsgIdConsistent(ONE_CONV, missing)).toBeUndefined();
+    });
+
+    // today-checklist PR104 (spec r8 7.3): system_copy marks a row a person
+    // sent whose copy is the system's (Send now; a staff Retry of automated or
+    // system-copy copy). Persisted when passed true; ABSENT otherwise - never a
+    // stored false - and it leaves `automated` as passed.
+    it('append persists system_copy when systemCopy is true, and writes no field otherwise', async () => {
+      const marked = await appendOutbound({
+        providerSid: 'SMsyscopy1',
+        providerTs: T0,
+        automated: false,
+        systemCopy: true,
+      });
+      expect(marked).toMatchObject({ system_copy: true, automated: false });
+      const plain = await appendOutbound({ providerSid: 'SMsyscopy2', providerTs: T1, automated: false });
+      expect(plain).not.toHaveProperty('system_copy');
+    });
+  });
+});
+```
+
+1b. `app/test/sendMessage.test.ts` - append at the end of the file (after
+S2.1's describe):
+```ts
+
+// today-checklist PR104 (spec r8 7.3): `systemCopy: true` marks a person's
+// send whose copy is the system's (tour reminder / nudge Send now, a staff
+// Retry of automated or system-copy copy). The service persists it on the
+// row and changes nothing else: the send is still gated as a person's, and
+// the marker alone never stamps.
+describe('system_copy marker (today-checklist PR104)', () => {
+  const base = { conversationId: 'conv-1', body: 'checking in' };
+
+  it('persists systemCopy on the appended row; the send stays a person\'s (automated false) and stamps nothing', async () => {
+    const f = makeFakes();
+    await f.service({ ...base, automated: false, systemCopy: true });
+    expect(f.appended).toHaveLength(1);
+    expect(f.appended[0]).toMatchObject({ automated: false, systemCopy: true });
+    expect(f.reachedOutTouches).toEqual([]);
+  });
+
+  it('(PIN) writes no marker without the option, automated or not', async () => {
+    const f = makeFakes();
+    await f.service(base);
+    await f.service({ ...base, automated: true });
+    expect(f.appended).toHaveLength(2);
+    expect(f.appended.every((m) => !('systemCopy' in m))).toBe(true);
+  });
+});
+```
+
+#### Step 2 - RED
+
+Needs DynamoDB Local up (`npm run db:start` STARTS it; never restart it).
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/messagesRepoRetryLineage.integration.test.ts test/sendMessage.test.ts
+```
+Expected failures, and why: "append persists system_copy ..." - the repo
+ignores `systemCopy`, so the stored row has no `system_copy`; "persists
+systemCopy on the appended row ..." - the service drops the option, so the
+append input has no `systemCopy`. "(PIN) writes no marker ..." passes
+already. Every pre-existing case stays green.
+
+#### Step 3 - implementation
+
+3a. `app/src/repos/messagesRepo.ts` - `NewMessage`, after `automated`. Edit:
+
+old:
+```ts
+   * wrapper (services/sendMessage.ts) sets it on every row it appends; no other
+   * writer does.
+   */
+  automated?: boolean;
+```
+new:
+```ts
+   * wrapper (services/sendMessage.ts) sets it on every row it appends; no other
+   * writer does.
+   */
+  automated?: boolean;
+  /**
+   * today-checklist PR104 (spec r8 7.3): true when a person pressed send but
+   * the copy is the system's - tour reminder / placement nudge Send now, and a
+   * staff Retry of a row that is automated or system copy. Stored as
+   * `system_copy`, ONLY when true (absent otherwise). It changes no gating
+   * (the row stays `automated: false`, a person's send); only the W2 Retry
+   * gate and the last_reached_out_at backfill read it.
+   */
+  systemCopy?: boolean;
+```
+
+3b. Same file, `MessageItem`. Edit:
+
+old:
+```ts
+  /** retry-send-window D14: the send's automated flag, false included (see NewMessage.automated). */
+  automated?: boolean;
+```
+new:
+```ts
+  /** retry-send-window D14: the send's automated flag, false included (see NewMessage.automated). */
+  automated?: boolean;
+  /** today-checklist PR104: true when the copy is the system's though a person sent it (see NewMessage.systemCopy); absent otherwise. */
+  system_copy?: boolean;
+```
+
+3c. Same file, the append mapping (the one `automated` spread in the file).
+Edit:
+
+old:
+```ts
+        ...(message.automated !== undefined && { automated: message.automated }),
+        ...(message.recipientContactId !== undefined && {
+          recipient_contact_id: message.recipientContactId,
+        }),
+```
+new:
+```ts
+        ...(message.automated !== undefined && { automated: message.automated }),
+        // today-checklist PR104: a true-only marker, written like
+        // received_on_closed_thread - absent unless the copy is the system's.
+        ...(message.systemCopy === true && { system_copy: true }),
+        ...(message.recipientContactId !== undefined && {
+          recipient_contact_id: message.recipientContactId,
+        }),
+```
+
+3d. `app/src/services/sendMessage.ts` - the input field, after S2.1's
+`staffOutreach`. Edit:
+
+old:
+```ts
+   * their Send now, the missed-call and welcome texts). Absent: no stamp.
+   */
+  staffOutreach?: true;
+}
+```
+new:
+```ts
+   * their Send now, the missed-call and welcome texts). Absent: no stamp.
+   */
+  staffOutreach?: true;
+  /**
+   * today-checklist PR104 (spec r8 7.3): set by tour reminder / nudge Send now
+   * and by a staff Retry of automated or system-copy copy; changes no gating.
+   * Persisted on the row as `system_copy: true`, so a later staff Retry of
+   * that row never counts as staff outreach (W2). Absent: no marker.
+   */
+  systemCopy?: true;
+}
+```
+
+3e. Destructure it (S2.1's line above it). Edit:
+
+old:
+```ts
+      beforeProviderSend,
+      staffOutreach,
+    } = input;
+```
+new:
+```ts
+      beforeProviderSend,
+      staffOutreach,
+      systemCopy,
+    } = input;
+```
+
+3f. Persist it. Edit:
+
+old:
+```ts
+      automated,
+      ...(heldRecipient !== undefined && { recipientContactId: heldRecipient.contactId }),
+    };
+```
+new:
+```ts
+      automated,
+      ...(heldRecipient !== undefined && { recipientContactId: heldRecipient.contactId }),
+      // today-checklist PR104: the copy is the system's though a person sent it.
+      ...(systemCopy === true && { systemCopy: true }),
+    };
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/messagesRepoRetryLineage.integration.test.ts test/sendMessage.test.ts test/twilioWebhookHarnessRetryFields.test.ts
+```
+Expect all green. Then (bare):
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0.
+
+#### Step 5 - ASCII check on added lines
+
+```
+git -C W:/tmp/today-checklist diff -U0 -- app/src/repos/messagesRepo.ts app/src/services/sendMessage.ts app/test/messagesRepoRetryLineage.integration.test.ts app/test/sendMessage.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0`.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add app/src/repos/messagesRepo.ts app/src/services/sendMessage.ts app/test/messagesRepoRetryLineage.integration.test.ts app/test/sendMessage.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(messages): system_copy row marker for a person's send of system copy (tracker #31 S2.1a)" -m "NewMessage.systemCopy / MessageItem.system_copy, written only when true; SendMessageInput.systemCopy is persisted by the send service and changes no gating. Read only by the W2 Retry gate and the backfill (spec r8 7.3, PR104)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
 ### Task S2.2 - The `/api` router wires its contacts repo into the send service; W1 and W2 pass the option; every other `sendMessage` caller pinned as no-stamp
 
 PR9 (wiring, WI2), PR10, PR11, and the no-stamp half of spec 9 for every
 other `sendMessage` caller: the share fan-out, the automatic 30003 retry, the
 missed-call text, the housing-fair welcome, the tour reminder poll and Send
 now, the nudge poll and Send now. The cases marked (PIN) are green on
-unchanged code; the harness W1/W2 cases are the RED. [PR91] W2 also skips a
-Retry of an automated row (`original.automated === true`). [PR84] The task
-names the harness suites that reach the default 1:1 send path (Step 3e),
-states the red-case rule, and rewrites the stale harness comment.
+unchanged code; the harness W1/W2 cases are the RED. [PR104] (replacing
+PR91's gate) W2 skips a Retry of a share (`broadcast_id`), an automated row
+(`automated === true`) or a system-copy row (`system_copy === true`); the
+Retry writes `systemCopy: true` when the retried row is automated or system
+copy, so a Retry of a Retry is judged by the first send (PR100's residue is
+CLOSED); both Send now paths (`forceSendReminder`, `forceSendNudge`) write
+`systemCopy: true`. Builds on S2.1a. [PR84] The task names the harness
+suites that reach the default 1:1 send path (Step 3e), states the red-case
+rule, and rewrites the stale harness comment.
 
 Files:
 - `app/src/routes/api.ts` (contacts construction order; the 1:1 send loop;
   the Retry call)
+- `app/src/jobs/tourReminders.ts`, `app/src/jobs/placementNudges.ts` (the
+  Send now send input, `systemCopy: true` [PR104])
 - `app/test/helpers/twilioWebhookHarness.ts` (the `sendMessageService`
   option's doc comment ~5590-5596 ONLY - comment-only, [PR84])
 - Tests: `app/test/apiRoutes.test.ts`, `app/test/broadcastFanOut.test.ts`,
@@ -3559,8 +3825,9 @@ new:
         retryOf: '2026-06-12T09:00:00.000Z#SMorig',
         // retry-send-adoption R7: a root row is its own chain's root.
         retryRoot: '2026-06-12T09:00:00.000Z#SMorig',
-        // today-checklist W2 (PR11, PR91): a staff Retry of a text that is
-        // neither a share nor automated stamps.
+        // today-checklist W2 (PR11, PR104): a staff Retry of a text that is
+        // neither a share, automated nor system copy stamps - and carries no
+        // systemCopy marker (this exact toEqual pins its absence).
         staffOutreach: true,
       },
     ]);
@@ -3579,8 +3846,9 @@ new:
 ```ts
         retryRoot: '2026-06-12T09:00:00.000Z#SMorig',
         recipient: real,
-        // today-checklist W2 (PR11, PR91): a staff Retry of a text that is
-        // neither a share nor automated stamps.
+        // today-checklist W2 (PR11, PR104): a staff Retry of a text that is
+        // neither a share, automated nor system copy stamps - and carries no
+        // systemCopy marker (this exact toEqual pins its absence).
         staffOutreach: true,
       },
     ]);
@@ -3613,9 +3881,9 @@ new:
   });
 ```
 
-1e. W2 share and automated exceptions at the input seam [PR91]. Edit (the
-end of the existing "the route's append carries retryRoot and broadcastId"
-case):
+1e. W2's exceptions and the marker at the input seam [PR104, replacing
+PR91's case]. Edit (the end of the existing "the route's append carries
+retryRoot and broadcastId" case):
 
 old:
 ```ts
@@ -3627,27 +3895,51 @@ new:
     expect(plain.calls[0]).not.toHaveProperty('broadcastId');
   });
 
-  it('today-checklist W2 (PR11, PR91): a Retry passes staffOutreach, EXCEPT a retry of a share text (broadcast_id) or of an automated row', async () => {
+  it('today-checklist W2 (PR11, PR104): a Retry passes staffOutreach, EXCEPT a retry of a share text, an automated row or a system-copy row; the latter two pass systemCopy', async () => {
     const share = makeRetryApp({ ...FAILED_ORIGINAL, broadcast_id: 'b-1' });
     expect((await press(share.app)).status).toBe(201);
     expect(share.calls[0]).toMatchObject({ broadcastId: 'b-1' });
     expect(share.calls[0]).not.toHaveProperty('staffOutreach');
+    expect(share.calls[0]).not.toHaveProperty('systemCopy');
 
-    // PR91: a failed automated text (missed-call, welcome, reminder, nudge)
-    // retried by staff is still the system's copy - no stamp.
+    // A failed automated text (missed-call, welcome, reminder, nudge) retried
+    // by staff is still the system's copy: no stamp, and the new row is
+    // marked so a Retry of IT is judged by the first send.
     const automated = makeRetryApp({ ...FAILED_ORIGINAL, automated: true });
     expect((await press(automated.app)).status).toBe(201);
     expect(automated.calls[0]).not.toHaveProperty('staffOutreach');
+    expect(automated.calls[0]).toMatchObject({ automated: false, systemCopy: true });
 
-    const plain = makeRetryApp(FAILED_ORIGINAL);
-    expect((await press(plain.app)).status).toBe(201);
-    expect(plain.calls[0]?.staffOutreach).toBe(true);
+    // A reminder / nudge Send-now row (stored automated: false, system_copy:
+    // true): no stamp, and the marker carries on.
+    const sendNow = makeRetryApp({ ...FAILED_ORIGINAL, automated: false, system_copy: true });
+    expect((await press(sendNow.app)).status).toBe(201);
+    expect(sendNow.calls[0]).not.toHaveProperty('staffOutreach');
+    expect(sendNow.calls[0]?.systemCopy).toBe(true);
 
-    // A person's send stored automated:false (a reminder / nudge Send-now row
-    // is stored this way too - PR91 accepts that residue) still stamps.
-    const manual = makeRetryApp({ ...FAILED_ORIGINAL, automated: false });
-    expect((await press(manual.app)).status).toBe(201);
-    expect(manual.calls[0]?.staffOutreach).toBe(true);
+    // A Retry of a manual retry of an automated text: that retry row is
+    // stored automated: false WITH the marker it inherited - no stamp (PR104
+    // closes PR100's residue).
+    const retryOfRetry = makeRetryApp({
+      ...FAILED_ORIGINAL,
+      automated: false,
+      system_copy: true,
+      retry_of: '2026-06-12T08:00:00.000Z#SMauto',
+      // The stored root, so the route needs no parent read (retryChain.ts).
+      retry_root: '2026-06-12T08:00:00.000Z#SMauto',
+    });
+    expect((await press(retryOfRetry.app)).status).toBe(201);
+    expect(retryOfRetry.calls[0]).not.toHaveProperty('staffOutreach');
+    expect(retryOfRetry.calls[0]?.systemCopy).toBe(true);
+
+    // A plain staff text (no automated flag, or automated: false, no marker)
+    // still stamps and writes no marker.
+    for (const original of [FAILED_ORIGINAL, { ...FAILED_ORIGINAL, automated: false }]) {
+      const plain = makeRetryApp(original);
+      expect((await press(plain.app)).status).toBe(201);
+      expect(plain.calls[0]?.staffOutreach).toBe(true);
+      expect(plain.calls[0]).not.toHaveProperty('systemCopy');
+    }
   });
 ```
 
@@ -3719,7 +4011,7 @@ describe('staff outreach through the default send service (today-checklist W1/W2
     expect(contactUpdates(world)).toEqual([{ contactId: 'c-1' }]);
   });
 
-  it('a staff Retry of a failed text stamps; a Retry of a share text (broadcast_id) or of an automated row does not (PR11, PR91)', async () => {
+  it('a staff Retry of a failed text stamps; a Retry of a share text, an automated row or a system-copy row does not (PR11, PR104)', async () => {
     const { app, world } = makeWebhookHarness();
     const conversationId = await seedThread(world);
     const failedRow = (
@@ -3740,8 +4032,13 @@ describe('staff outreach through the default send service (today-checklist W1/W2
     });
     await world.messagesRepo.append(failedRow('SMplainfail', 60_000));
     await world.messagesRepo.append(failedRow('SMsharefail', 50_000, { broadcastId: 'b-1' }));
-    // PR91: a failed automated text (the missed-call auto text shape).
+    // A failed automated text (the missed-call auto text shape).
     await world.messagesRepo.append(failedRow('SMautofail', 40_000, { automated: true }));
+    // PR104: a failed Send-now row (automated: false, system_copy: true). The
+    // harness messages fake does not map systemCopy (PR37: it is not edited),
+    // so the stored marker is set on the world row directly.
+    await world.messagesRepo.append(failedRow('SMsendnowfail', 30_000, { automated: false }));
+    world.messages.find((m) => m.provider_sid === 'SMsendnowfail')!.system_copy = true;
     const retry = (sid: string) => post(app, `/api/conversations/${conversationId}/messages/${sid}/retry`, {});
 
     expect((await retry('SMsharefail')).status).toBe(201);
@@ -3749,6 +4046,10 @@ describe('staff outreach through the default send service (today-checklist W1/W2
     expect(contactUpdates(world)).toEqual([]);
 
     expect((await retry('SMautofail')).status).toBe(201);
+    expect(world.reachedOutTouches).toEqual([]);
+    expect(contactUpdates(world)).toEqual([]);
+
+    expect((await retry('SMsendnowfail')).status).toBe(201);
     expect(world.reachedOutTouches).toEqual([]);
     expect(contactUpdates(world)).toEqual([]);
 
@@ -3911,6 +4212,8 @@ describe('today-checklist: the tour reminder poll never asks for a staff-outreac
 
     expect(spy.sent).toHaveLength(1);
     expect(spy.sent[0]).not.toHaveProperty('staffOutreach');
+    // PR104: the poll send is automated: true, so it carries no marker.
+    expect(spy.sent[0]).not.toHaveProperty('systemCopy');
     expect(world.reachedOutTouches).toEqual([]);
   });
 });
@@ -3990,10 +4293,48 @@ new:
 
     expect(spy.sent).toHaveLength(1);
     expect(spy.sent[0]).not.toHaveProperty('staffOutreach');
+    // PR104: the poll send is automated: true, so it carries no marker.
+    expect(spy.sent[0]).not.toHaveProperty('systemCopy');
     expect(world.reachedOutTouches).toEqual([]);
   });
 
   it('409s nudge_not_pending with the honest current view when the rung already fired', async () => {
+```
+
+1n. [PR104] Each Send now writes the marker, through its spy at the input
+seam (the service persists it, S2.1a; the stamp absence is 1k / 1m).
+`app/test/tourRemindersApi.test.ts`, the existing "200s with the re-read
+sent view, sends automated: false, ..." case. Edit:
+
+old:
+```ts
+    expect(spy.sent[0]!.conversationId).toBe('conv-sendnow-1');
+    expect(spy.sent[0]!.automated).toBe(false);
+```
+new:
+```ts
+    expect(spy.sent[0]!.conversationId).toBe('conv-sendnow-1');
+    expect(spy.sent[0]!.automated).toBe(false);
+    // today-checklist PR104: a person pressed send, but the copy is the
+    // reminder - marked system copy, and never staff outreach.
+    expect(spy.sent[0]!.systemCopy).toBe(true);
+    expect(spy.sent[0]).not.toHaveProperty('staffOutreach');
+```
+`app/test/placementNudgesApi.test.ts`, the same-titled case. Edit:
+
+old:
+```ts
+    expect(spy.sent[0]!.body).toBe(resolveMessage('nudge.receipt_check'));
+    expect(spy.sent[0]!.automated).toBe(false);
+```
+new:
+```ts
+    expect(spy.sent[0]!.body).toBe(resolveMessage('nudge.receipt_check'));
+    expect(spy.sent[0]!.automated).toBe(false);
+    // today-checklist PR104: the copy is the nudge - marked system copy, and
+    // never staff outreach.
+    expect(spy.sent[0]!.systemCopy).toBe(true);
+    expect(spy.sent[0]).not.toHaveProperty('staffOutreach');
 ```
 
 #### Step 2 - RED
@@ -4007,14 +4348,18 @@ cd W:/tmp/today-checklist/app; npx vitest run test/apiRoutes.test.ts test/broadc
 Expected failures, and why:
 - apiRoutes.test.ts: the three edited call-shape pins (no `staffOutreach` in
   the call); "only the FIRST batch carries staffOutreach" (`calls[0]
-  .staffOutreach` undefined); "a Retry passes staffOutreach, EXCEPT ..." (the
-  plain and the `automated: false` calls lack it; the share and automated
-  halves already pass); the three harness cases (`world.reachedOutTouches` is
-  `[]`: the default service never calls the world fake, and no caller passes
-  the option - the Retry case goes red on its plain half; its share and
-  automated halves are absences [PR91]).
-- Every other new case is a (PIN) and passes already. Every pre-existing case
-  in these files stays green.
+  .staffOutreach` undefined); "a Retry passes staffOutreach, EXCEPT ..."
+  [PR104] (the automated, Send-now and Retry-of-Retry calls lack
+  `systemCopy`; the plain calls lack `staffOutreach`); the three harness
+  cases (`world.reachedOutTouches` is `[]`: the default service never calls
+  the world fake, and no caller passes the option - the Retry case goes red
+  on its plain half; its share, automated and system-copy halves are
+  absences).
+- tourRemindersApi.test.ts and placementNudgesApi.test.ts: the two Send now
+  spy cases (1n) - `systemCopy` is undefined [PR104].
+- Every other new case is a (PIN) and passes already, the two polls'
+  no-marker lines included. Every pre-existing case in these files stays
+  green.
 
 #### Step 3 - implementation
 
@@ -4093,8 +4438,9 @@ new:
         if (i === 0) first = outcome;
 ```
 
-3c. W2 - the Retry passes it except for a share text (PR11) or an automated
-row [PR91]. Edit:
+3c. W2 - the Retry passes `staffOutreach` except for a share, an automated
+or a system-copy row, and passes `systemCopy` for an automated or
+system-copy row [PR104, replacing PR91's gate]. Edit:
 
 old:
 ```ts
@@ -4110,15 +4456,62 @@ new:
         ...(original.broadcast_id !== undefined && { broadcastId: original.broadcast_id }),
         // retry-send-window D14: the recorded recipient, when it still exists.
         ...(recipient !== undefined && { recipient }),
-        // today-checklist W2 (spec 7.3, PR11, PR91): a staff Retry is staff
-        // outreach - EXCEPT a retry of a share text (broadcast_id), which is a
-        // share (shares never move last_reached_out_at, spec 7.2), and a retry
-        // of an AUTOMATED row (stored automated: true), whose copy is the
-        // system's. A reminder / nudge Send-now row is stored automated: false
-        // and still stamps - rare, accepted (PR91).
+        // today-checklist PR104 (spec r8 7.3): a Retry of a row whose copy is
+        // the system's - automated, or itself system copy (a Send now, or an
+        // earlier Retry of one) - is marked system copy, so a Retry of THIS
+        // row is judged by the first send.
+        ...((original.automated === true || original.system_copy === true) && {
+          systemCopy: true as const,
+        }),
+        // today-checklist W2 (spec r8 7.3, PR11, PR104): a staff Retry is staff
+        // outreach - EXCEPT a retry of a share text (broadcast_id: shares never
+        // move last_reached_out_at, spec 7.2), of an AUTOMATED row, or of a
+        // SYSTEM-COPY row (a reminder / nudge Send now, or a Retry of one).
         ...(original.broadcast_id === undefined &&
-          original.automated !== true && { staffOutreach: true as const }),
+          original.automated !== true &&
+          original.system_copy !== true && { staffOutreach: true as const }),
       });
+```
+
+3c2. [PR104] Both Send now paths mark the system copy. Neither changes its
+gating (`automated: false` stays). `app/src/jobs/tourReminders.ts`
+(`forceSendReminder`, ~1998; the one `automated: false,` send input in the
+file). Edit:
+
+old:
+```ts
+      // the JIT consent gate pre-checked above).
+      automated: false,
+    });
+```
+new:
+```ts
+      // the JIT consent gate pre-checked above).
+      automated: false,
+      // today-checklist PR104 (spec r8 7.3): a person picked the time, but the
+      // copy is the reminder's - never staff outreach, and a later staff Retry
+      // of this row does not count either.
+      systemCopy: true,
+    });
+```
+`app/src/jobs/placementNudges.ts` (`forceSendNudge`, ~854; the one
+`automated: false,` send input in the file). Edit:
+
+old:
+```ts
+      // the JIT consent gate pre-checked above).
+      automated: false,
+    });
+```
+new:
+```ts
+      // the JIT consent gate pre-checked above).
+      automated: false,
+      // today-checklist PR104 (spec r8 7.3): a person picked the time, but the
+      // copy is the nudge's - never staff outreach, and a later staff Retry of
+      // this row does not count either.
+      systemCopy: true,
+    });
 ```
 
 WI2 record (for the S2 report): before, `createSendMessageService` received
@@ -4194,8 +4587,11 @@ old real-DynamoDB miss: seed consent on THAT world contact (for example
 #### Step 4 - GREEN
 
 ```
-cd W:/tmp/today-checklist/app; npx vitest run test/apiRoutes.test.ts test/broadcastFanOut.test.ts test/retrySendAttempt.test.ts test/missedCallAutoText.test.ts test/publicIntake.test.ts test/tourRemindersApi.test.ts test/placementNudgesApi.test.ts test/rateLimit.test.ts test/relayApi.test.ts test/groupSendRoute.test.ts test/emailRoute.test.ts test/relayQueuedMessages.test.ts
+cd W:/tmp/today-checklist/app; npx vitest run test/apiRoutes.test.ts test/broadcastFanOut.test.ts test/retrySendAttempt.test.ts test/missedCallAutoText.test.ts test/publicIntake.test.ts test/tourRemindersApi.test.ts test/placementNudgesApi.test.ts test/rateLimit.test.ts test/relayApi.test.ts test/groupSendRoute.test.ts test/emailRoute.test.ts test/relayQueuedMessages.test.ts test/tourReminders.test.ts test/placementNudges.test.ts
 ```
+(`tourReminders.test.ts` / `placementNudges.test.ts` drive `forceSendReminder`
+/ `forceSendNudge` directly; their send-input checks are per-field, so the
+added `systemCopy` breaks none [PR104].)
 Expect all green. A case on the Step 3e list that goes red on a consent /
 opt-out / deleted refusal follows the [PR84] red-case rule above (seed the
 world contact, name it in the report) - never an assertion change. Then
@@ -4208,7 +4604,7 @@ Expect exit 0.
 #### Step 5 - ASCII check on added lines
 
 ```
-git -C W:/tmp/today-checklist diff -U0 -- app/src/routes/api.ts app/test/helpers/twilioWebhookHarness.ts app/test/apiRoutes.test.ts app/test/broadcastFanOut.test.ts app/test/retrySendAttempt.test.ts app/test/missedCallAutoText.test.ts app/test/publicIntake.test.ts app/test/tourRemindersApi.test.ts app/test/placementNudgesApi.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git -C W:/tmp/today-checklist diff -U0 -- app/src/routes/api.ts app/src/jobs/tourReminders.ts app/src/jobs/placementNudges.ts app/test/helpers/twilioWebhookHarness.ts app/test/apiRoutes.test.ts app/test/broadcastFanOut.test.ts app/test/retrySendAttempt.test.ts app/test/missedCallAutoText.test.ts app/test/publicIntake.test.ts app/test/tourRemindersApi.test.ts app/test/placementNudgesApi.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
 ```
 Expect `0`. Also confirm the harness diff is the 3d comment only:
 `git -C W:/tmp/today-checklist diff --stat -- app/test/helpers/twilioWebhookHarness.ts`
@@ -4219,8 +4615,8 @@ shows one file, about 9 lines [PR84].
 ```
 git -C W:/tmp/today-checklist status
 ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
-git -C W:/tmp/today-checklist add app/src/routes/api.ts app/test/helpers/twilioWebhookHarness.ts app/test/apiRoutes.test.ts app/test/broadcastFanOut.test.ts app/test/retrySendAttempt.test.ts app/test/missedCallAutoText.test.ts app/test/publicIntake.test.ts app/test/tourRemindersApi.test.ts app/test/placementNudgesApi.test.ts
-git -C W:/tmp/today-checklist commit -m "feat(api): staff send and Retry stamp last_reached_out_at; the send service reads the router's contacts repo (tracker #31 S2.2)" -m "W1 passes staffOutreach on the first MMS batch only; W2 on every Retry except a share text or an automated row (PR91). The contacts repo is built before the send service and passed in (PR9, WI2); the harness comment that described the old default is rewritten (PR84). No-stamp pins for the share fan-out, automatic retry, missed-call and welcome texts, both polls and both Send now routes." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/today-checklist add app/src/routes/api.ts app/src/jobs/tourReminders.ts app/src/jobs/placementNudges.ts app/test/helpers/twilioWebhookHarness.ts app/test/apiRoutes.test.ts app/test/broadcastFanOut.test.ts app/test/retrySendAttempt.test.ts app/test/missedCallAutoText.test.ts app/test/publicIntake.test.ts app/test/tourRemindersApi.test.ts app/test/placementNudgesApi.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(api): staff send and Retry stamp last_reached_out_at; the send service reads the router's contacts repo (tracker #31 S2.2)" -m "W1 passes staffOutreach on the first MMS batch only; W2 on every Retry except a share text, an automated row or a system-copy row, and a Retry of automated or system copy is marked systemCopy; both Send now paths mark systemCopy (PR104). The contacts repo is built before the send service and passed in (PR9, WI2); the harness comment that described the old default is rewritten (PR84). No-stamp pins for the share fan-out, automatic retry, missed-call and welcome texts, both polls and both Send now routes." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -6321,11 +6717,21 @@ service (re-verified on the tree) [PR84], every case that went red under
 the red-case rule and the consent seeded for it (or "none"), and the
 result of the app-workspace run.>
 
-## W2 Retry gate (PR91)
+## W2 Retry gate (PR104, replacing PR91)
 W2 stamps only when `original.broadcast_id === undefined &&
-original.automated !== true` (api.ts:<line>). Accepted residue: a staff
-Retry of a reminder / nudge Send-now row (stored automated: false) still
-stamps - rare, recorded here, no mechanism added.
+original.automated !== true && original.system_copy !== true`
+(api.ts:<line>); the Retry passes `systemCopy: true` when the retried row is
+automated or system copy (api.ts:<line>); `forceSendReminder`
+(tourReminders.ts:<line>) and `forceSendNudge` (placementNudges.ts:<line>)
+pass `systemCopy: true`; the repo writes `system_copy` only when true
+(messagesRepo.ts:<line>).
+- PR91's residue (a staff Retry of a reminder / nudge Send-now row stamps):
+  closed by PR104.
+- PR100's residue (a second staff Retry of a failed automated text stamps):
+  closed by PR104 (a Retry of a Retry inherits the marker).
+- The harness messages fake does not map `systemCopy` (PR37 leaves the
+  harness alone); the harness Retry case seeds `system_copy` on the world
+  row directly. Record whether any other test needed that.
 
 ## WI3 - the whisper-gate no-await rule
 <The reviewer's line-by-line read of the outbound accept branch diff: nothing
@@ -6337,7 +6743,7 @@ the stamp starts after sendTwiml via afterResponse, un-awaited.>
 |---|---|---|
 | W1 staff text | apiRoutes.test.ts harness case | 1 contact.updated, after conversation.updated |
 | W1 multi-batch MMS | apiRoutes.test.ts harness case | 1 contact.updated for N batches |
-| W2 staff Retry | apiRoutes.test.ts harness case | 1 (plain); 0 (share text); 0 (automated row, PR91) |
+| W2 staff Retry | apiRoutes.test.ts harness case | 1 (plain); 0 (share text); 0 (automated row); 0 (system-copy row, PR104) |
 | W3 email | sendEmailMessage.test.ts | 1 contact.updated, last |
 | W6 outbound press-1 | voiceOutbound.test.ts | 1 contact.updated |
 | W8 dev fixtures | devTranscriptFixture / devMessageTransportFixture | 1 contact.updated |
@@ -6390,7 +6796,9 @@ git -C W:/tmp/today-checklist commit -m "docs(records): S2 slice report - direct
 | `staffOutreach` option; stamp judged contact at providerTs; `contact.updated` after `conversation.updated`, only when written; best-effort | PR9; spec 7.3 | S2.1 | sendMessage.test.ts "staff outreach stamp" (held recipient, phone contact, moved recipient, no option, no contact, written-only, failed/rejecting, refused/append failure) |
 | api.ts builds `contacts` before the send service and passes it | PR9; WI2 | S2.2 | apiRoutes.test.ts harness cases move `world.reachedOutTouches`; WI2 record in the report |
 | W1 1:1 send passes the option, first batch only | PR10 | S2.2 | apiRoutes.test.ts spy batch case + harness multi-batch case (1 stamp, 1 event) |
-| W2 Retry passes the option except `broadcast_id` rows and automated rows | PR11, PR91; spec 7.3 W2 | S2.2 | apiRoutes.test.ts spy case + harness Retry case (share, automated, plain) |
+| `system_copy` marker: field, true-only append mapping, `SendMessageInput.systemCopy` persisted, no gating change | PR104; spec r8 7.3 | S2.1a | messagesRepoRetryLineage.integration "append persists system_copy ...", sendMessage.test.ts "system_copy marker" |
+| W2 Retry passes the option except `broadcast_id`, automated and system-copy rows; passes `systemCopy` for automated / system-copy rows | PR11, PR104 (replaces PR91's gate; closes PR100's residue); spec r8 7.3 W2 | S2.2 | apiRoutes.test.ts spy case (share, automated, Send-now row, Retry of a Retry, plain) + harness Retry case |
+| Both Send now paths pass `systemCopy: true`; the polls write no marker | PR104 | S2.2 | the two Send now spy cases (1n); the two poll cases (1l, 1m) |
 | Harness suites on the default 1:1 send path named; red-case rule; harness comment rewritten | PR84 | S2.2 | Step 3d/3e; S2 report WI2 |
 | No stamp: share fan-out, automatic retry, missed-call text, welcome text, tour reminder poll and Send now, nudge poll and Send now | spec 7.2, 7.3 no-stamp table, 9 | S2.2 | the (PIN) cases in broadcastFanOut, retrySendAttempt, missedCallAutoText, publicIntake, tourRemindersApi, placementNudgesApi |
 | W3 email: stamp after SES accepts, none on adapter throw, one `contact.updated` | PR12 | S2.3 | sendEmailMessage.test.ts "W3" |
@@ -8390,7 +8798,8 @@ PR30 are implementable exactly as written.
     the tour's createdAt; `unitLabel` = `formatAddress(unit.address) || unitId`).
   - `interface QuietSharePerson { contactId: string; name: string; type: string; role?: string; state: 'replied' | 'no_reply'; quietSince: string }`.
   - `interface QuietShareProperty { unitId: string; unitLabel: string; people: QuietSharePerson[] }`.
-  - `type TodayQuietShares = { status: 'ok'; properties: QuietShareProperty[]; people: number; truncated: boolean } | { status: 'unavailable' }`.
+  - `type TodayQuietShares = { status: 'ok'; properties: QuietShareProperty[]; truncated: boolean } | { status: 'unavailable' }`
+    ([PR103]: no `people`).
   - `interface TodayResponse { items; relayCloseNags; quietShares: TodayQuietShares; toursToBook: 'ok' | 'unavailable'; generatedAt }`.
     PR31 makes `quietShares?` / `toursToBook?` optional on the dashboard
     side only.
@@ -8813,8 +9222,8 @@ git -C W:/tmp/today-checklist commit -m "feat(follow-ups): split the Follow up c
 ### Task S4.2 - The quiet-shares builder and its wire types (PR23)
 
 A pure builder over the core's rows: the quiet clock, both thresholds, the
-per-row clock, grouping by property, ordering and the distinct-people count
-(spec 6.1-6.3). The wire types live in `routes/today.ts` beside
+per-row clock, grouping by property and ordering (spec 6.1-6.3; [PR103]:
+no distinct-people count - it returns `{ properties }` only). The wire types live in `routes/today.ts` beside
 `TodayResponse` (PR23); the response field arrives in S4.7.
 
 Files:
@@ -8828,8 +9237,8 @@ Create `app/test/quietShares.test.ts`:
 ```ts
 // Quiet shares builder (spec 2026-10-23-today-checklist-design.md 6, plan
 // PR23): the quiet clock (sentAt, heard if later, reached if later), both
-// thresholds and both boundaries, each row's own clock, grouping by property,
-// ordering, and the distinct-people count. Pure - the rows are
+// thresholds and both boundaries, each row's own clock, grouping by property
+// and ordering (PR103: no distinct-people count). Pure - the rows are
 // WaitingFollowUp values built by hand, shaped as collectWaitingFollowUps
 // returns them.
 import { describe, expect, it } from 'vitest';
@@ -8906,7 +9315,6 @@ describe('buildQuietShares (spec 6.1-6.3)', () => {
       NOW,
     );
     expect(listed(out)).toEqual([['u1', 'c-at', ago(120 * HOUR)]]);
-    expect(out.people).toBe(1);
   });
 
   it('replied: shown at EXACTLY 48h since the reply; hidden 1 ms before', () => {
@@ -8983,7 +9391,6 @@ describe('buildQuietShares (spec 6.1-6.3)', () => {
       NOW,
     );
     expect(listed(out)).toEqual([['u-first', 'c-1', ago(6 * DAY)]]);
-    expect(out.people).toBe(1);
   });
 
   it('inside a property: replied first, then no_reply; within each the longest quiet first; ties by contactId', () => {
@@ -9023,7 +9430,9 @@ describe('buildQuietShares (spec 6.1-6.3)', () => {
     expect(out.properties.map((p) => p.unitId)).toEqual(['u-b', 'u-d', 'u-c', 'u-a']);
   });
 
-  it('people counts DISTINCT contacts; a person waiting on two properties has a row under each', () => {
+  // PR103: no distinct-people count is built; the person still has a row
+  // under each property, and the result carries nothing but `properties`.
+  it('a person waiting on two properties has a row under each; the result holds properties only (PR103)', () => {
     const out = buildQuietShares(
       [
         row({ contactId: 'c-both', unitId: 'u-a', outcome: 'no_reply', sentAt: ago(7 * DAY) }),
@@ -9032,7 +9441,7 @@ describe('buildQuietShares (spec 6.1-6.3)', () => {
       ],
       NOW,
     );
-    expect(out.people).toBe(2);
+    expect(Object.keys(out)).toEqual(['properties']);
     expect(listed(out)).toEqual([
       ['u-a', 'c-both', ago(7 * DAY)],
       ['u-b', 'c-both', ago(6 * DAY)],
@@ -9047,7 +9456,7 @@ describe('buildQuietShares (spec 6.1-6.3)', () => {
       ),
       NOW,
     );
-    expect(out).toEqual({ properties: [], people: 0 });
+    expect(out).toEqual({ properties: [] });
   });
 
   it('the wire rows: the property keeps the Follow up unitLabel; a person carries name, type, role only when set, state and quietSince', () => {
@@ -9060,7 +9469,6 @@ describe('buildQuietShares (spec 6.1-6.3)', () => {
       NOW,
     );
     expect(out).toEqual({
-      people: 2,
       properties: [
         {
           unitId: 'u1',
@@ -9075,8 +9483,8 @@ describe('buildQuietShares (spec 6.1-6.3)', () => {
     expect(out.properties[0]!.people[1]).not.toHaveProperty('role');
   });
 
-  it('no rows: no properties and zero people', () => {
-    expect(buildQuietShares([], NOW)).toEqual({ properties: [], people: 0 });
+  it('no rows: no properties', () => {
+    expect(buildQuietShares([], NOW)).toEqual({ properties: [] });
   });
 });
 ```
@@ -9186,16 +9594,15 @@ interface ListedPerson {
  * The Quiet shares section from the Follow up core's waiting rows (spec 6):
  * the properties in order (by their longest-quiet person, oldest first; ties
  * by unitId), each with its people in order (replied, then no_reply; within
- * each the oldest quietSince first; ties by contactId), and `people` = the
- * number of DISTINCT contacts across all properties (the heading count - a
- * person waiting on two properties counts once and has a row under each).
+ * each the oldest quietSince first; ties by contactId). A person waiting on
+ * two properties has a row under each. No distinct-people count is built:
+ * section headings carry no count (spec r8 2.1, plan PR102, PR103).
  */
 export function buildQuietShares(
   rows: readonly WaitingFollowUp[],
   now: number,
-): { properties: QuietShareProperty[]; people: number } {
+): { properties: QuietShareProperty[] } {
   const byUnit = new Map<string, { unitId: string; unitLabel: string; people: ListedPerson[] }>();
-  const distinct = new Set<string>();
   for (const { item, recipient } of rows) {
     const state = item.outcome;
     // The core already keeps only these two; the builder does not rely on it.
@@ -9224,7 +9631,6 @@ export function buildQuietShares(
       },
       quietMs,
     });
-    distinct.add(item.contactId);
   }
 
   const groups = [...byUnit.values()];
@@ -9246,7 +9652,6 @@ export function buildQuietShares(
       unitLabel: group.unitLabel,
       people: group.people.map((p) => p.person),
     })),
-    people: distinct.size,
   };
 }
 ```
@@ -9275,7 +9680,7 @@ Expect `0` three times.
 git -C W:/tmp/today-checklist status
 ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
 git -C W:/tmp/today-checklist add app/src/routes/today.ts app/src/services/quietShares.ts app/test/quietShares.test.ts
-git -C W:/tmp/today-checklist commit -m "feat(today): quiet-shares builder and its wire types (today-checklist S4.2)" -m "buildQuietShares applies the spec 6.1 clock (sentAt, heard if later, reached if later) with fixed 48h/120h thresholds to the Follow up core's rows, grouped by property in spec 6.2/6.3 order with a distinct-people count. QuietShareProperty/QuietSharePerson live in routes/today.ts." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/today-checklist commit -m "feat(today): quiet-shares builder and its wire types (today-checklist S4.2)" -m "buildQuietShares applies the spec 6.1 clock (sentAt, heard if later, reached if later) with fixed 48h/120h thresholds to the Follow up core's rows, grouped by property in spec 6.2/6.3 order (no distinct-people count, PR103). QuietShareProperty/QuietSharePerson live in routes/today.ts." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -12747,6 +13152,9 @@ spec as superseding the grouping rules. WI7's read budget is pinned by a test
 (pre-existing counts may take the observed value, both numbers recorded;
 the six S4-owned counts never move - [PR62]); the unread walk's page count is
 recorded for the cost issue [PR92]. WI8 is recorded as PR90 states it.
+[PR103] The `quietShares` wire carries no `people`: every expectation
+below matches `{ status, properties, truncated }`, and a one-person check
+matches the person inside `properties` instead of a count.
 
 Files:
 - `app/src/routes/today.ts`
@@ -12807,7 +13215,7 @@ new:
 ```ts
     expect(body.relayCloseNags).toEqual([]);
     expect(body.toursToBook).toBe('ok');
-    expect(body.quietShares).toEqual({ status: 'ok', properties: [], people: 0, truncated: false });
+    expect(body.quietShares).toEqual({ status: 'ok', properties: [], truncated: false });
 ```
 
 1d. The envelope keys. Edit:
@@ -12872,7 +13280,7 @@ new:
       expect(res.status).toBe(200);
       return res.body as TodayResponse;
     };
-    const EMPTY = { status: 'ok', properties: [], people: 0, truncated: false };
+    const EMPTY = { status: 'ok', properties: [], truncated: false };
 
     it('quietShares groups by property in spec order; the contacts batch is read CONSISTENTLY', async () => {
       seedUnit('u-a', { address: OAK });
@@ -12895,7 +13303,6 @@ new:
       expect(body.quietShares).toEqual({
         status: 'ok',
         truncated: false,
-        people: 3,
         properties: [
           {
             unitId: 'u-b',
@@ -12934,14 +13341,13 @@ new:
       expect((await getBody()).quietShares).toEqual({
         status: 'ok',
         truncated: false,
-        people: 1,
         properties: [
           { unitId: 'u-a', unitLabel: 'u-a', people: [{ contactId: 'c-1', name: 'Quinn c-1', type: 'tenant', state: 'no_reply', quietSince: reached }] },
         ],
       });
     });
 
-    it('a second share does not restart the first: each property keeps its own clock; the person counts once', async () => {
+    it('a second share does not restart the first: each property keeps its own clock; the person is listed once', async () => {
       seedUnit('u-a');
       seedUnit('u-b');
       seedRecipient('c-1', '+15550620001');
@@ -12950,7 +13356,7 @@ new:
 
       const quiet = (await getBody()).quietShares;
 
-      expect(quiet).toMatchObject({ status: 'ok', people: 1 });
+      expect(quiet).toMatchObject({ status: 'ok', properties: [{ unitId: 'u-a', people: [{ contactId: 'c-1' }] }] });
       expect(quiet.status === 'ok' && quiet.properties.map((p) => p.unitId)).toEqual(['u-a']);
     });
 
@@ -12972,7 +13378,7 @@ new:
         seedUnit('u-a');
         seedRecipient('c-1', '+15550630001');
         seedSend('u-a', 'c-1', ago(6 * DAY_MS));
-        expect((await getBody()).quietShares).toMatchObject({ status: 'ok', people: 1 });
+        expect((await getBody()).quietShares).toMatchObject({ status: 'ok', properties: [{ unitId: 'u-a', people: [{ contactId: 'c-1' }] }] });
 
         await change();
 
@@ -13030,7 +13436,7 @@ new:
       const body = await getBody();
 
       expect(body.toursToBook).toBe('unavailable');
-      expect(body.quietShares).toMatchObject({ status: 'ok', people: 1 });
+      expect(body.quietShares).toMatchObject({ status: 'ok', properties: [{ unitId: 'u-a', people: [{ contactId: 'c-1' }] }] });
       expect(body.items.map((i) => [i.group, i.refId])).toEqual([['identify', 'c-unk']]);
     });
 
@@ -13153,7 +13559,7 @@ new:
 ```ts
     expect(before.body.toursToBook).toBe('ok');
     // 'ok' (not 'unavailable') proves the core's reads hit THIS prefix's tables.
-    expect(before.body.quietShares).toEqual({ status: 'ok', properties: [], people: 0, truncated: false });
+    expect(before.body.quietShares).toEqual({ status: 'ok', properties: [], truncated: false });
 ```
 Edit:
 
@@ -13174,7 +13580,8 @@ cd W:/tmp/today-checklist/app; npx vitest run test/todayApi.test.ts test/todayUn
 ```
 Expected failures, and why: `quietShares` is absent from the response, so
 the empty envelope, the envelope keys, every "Quiet shares on Today" case
-(the drop-off cases fail on their FIRST expectation, `people: 1`; the four
+(the drop-off cases fail on their FIRST expectation, the one-person
+`properties` match [PR103]; the four
 failure cases on `{ status: 'unavailable' }`; the tours-read case on
 `status: 'ok'`) and the non-regression file fail. WI7 fails on
 `unitsWalk: 0`, `sendsByUnit: 0`, `toursByUnit: 0`, `recipientBatch: 0`.
@@ -13221,8 +13628,6 @@ export type TodayQuietShares =
   | {
       status: 'ok';
       properties: QuietShareProperty[];
-      /** DISTINCT contacts across every property (the heading count). */
-      people: number;
       /** The Follow up core's flag: more than 100 available properties exist. */
       truncated: boolean;
     }
@@ -13308,7 +13713,6 @@ new:
       quietShares = {
         status: 'ok',
         properties: built.properties,
-        people: built.people,
         truncated: waiting.truncated,
       };
     } catch (err) {
@@ -13332,7 +13736,6 @@ new:
         relay_close_nags: relayCloseNags.length,
         quiet_shares_status: quietShares.status,
         quiet_share_properties: quietShares.status === 'ok' ? quietShares.properties.length : 0,
-        quiet_share_people: quietShares.status === 'ok' ? quietShares.people : 0,
       },
       'today queue assembled',
 ```
@@ -13582,7 +13985,7 @@ Spec sections and rulings covered:
 | Spec / ruling | What | Task |
 |---|---|---|
 | 6.1 mechanism, PR22, WI1 | Follow up core `collectWaitingFollowUps` (rows + recipient, `consistentRead` pass-through), `buildFollowUps` byte-identical, route-level regression with `last_reached_out_at` set | S4.1 |
-| 6.1, 6.2 order, 6.3 order, 3 (`people`), PR23 | `buildQuietShares`: both thresholds, both boundaries (exactly 48h / 120h and 1 ms before), heard later, reached later, reached EARLIER ignored, unparseable values, per-row clock, in-property and property order, distinct people, a person on two properties, non-waiting outcomes excluded; wire types | S4.2 |
+| 6.1, 6.2 order, 6.3 order, 3, PR23, PR103 | `buildQuietShares`: both thresholds, both boundaries (exactly 48h / 120h and 1 ms before), heard later, reached later, reached EARLIER ignored, unparseable values, per-row clock, in-property and property order, a person on two properties (a row under each; no distinct-people count - PR103), non-waiting outcomes excluded; wire types | S4.2 |
 | 3 (`TodayItem.at` / `unitLabel`, units dep), 2.4, PR24 (units), PR25 as amended by PR86, PR29 | unit-label cache (memo; a soft-deleted unit keeps its address, no WARN; an absent or throwing unit -> unitId + one WARN), tours_today `at` / `unitLabel`, time-then-tenant-then-tourId order, `api.ts` wiring | S4.3 |
 | 5.2 (group + order), PR27 | `identify` from both sources, row shape unchanged, created_at order (none / unparseable last, ties refId), position after needs_you_now | S4.4 |
 | 4, 5.2 (owner rule), PR26, PR40 | type filter FIRST (no contact read, no cap slot for known threads), owner rule replacing the #30 skip, unresolved owner unchanged, Unreplied removed everywhere (union, array, branch, row key, log, comments), every inversion and re-expression, `seed-smoke.mjs` comment | S4.5 |
@@ -13640,17 +14043,15 @@ label time, not load time; across a local midnight a future-dated off-range
 row can read as in-range and sort LAST among the in-range rows. No in-range
 row can ever read as off-range (its date is <= the earlier day's end).
 
-C2. Spec 2.1 "The heading carries the section's count" REVERSES commit
+C2. Spec r7 2.1 "The heading carries the section's count" REVERSED commit
 `2f0db66f` (2026-08-03, "remove the remaining heading count chips ...
 completing the no-bare-counts ruling"; ruling text in
 `docs/superpowers/specs/2026-08-03-listing-card-actions-design.md:20-21`,
 "the counts add nothing"), and `Today.test.tsx:167-168` pins "the headings
-are bare labels". Resolution: follow spec 2.1 (Cameron approved it
-2026-10-24; the approved mockup `project/Main.dc.html` draws a count chip on
-every heading - with a 5-row limit the count is the only place the full
-number shows). The `.count` style that commit removed is re-added
-(S5.1); the bare-label pins are inverted deliberately (S5.6). Recorded in
-the S5 report so nobody re-applies the 08-03 ruling to Today.
+are bare labels". RULED by [PR102] (Cameron at the launch gate; spec r8
+2.1): headings carry NO count. The 2026-08-03 ruling stands for Today too:
+no `.count` style is added (S5.1), the bare-label pins stay exactly as they
+are (S5.6), and the full number shows only in the "Show all N" button.
 
 C3. PR33: the shared component "renders heading `<h2>`" and "both At a
 glance parts use it". Spec 2.4 heads the lower section "At a glance", so an
@@ -13688,8 +14089,8 @@ AI line reads "AI suggestions - 22 contacts have details the AI heard..."
 reference, not part of the checklist" suffix (spec 2.4: headed "At a
 glance"); the quiet-shares help line ends "either way restarts the clock"
 (spec 2.2 adds "sending another property does not"). The spec is later and
-exact; S5 uses the spec's copy everywhere. The mockup's LAYOUT (count chip,
-plain-text request age, dashed divider, compact time-first tour rows,
+exact; S5 uses the spec's copy everywhere. The mockup's LAYOUT (NOT its
+count chip - PR102; plain-text request age, dashed divider, compact time-first tour rows,
 property line with a Show/Hide word) is followed.
 
 C7. Plan WI10 cites "(S5, PR30)" for `TODAY_PAST_TOURS_CAP`; the ruling is
@@ -13723,14 +14124,13 @@ For S4 (what the dashboard assumes about the wire):
   (`app/src/services/followUps.ts:184-191`).
 
 For S7 (accessible names the e2e specs and the perf terminal select on):
-- Section headings carry the count: `<h2>` names are
-  "Needs you now 3", "Identify these contacts 8", "Past tours needing an
-  outcome 23", "Tours to book 9", "Quiet shares 21", "Relay groups to close
-  1", "Placements 3", plus "At a glance" (no count) and the `<h3>` "Tours
-  today 2". Playwright's default substring match still finds
-  `{ name: 'Tours to book' }`; `exact: true` does NOT. A section that failed
-  to load has the bare heading ("Tours to book") and no count.
-- Lists are named by the bare heading text, exactly: 'Needs you now',
+- [PR102] Section headings carry NO count: `<h2>` names are exactly
+  "Needs you now", "Identify these contacts", "Past tours needing an
+  outcome", "Tours to book", "Quiet shares", "Relay groups to close",
+  "Placements", "At a glance", and the `<h3>` "Tours today" -
+  `{ name: 'Tours to book', exact: true }` works. A section that failed to
+  load has the same heading. The count shows only in "Show all N".
+- Lists are named by the heading text, exactly: 'Needs you now',
   'Identify these contacts', 'Past tours needing an outcome', 'Tours to
   book', 'Quiet shares', 'Relay groups to close', 'Placements', 'Tours
   today', and 'AI suggestions' - the last is NOT in the accessibility tree
@@ -13766,7 +14166,7 @@ For S7 (accessible names the e2e specs and the perf terminal select on):
   alert, "We couldn't load " (contains - the per-section unavailable
   alerts) and the fallback line "Some sections can't load right now.".
 - `e2e/support/selectors.md` rows to update: line 18 (the h1/"Tours today"
-  ambiguity still holds - "Tours today N" is now an `<h3>` and still
+  ambiguity still holds - "Tours today" is now an `<h3>` and still
   substring-matches "Today"; `expectTodayReady` stays) and line 65 (the AI
   list is behind the collapsed line).
 - `today-past-tours`: rows are OLDEST first; 5 shown + "Show all N" when
@@ -13783,24 +14183,26 @@ S5.6 removes it with its last reader.
 
 ### Task S5.1 - The shared section frame: `TodaySection` and `LimitedList`
 
-PR33, spec 2 and 2.1: a heading with its count as its own element, an
-optional help line, and a list named by the heading text that shows 5 rows
-with "Show all N" / "Show fewer". Nothing uses it yet (S5.5, S5.6 do).
+PR33, spec 2 and 2.1: a heading that is the bare label - NO count [PR102],
+an optional help line, and a list named by the heading text that shows 5
+rows with "Show all N" / "Show fewer" (the button is where the count
+shows). Nothing uses it yet (S5.5, S5.6 do).
 
 Files:
 - `dashboard/src/routes/today/TodaySection.tsx` (new)
 - `dashboard/src/routes/today/TodaySection.test.tsx` (new)
-- `dashboard/src/routes/today/Today.module.css` (`.groupHeading`; new
-  `.count`, `.help`, `.listFooter`, `.showAll`)
+- `dashboard/src/routes/today/Today.module.css` (new `.help`, `.listFooter`,
+  `.showAll`; `.groupHeading` untouched and no `.count` [PR102])
 
 #### Step 1 - failing tests
 
 Create `dashboard/src/routes/today/TodaySection.test.tsx`:
 ```tsx
 // TodaySection / LimitedList - the frame every Today section shares (spec
-// 2026-10-23-today-checklist-design 2.1; plan PR33): the heading carries the
-// count as its own element, the list is named by the heading text alone, and
-// the list shows 5 rows with "Show all N" / "Show fewer".
+// 2026-10-23-today-checklist-design 2.1; plan PR33, PR102): the heading is the
+// bare label (no count - the 2026-08-03 no-bare-counts ruling stands), the
+// list is named by the heading text, and the list shows 5 rows with
+// "Show all N" / "Show fewer".
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
@@ -13820,7 +14222,7 @@ function Section(props: {
   level?: 2 | 3;
 }): React.JSX.Element {
   return (
-    <TodaySection label={LABEL} count={props.n} help={props.help} level={props.level}>
+    <TodaySection label={LABEL} help={props.help} level={props.level}>
       <LimitedList
         label={LABEL}
         items={rows(props.n)}
@@ -13834,14 +14236,14 @@ function Section(props: {
 }
 
 describe('TodaySection', () => {
-  it('the heading carries the count as its own element; the list is named by the heading text alone', () => {
+  it('the heading is the bare label - no count (PR102); the list is named by the heading text', () => {
     render(<Section n={3} />);
-    const heading = screen.getByRole('heading', { level: 2, name: 'Tours to book 3' });
-    expect(within(heading).getByText('3')).toBeInTheDocument();
+    const heading = screen.getByRole('heading', { level: 2, name: LABEL });
+    expect(heading).toHaveTextContent(/^Tours to book$/);
     expect(screen.getByRole('list', { name: LABEL })).toBeInTheDocument();
   });
 
-  it('no count element when the section has no count (a section that failed to load)', () => {
+  it('a section that failed to load has the same bare heading', () => {
     render(
       <TodaySection label={LABEL}>
         <p>We couldn&apos;t load tours to book.</p>
@@ -13860,7 +14262,7 @@ describe('TodaySection', () => {
 
   it('is an h3 for a part of At a glance', () => {
     render(<Section n={2} level={3} />);
-    expect(screen.getByRole('heading', { level: 3, name: 'Tours to book 2' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 3, name: LABEL })).toBeInTheDocument();
   });
 });
 
@@ -13924,12 +14326,13 @@ Expected: the file fails to load - `Failed to resolve import
 // TodaySection - the section frame every Today section shares (spec
 // 2026-10-23-today-checklist-design 2, 2.1; plan PR33).
 //
-// TodaySection: a <section> whose heading carries the section's count as its
-// OWN element (so the list's name can stay the bare heading text), plus an
-// optional help line for the VA (spec 2.2).
+// TodaySection: a <section> whose heading is the bare label - NO count (spec
+// r8 2.1, plan PR102: the 2026-08-03 no-bare-counts ruling stands; the
+// "Show all N" button names the count) - plus an optional help line for the
+// VA (spec 2.2).
 //
-// LimitedList: the section's list, named by the heading text WITHOUT the
-// count - getByRole('list', { name: 'Tours to book' }) - showing its first
+// LimitedList: the section's list, named by the heading text -
+// getByRole('list', { name: 'Tours to book' }) - showing its first
 // TODAY_SECTION_LIMIT rows. Past the limit a "Show all N" button under it
 // expands the list in place and then reads "Show fewer" (aria-expanded,
 // aria-controls = the list). Expansion is per-viewer page state only: lost
@@ -13942,11 +14345,8 @@ import styles from './Today.module.css';
 export const TODAY_SECTION_LIMIT = 5;
 
 export interface TodaySectionProps {
-  /** The heading text WITHOUT the count - also its list's accessible name. */
+  /** The heading text (no count, PR102) - also its list's accessible name. */
   label: string;
-  /** The section's count, beside the heading text as its own element.
-   *  Omitted on a section that failed to load (it has nothing to count). */
-  count?: number;
   /** The VA help line under the heading (spec 2.2). */
   help?: string;
   /** 2 for a checklist section (the default); 3 for a part of At a glance. */
@@ -13954,19 +14354,11 @@ export interface TodaySectionProps {
   children: React.ReactNode;
 }
 
-export function TodaySection({ label, count, help, level = 2, children }: TodaySectionProps): React.JSX.Element {
+export function TodaySection({ label, help, level = 2, children }: TodaySectionProps): React.JSX.Element {
   const Heading = level === 3 ? 'h3' : 'h2';
   return (
     <section className={styles.group}>
-      <Heading className={styles.groupHeading}>
-        {label}
-        {count !== undefined ? (
-          <>
-            {' '}
-            <span className={styles.count}>{count}</span>
-          </>
-        ) : null}
-      </Heading>
+      <Heading className={styles.groupHeading}>{label}</Heading>
       {help !== undefined ? <p className={styles.help}>{help}</p> : null}
       {children}
     </section>
@@ -13974,7 +14366,7 @@ export function TodaySection({ label, count, help, level = 2, children }: TodayS
 }
 
 export interface LimitedListProps<T> {
-  /** The list's accessible name: the section's heading text, no count. */
+  /** The list's accessible name: the section's heading text. */
   label: string;
   items: readonly T[];
   itemKey: (item: T) => string;
@@ -14027,28 +14419,12 @@ export function LimitedList<T>({
 }
 ```
 
-3b. `dashboard/src/routes/today/Today.module.css` - the heading is block,
-not flex (its count is separated by a real space). Edit:
+3b. [PR102] (struck: `.groupHeading` is NOT edited - with no count in the
+heading there is no text-node spacing to protect, so it keeps its current
+flex rule.)
 
-old:
-```css
-.groupHeading {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  margin: 0 0 var(--sp-2);
-```
-new:
-```css
-.groupHeading {
-  /* Block, not flex: the space between the heading text and its count
-   * (TodaySection) is a real text node, and a flex container drops a
-   * whitespace-only child from layout (and can drop it from the heading's
-   * accessible name, which then reads "Tours to book9"). */
-  margin: 0 0 var(--sp-2);
-```
-
-3c. Same file - append the new blocks after `.sectionError`. Edit:
+3c. `dashboard/src/routes/today/Today.module.css` - append the new blocks
+after `.sectionError` (no `.count` block - PR102). Edit:
 
 old:
 ```css
@@ -14069,23 +14445,6 @@ new:
 }
 
 /* --- Shared section frame (TodaySection, spec 2026-10-23 2.1) ------------- */
-
-/* A section's count, beside its heading text. Spec 2026-10-23 2.1 brings the
- * count back (the 5-row limit hides the rest); its own element, so the list's
- * accessible name stays the bare heading text. */
-.count {
-  display: inline-block;
-  min-width: 1.25rem;
-  padding: 0 var(--sp-2);
-  border-radius: var(--radius-pill);
-  background: var(--c-brand-soft);
-  color: var(--c-brand);
-  font-size: var(--fs-xs);
-  font-weight: var(--fw-medium);
-  letter-spacing: 0;
-  text-align: center;
-  text-transform: none;
-}
 
 /* The VA help line under a checklist heading (spec 2.2). */
 .help {
@@ -14132,7 +14491,8 @@ new:
 cd W:/tmp/today-checklist/dashboard; npx vitest run src/routes/today
 ```
 Expect all green (the new file, and every existing Today suite unchanged -
-no existing heading has a count yet). Then the compile check (bare):
+including the 2026-08-03 bare-label pins in `Today.test.tsx` ~167-168,
+which stay untouched [PR102]). Then the compile check (bare):
 ```
 cd W:/tmp/today-checklist; npm run typecheck
 ```
@@ -14151,7 +14511,7 @@ Expect `0` three times.
 git -C W:/tmp/today-checklist status
 test ! -e "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD" && echo no-merge-in-progress
 git -C W:/tmp/today-checklist add dashboard/src/routes/today/TodaySection.tsx dashboard/src/routes/today/TodaySection.test.tsx dashboard/src/routes/today/Today.module.css
-git -C W:/tmp/today-checklist commit -m "feat(dashboard): Today section frame - heading count, help line, 5-row list with Show all (today-checklist S5.1)" -m "TodaySection and LimitedList (plan PR33, spec 2.1). Not used by the page yet." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/today-checklist commit -m "feat(dashboard): Today section frame - bare heading, help line, 5-row list with Show all (today-checklist S5.1)" -m "TodaySection and LimitedList (plan PR33, PR102, spec r8 2.1: no heading count). Not used by the page yet." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -14521,9 +14881,9 @@ new:
   });
 
   it('labels EVERY Past row (no cap) and reports the Past tab count', async () => {
-    // RE-WRITTEN (was "shows at most five rows"): spec 5.3 - the heading count
-    // and "Show all N" are the rows Today qualifies, so every row is labeled;
-    // the page shows 5 of them (TodaySection).
+    // RE-WRITTEN (was "shows at most five rows"): spec 5.3 - "Show all N"
+    // counts the rows Today qualifies (the heading carries no count, PR102),
+    // so every row is labeled; the page shows 5 of them (TodaySection).
     serveTours(Array.from({ length: 7 }, (_, i) => tour(`t${i}`, i + 1)));
     const { result } = renderHook(() => useTodayPastTours());
     await waitFor(() => expect(result.current.status).toBe('ready'));
@@ -14647,8 +15007,8 @@ and stays ASCII:
 // which tour is "past"; change the Past tab's rule and Today follows.
 //
 // What it adds for the home page:
-// - Names for EVERY Past row, so the heading count and "Show all N" are the
-//   rows Today actually qualifies (spec 5.3; the page shows the first 5). The
+// - Names for EVERY Past row, so "Show all N" counts the rows Today actually
+//   qualifies (spec 5.3; the page shows the first 5; no heading count). The
 //   Past tab loads every contact and property to label its rows - too heavy
 //   for the landing page - so this point-reads only the listed tenants and
 //   properties, all at once (one round trip).
@@ -14944,7 +15304,7 @@ function Probe(): React.JSX.Element {
         {quietShares === undefined
           ? 'missing'
           : quietShares.status === 'ok'
-            ? `ok:${quietShares.people}:${quietShares.properties.length}:${String(quietShares.truncated)}`
+            ? `ok:${quietShares.properties.length}:${String(quietShares.truncated)}`
             : 'unavailable'}
       </span>
       <span data-testid="ttb">{toursToBookStatus ?? 'missing'}</span>
@@ -14972,7 +15332,7 @@ describe('useToday - Quiet shares and Tours to book statuses', () => {
         ],
       },
     ],
-    people: 1,
+    // PR103: the wire carries no distinct-people count.
     truncated: false,
   };
 
@@ -14980,7 +15340,7 @@ describe('useToday - Quiet shares and Tours to book statuses', () => {
     getToday.mockResolvedValue({ ...TODAY, quietShares: QUIET, toursToBook: 'ok' });
     render(<Probe />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
-    expect(screen.getByTestId('quiet').textContent).toBe('ok:1:1:false');
+    expect(screen.getByTestId('quiet').textContent).toBe('ok:1:false');
     expect(screen.getByTestId('ttb').textContent).toBe('ok');
     expect(screen.getByTestId('generated').textContent).toBe('2026-06-16T12:00:00Z');
   });
@@ -15316,11 +15676,11 @@ export interface QuietShareProperty {
   unitLabel: string;
   people: QuietSharePerson[];
 }
-/** Today's Quiet shares (spec 3). `people` = DISTINCT contacts across every
- *  property (the heading count); `truncated` = more than 100 available
- *  properties exist ("Showing the first 100 properties"). */
+/** Today's Quiet shares (spec r8 3; plan PR103: no distinct-people count).
+ *  `truncated` = more than 100 available properties exist ("Showing the
+ *  first 100 properties"). */
 export type TodayQuietShares =
-  | { status: 'ok'; properties: QuietShareProperty[]; people: number; truncated: boolean }
+  | { status: 'ok'; properties: QuietShareProperty[]; truncated: boolean }
   | { status: 'unavailable' };
 export interface TodayResponse {
   items: TodayItem[];
@@ -15797,6 +16157,8 @@ git -C W:/tmp/today-checklist commit -m "feat(dashboard): Today wire mirror, use
 PR34, spec 6.2, 6.3. One expandable line per property; the first open on
 first arrival; choices kept by unitId across refetches; a later property
 folded; "Show all N properties"; person rows linking to the contact page.
+[PR102] The heading is the bare "Quiet shares" (no count); [PR103] the
+state carries no `people` count.
 
 Files:
 - `dashboard/src/routes/today/QuietShares.tsx` (new)
@@ -15841,13 +16203,9 @@ function property(unitId: string, people: QuietSharePerson[]): QuietSharePropert
   return { unitId, unitLabel: `${unitId} Main St`, people };
 }
 
-function ok(properties: QuietShareProperty[], extra: { people?: number; truncated?: boolean } = {}): QuietSharesState {
-  return {
-    status: 'ok',
-    properties,
-    people: extra.people ?? properties.reduce((n, p) => n + p.people.length, 0),
-    truncated: extra.truncated ?? false,
-  };
+function ok(properties: QuietShareProperty[], extra: { truncated?: boolean } = {}): QuietSharesState {
+  // PR103: no distinct-people count on the wire.
+  return { status: 'ok', properties, truncated: extra.truncated ?? false };
 }
 
 function ui(quiet: QuietSharesState): React.JSX.Element {
@@ -15899,10 +16257,11 @@ describe('quietText (spec 6.2)', () => {
 });
 
 describe('QuietSharesSection (option C)', () => {
-  it('the heading counts people, the help line shows, and the property lines keep the order given', () => {
-    // The server counts DISTINCT contacts: b waits on both properties.
-    render(ui(ok([property('u2', [person('a'), person('b')]), property('u1', [person('b')])], { people: 2 })));
-    expect(screen.getByRole('heading', { level: 2, name: 'Quiet shares 2' })).toBeInTheDocument();
+  it('the heading is the bare label (no count), the help line shows, and the property lines keep the order given', () => {
+    // b waits on both properties: a row under each (PR103), and the heading
+    // carries no count at all (PR102).
+    render(ui(ok([property('u2', [person('a'), person('b')]), property('u1', [person('b')])])));
+    expect(screen.getByRole('heading', { level: 2, name: 'Quiet shares' })).toHaveTextContent(/^Quiet shares$/);
     expect(
       screen.getByText(
         'Properties sent in the last 14 days. Replied and then went quiet for 2+ days, or never replied in 5+ days. A message or call from either side restarts the clock; sending another property does not.',
@@ -16052,8 +16411,8 @@ Expected: the file fails to load - `Failed to resolve import
 // rest folded. After that the viewer's choices are kept by unitId across live
 // refetches, and a property that appears later starts folded. Page state
 // only. The 5-line limit counts PROPERTY lines ("Show all N properties"); an
-// open property shows all its people. The heading count is the server's
-// `people` (distinct contacts).
+// open property shows all its people. The heading carries no count (spec r8
+// 2.1, plan PR102) and the wire carries no distinct-people count (PR103).
 //
 // No Interested / Not interested here (spec 6.2): a person row opens the
 // contact page, where the decision is made with the conversation in view.
@@ -16219,7 +16578,7 @@ export function QuietSharesSection({ quiet, now }: QuietSharesSectionProps): Rea
   };
 
   return (
-    <TodaySection label={QUIET_SHARES_LABEL} count={quiet.people} help={QUIET_SHARES_HELP}>
+    <TodaySection label={QUIET_SHARES_LABEL} help={QUIET_SHARES_HELP}>
       <LimitedList
         label={QUIET_SHARES_LABEL}
         items={properties}
@@ -16395,16 +16754,16 @@ it:
 | shows a Today heading and a spinner while loading | unchanged |
 | shows an inline error message on error | unchanged |
 | shows a friendly empty state when there is nothing to do | unchanged |
-| renders only the non-empty groups, with rows, urgency, tag, and links | RE-WRITTEN: headings carry counts ("Needs you now 2", C2); the Unreplied row becomes an `identify` row; `source` 'fallback' -> 'server' (the fallback now shows its notice); the untriaged needs-you-now fixture (em dash copy) becomes an ASCII relay opt-out row; asserts no Unreplied / Follow-ups heading |
+| renders only the non-empty groups, with rows, urgency, tag, and links | RE-WRITTEN: headings stay bare labels - the 2026-08-03 pins (the comment at ~166-168 and the exact 'Needs you now' at ~169) are kept byte-for-byte [PR102]; the Unreplied row becomes an `identify` row; `source` 'fallback' -> 'server' (the fallback now shows its notice); the untriaged needs-you-now fixture (em dash copy) becomes an ASCII relay opt-out row; asserts no Unreplied / Follow-ups heading |
 | renders the AI suggestions group with its label | RE-WRITTEN: one collapsed line "AI suggestions for 2 contacts", list absent until opened; + a new singular case |
 | exposes each group as a list of rows | RE-WRITTEN: Tours today compact rows under At a glance (time, tenant, property) |
-| renders a nag with its pool number, copy, and an Open deep-link | CHANGED: heading "Relay groups to close 1" |
+| renders a nag with its pool number, copy, and an Open deep-link | unchanged - its bare-label heading and comment stay [PR102] |
 | Close wires ... / Keep open wires ... / a nag with a tag ... | unchanged |
 | sits after Follow-ups due and before AI suggestions to review | RE-WRITTEN: sits after Identify and before Tours to book |
 | renders each row ... / Needs outcome ... / undated ... / no-show ... | unchanged |
 | links "See all N on the Past tab" when it shows only some of them | unchanged (PIN: total > labeled rows) |
 | links "Open the Past tab" when every one is shown | unchanged |
-| past tours alone are not "all caught up" | CHANGED: heading name with count |
+| past tours alone are not "all caught up" | unchanged [PR102] |
 | "all caught up" waits while the section is still loading ... | unchanged |
 | no spinner while the section loads when the queue already has rows | CHANGED: the fixture row is `needs_you_now` (was `unreplied`) |
 | a "Tours today" row also carries the back pointer to Today | unchanged (PIN; the compact row keeps it) |
@@ -16414,6 +16773,14 @@ it:
 | round-2: reloadFailed / no refresh note / close-nag Open back pointer | unchanged |
 | AI suggestions render at once while the past-tours section is still loading | RE-WRITTEN: the AI line (a button) renders at once; no spinner; no All caught up |
 | NEW | the layout order; the subtitle; the help lines; 5 rows + Show all / Show fewer; the relay 5-row limit; a Tours to book row; Quiet shares on the page; All caught up ignores At a glance; no At a glance when empty; Tours to book unavailable; Quiet shares unavailable; the fallback's one line; the fallback's Identify rows; past tours 5 rows + Show all beside the Past tab link |
+
+[PR102] Headings carry NO count, so the 2026-08-03 bare-label pins stay:
+the three comment lines and the exact `'Needs you now'` assertion that open
+the "renders only the non-empty ..." case below are the CURRENT file's
+~166-169, kept byte-for-byte, and the relay nag case keeps its "Exact string
+name ... no count chip" comment. Line ~167 holds an em dash, written below
+as `[U+2014]` (the notation of this section's anchors): copy that ONE line
+from your Read of the current file - never type the bracket notation.
 
 New content of `dashboard/src/routes/today/Today.test.tsx`:
 ```tsx
@@ -16537,8 +16904,9 @@ function quietPerson(contactId: string, over: Partial<QuietSharePerson> = {}): Q
   return { contactId, name: `Name ${contactId}`, type: 'tenant', state: 'no_reply', quietSince: daysBefore(6), ...over };
 }
 
-function quietOk(properties: QuietShareProperty[], people: number): QuietSharesState {
-  return { status: 'ok', properties, people, truncated: false };
+function quietOk(properties: QuietShareProperty[]): QuietSharesState {
+  // PR103: the wire carries no distinct-people count.
+  return { status: 'ok', properties, truncated: false };
 }
 
 function item(group: TodayItem['group'], refId: string, over: Partial<TodayItem> = {}): TodayItem {
@@ -16617,10 +16985,11 @@ describe('Today', () => {
     };
     renderToday();
 
-    // Each heading carries its section's count as its own element (spec
-    // 2026-10-23 2.1 - this reverses the 2026-08-03 bare-label headings).
-    expect(screen.getByRole('heading', { name: 'Needs you now 2' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Identify these contacts 1' })).toBeInTheDocument();
+    // Group headings present for non-empty groups; absent groups are skipped.
+    // String names are EXACT matches: the headings are bare labels [U+2014] the count
+    // chips were removed 2026-08-03 ("Needs you now" has 2 rows here).
+    expect(screen.getByRole('heading', { name: 'Needs you now' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Identify these contacts' })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: /Tours today/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: /Placements/ })).not.toBeInTheDocument();
     // Unreplied is gone (spec 4), and so is the old Follow-ups heading.
@@ -16704,7 +17073,7 @@ describe('Today', () => {
     };
     renderToday();
     const glance = sectionOf('At a glance');
-    expect(within(glance).getByRole('heading', { level: 3, name: 'Tours today 2' })).toBeInTheDocument();
+    expect(within(glance).getByRole('heading', { level: 3, name: 'Tours today' })).toBeInTheDocument();
     const list = within(glance).getByRole('list', { name: 'Tours today' });
     expect(within(list).getAllByRole('listitem')).toHaveLength(2);
     const first = within(list).getByRole('link', { name: 'Tour for Dana Ruiz at 1458 Maple Ridge Dr SW, 10:00 AM' });
@@ -16734,7 +17103,7 @@ describe('Today - the checklist layout (spec 2026-10-23 2)', () => {
       ],
       relayCloseNags: [makeNag()],
       dismissNag: vi.fn(),
-      quietShares: quietOk([{ unitId: 'u1', unitLabel: '12 Oak St', people: [quietPerson('q1')] }], 1),
+      quietShares: quietOk([{ unitId: 'u1', unitLabel: '12 Oak St', people: [quietPerson('q1')] }]),
       toursToBookStatus: 'ok',
     };
     past = { status: 'ready', rows: [pastRow('p1')], total: 1 };
@@ -16744,16 +17113,16 @@ describe('Today - the checklist layout (spec 2026-10-23 2)', () => {
     fullPage();
     renderToday();
     expect(screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual([
-      'Needs you now 1',
-      'Identify these contacts 1',
-      'Past tours needing an outcome 1',
-      'Tours to book 1',
-      'Quiet shares 1',
-      'Relay groups to close 1',
-      'Placements 1',
+      'Needs you now',
+      'Identify these contacts',
+      'Past tours needing an outcome',
+      'Tours to book',
+      'Quiet shares',
+      'Relay groups to close',
+      'Placements',
       'At a glance',
     ]);
-    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Tours today 1']);
+    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Tours today']);
     expect(screen.getByRole('button', { name: 'AI suggestions for 1 contact' })).toBeInTheDocument();
     expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
   });
@@ -16771,19 +17140,19 @@ describe('Today - the checklist layout (spec 2026-10-23 2)', () => {
     fullPage();
     renderToday();
     expect(
-      within(sectionOf('Identify these contacts 1')).getByText(
+      within(sectionOf('Identify these contacts')).getByText(
         "We don't know yet who these are. Call each one; after about a week with no contact, mark them Inactive.",
       ),
     ).toBeInTheDocument();
     expect(
-      within(sectionOf('Tours to book 1')).getByText('Said yes to a property; the tour has no date yet. Oldest first.'),
+      within(sectionOf('Tours to book')).getByText('Said yes to a property; the tour has no date yet. Oldest first.'),
     ).toBeInTheDocument();
     expect(
-      within(sectionOf('Quiet shares 1')).getByText(
+      within(sectionOf('Quiet shares')).getByText(
         'Properties sent in the last 14 days. Replied and then went quiet for 2+ days, or never replied in 5+ days. A message or call from either side restarts the clock; sending another property does not.',
       ),
     ).toBeInTheDocument();
-    for (const heading of ['Needs you now 1', 'Past tours needing an outcome 1', 'Relay groups to close 1', 'Placements 1']) {
+    for (const heading of ['Needs you now', 'Past tours needing an outcome', 'Relay groups to close', 'Placements']) {
       // No paragraph at all in these sections: their rows already say why (spec 2.2).
       expect(sectionOf(heading).querySelectorAll('p')).toHaveLength(0);
     }
@@ -16799,8 +17168,8 @@ describe('Today - the checklist layout (spec 2026-10-23 2)', () => {
     renderToday();
     const list = screen.getByRole('list', { name: 'Needs you now' });
     expect(within(list).getAllByRole('listitem')).toHaveLength(5);
-    // The heading counts every row, not just the five shown.
-    expect(screen.getByRole('heading', { name: 'Needs you now 7' })).toBeInTheDocument();
+    // The heading carries no count (PR102); the button names all seven.
+    expect(screen.getByRole('heading', { name: 'Needs you now' })).toHaveTextContent(/^Needs you now$/);
     const toggle = screen.getByRole('button', { name: 'Show all 7' });
     expect(toggle).toHaveAttribute('aria-expanded', 'false');
     await user.click(toggle);
@@ -16821,7 +17190,7 @@ describe('Today - the checklist layout (spec 2026-10-23 2)', () => {
     };
     renderToday();
     expect(within(screen.getByRole('list', { name: 'Relay groups to close' })).getAllByRole('listitem')).toHaveLength(5);
-    expect(within(sectionOf('Relay groups to close 6')).getByRole('button', { name: 'Show all 6' })).toBeInTheDocument();
+    expect(within(sectionOf('Relay groups to close')).getByRole('button', { name: 'Show all 6' })).toBeInTheDocument();
   });
 
   it('a Tours to book row names the tenant, the property and the request age, and opens the tour with the back pointer', async () => {
@@ -16852,7 +17221,7 @@ describe('Today - the checklist layout (spec 2026-10-23 2)', () => {
     expect(screen.getByTestId('state')).toHaveTextContent('{"back":"/"}');
   });
 
-  it('Quiet shares on the page: the heading counts people, the first property is open, a person row opens the contact page', () => {
+  it('Quiet shares on the page: a bare heading, the first property is open, a person row opens the contact page', () => {
     state = {
       status: 'ready',
       source: 'server',
@@ -16870,11 +17239,10 @@ describe('Today - the checklist layout (spec 2026-10-23 2)', () => {
           },
           { unitId: 'u2', unitLabel: '9 Elm Ave', people: [quietPerson('q-kim', { name: 'Kim Tran', quietSince: daysBefore(5) })] },
         ],
-        3,
       ),
     };
     renderToday();
-    expect(screen.getByRole('heading', { name: 'Quiet shares 3' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Quiet shares' })).toHaveTextContent(/^Quiet shares$/);
     expect(
       screen.getByRole('button', { name: '12 Oak St, 2 people: 1 replied, then quiet - 1 never replied' }),
     ).toHaveAttribute('aria-expanded', 'true');
@@ -16964,7 +17332,7 @@ describe('Today - All caught up (spec 2026-10-23 2.3, 2.5)', () => {
       toursToBookStatus: 'unavailable',
     };
     renderToday();
-    expect(screen.getByRole('heading', { name: 'Identify these contacts 1' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Identify these contacts' })).toBeInTheDocument();
     expect(screen.getByText("Some sections can't load right now.")).toBeInTheDocument();
   });
 });
@@ -16979,9 +17347,9 @@ describe('Today - relay close-nag card (D5)', () => {
       dismissNag: vi.fn(),
     };
     renderToday();
-    // Its own section (not "all caught up", even though items is empty). The
-    // heading carries its count (spec 2026-10-23 2.1).
-    expect(screen.getByRole('heading', { name: 'Relay groups to close 1' })).toBeInTheDocument();
+    // Its own section (not "all caught up", even though items is empty). Exact
+    // string name: the heading is a bare label (no count chip).
+    expect(screen.getByRole('heading', { name: 'Relay groups to close' })).toBeInTheDocument();
     expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
     // Pool number is display DATA (formatted), plus the close-it copy with members.
     expect(screen.getByText('(555) 019-0001')).toBeInTheDocument();
@@ -17055,7 +17423,7 @@ describe('Today - past tours needing an outcome (Sam item 18)', () => {
     past = { status: 'ready', rows: [pastRow('t1')], total: 1 };
     renderToday();
     const headings = screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent);
-    expect(headings).toEqual(['Identify these contacts 1', `${HEADING} 1`, 'Tours to book 1']);
+    expect(headings).toEqual(['Identify these contacts', HEADING, 'Tours to book']);
   });
 
   it('renders each row with tenant, property, date and the Past state, as one link', () => {
@@ -17143,7 +17511,7 @@ describe('Today - past tours needing an outcome (Sam item 18)', () => {
     renderToday();
     const list = screen.getByRole('list', { name: HEADING });
     expect(within(list).getAllByRole('listitem')).toHaveLength(5);
-    const section = sectionOf(`${HEADING} 7`);
+    const section = sectionOf(HEADING);
     const toggle = within(section).getByRole('button', { name: 'Show all 7' });
     const link = within(section).getByRole('link', { name: 'Open the Past tab' });
     expect(toggle.parentElement).toBe(link.parentElement);
@@ -17155,7 +17523,7 @@ describe('Today - past tours needing an outcome (Sam item 18)', () => {
     state = { status: 'ready', source: 'server', items: [] };
     past = { status: 'ready', rows: [pastRow('a')], total: 1 };
     renderToday();
-    expect(screen.getByRole('heading', { name: `${HEADING} 1` })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: HEADING })).toBeInTheDocument();
     expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
   });
 
@@ -17279,9 +17647,11 @@ cd W:/tmp/today-checklist/dashboard; npx vitest run src/routes/today/Today.test.
 ```
 Expected failures, and why (the old page: bare headings, the old order,
 Unreplied, a heading-and-list AI group):
-- every case naming a heading with a count (`'Needs you now 2'`,
-  `'Relay groups to close 1'`, `` `${HEADING} 1` `` ...) - the heading is the
-  bare label;
+- [PR102] every case naming a NEW section heading (`'Identify these
+  contacts'`, `'Tours to book'`, `'Quiet shares'`, `'Placements'`,
+  `'At a glance'`) - the old page has no such heading. The bare-label pins
+  (`'Needs you now'`, `'Relay groups to close'`, `HEADING`) are green on the
+  old page too: headings never carry a count;
 - `shows the AI suggestions as one collapsed line ...`, `names one AI
   suggestion contact ...`, the round-4 case - no such button;
 - `lists Tours today under At a glance ...` - no "At a glance" heading;
@@ -17307,7 +17677,8 @@ are not carried over:
 // a glance" - Tours today as compact rows, the AI suggestions as one collapsed
 // line - which never counts toward "done".
 //
-// Every section is a TodaySection: a heading with its count, an optional help
+// Every section is a TodaySection: a bare heading (no count - spec r8 2.1,
+// plan PR102; the "Show all N" button names the count), an optional help
 // line for the VA, and a list named by the heading text that shows its first 5
 // rows with "Show all N". Rows are white cards (who - why - an optional red
 // urgency chip - a "Placement - Touring"-style tag - an amber attention
@@ -17366,7 +17737,7 @@ const BACK_TO_TODAY = { back: '/' } as const;
 
 /** useToday always sets quietShares; this default only keeps a partial test
  *  mock rendering (as the relayCloseNags default does). */
-const NO_QUIET_SHARES: QuietSharesState = { status: 'ok', properties: [], people: 0, truncated: false };
+const NO_QUIET_SHARES: QuietSharesState = { status: 'ok', properties: [], truncated: false };
 
 /** The deep-link target for a row, driven by its refType. The contact and
  *  conversation routes are placeholders for now (B2+) - that's expected. */
@@ -17434,7 +17805,7 @@ function ItemsSection({
 }): React.JSX.Element | null {
   if (rows.length === 0) return null;
   return (
-    <TodaySection label={label} count={rows.length} help={help}>
+    <TodaySection label={label} help={help}>
       <LimitedList label={label} items={rows} itemKey={rowKey} renderItem={(item) => <Row item={item} />} />
     </TodaySection>
   );
@@ -17596,7 +17967,7 @@ function PastToursSection({ past }: { past: TodayPastToursState }): React.JSX.El
   if (past.rows.length === 0) return null;
   const more = past.total > past.rows.length;
   return (
-    <TodaySection label={PAST_TOURS_LABEL} count={past.rows.length}>
+    <TodaySection label={PAST_TOURS_LABEL}>
       <LimitedList
         label={PAST_TOURS_LABEL}
         items={past.rows}
@@ -17654,7 +18025,7 @@ function AtAGlance({ toursToday, aiSuggestions }: { toursToday: TodayItem[]; aiS
     <section className={styles.glance}>
       <h2 className={styles.groupHeading}>{GLANCE_LABEL}</h2>
       {toursToday.length > 0 ? (
-        <TodaySection label={TOURS_TODAY_LABEL} count={toursToday.length} level={3}>
+        <TodaySection label={TOURS_TODAY_LABEL} level={3}>
           <LimitedList
             label={TOURS_TODAY_LABEL}
             items={toursToday}
@@ -17775,7 +18146,7 @@ export function Today(): React.JSX.Element {
           )}
           {fallback ? null : <QuietSharesSection quiet={quietShares} now={generatedAt} />}
           {relayCloseNags.length > 0 ? (
-            <TodaySection label={RELAY_LABEL} count={relayCloseNags.length}>
+            <TodaySection label={RELAY_LABEL}>
               <LimitedList
                 label={RELAY_LABEL}
                 items={relayCloseNags}
@@ -17983,9 +18354,12 @@ way, and record it in the report.
 #### Step 5 - ASCII check
 
 ```
-cd W:/tmp/today-checklist; tr -d '\11\12\15\40-\176' < dashboard/src/routes/today/Today.tsx | wc -c; tr -d '\11\12\15\40-\176' < dashboard/src/routes/today/Today.test.tsx | wc -c; git diff -U0 -- dashboard/src/api/types.ts dashboard/src/routes/today/buildToday.ts dashboard/src/routes/today/Today.module.css | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+cd W:/tmp/today-checklist; tr -d '\11\12\15\40-\176' < dashboard/src/routes/today/Today.tsx | wc -c; git diff -U0 -- dashboard/src/routes/today/Today.test.tsx dashboard/src/api/types.ts dashboard/src/routes/today/buildToday.ts dashboard/src/routes/today/Today.module.css | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c; grep -c "the headings are bare labels $(printf '\342\200\224') the count" dashboard/src/routes/today/Today.test.tsx
 ```
-Expect `0` three times (both rewritten files are now ASCII throughout).
+Expect `0`, `0`, `1`. `Today.tsx` is ASCII throughout. `Today.test.tsx` keeps
+ONE non-ASCII line on purpose - the 2026-08-03 pin comment (~167), copied
+byte-for-byte [PR102] - so it is checked on ADDED lines, and the last
+command proves the pin line survived the rewrite.
 
 #### Step 6 - commit
 
@@ -17993,7 +18367,7 @@ Expect `0` three times (both rewritten files are now ASCII throughout).
 git -C W:/tmp/today-checklist status
 test ! -e "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD" && echo no-merge-in-progress
 git -C W:/tmp/today-checklist add dashboard/src/routes/today/Today.tsx dashboard/src/routes/today/Today.test.tsx dashboard/src/routes/today/Today.module.css dashboard/src/api/types.ts dashboard/src/routes/today/buildToday.ts
-git -C W:/tmp/today-checklist commit -m "feat(dashboard): Today as the daily checklist - section order, counts, help lines, At a glance, All caught up rules (today-checklist S5.6)" -m "Spec 2-2.5, plan PR33, PR36. Unreplied leaves TodayGroup. Today.test.tsx re-written deliberately (cases listed in plan S5.6)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/today-checklist commit -m "feat(dashboard): Today as the daily checklist - section order, bare headings, help lines, At a glance, All caught up rules (today-checklist S5.6)" -m "Spec r8 2-2.5, plan PR33, PR36, PR102 (no heading counts; the 2026-08-03 bare-label pins kept). Unreplied leaves TodayGroup. Today.test.tsx re-written deliberately (cases listed in plan S5.6)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -18077,9 +18451,10 @@ Write `docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S5-report
   `fallback || any unavailable` (`Today.tsx`, `anyUnavailable`). Pinned by
   `useToday.test.tsx` "a fallback load has both sections unavailable" and
   `Today.test.tsx` "the fallback shows one line ...".
-- C1-C7 as resolved (one line each), in particular C2 (count chips are back
-  on Today, reversing 2f0db66f deliberately) and C4 (`generatedAt` on
-  `useToday`, the quiet clock).
+- C1-C7 as resolved (one line each), in particular C2 (RULED by PR102:
+  headings carry NO count; the 2026-08-03 bare-label pins in
+  `Today.test.tsx` ~166-169 kept byte-for-byte; the count shows only in
+  "Show all N") and C4 (`generatedAt` on `useToday`, the quiet clock).
 - The spinner rule changed shape: it now spins only while past tours settle
   AND nothing else would render (checklist and At a glance empty, nothing
   unavailable) - `Today.tsx`, `settling`. "All caught up" itself still waits
@@ -18093,8 +18468,7 @@ Write `docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S5-report
 - The `Today.test.tsx` fate table from S5.6 Step 1 (or a pointer to it).
 - The Step 1 re-grep command and output; Step 3 counts; Step 4 lint result
   (and any pre-existing error by name).
-- Risks for S7's live QA: the heading count chip and the `display: block`
-  heading at 360px; the Quiet shares property line wrapping a long address
+- Risks for S7's live QA: the Quiet shares property line wrapping a long address
   and summary; the AI line's width; the Show all button beside the Past tab
   link wrapping on a narrow pane.
 
@@ -18113,7 +18487,7 @@ git -C W:/tmp/today-checklist commit -m "docs(records): today-checklist S5 slice
 | Spec 2 page order; Unreplied removed; subtitle | S5.6 (`orders the checklist sections ...`, `reads the checklist subtitle`, the rewritten groups case) |
 | Spec 2 / PR33 heading + list named by heading text | S5.1 (`TodaySection.test.tsx`), S5.6 (every `getByRole('list', { name })`) |
 | Spec 2.1 5 rows, Show all N / Show fewer, aria-expanded | S5.1 (LimitedList cases), S5.6 (Needs you now, Relay groups, Past tours cases) |
-| Spec 2.1 count in the heading | S5.1, S5.6 (C2) |
+| Spec r8 2.1 NO count in the heading (PR102); the count in "Show all N" | S5.1 (`the heading is the bare label ...`), S5.6 (the bare-label pins kept, `shows the first 5 rows ...`) |
 | Spec 2.1 Past tours keeps its link beside Show all | S5.6 (`shows 5 rows with "Show all N" beside the Past tab link`) |
 | Spec 2.1 Quiet shares limit counts property lines | S5.5 (`more than 5 properties ...`, `an open property shows ALL its people`) |
 | Spec 2.2 help lines (exact, three only) | S5.6 (`shows the VA help lines ...`), S5.5 |
@@ -18140,9 +18514,12 @@ browser QA (S7).
 ## 10. S6 - Backfill: last_reached_out_at from the last 14 days
 
 Scope: plan section 2 row S6; ruling PR38 (binding), with PR70-PR72 (this
-draft's C1-C3), PR91 (the manual-retry rule) and PR93 (C1 amended; the
-stranded-leg note) applied into the task text below [PR83]; watch item
-WI12. Spec 7.2, 7.3 and 7.5. Depends on S1 (`contactsRepo.touchLastReachedOut`, PR2).
+draft's C1-C3), PR91 (the manual-retry rule, REPLACED by PR105: a
+`system_copy` row never counts; a Retry is judged by its retried row OR its
+chain root in the window) and PR93 (C1 amended; the stranded-leg note)
+applied into the task text below [PR83]; watch item
+WI12. Spec r8 7.2, 7.3 and 7.5. Depends on S1 (`contactsRepo.touchLastReachedOut`, PR2)
+and on S2.1a (`MessageItem.system_copy`, PR104).
 Every line number below is a hint against main @970a29b9; the QUOTED text is
 the anchor.
 
@@ -18500,33 +18877,64 @@ describe('planThreadPage - one-to-one texts (spec 7.5)', () => {
     ]);
     expect(nonZero(plan)).toEqual({ automated: 1, share: 2, machine_retry: 2, text: 1 });
     expect([...plan.latest]).toEqual([['c-a', '2026-10-20T15:00:00.000Z']]);
-    // PR91: the staff Retry's retried row (#F2) is not among the window rows
-    // here, so it counts and is reported as residue.
+    // PR105: the staff Retry's retried row and root (both #F2) are not among
+    // the window rows here, so it counts and is reported as residue.
     expect(plan.retryOriginOutsideWindow).toBe(1);
   });
 
-  // PR91 (the live W2 gate, mirrored): a staff Retry (retry_of alone) of a row
-  // whose copy is the system's - automated, or a Send-now body - is not staff
-  // outreach. The retried row is judged only when it is among this thread's
-  // window rows; one that is not (older than the window) counts, as residue.
-  it('PR91: a staff Retry of an in-window automated or Send-now row is excluded; of a staff row, or of a row outside the window, it counts', async () => {
+  // PR105 (spec r8 7.5; the live W2 gate of PR104, mirrored for history): a
+  // row marked system_copy (a Send now, or a Retry of automated or
+  // system-copy copy) never counts. A staff Retry (retry_of) is excluded when
+  // its retried row OR its chain root (retry_root) is among this thread's
+  // window rows and is automated, system copy, or a Send-now body. A Retry
+  // whose retried row and root are BOTH outside the window cannot be judged:
+  // it counts, reported as residue.
+  it('PR105: system_copy rows never count; a staff Retry is excluded when its retried row or chain root in the window is system copy; otherwise it counts', async () => {
     const nudge = MESSAGE_CATALOG['nudge.receipt_check'].default;
     const plan = await planRows(ONE, [
+      // An automated text and its staff Retry.
       text('2026-10-20T10:00:00.000Z#AF', { automated: true, body: 'Sorry we missed your call.' }),
       text('2026-10-20T10:05:00.000Z#AR', { retry_of: '2026-10-20T10:00:00.000Z#AF', body: 'Sorry we missed your call.' }),
+      // A Send-now row from before the marker (the body rule) and its Retry.
       text('2026-10-20T11:00:00.000Z#NF', { body: nudge }),
       text('2026-10-20T11:05:00.000Z#NR', { retry_of: '2026-10-20T11:00:00.000Z#NF', body: nudge }),
+      // A marked Send-now row (PR104): skipped itself, and so is its Retry.
+      text('2026-10-20T11:30:00.000Z#XF', { system_copy: true, body: 'Your tour is tomorrow at 10.' }),
+      text('2026-10-20T11:35:00.000Z#XR', { retry_of: '2026-10-20T11:30:00.000Z#XF', body: 'Your tour is tomorrow at 10.' }),
+      // A Retry of a Retry from before the marker: its retried row (AR2) is a
+      // plain manual retry, but its chain ROOT (AF2) is automated - excluded.
+      text('2026-10-20T11:40:00.000Z#AF2', { automated: true, body: 'Welcome!' }),
+      text('2026-10-20T11:45:00.000Z#AR2', {
+        retry_of: '2026-10-20T11:40:00.000Z#AF2',
+        retry_root: '2026-10-20T11:40:00.000Z#AF2',
+        body: 'Welcome!',
+      }),
+      text('2026-10-20T11:50:00.000Z#AR3', {
+        retry_of: '2026-10-20T11:45:00.000Z#AR2',
+        retry_root: '2026-10-20T11:40:00.000Z#AF2',
+        body: 'Welcome!',
+      }),
+      // A staff text and its Retry count.
       text('2026-10-20T12:00:00.000Z#SF'),
-      text('2026-10-20T12:05:00.000Z#SR', { retry_of: '2026-10-20T12:00:00.000Z#SF' }),
-      // The retried row is older than the window: never read, so never judged.
-      text('2026-10-20T13:05:00.000Z#OR', { retry_of: '2026-10-01T09:00:00.000Z#OLD' }),
+      text('2026-10-20T12:05:00.000Z#SR', { retry_of: '2026-10-20T12:00:00.000Z#SF', retry_root: '2026-10-20T12:00:00.000Z#SF' }),
+      // The retried row is in the window (a staff text) though the root is
+      // not: judged by the retried row - counts, and it is NOT residue.
+      text('2026-10-20T12:10:00.000Z#SR2', { retry_of: '2026-10-20T12:00:00.000Z#SF', retry_root: '2026-10-01T08:00:00.000Z#GONE' }),
+      // Retried row and root both older than the window: counts, as residue.
+      text('2026-10-20T13:05:00.000Z#OR', { retry_of: '2026-10-01T09:00:00.000Z#OLD', retry_root: '2026-09-30T09:00:00.000Z#OLDER' }),
     ]);
-    expect(nonZero(plan)).toEqual({ automated: 1, excluded_nudge_body: 1, retry_of_system_copy: 2, text: 3 });
+    expect(nonZero(plan)).toEqual({
+      automated: 2,
+      excluded_nudge_body: 1,
+      system_copy: 1,
+      retry_of_system_copy: 5,
+      text: 4,
+    });
     expect(plan.retryOriginOutsideWindow).toBe(1);
     expect([...plan.latest]).toEqual([['c-a', '2026-10-20T13:05:00.000Z']]);
   });
 
-  it('PR91: the retried row is judged whether it sits on an earlier page or later in the same page', async () => {
+  it('PR91 / PR105: the retried row is judged whether it sits on an earlier page or later in the same page', async () => {
     const plan = newPlan();
     await planThreadPage(plan, ONE, [text('2026-10-20T10:00:00.000Z#AF', { automated: true })], ctx());
     await planThreadPage(
@@ -18947,10 +19355,12 @@ Create `app/scripts/backfill-last-reached-out.ts` with exactly:
 //   - one-to-one sms/mms/email/call: automated not true; no broadcast_id (a
 //     share, or a Retry of one); no retry_attempt / retry_window_start (the
 //     automatic 30003 retry - a staff Retry carries retry_of alone and
-//     counts, EXCEPT a Retry of a row in this thread's window whose copy is
-//     the system's - automated, or a Send-now body (plan PR91, the live W2
-//     gate); a Retry whose row is older than the window counts and is
-//     reported as retryOriginOutsideWindow); an email once it left for SES
+//     counts, EXCEPT a Retry whose retried row OR chain root (retry_root) is
+//     among this thread's window rows and is automated, system copy or a
+//     Send-now body (plan PR105, the live W2 gate of PR104); a Retry whose
+//     retried row and root are both older than the window counts and is
+//     reported as retryOriginOutsideWindow); never a row marked system_copy
+//     (a Send now, or a Retry of system copy - PR104); an email once it left for SES
 //     (not failed; queued only with an SES id); a call once the contact's
 //     leg was dialed (answered_at or
 //     call_outcome), at answered_at when present. Recipient:
@@ -19050,8 +19460,11 @@ export const SKIP_KINDS = [
   'automated',
   'share',
   'machine_retry',
-  // PR91: a staff Retry of an in-window automated or Send-now row.
+  // PR105: a staff Retry whose retried row or chain root in the window is
+  // automated, system copy or a Send-now body.
   'retry_of_system_copy',
+  // PR105: a row marked system_copy (Send now; a Retry of system copy, PR104).
+  'system_copy',
   'call_not_dialed',
   'email_failed',
   'email_queued',
@@ -19082,9 +19495,9 @@ export interface ReachedOutPlan {
   /** Of rowsSkipped.excluded_reminder_body: rows also within REMINDER_TIME_MATCH_MS after that reminder's sentAt. */
   reminderBodyTimeMatched: number;
   /**
-   * PR91: of the COUNTED one-to-one rows, the staff Retries (retry_of set)
-   * whose retried row was not among the thread's window rows, so it could not
-   * be judged - counted, reported as residue.
+   * PR105: of the COUNTED one-to-one rows, the staff Retries (retry_of set)
+   * whose retried row AND chain root were both absent from the thread's
+   * window rows, so they could not be judged - counted, reported as residue.
    */
   retryOriginOutsideWindow: number;
   unparseableInstants: number;
@@ -19093,7 +19506,8 @@ export interface ReachedOutPlan {
   /**
    * PR91: every in-window one-to-one outbound row seen so far, keyed
    * `<conversationId>|<tsMsgId>`, -> whether its copy is the system's
-   * (automated, or a Send-now body). A later staff Retry is judged by it.
+   * (automated, system_copy, or a Send-now body - PR105). A later staff Retry
+   * is judged by its retried row and its chain root here.
    */
   windowOneToOne: Map<string, boolean>;
 }
@@ -19170,9 +19584,10 @@ export function indexReminderSends(items: readonly ReminderSendRow[], windowStar
  * slot) lands in exactly one counted or skipped category, and every counted
  * one folds its instant into `plan.latest`. The Query filters inbound rows
  * out; the planner re-checks so it is right on any input. The page is
- * INDEXED first (PR91), so a staff Retry can be judged against a retried row
- * later in the same page; the window Query reads a thread in key order, so
- * a retried row (an earlier key) on another page was indexed before.
+ * INDEXED first (PR91, PR105), so a staff Retry can be judged against a
+ * retried row (or chain root) later in the same page; the window Query reads
+ * a thread in key order, so a retried row or root (an earlier key) on
+ * another page was indexed before.
  */
 export async function planThreadPage(
   plan: ReachedOutPlan,
@@ -19187,9 +19602,10 @@ export async function planThreadPage(
 
 const windowRowKey = (conversationId: string, tsMsgId: string): string => `${conversationId}|${tsMsgId}`;
 
-/** PR91: the copy is the system's - automated, or one of the Send-now bodies. */
+/** PR105: the copy is the system's - automated, marked system_copy (PR104),
+ *  or one of the Send-now bodies. */
 function isSystemCopy(row: MessageItem, ctx: ReachedOutContext): boolean {
-  if (row.automated === true) return true;
+  if (row.automated === true || row.system_copy === true) return true;
   const body = row.body;
   return typeof body === 'string' && (ctx.nudgeBodies.has(body) || ctx.reminderSends.has(body));
 }
@@ -19311,15 +19727,22 @@ async function planOneToOneRow(
   if (row.automated === true) return skip(plan, 'automated');
   if (nonEmpty(row.broadcast_id)) return skip(plan, 'share');
   if (row.retry_attempt !== undefined || nonEmpty(row.retry_window_start)) return skip(plan, 'machine_retry');
-  // PR91 (the live W2 gate): a staff Retry (retry_of alone) of an in-window
-  // row whose copy is the system's is not staff outreach. A retried row that
-  // is not among the window rows cannot be judged: the Retry counts, as
-  // reported residue.
+  // PR105 (spec r8 7.5): a row marked system copy - a Send now, or a staff
+  // Retry of automated or system-copy copy (PR104) - never counts.
+  if (row.system_copy === true) return skip(plan, 'system_copy');
+  // PR105 (the live W2 gate, mirrored for rows written before the marker): a
+  // staff Retry (retry_of) is not staff outreach when its retried row OR its
+  // chain root (retry_root) is among the thread's window rows and its copy is
+  // the system's. When NEITHER is among them the Retry cannot be judged: it
+  // counts, as reported residue.
   let retryOriginUnseen = false;
   if (nonEmpty(row.retry_of)) {
     const origin = plan.windowOneToOne.get(windowRowKey(thread.conversationId, row.retry_of));
-    if (origin === true) return skip(plan, 'retry_of_system_copy');
-    if (origin === undefined) retryOriginUnseen = true;
+    const root = nonEmpty(row.retry_root)
+      ? plan.windowOneToOne.get(windowRowKey(thread.conversationId, row.retry_root))
+      : undefined;
+    if (origin === true || root === true) return skip(plan, 'retry_of_system_copy');
+    if (origin === undefined && root === undefined) retryOriginUnseen = true;
   }
   let kind: 'text' | 'email' | 'call';
   let instant = at;
@@ -19378,7 +19801,8 @@ function oneToOneContactOf(thread: ReachedOutThread, lookup: HeardFromLookup): P
 ```
 cd W:/tmp/today-checklist/app; ALLOW_SKIP_DYNAMO_TESTS=1 npx vitest run test/backfillLastReachedOut.test.ts
 ```
-Expect every case green (25 cases: the drafted 23 plus the two PR91 cases).
+Expect every case green (25 cases: the drafted 23 plus the two PR91 / PR105
+cases).
 Then the compile check (bare):
 ```
 cd W:/tmp/today-checklist; npm run typecheck
@@ -19908,7 +20332,7 @@ export interface BackfillResult {
   counted: Record<CountedKind, number>;
   rowsSkipped: Record<SkipKind, number>;
   reminderBodyTimeMatched: number;
-  /** PR91: counted staff Retries whose retried row was outside the window (residue). */
+  /** PR105: counted staff Retries whose retried row and root were both outside the window (residue). */
   retryOriginOutsideWindow: number;
   unparseableInstants: number;
   /** Contacts with a planned instant (dry run: would touch). */
@@ -20212,7 +20636,7 @@ new:
 
 What `app/scripts/backfill-last-reached-out.ts` does: from the deploy on, every staff text, email, call, relay group post and group text moves the contacted people's `last_reached_out_at` - the staff follow-up clock behind Today's Quiet shares (shares and automated sends never move it, and it is shown nowhere). People staff followed up with BEFORE the deploy have no value until this backfill runs, so Quiet shares would list them too early. The script reads the last 14 days of outbound messages of every conversation (a share older than 14 days is never a Quiet shares candidate, so older rows cannot matter), applies the same rules the live sends follow, keeps the latest instant per contact across all threads, and makes one conditional, forward-only write per contact. It never moves a value backward, so a contact staff reached after the deploy keeps that newer value. It emits no live events.
 
-Which rows count (a stored row does not say who started it, so the script reads the fields each sender leaves): outbound, author `teammate`, never a Quo import row; one-to-one texts that are not automated, not a share (`broadcast_id`) and not an automatic retry (a staff Retry counts - except a Retry of an automated text, or of a "Send now" text, that is itself in the window); emails once they left for SES; calls once the contact's phone was dialed (`answered_at` or `call_outcome` - a call the staff member never picked up does not count); relay team posts, per contact member whose text was sent; group texts, per member not suppressed; and a relay intro staff edited before creating the group (matched by its text). Excluded by text: the four placement nudge texts, and any text equal to a tour reminder sent in the window - their "Send now" sends carry no marker, so a staff text with exactly the same words is excluded too.
+Which rows count (a stored row does not say who started it, so the script reads the fields each sender leaves): outbound, author `teammate`, never a Quo import row; one-to-one texts that are not automated, not a share (`broadcast_id`) and not an automatic retry (a staff Retry counts - except a Retry whose retried text, or the first text of its retry chain, is in the window and was automated, a "Send now" or a Retry of one); never a row marked system copy (a "Send now", or a staff Retry of an automated text, from the deploy on); emails once they left for SES; calls once the contact's phone was dialed (`answered_at` or `call_outcome` - a call the staff member never picked up does not count); relay team posts, per contact member whose text was sent; group texts, per member not suppressed; and a relay intro staff edited before creating the group (matched by its text). Excluded by text: the four placement nudge texts, and any text equal to a tour reminder sent in the window - their "Send now" sends carry no marker, so a staff text with exactly the same words is excluded too.
 
 Known gap, accepted: a relay team post queued on a still-connecting group MORE than 14 days ago whose texts went out inside the window is not read (the read starts at the post's own time). Those contacts get no value from the backfill; their next staff send sets it.
 
@@ -20227,8 +20651,8 @@ Per environment, in this order:
    - `conversationsWalked` - conversations read (`pointerRows` are claim rows, skipped);
    - `messagesRead` - outbound rows of the window read;
    - `counted` - per category: `text`, `email`, `call` (messages) and `relay_team_slot`, `group_text_slot`, `edited_intro_slot` (one per member reached);
-   - `rowsSkipped` - per reason, for example `automated`, `share`, `machine_retry`, `imported`, `call_not_dialed`, `slot_not_sent`, `outside_window` (inside the margin, before the window). `excluded_nudge_body` and `excluded_reminder_body` are the "Send now" texts the script cannot tell apart from a staff text; `reminderBodyTimeMatched` says how many of the latter also went out within 10 minutes of a reminder (most should). `retry_of_system_copy` is a staff Retry of an automated or "Send now" text in the window. `no_recipient` and `group_unresolved_slot` are messages with no contact to name (a handful is normal);
-   - `retryOriginOutsideWindow` - staff Retries that were counted although the text they retried is older than the window, so the script could not check it (rare; expected near 0);
+   - `rowsSkipped` - per reason, for example `automated`, `share`, `machine_retry`, `imported`, `call_not_dialed`, `slot_not_sent`, `outside_window` (inside the margin, before the window). `excluded_nudge_body` and `excluded_reminder_body` are the "Send now" texts the script cannot tell apart from a staff text; `reminderBodyTimeMatched` says how many of the latter also went out within 10 minutes of a reminder (most should). `retry_of_system_copy` is a staff Retry whose retried text or chain root in the window was automated, system copy or a "Send now"; `system_copy` is a row marked system copy (a "Send now", or a Retry of one, from the deploy on). `no_recipient` and `group_unresolved_slot` are messages with no contact to name (a handful is normal);
+   - `retryOriginOutsideWindow` - staff Retries that were counted although the text they retried AND the first text of their chain are both older than the window, so the script could not check them (rare; expected near 0);
    - `introRule: body_match` and `sendNowRule: exclude_by_body` - the rules applied;
    - `remindersInWindow` - tour reminders sent in the window, the input of the reminder exclusion;
    - `planned` - contacts that will get a value;
@@ -20331,12 +20755,13 @@ Write `W:/tmp/today-checklist/docs/superpowers/reviews/2026-10-23-feat-today-che
 - [PR93] The stranded-after-send relay leg: stamped live (S3, a deliberate
   widening of spec 7.3 W4) but invisible to the backfill (no slot `sid`);
   noted in the RUNBOOK entry.
-- [PR91] The manual-retry rule as built: `retry_of_system_copy` (a staff
-  Retry of an in-window automated or Send-now row) and the
-  `retryOriginOutsideWindow` residue counter, with the two case titles; the
-  accepted live residue (a Retry of a Send-now row, stored automated:false,
-  still stamps live - the backfill excludes it only when the retried row is
-  in the window).
+- [PR105, replacing PR91's rule and PR100's residue] The rules as built:
+  `system_copy` (a marked row never counts), `retry_of_system_copy` (a
+  staff Retry whose retried row OR chain root in the window is automated,
+  system copy or a Send-now body) and the `retryOriginOutsideWindow`
+  residue counter (retried row and root both outside the window), with the
+  two case titles. The live residues PR91 and PR100 recorded are closed by
+  PR104 (S2).
 - WI12: the agent did NOT run the CLI in S6 (against anything); the RUNBOOK
   says Cameron runs dev then prod after the deploy, dry run first; the lane
   rehearsal is S7's.
@@ -20369,7 +20794,7 @@ Spec 7.5 and PR38, each item to the case that pins it
 | No `last_activity_at` pre-filter | S6.2 runner reads every non-pointer thread ("a dry run" conversationsWalked 5) |
 | 1:1 sms/mms counted (automated false or absent) | "counts a staff sms and mms ..." |
 | automated / broadcast_id / retry_attempt / retry_window_start skipped; manual retry_of counts | "skips automated sends, shares ..." |
-| PR91: a manual retry_of of an in-window automated / Send-now row skipped (`retry_of_system_copy`); retried row outside the window counts (`retryOriginOutsideWindow`); same-page and earlier-page origins | "PR91: a staff Retry of an in-window automated ...", "PR91: the retried row is judged whether ..." |
+| PR105 (replaces PR91's rule): a `system_copy` row skipped (`system_copy`); a manual retry_of whose retried row or chain root in the window is automated / system copy / Send-now skipped (`retry_of_system_copy`); retried row and root both outside the window counts (`retryOriginOutsideWindow`); same-page and earlier-page origins | "PR105: system_copy rows never count ...", "PR91 / PR105: the retried row is judged whether ..." |
 | Email: sent/delivered/undelivered or SES id counts; failed and queued-without-SES skipped | "counts an email once it left for SES ..." |
 | Calls: answered_at or call_outcome; instant rule; ringing-only skipped | "counts a call once the contact leg was dialed ..." |
 | Relay team: contact-keyed sid+sentAt at slot.sentAt; phone# skipped; status ignored; relay_retry_of skipped | "counts each CONTACT member ...", "skips a relay 30003 retry row ..." |
@@ -20516,13 +20941,14 @@ No other conflict with plan sections 0-4 or the spec.
 - As-built names S7 depends on (verified in S7.1 step 3; if one differs,
   change ONLY the `UI` constant object of the spec that uses it and record
   the difference in the S7 report):
-  - S5: list accessible names = heading text without the count, exactly
+  - S5: list accessible names = the heading text (headings carry no count,
+    PR102), exactly
     "Needs you now", "Identify these contacts", "Past tours needing an
     outcome", "Tours to book", "Quiet shares", "Relay groups to close",
     "Placements", "Tours today"; each list's nearest `<section>` ancestor is
     its own section (S7's `todaySection` uses `xpath=ancestor::section[1]`);
-    the heading's accessible name starts with the heading text and contains
-    the count; "Show all N" (Quiet shares: "Show all N properties") and
+    the heading's accessible name IS the heading text - no count [PR102];
+    "Show all N" (Quiet shares: "Show all N properties") and
     "Show fewer" are buttons with `aria-expanded` inside the section; the AI
     line is a button named exactly `AI suggestions for N contact(s)` with
     `aria-expanded`, its opened list named "AI suggestions"; the Quiet
@@ -20570,7 +20996,8 @@ No other conflict with plan sections 0-4 or the spec.
 - `relay-number-lifecycle.spec.ts:367-393` stays valid unchanged: the FULL
   world seeds ONE past-due nag (`app/src/lib/seed/matrix.ts:1207`
   `i === 0 && { close_nag_next_at: ... }`), well inside the 5-row limit, and
-  the heading regex `/Relay groups to close/i` tolerates the count. It runs
+  the heading regex `/Relay groups to close/i` matches the bare heading
+  (no count, PR102). It runs
   as a pin in S7.17.
 - S7 does NOT touch RUNBOOK.md (S6 owns the backfill entry) and does NOT
   record the tracker #31 decisions (spec 10, last bullet): that is the
@@ -20970,8 +21397,8 @@ export const AI_SUGGESTIONS_LIST = 'AI suggestions';
 /**
  * A Today section's list. Since tracker #31 (spec
  * docs/superpowers/specs/2026-10-23-today-checklist-design.md section 2,
- * plan PR33) every list's accessible name is its section heading WITHOUT the
- * count, so the match is exact: 'Needs you now', 'Identify these contacts',
+ * plan PR33, PR102) every list's accessible name is its section heading
+ * (headings carry no count), so the match is exact: 'Needs you now', 'Identify these contacts',
  * 'Past tours needing an outcome', 'Tours to book', 'Quiet shares', 'Relay
  * groups to close', 'Placements', and under At a glance 'Tours today'.
  */
@@ -21178,7 +21605,6 @@ interface TodayWireItem {
 interface QuietSharesWire {
   status: 'ok' | 'unavailable';
   properties?: Array<{ unitId: string; unitLabel: string; people: Array<{ contactId: string; state: string }> }>;
-  people?: number;
   truncated?: boolean;
 }
 
@@ -21384,7 +21810,8 @@ test.describe('Today - the daily checklist (tracker #31)', () => {
     expect(wire.items.some((i) => i.group === 'follow_ups' && i.refId === LEAN_PLACEMENT)).toBe(true);
     expect(wire.toursToBook).toBe('ok');
     expect(wire.quietShares?.status).toBe('ok');
-    expect(wire.quietShares?.people).toBe(2);
+    // PR103: the wire carries no distinct-people count.
+    expect(wire.quietShares).not.toHaveProperty('people');
     // The unread typed thread feeds ONLY the Inbox (spec 4): no row of any
     // group points at the booker or their thread, beyond their tour.
     expect(
@@ -21445,14 +21872,16 @@ test.describe('Today - the daily checklist (tracker #31)', () => {
 
     const wire = await readToday(api);
     expect(wire.quietShares?.status).toBe('ok');
-    expect(wire.quietShares?.people).toBe(2);
+    // PR103: the wire carries no distinct-people count.
+    expect(wire.quietShares).not.toHaveProperty('people');
     expect(
       wire.quietShares?.properties?.map((p) => [p.unitId, p.unitLabel, p.people.map((x) => [x.contactId, x.state])]),
     ).toEqual([[w.unitId, w.unitLabel, [[w.replied.contactId, 'replied'], [w.quiet.contactId, 'no_reply']]]]);
 
     await page.goto(`${NEXT}/`);
     await expectTodayReady(page);
-    await expect(page.getByRole('heading', { name: new RegExp(`^${UI.quietShares}`) })).toContainText('2');
+    // PR102: the heading is the bare label - no count.
+    await expect(page.getByRole('heading', { name: UI.quietShares, exact: true })).toBeVisible();
     await expect(page.getByText(UI.quietSharesHelp, { exact: true })).toBeVisible();
     const line = quietLine(page, w.line1);
     // The first property in order is open when the section first renders.
@@ -21530,7 +21959,8 @@ test.describe('Today - the daily checklist (tracker #31)', () => {
     await expect(people.getByRole('listitem')).toContainText(w.replied.name);
     await expect(quietLine(today, w.line1)).toHaveAttribute('aria-expanded', 'true');
     await expect(quietLine(today, w.line1)).toContainText(UI.summaryRepliedOnly);
-    await expect(today.getByRole('heading', { name: new RegExp(`^${UI.quietShares}`) })).toContainText('1');
+    // PR102: no heading count; the one listitem above is the live drop-off.
+    await expect(today.getByRole('heading', { name: UI.quietShares, exact: true })).toBeVisible();
     await expectNotReloaded(today);
     await today.close();
   });
@@ -21607,7 +22037,7 @@ Anchor (`:65`, one line):
 Replacement (three lines):
 
 ```
-| Today | a section's rows | `todayList(page, '<heading>')` from `support/today.ts` = `getByRole('list', { name: '<heading>', exact: true })` - since tracker #31 the list's accessible name is the section heading WITHOUT its count: `Needs you now`, `Identify these contacts`, `Past tours needing an outcome`, `Tours to book`, `Quiet shares`, `Relay groups to close`, `Placements` (the checklist, in that order), then under "At a glance" `Tours today`. There is NO `Unreplied` and no `Follow-ups due` any more. Every section shows 5 rows; past that `showAllIn(page, '<heading>')` clicks its `Show all <n>` button (`Show fewer` collapses; both carry `aria-expanded`). An empty section is not rendered, so assert an absence on server truth (`GET /api/today` `items[].group`), never on a missing list alone. NOTE the Today page is the dashboard HOME route `/`, not `/today` |
+| Today | a section's rows | `todayList(page, '<heading>')` from `support/today.ts` = `getByRole('list', { name: '<heading>', exact: true })` - since tracker #31 the list's accessible name is the section heading (headings carry no count): `Needs you now`, `Identify these contacts`, `Past tours needing an outcome`, `Tours to book`, `Quiet shares`, `Relay groups to close`, `Placements` (the checklist, in that order), then under "At a glance" `Tours today`. There is NO `Unreplied` and no `Follow-ups due` any more. Every section shows 5 rows; past that `showAllIn(page, '<heading>')` clicks its `Show all <n>` button (`Show fewer` collapses; both carry `aria-expanded`). An empty section is not rendered, so assert an absence on server truth (`GET /api/today` `items[].group`), never on a missing list alone. NOTE the Today page is the dashboard HOME route `/`, not `/today` |
 | Today | the AI suggestions line | `aiSuggestionsLine(page)` from `support/today.ts`: ONE collapsed button `AI suggestions for <n> contact(s)` with `aria-expanded`; `openAiSuggestions(page)` opens it and returns `getByRole('list', { name: 'AI suggestions', exact: true })`, which is NOT in the accessibility tree until opened - so a zero count on it is vacuous; use `expectNoAiSuggestionFor(page, contactId, rowText)` (server truth, then the line absent or the opened list without the row) |
 | Today | a quiet share | the property line `todaySection(page, 'Quiet shares').getByRole('button', { name: /^<street line>/ })` carries `aria-expanded` (the first property is open on first render, the rest folded); its people are `getByRole('list', { name: 'People waiting on <unitLabel>', exact: true })`, each row a link to the contact page reading `Replied, then quiet <n> days` / `No reply in <n> days` with a `Replied` / `No reply yet` tag (`today-checklist.spec.ts`) |
 ```
@@ -22493,7 +22923,8 @@ Replacement:
     const oldestFirst = [...older].reverse().map((id) => `/tours/${id}`);
     expect(capped).toEqual(oldestFirst);
     const section = todaySection(page, HEADING);
-    await expect(page.getByRole('heading', { name: new RegExp(`^${HEADING}`) })).toContainText('7');
+    // PR102: the heading carries no count; "Show all 7" names it.
+    await expect(page.getByRole('heading', { name: HEADING, exact: true })).toBeVisible();
     const showAll = section.getByRole('button', { name: 'Show all 7', exact: true });
     await expect(showAll).toHaveAttribute('aria-expanded', 'false');
     await showAll.click();
@@ -22936,7 +23367,8 @@ Replacement:
  * (services/staffOutreach.ts) returned as written, so Today's Quiet shares
  * drops the person on the refetch. Emitters: services/sendMessage.ts (a send
  * carrying the `staffOutreach` option - the 1:1 route's first batch and the
- * staff Retry of a row that is neither a share nor automated),
+ * staff Retry of a row that is neither a share, automated nor system copy
+ * - PR104),
  * services/sendEmailMessage.ts (after SES
  * accepts), routes/webhooks/voice.ts stampOutboundDial (the outbound
  * whisper-gate dial, after the TwiML is sent, handed to `afterResponse`),
@@ -23118,8 +23550,8 @@ Replacement:
   replied, then quiet - 2 never replied"), the first property open on first
   render; a person row reads "Replied, then quiet N days" or "No reply in N
   days" and opens the contact page (no Interested / Not interested on
-  Today). The heading counts distinct people; the 5-row limit counts
-  property lines. Code: `buildQuietShares` (`app/src/services/quietShares.ts`),
+  Today). The heading carries no count; the 5-row limit counts
+  property lines ("Show all N properties"). Code: `buildQuietShares` (`app/src/services/quietShares.ts`),
   wire `TodayResponse.quietShares`.
 
 - **last reached out** (`last_reached_out_at`; today-checklist, 2026-10-24)
@@ -23778,7 +24210,8 @@ Step 4 - desktop (`browser_resize` 1280 x 900). `browser_snapshot`, then
   property); the three help lines exactly;
 - Tours to book shows 5 rows and "Show all 6"; click it: 6 rows and "Show
   fewer"; click: 5 again;
-- Quiet shares: heading count 3; the first property line open (2 people,
+- Quiet shares: the heading reads exactly "Quiet shares" - no count
+  [PR102]; the first property line open (2 people,
   replied first, "Replied, then quiet 3 days" / "No reply in 6 days" with
   their tags), the second folded ("1 person: 1 never replied"); open and fold
   each;

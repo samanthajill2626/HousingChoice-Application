@@ -44,6 +44,7 @@ import { mergeContext } from '../lib/context.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { summarizeError } from '../lib/errors.js';
 import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
+import { normalizeInstant } from '../lib/heardFrom.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { TRANSPORT_SCHEMA_VERSION } from '../lib/messageTransport.js';
 import { hasSmsConsent } from '../lib/smsCompliance.js';
@@ -86,6 +87,7 @@ import {
   type GroupRailEnsurer,
 } from './groupRail.js';
 import { readNumberSuppression } from './numberSuppression.js';
+import { recordStaffOutreach, type StaffOutreachStamp } from './staffOutreach.js';
 import { ConversationNotFoundError, SendRefusedError, SmsSendingDisabledError } from './sendMessage.js';
 
 /**
@@ -222,7 +224,9 @@ export interface GroupSendServiceDeps {
     'getById' | 'touchLastActivity' | 'findByParticipantPhone' | 'clearGroupRail'
   >;
   messagesRepo?: Pick<MessagesRepo, 'append'>;
-  contactsRepo?: Pick<ContactsRepo, 'findByPhone'>;
+  // `touchLastReachedOut` (today-checklist W5): the staff-outreach stamp the
+  // post makes for every member it reached (recordStaffOutreach).
+  contactsRepo?: Pick<ContactsRepo, 'findByPhone' | 'touchLastReachedOut'>;
   auditRepo?: Pick<AuditRepo, 'append'>;
   events?: EventBus;
   /** The ONE authoritative rail path (T6.1). Defaults to the real service. */
@@ -605,6 +609,9 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
     // pre-existing behavior (worst case, the old false alarm) rather than
     // mislabelling a reachable member as opted out.
     const deliveryRecipients: Record<string, RelayRecipientDelivery> = {};
+    // The slots seeded `excluded` below (a known-suppressed handset): W5 never
+    // stamps those members (today-checklist spec 7.3).
+    const excludedKeys = new Set<string>();
     for (const { member, contact } of resolved) {
       const key = groupMemberKey(member.phone);
       let suppressed = false;
@@ -621,6 +628,7 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
           'group send: suppression read failed - member slot seeded queued (a stuck slot is recoverable; a wrong "opted out" label is not)',
         );
       }
+      if (suppressed) excludedKeys.add(key);
       deliveryRecipients[key] = suppressed
         ? {
             ...suppressedSlot(),
@@ -696,6 +704,29 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
       log.error(
         { err, conversationId, providerSid: posted.messageSid },
         'group send: draining parked delivery receipts failed (the send itself succeeded)',
+      );
+    }
+
+    // (7c) today-checklist W5 (spec 2026-10-23-today-checklist-design.md 7.3).
+    // The post is a staff follow-up to every member it reached, so each
+    // resolved member contact whose slot was NOT seeded `excluded` gets
+    // last_reached_out_at at the post's own provider instant (normalized - the
+    // stored form every writer shares). Awaited here, after the row exists and
+    // BEFORE the conversation.updated below, so that existing event is the
+    // post-stamp event: W5 adds none of its own. Best-effort: recordStaffOutreach
+    // never throws, so a failed stamp never fails a post that already left.
+    const stampAt = normalizeInstant(posted.dateCreated);
+    if (stampAt !== undefined) {
+      const stamps: StaffOutreachStamp[] = [];
+      for (const { member, contact } of resolved) {
+        if (contact === undefined || excludedKeys.has(groupMemberKey(member.phone))) continue;
+        stamps.push({ contactId: contact.contactId, at: stampAt });
+      }
+      await recordStaffOutreach({ contacts, log }, stamps);
+    } else {
+      log.warn(
+        { conversationId, providerSid: posted.messageSid },
+        'group send: the post instant is unparseable - no staff-outreach stamp',
       );
     }
 

@@ -101,6 +101,8 @@ interface Fakes {
   railCalls: string[];
   drained: string[];
   touched: { previewText: string | undefined; ts: string }[];
+  /** Every touchLastReachedOut call, with how many events had been emitted at that moment. */
+  reachedOut: { contactId: string; at: string; emittedBefore: number }[];
   send: ReturnType<typeof createGroupSendService>;
 }
 
@@ -125,6 +127,8 @@ function makeFakes(
     deps?: Partial<GroupSendServiceDeps>;
     /** The closed-rail drop, so a test can watch the heal sequence. */
     clearGroupRail?: (conversationId: string, expectedSid: string) => Promise<boolean>;
+    /** today-checklist W5: the stamp's answer (default 'written'), or a rejection. */
+    touchLastReachedOut?: (contactId: string, at: string) => Promise<'written' | 'skipped' | 'failed'>;
   } = {},
 ): Fakes {
   const members = overrides.members ?? [ANN, MARCUS];
@@ -167,6 +171,7 @@ function makeFakes(
     railCalls: [] as string[],
     drained: [] as string[],
     touched: [] as Fakes['touched'],
+    reachedOut: [] as Fakes['reachedOut'],
   };
 
   const postGroupMessage =
@@ -214,7 +219,7 @@ function makeFakes(
   }
 
   const events = createEventBus();
-  for (const name of ['message.persisted', 'conversation.updated'] as AppEventName[]) {
+  for (const name of ['message.persisted', 'conversation.updated', 'contact.updated'] as AppEventName[]) {
     events.on(name, (payload: unknown) => fakes.emitted.push({ event: name, payload }));
   }
 
@@ -263,6 +268,10 @@ function makeFakes(
     },
     contactsRepo: {
       findByPhone: async (phone) => contactsByPhone.get(phone),
+      touchLastReachedOut: async (contactId, at) => {
+        fakes.reachedOut.push({ contactId, at, emittedBefore: fakes.emitted.length });
+        return overrides.touchLastReachedOut !== undefined ? overrides.touchLastReachedOut(contactId, at) : 'written';
+      },
     },
     auditRepo: {
       append: async (entityKey, eventType, payload) => {
@@ -1381,5 +1390,85 @@ describe('groupSend - default construction', () => {
       }),
     ).not.toThrow();
     spy.mockRestore();
+  });
+});
+
+// today-checklist W5 (spec 2026-10-23-today-checklist-design.md 7.3): a staff
+// post into a native group text stamps last_reached_out_at for every resolved
+// member contact whose slot is NOT seeded `excluded`, at the post's own
+// provider instant, BEFORE the send's one conversation.updated - and adds no
+// event of its own (WI4: zero extra events).
+describe('groupSend - staff outreach stamps (today-checklist W5)', () => {
+  it('stamps every member contact at the post instant, before both SSE events, and emits nothing extra', async () => {
+    const f = makeFakes();
+    await f.send({ conversationId: 'group-1', body: 'on my way' });
+
+    expect(f.reachedOut.map(({ contactId, at }) => ({ contactId, at }))).toEqual([
+      { contactId: 'contact-ann', at: '2026-08-11T13:00:00.500Z' },
+      { contactId: 'contact-marcus', at: '2026-08-11T13:00:00.500Z' },
+    ]);
+    // Every stamp landed before the first event of the send.
+    expect(f.reachedOut.every((r) => r.emittedBefore === 0)).toBe(true);
+    expect(f.emitted.map((e) => e.event)).toEqual(['message.persisted', 'conversation.updated']);
+  });
+
+  it('normalizes the provider instant before stamping', async () => {
+    const f = makeFakes({
+      port: {
+        postGroupMessage: async () => ({
+          messageSid: 'IMposted1',
+          dateCreated: '2026-08-11T13:00:00Z',
+          actualTransport: 'mms' as const,
+        }),
+      },
+    });
+    await f.send({ conversationId: 'group-1', body: 'hi' });
+    expect(f.reachedOut.map((r) => r.at)).toEqual(['2026-08-11T13:00:00.000Z', '2026-08-11T13:00:00.000Z']);
+  });
+
+  it('never stamps a member whose slot is seeded excluded (a known-suppressed handset Twilio skips)', async () => {
+    const f = makeFakes({
+      contacts: [
+        consentingContact('contact-ann', '+16175550111'),
+        { ...consentingContact('contact-marcus', '+16175550222'), sms_opt_out: true } as ContactItem,
+      ],
+    });
+    await f.send({ conversationId: 'group-1', body: 'hi' });
+    expect(f.appended[0]?.deliveryRecipients?.['phone#+16175550222']?.transportAggregationState).toBe('excluded');
+    expect(f.reachedOut.map((r) => r.contactId)).toEqual(['contact-ann']);
+  });
+
+  it('stamps one contact on two numbers of the group ONCE', async () => {
+    const f = makeFakes({
+      members: [ANN, member('+16175550999', 'contact-ann', 'Ann second')],
+      contacts: [consentingContact('contact-ann', '+16175550111')],
+      attachedNumbers: { '+16175550999': consentingContact('contact-ann', '+16175550111') },
+    });
+    await f.send({ conversationId: 'group-1', body: 'hi' });
+    expect(f.reachedOut.map((r) => r.contactId)).toEqual(['contact-ann']);
+  });
+
+  it('stamps nothing when the post fails - no row, no stamp', async () => {
+    const f = makeFakes({
+      port: {
+        postGroupMessage: async () => {
+          throw new Error('twilio exploded');
+        },
+      },
+    });
+    await expect(f.send({ conversationId: 'group-1', body: 'hi' })).rejects.toBeInstanceOf(GroupSendFailedError);
+    expect(f.reachedOut).toEqual([]);
+  });
+
+  it('a stamp that fails never fails a post that already left', async () => {
+    const f = makeFakes({
+      touchLastReachedOut: async () => {
+        throw new Error('dynamo down');
+      },
+    });
+    const out = await f.send({ conversationId: 'group-1', body: 'hi' });
+    expect(out).toMatchObject({ providerSid: 'IMposted1', status: 'queued' });
+    expect(f.reachedOut).toHaveLength(2);
+    expect(f.emitted.map((e) => e.event)).toEqual(['message.persisted', 'conversation.updated']);
   });
 });

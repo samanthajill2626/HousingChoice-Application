@@ -407,6 +407,13 @@ export interface SendMessageInput {
    * their Send now, the missed-call and welcome texts). Absent: no stamp.
    */
   staffOutreach?: true;
+  /**
+   * today-checklist PR104 (spec r8 7.3): set by tour reminder / nudge Send now
+   * and by a staff Retry of automated or system-copy copy; changes no gating.
+   * Persisted on the row as `system_copy: true`, so a later staff Retry of
+   * that row never counts as staff outreach (W2). Absent: no marker.
+   */
+  systemCopy?: true;
 }
 
 export interface SendMessageOutcome {
@@ -471,6 +478,7 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
       recipient,
       beforeProviderSend,
       staffOutreach,
+      systemCopy,
     } = input;
     mergeContext({ conversationId });
 
@@ -696,6 +704,8 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
       // input's default is a person's send) and the caller's recipient by id.
       automated,
       ...(heldRecipient !== undefined && { recipientContactId: heldRecipient.contactId }),
+      // today-checklist PR104: the copy is the system's though a person sent it.
+      ...(systemCopy === true && { systemCopy: true }),
     };
     let appended: AppendResult;
     try {

@@ -570,5 +570,21 @@ describe.skipIf(!reachable)('relay retry lineage against DynamoDB Local', () => 
       expect(await messages.stampRetryAttribution(ONE_CONV, missing, { broadcastId: 'b-stamp', retryRoot: parent.tsMsgId })).toBe(false);
       expect(await messages.getByTsMsgIdConsistent(ONE_CONV, missing)).toBeUndefined();
     });
+
+    // today-checklist PR104 (spec r8 7.3): system_copy marks a row a person
+    // sent whose copy is the system's (Send now; a staff Retry of automated or
+    // system-copy copy). Persisted when passed true; ABSENT otherwise - never a
+    // stored false - and it leaves `automated` as passed.
+    it('append persists system_copy when systemCopy is true, and writes no field otherwise', async () => {
+      const marked = await appendOutbound({
+        providerSid: 'SMsyscopy1',
+        providerTs: T0,
+        automated: false,
+        systemCopy: true,
+      });
+      expect(marked).toMatchObject({ system_copy: true, automated: false });
+      const plain = await appendOutbound({ providerSid: 'SMsyscopy2', providerTs: T1, automated: false });
+      expect(plain).not.toHaveProperty('system_copy');
+    });
   });
 });

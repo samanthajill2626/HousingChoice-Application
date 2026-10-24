@@ -1326,6 +1326,8 @@ export function createFakeWorld(): FakeWorld {
           retry_window_start: message.retryWindowStart,
         }),
         ...(message.automated !== undefined && { automated: message.automated }),
+        // today-checklist PR104/PR106: true-only, exactly as the real repo maps it.
+        ...(message.systemCopy === true && { system_copy: true }),
         ...(message.recipientContactId !== undefined && {
           recipient_contact_id: message.recipientContactId,
         }),

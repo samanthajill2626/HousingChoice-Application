@@ -767,6 +767,15 @@ export interface NewMessage {
    */
   automated?: boolean;
   /**
+   * today-checklist PR104 (spec r8 7.3): true when a person pressed send but
+   * the copy is the system's - tour reminder / placement nudge Send now, and a
+   * staff Retry of a row that is automated or system copy. Stored as
+   * `system_copy`, ONLY when true (absent otherwise). It changes no gating
+   * (the row stays `automated: false`, a person's send); only the W2 Retry
+   * gate and the last_reached_out_at backfill read it.
+   */
+  systemCopy?: boolean;
+  /**
    * retry-send-window D14: the contact the caller named as the recipient (the
    * send wrapper's `recipient`, share-skip-fix I8), stored as
    * `recipient_contact_id` so a retry judges that same contact while it still
@@ -1077,6 +1086,8 @@ export interface MessageItem {
   retry_outcome?: RetryOutcome;
   /** retry-send-window D14: the send's automated flag, false included (see NewMessage.automated). */
   automated?: boolean;
+  /** today-checklist PR104: true when the copy is the system's though a person sent it (see NewMessage.systemCopy); absent otherwise. */
+  system_copy?: boolean;
   /** retry-send-window D14: the recipient contact the send named (see NewMessage.recipientContactId). */
   recipient_contact_id?: string;
   // --- Relay 30003 retry lineage (spec D11/D12) -----------------------------
@@ -2639,6 +2650,9 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         // same way. `automated` is written for FALSE too - absent means a row
         // from before the field existed, which is retried as automated.
         ...(message.automated !== undefined && { automated: message.automated }),
+        // today-checklist PR104: a true-only marker, written like
+        // received_on_closed_thread - absent unless the copy is the system's.
+        ...(message.systemCopy === true && { system_copy: true }),
         ...(message.recipientContactId !== undefined && {
           recipient_contact_id: message.recipientContactId,
         }),

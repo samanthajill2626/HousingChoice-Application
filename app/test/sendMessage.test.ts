@@ -1515,3 +1515,28 @@ describe('staff outreach stamp (today-checklist W1/W2, PR9)', () => {
     expect(unrecorded.reachedOutTouches).toEqual([]);
   });
 });
+
+// today-checklist PR104 (spec r8 7.3): `systemCopy: true` marks a person's
+// send whose copy is the system's (tour reminder / nudge Send now, a staff
+// Retry of automated or system-copy copy). The service persists it on the
+// row and changes nothing else: the send is still gated as a person's, and
+// the marker alone never stamps.
+describe('system_copy marker (today-checklist PR104)', () => {
+  const base = { conversationId: 'conv-1', body: 'checking in' };
+
+  it('persists systemCopy on the appended row; the send stays a person\'s (automated false) and stamps nothing', async () => {
+    const f = makeFakes();
+    await f.service({ ...base, automated: false, systemCopy: true });
+    expect(f.appended).toHaveLength(1);
+    expect(f.appended[0]).toMatchObject({ automated: false, systemCopy: true });
+    expect(f.reachedOutTouches).toEqual([]);
+  });
+
+  it('(PIN) writes no marker without the option, automated or not', async () => {
+    const f = makeFakes();
+    await f.service(base);
+    await f.service({ ...base, automated: true });
+    expect(f.appended).toHaveLength(2);
+    expect(f.appended.every((m) => !('systemCopy' in m))).toBe(true);
+  });
+});

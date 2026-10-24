@@ -308,4 +308,24 @@ describe('twilioWebhookHarness fake - retry-send-adoption fields', () => {
       retry_outcome: 'unconfirmed',
     });
   });
+
+  // today-checklist PR104 / PR106: the fake maps systemCopy exactly as the
+  // real repo does - stored as system_copy ONLY when true, never as false.
+  it('append carries system_copy when systemCopy is true, and writes no field otherwise (PR106)', async () => {
+    const world = createFakeWorld();
+    const marked = await world.messagesRepo.append({
+      ...outbound('SMsyscopy0001', '2026-09-25T12:00:00.000Z'),
+      automated: false,
+      systemCopy: true,
+    });
+    expect(await world.messagesRepo.getByTsMsgId(CONV, marked.tsMsgId)).toMatchObject({
+      system_copy: true,
+      automated: false,
+    });
+    const plain = await world.messagesRepo.append({
+      ...outbound('SMsyscopy0002', '2026-09-25T12:00:01.000Z'),
+      automated: false,
+    });
+    expect(await world.messagesRepo.getByTsMsgId(CONV, plain.tsMsgId)).not.toHaveProperty('system_copy');
+  });
 });

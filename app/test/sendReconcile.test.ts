@@ -3102,6 +3102,26 @@ describe('send.reconcile (spec D11-D16)', () => {
 
     // ---- adoption (spec section 4 items 10 and 14) ----
 
+    // today-checklist PR107: the adoption appends the retry row sendMessage
+    // would have appended, so a retry of a system-copy row is adopted with
+    // the marker (as `automated` is carried) - and adoption never stamps.
+    it('today-checklist PR107: adopting the retry of a system-copy row writes system_copy on the adopted row', async () => {
+      register();
+      await seedOneToOne();
+      const root = await seedRow('SMroot-sc', { providerTs: iso(Date.now() - 20_000), systemCopy: true });
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      plant({ providerSid: 'SMorphan-sc', providerStatus: 'delivered', to: TENANT_PHONE });
+      await runCheck(payloadOf(owner, at));
+      expect(retryRow(root.tsMsgId, 1)).toMatchObject({
+        provider_sid: 'SMorphan-sc',
+        system_copy: true,
+        automated: false,
+        retry_root: root.tsMsgId,
+      });
+      expect(world.reachedOutTouches).toEqual([]);
+    });
+
     it('10 a listed orphan adopts as the retry row sendMessage would have appended - the full R4 field set, its retrychild# pointer, one audit row, the emits, the inbox moved forward - and NO promise write', async () => {
       register();
       await seedOneToOne();
@@ -3132,7 +3152,7 @@ describe('send.reconcile (spec D11-D16)', () => {
         automated: false,
         recipient_contact_id: 'c-retry',
       });
-      for (const absent of ['broadcast_id', 'error_code', 'media_attachments', 'mediaUrls', 'retry_due_at', 'retry_outcome']) {
+      for (const absent of ['broadcast_id', 'error_code', 'media_attachments', 'mediaUrls', 'retry_due_at', 'retry_outcome', 'system_copy']) {
         expect(row, absent).not.toHaveProperty(absent);
       }
       expect(await world.messagesRepo.listRetryChildrenConsistent(retryConv, root.tsMsgId)).toEqual([

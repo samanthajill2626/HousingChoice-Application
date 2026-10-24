@@ -1085,6 +1085,25 @@ describe('messaging.retrySend on the send-attempt record (retry-send-adoption T4
     expect(world.emitted.filter((e) => e.event === 'contact.updated')).toEqual([]);
   });
 
+  // today-checklist PR107 (spec r8 7.2): the automatic 30003 retry re-sends
+  // the retried row's copy, so it carries the system_copy marker the way it
+  // carries `automated` - and, a machine resend, it never stamps.
+  it('today-checklist PR107: an automatic retry of a system-copy row writes system_copy on the new row; a plain row writes none', async () => {
+    wire();
+    const marked = await seedRetried('SMsyscopy-auto1', { systemCopy: true });
+    const plain = await seedRetried('SMsyscopy-auto2');
+    await run(marked);
+    await run(plain);
+    expect(world.sent).toHaveLength(2);
+    expect(world.messages.find((m) => m.retry_of === marked.tsMsgId)).toMatchObject({
+      system_copy: true,
+      automated: false,
+      retry_attempt: 1,
+    });
+    expect(world.messages.find((m) => m.retry_of === plain.tsMsgId)).not.toHaveProperty('system_copy');
+    expect(world.reachedOutTouches).toEqual([]);
+  });
+
   it('7b a record-phase fence LOST after a recorded send is a WARN, never sent_unrecorded: the row exists, the takeover reconcile repairs', async () => {
     wire();
     const row = await seedRetried('SMroot1');
@@ -1542,6 +1561,31 @@ describe('messaging.retrySend on the send-attempt record (retry-send-adoption T4
       .set('x-origin-verify', ORIGIN_SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
       .send();
+
+  // today-checklist PR107 end to end: a Send-now row (system copy) fails with
+  // 30003; the automatic retry re-sends it and carries the marker; staff then
+  // press Retry on THAT newest row - the only row the dashboard offers Retry
+  // on. W2 (S2.2) reads the pressed row's marker: no stamp, and the staff
+  // Retry's own row is marked too.
+  it('today-checklist PR107: Send-now row -> automatic retry -> staff Retry of the newest row never stamps, and the chain stays system copy', async () => {
+    wire();
+    const sendNow = await seedRetried('SMsendnow-chain', { systemCopy: true });
+    await run(sendNow);
+    const autoRow = world.messages.find((m) => m.retry_of === sendNow.tsMsgId)!;
+    expect(autoRow).toMatchObject({ system_copy: true, automated: false, retry_attempt: 1 });
+    // The automatic retry's own send fails too; it holds no promise and no
+    // child, so the Retry button is offered on it.
+    autoRow.delivery_status = 'undelivered';
+
+    const res = await pressRetry(autoRow);
+
+    expect(res.status).toBe(201);
+    const staffRow = world.messages.find((m) => m.retry_of === autoRow.tsMsgId)!;
+    expect(staffRow).toMatchObject({ system_copy: true, automated: false });
+    expect(staffRow).not.toHaveProperty('retry_attempt');
+    expect(world.reachedOutTouches).toEqual([]);
+    expect(world.emitted.filter((e) => e.event === 'contact.updated')).toEqual([]);
+  });
 
   it('FW1 A-6 (pending): the REAL job leaves a reconciling record (an unknown outcome) on a retried row with NO retry_outcome, no live promise and no child - the REAL route over the same world answers 409 retry_pending from that record alone', async () => {
     wire();

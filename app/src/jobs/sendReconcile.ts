@@ -941,6 +941,10 @@ async function adoptRetry(
     ...(typeof windowStart === 'string' && { retryWindowStart: windowStart }),
     retryRoot: o.retryRoot,
     ...(retried.broadcast_id !== undefined && { broadcastId: retried.broadcast_id }),
+    // today-checklist PR107: the adopted row is the retry sendMessage would
+    // have appended, so it carries the retried row's system-copy marker as it
+    // carries `automated`.
+    ...(retried.system_copy === true && { systemCopy: true }),
   });
   // share-sent-outcome D2: the send-time contact the found row names (the
   // ledger's contact for a phone-keyed share slot) - this append's, or on a

@@ -561,6 +561,10 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
         ...(typeof windowStart === 'string' && { retryWindowStart: windowStart }),
         retryRoot,
         ...(retried.broadcast_id !== undefined && { broadcastId: retried.broadcast_id }),
+        // today-checklist PR107 (spec r8 7.2): the copy is the retried row's,
+        // so its system-copy marker rides along like `automated` does - a
+        // later staff Retry of this row is judged by the first send.
+        ...(retried.system_copy === true && { systemCopy: true as const }),
         beforeProviderSend: async () => {
           const rearmed = await attemptsRepo.rearm(owner, ref, nowIso());
           if (rearmed === undefined) {

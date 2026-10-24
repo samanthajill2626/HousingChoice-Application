@@ -124,6 +124,32 @@ export interface RelayCloseNagItem {
   nagDueAt: string;
 }
 
+/**
+ * Quiet shares (spec 2026-10-23-today-checklist-design.md 3, 6): one person
+ * waiting on one property. Built by services/quietShares.ts from the Follow up
+ * core's rows; mirrored in dashboard/src/api/types.ts.
+ */
+export interface QuietSharePerson {
+  contactId: string;
+  /** The Follow up tab's name rule (FollowUpItem.name). */
+  name: string;
+  type: string;
+  /** As on the Follow up tab: the trimmed caseworker role; absent when none. */
+  role?: string;
+  state: 'replied' | 'no_reply';
+  /** ISO - the quiet clock: the latest of sentAt, heard (if later), reached (if later). */
+  quietSince: string;
+}
+
+/** Quiet shares: one property line and the people waiting on it (spec 6.2, 6.3). */
+export interface QuietShareProperty {
+  unitId: string;
+  /** The Follow up tab's formatter: formatAddress(unit.address) || unitId. */
+  unitLabel: string;
+  /** Replied first, then no_reply; within each the oldest quietSince first; ties by contactId. */
+  people: QuietSharePerson[];
+}
+
 export interface TodayResponse {
   items: TodayItem[];
   relayCloseNags: RelayCloseNagItem[];

@@ -186,3 +186,22 @@ quality Sam trusts, then her review of it, then the two views.
   blanket model for everybody once a day". Dropped. WP3 may want a
   scheduled caller of the same engine; the charter may mention the seam
   only.
+
+## Decisions, round 5 (Cameron, 2026-10-24)
+
+- D-pool-final: the pool is ELIGIBILITY ONLY - tenant status searching,
+  voucher size the property takes, housing authority the property accepts,
+  property available and not committed to another placement. Send history
+  (sent date, no reply, not interested with extracted nuance, interested
+  with a tour pending) and tour outcomes are MODEL INPUTS and UI chips,
+  never pool rules.
+- D-sent-visible: a property already sent to a tenant stays in that
+  tenant's ranked list with its chip. Cameron's case: the tenant said
+  "Yeah, maybe, but I want to see other properties first", Sam marks Not
+  interested; the extracted nuance should make that property "bubble up to
+  the top after a while of sending other properties, since they said
+  maybe to it". So the ranking reads BOTH the recorded outcome and the
+  extracted nuance, and the passage of time since the send matters.
+- Prod pool count: APPROVED (read-only). "The number of properties in here
+  isn't really that big, and the number of tenants isn't really that big,
+  but we got to think about scale in general, just not now."

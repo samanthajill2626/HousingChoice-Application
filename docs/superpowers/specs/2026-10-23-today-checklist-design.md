@@ -1,10 +1,16 @@
 # Today as the daily checklist - design (tracker #31)
 
-Status: DRAFT for review. Branch `feat/today-checklist`, cut from `main` @970a29b9.
-Tracker: HousingChoice Improvements Tracker item #31 (Oct 16 meeting with Sam,
-Oct 18 and Oct 23 decisions). Mockups shared with Sam (Design canvas
-https://claude.ai/artifact/673Q7i9fjQ7zWAH1XydJ5v); Sam picked quiet-shares
-option C on 2026-10-23.
+Status: DRAFT r2 (after design review round 1). Branch `feat/today-checklist`,
+cut from `main` @970a29b9. Tracker: HousingChoice Improvements Tracker item #31
+(Oct 16 meeting with Sam, Oct 18 and Oct 23 decisions). Mockups shared with
+Sam (Design canvas https://claude.ai/artifact/673Q7i9fjQ7zWAH1XydJ5v); Sam
+picked quiet-shares option C on 2026-10-23. Review adjudications:
+`docs/superpowers/reviews/2026-10-23-feat-today-checklist/design-review/adjudications.md`.
+
+This spec supersedes the "Today action queue" grouping rules in
+`docs/superpowers/specs/2026-06-16-new-dashboard-design.md`, which
+`app/src/routes/today.ts` says it must match; the build updates that header
+comment to point here.
 
 ## 1. Goal
 
@@ -14,12 +20,14 @@ end-of-day checklist. Two rules decide what is on the page (Cameron,
 
 1. Today holds only things that must happen today - no FYIs, nothing that can
    wait.
-2. Everything that must happen today is on it. Clearing the checklist means
-   the day's follow-ups are done.
+2. Everything that must happen today is on it, with two deliberate exceptions
+   that have their own badges: replies from known contacts (the Inbox badge)
+   and unmatched email (its own nav badge).
 
 Two reference items stay, in a small lower section that never counts toward
 "done": Tours today (Sam likes it at a glance) and AI suggestions, collapsed to
-one line. The lower section must never be the largest part of the page.
+one line. The lower section is kept small by the 5-row limit and the collapsed
+AI line.
 
 The VA uses a normal staff login. No roles or permissions change.
 
@@ -29,6 +37,7 @@ The VA uses a normal staff login. No roles or permissions change.
 - "Last heard from" and `last_heard_from_at` (inbound only, unchanged).
 - Showing `last_reached_out_at` anywhere, or a backfill of it.
 - Interested / Not interested actions on Today rows.
+- A Properties sent list on the unknown contact page.
 - New roles or permissions for the VA.
 - An agent that sends as staff (future; only the hook point is designed).
 
@@ -40,63 +49,68 @@ The page has two parts: the checklist, then a dashed divider and the
 | # | Section (heading) | Source | Order (the first 5 shown) |
 |---|---|---|---|
 | 1 | Needs you now | server group `needs_you_now` | unchanged (most urgent first) |
-| 2 | Identify these contacts | server group `identify` (NEW, split from needs_you_now) | oldest contact first (section 5.2) |
-| 3 | Past tours needing an outcome | client, Past tab loader (unchanged source) | OLDEST tour first (changed, section 5.3) |
-| 4 | Tours to book | server group `tours_to_book` (NEW) | oldest request first |
-| 5 | Quiet shares | server list `quietShares` (NEW) | section 6 |
+| 2 | Identify these contacts | server group `identify` (NEW, split from needs_you_now) | oldest contact first (5.2) |
+| 3 | Past tours needing an outcome | client, the Past tab's loader | OLDEST tour first (5.3) |
+| 4 | Tours to book | server group `tours_to_book` (NEW) | oldest request first (5.4) |
+| 5 | Quiet shares | server field `quietShares` (NEW) | section 6 |
 | 6 | Relay groups to close | server list `relayCloseNags` (moved down) | unchanged |
 | 7 | Placements | server group `follow_ups` (heading renamed from "Follow-ups due") | unchanged |
-| - | At a glance: Tours today | server group `tours_today` (moved down, compact rows) | unchanged |
+| - | At a glance: Tours today | server group `tours_today` (moved down, compact rows) | by time (2.4) |
 | - | At a glance: AI suggestions | server group `ai_suggestions` (one collapsed line) | unchanged |
 
 Removed: the Unreplied section (Oct 16: the Inbox badge already covers it).
-Not added: unmatched email (it has its own nav badge, the same reason
-Unreplied goes).
+Not added: unmatched email (it has its own nav badge).
 
-Page subtitle: "Clear every section above the line and the day's follow-ups
-are done." (The current subtitle "What needs you, across every placement and
-contact." is replaced.)
+Page subtitle: "Clear every section above the line and today's checklist is
+done. New messages are in the Inbox." (replaces "What needs you, across every
+placement and contact.").
 
 Rejected layouts, so nobody re-proposes them: a jump row of section links at
 the top (Cameron: it reads as a filter bar); chips or badges per person in
 quiet shares (Cameron: "All of those badges look terrible").
 
+Each section is a `<section>` with an `<h2>` heading and a list whose
+accessible name is the heading text (the existing Today pattern), so tests
+select by `getByRole('list', { name: <heading> })`.
+
 ### 2.1 Every section shows 5 rows
 
-- Each section shows its first 5 rows. The heading carries the section's full
+- Each section shows its first 5 rows. The heading carries the section's
   count.
 - When a section has more than 5, a "Show all N" button under the list expands
-  it in place. Once expanded, the button reads "Show fewer" and collapses it.
-  Expansion is per-viewer page state only (lost on reload; not stored).
+  it in place. Once expanded, the button reads "Show fewer". Expansion is
+  per-viewer page state only (lost on reload; not stored).
 - Past tours keeps its existing "See all N on the Past tab" / "Open the Past
   tab" link as well, beside its Show all button.
-- Quiet shares applies the limit to PROPERTY lines, not people (section 6.3).
-- An empty section is not rendered (unchanged rule), so an empty checklist
-  section takes no space.
+- Quiet shares applies the limit to PROPERTY lines, not people (6.3).
+- An empty section is not rendered (unchanged rule).
+- Server-capped sections count what the server returns: Identify's two reads
+  are capped at 100 each (5.2) and AI suggestions at 20 contacts (2.4). At
+  today's volumes (8 and 22) the caps are not reached.
 
 ### 2.2 Help lines
 
-Each checklist section has one short help line under its heading, written for
-the VA (copy as in the mockups):
+Each checklist section that needs one has a short help line under its
+heading, written for the VA:
 
 - Identify these contacts: "We don't know yet who these are. Call each one;
   after about a week with no contact, mark them Inactive."
 - Tours to book: "Said yes to a property; the tour has no date yet. Oldest
   first."
 - Quiet shares: "Properties sent in the last 14 days. Replied and then went
-  quiet for 2+ days, or never replied in 5+ days. A message or call either way
-  restarts the clock."
+  quiet for 2+ days, or never replied in 5+ days. A message or call from
+  either side restarts the clock."
 - Needs you now, Past tours, Relay groups to close and Placements: no help
   line (their rows already say why).
 
 ### 2.3 All caught up
 
-"All caught up" shows when every CHECKLIST section (1-7) is empty and settled.
-The At a glance section still renders below the message. Tours today and AI
-suggestions never keep the page from reading as done.
+"All caught up" shows when every CHECKLIST section (1-7) is empty and
+settled. The At a glance section still renders below the message. Tours today
+and AI suggestions never keep the page from reading as done.
 
 - A section that failed to load is not empty: it shows its own error, and the
-  page does not claim "All caught up".
+  page does not claim "All caught up" (2.5).
 - The existing settle rule stays: the message waits for the past-tours section
   to settle so it never flashes above rows about to appear.
 
@@ -104,66 +118,94 @@ suggestions never keep the page from reading as done.
 
 Below a dashed divider, headed "At a glance":
 
-- Tours today: compact rows (time, tenant, property), same 5-row limit. Same
-  source and rule as today's Tours today group.
+- Tours today: compact rows - the time (local, from the row's `at`), the
+  tenant, the property (`unitLabel`) - ordered by time, then tenant name, then
+  tourId. Same source and status rule as today's group. Same 5-row limit.
 - AI suggestions: ONE line, "AI suggestions for N contacts", collapsed by
-  default. Opening it shows the rows (same 5-row limit and Show all). N is the
-  server's contact-row count (capped at 20 today, unchanged).
+  default (a button with `aria-expanded`). Opening it shows the rows with the
+  same 5-row limit and Show all. N is the server's contact-row count (capped at
+  20, unchanged). The list is not in the accessibility tree until opened.
 - When both are empty the At a glance section is not rendered.
+
+### 2.5 Section failures
+
+- The route answers 200 whenever its core reads succeed. Quiet shares and
+  Tours to book are each computed inside their own try/catch: ANY throw in
+  that computation (a units walk, a per-unit read, a contacts batch, the
+  tours read, a units lookup) makes that one section unavailable, logs at
+  WARN with ids and counts only, and leaves the rest of the page intact.
+- The dashboard shows "We couldn't load <section>." in place of an unavailable
+  section (the past-tours error pattern) and withholds "All caught up".
 
 ## 3. Wire contract (GET /api/today)
 
 `TodayGroup` becomes:
 `'needs_you_now' | 'identify' | 'tours_to_book' | 'tours_today' | 'follow_ups' | 'ai_suggestions'`.
+`unreplied` is removed from the server and the dashboard types.
 
-- `unreplied` is removed from the server, the dashboard types and the
-  client-side fallback (`dashboard/src/routes/today/buildToday.ts`).
-- The fallback (used only when GET /api/today 404s) assembles no `identify`,
-  `tours_to_book` or quiet shares, the same way it already assembles no
-  `ai_suggestions`. Its unknown_1to1 rows move from `needs_you_now` to
-  `identify` so both paths agree on where they render.
+`TodayItem` gains two optional fields, set only on tour rows:
 
-`TodayResponse` gains one field:
+```
+at?: string;         // ISO. tours_today: scheduledAt. tours_to_book: the tour's createdAt.
+unitLabel?: string;  // the property, formatAddress(unit.address) || unitId (the server formatter)
+```
+
+The Today router gains a units repo dependency for these labels (point reads,
+memoized per request like the contact cache). A failed unit lookup degrades to
+the unitId (never a 500); for Tours to book it does not make the section
+unavailable.
+
+`TodayResponse` gains:
 
 ```
 quietShares:
-  | { status: 'ok'; properties: QuietShareProperty[]; people: number }
+  | { status: 'ok'; properties: QuietShareProperty[]; people: number; truncated: boolean }
   | { status: 'unavailable' }
+toursToBook: 'ok' | 'unavailable'    // whether the tours_to_book group was computed
 
 QuietShareProperty {
   unitId: string;
-  unitLabel: string;          // same formatter as the Follow up tab
-  people: QuietSharePerson[]; // replied first, then never replied (6.2)
+  unitLabel: string;          // the Follow up tab's formatter
+  people: QuietSharePerson[]; // order in 6.2
 }
 QuietSharePerson {
   contactId: string;
-  name: string;               // same name rule as the Follow up tab
+  name: string;               // the Follow up tab's name rule
   type: string;
-  role?: string;              // caseworker role, as on the Follow up tab
+  role?: string;              // as on the Follow up tab
   state: 'replied' | 'no_reply';
-  quietSince: string;         // ISO; the clock in section 6.1
+  quietSince: string;         // ISO; the clock in 6.1
 }
 ```
 
 `people` is the number of DISTINCT contacts across all properties (the heading
-count). A person waiting on two properties is one person in the count and a
-row under each property.
+count). A person waiting on two properties counts once and has a row under
+each property. `truncated` is the Follow up builder's flag (more than 100
+available properties); the dashboard shows "Showing the first 100 properties"
+under the section when it is true.
+
+### 3.1 The client-side fallback
+
+`dashboard/src/routes/today/buildToday.ts` runs only when GET /api/today 404s.
+It stops emitting `unreplied`. Its existing unknown_1to1 rows are emitted in
+the `identify` group (so both paths render them in the same place; their copy
+and unread rule stay the fallback's own). It assembles no `tours_to_book` and
+no quiet shares, and `useToday` treats a fallback load as quiet shares and
+Tours to book UNAVAILABLE - so the fallback never shows "All caught up".
 
 ## 4. Unreplied removal and the unread pass
 
-- The Unreplied group is gone. Known one-to-one unread threads appear only in
+- The Unreplied group is gone. Known contacts' unread threads appear only in
   the Inbox (and its badge).
 - The unread index walk in `app/src/routes/today.ts` now exists only to find
-  unknown_1to1 threads for Identify. Its collect loop keeps only
-  `unknown_1to1` threads BEFORE the 100-row cap, so known threads that would
-  emit nothing cannot spend cap slots (the filter-then-cap rule already
-  documented there). The deleted-contact skip and the #30 Inactive skip stay
-  where they are, ahead of the cap.
-- #30 (feat/unknown-inactive) is already on main: an Inactive unknown or team
-  member's unknown thread is skipped there, and `isEligibleRecipient` drops
-  every Inactive contact. This design keeps both behaviors unchanged. The code
-  comment that says Inactive tenants' typed threads "feed Unreplied (tracker
-  #31 owns that section)" is updated: they now feed only the Inbox.
+  Identify rows. In its collect loop the FIRST test is the type filter: keep
+  only `unknown_1to1` threads, before the deleted-contact skip (so a known
+  thread costs no contact read) and before the 100-row cap (so known threads
+  cannot spend cap slots).
+- After the deleted-contact skip, the owner test from 5.2 applies (it replaces
+  #30's narrower Inactive skip, which it contains).
+- The comment saying Inactive tenants' typed threads "feed Unreplied (tracker
+  #31 owns that section)" is updated: they feed only the Inbox now.
 
 ## 5. Sections in detail
 
@@ -175,48 +217,68 @@ contact" rows leave for Identify.
 
 ### 5.2 Identify these contacts (new group `identify`)
 
-- Rows: exactly the rows that today render in Needs you now as "New unknown
-  contact" - from the unread unknown_1to1 pass and from the
-  (unknown, needs_review) triage partition, with the existing de-dupe by phone,
-  group-detection-stub exclusion and #30 Inactive skip. Only the group changes.
+Identify lists contacts we do not yet know: contacts whose type is `unknown`
+(Cameron, 2026-10-23).
+
+- Sources (unchanged reads, new owner rule):
+  - the unread unknown_1to1 pass (section 4): a row only when the thread's
+    owner contact is type `unknown` and its status is not `inactive`. A thread
+    whose owner cannot be resolved keeps today's behavior (a row only when the
+    roster is linked, else deferred to the triage pass). Threads owned by a
+    team member, tenant, caseworker or any other type emit NO Today row; they
+    stay in the Inbox. This closes the Today half of
+    `docs/issues/imported-unknown-threads-surface-as-unknown-on-today.md`
+    (update the issue).
+  - the (unknown, needs_review) triage partition, with the existing
+    group-detection-stub exclusion and de-dupe by phone against the unread
+    rows.
 - Row text unchanged: who + "New unknown contact"; links to the contact page.
-- Order: oldest contact first by the contact's `created_at` (Cameron's ruling
-  that every limited section lists oldest or most urgent first; oldest
-  unknowns are the ones due a call or an Inactive mark). A row whose contact
-  has no `created_at` sorts last, then by refId.
+- Order: oldest first by the contact's `created_at`; a contact with no
+  `created_at` sorts last; ties by refId. The two reads are capped at 100 each
+  and are not recency ordered past the cap (the triage partition's range key is
+  constant), so "oldest" is over what was read. Prod holds 8 today.
 
 ### 5.3 Past tours needing an outcome
 
-- Source unchanged: the Past tab's rows (`selectPastTours`), deleted tenants
-  skipped.
-- Order changes on Today only: OLDEST scheduledAt first, ties by tourId. This
-  reverses the Sep 29 "five most recent" ruling (Cameron, 2026-10-23) so the
-  oldest tours do not wait for the two-week auto-close. The Past tab's own
-  order (most recent first) is unchanged.
-- Show all labels the remaining rows on demand (the section point-reads names
-  only for rows it shows, as now).
-- The heading count is the Past tab's row count (the existing `total`).
+- Source unchanged: the Past tab's rows as its loader returns them
+  (`usePastTours`: the in-range rows plus the appended off-range rows), with
+  deleted tenants skipped.
+- Order on Today only: in-range rows by OLDEST `scheduledAt` first (ties by
+  tourId), then the off-range rows (undated, or dated after today) in the
+  loader's own order, last. This reverses the Sep 29 "five most recent" ruling
+  (Cameron, 2026-10-23) so the oldest tours do not wait for the two-week
+  auto-close. The Past tab's own order is unchanged.
+- The section labels EVERY Past row (point reads of tenant and property,
+  memoized as now), not only the first five, so the heading count and "Show
+  all N" are the rows Today actually qualifies (deleted tenants excluded). The
+  "See all N on the Past tab" link keeps the Past tab's own count. Prod: about
+  23 rows.
 
 ### 5.4 Tours to book (new group `tours_to_book`)
 
 - Rows: every tour in status `requested` - the Tours page's Needs booking list
-  (`getTours({ status: 'requested' })`), read server-side through the same
-  repo query. Deleted tenants skipped (the Today rule).
-- Order: oldest `createdAt` first (as Needs booking).
-- Row: who = tenant name; why = the property's address; links to the tour
-  page. A tour drops off when it gets a date, is canceled or closed - any
-  status change away from `requested`.
-- Live refresh: tour.updated already triggers a Today refetch.
+  - read server-side with `tours.listByStatus('requested')`. Deleted tenants
+  skipped (the Today rule). No age limit and no tenant-status filter: an
+  unbooked request needs a decision (book it or cancel it), however old, and
+  that is the work this section exists for. Prod today: 13 requests; ages 0-9
+  days for 11, plus one at 17 and one at 64 days.
+- Row: who = tenant; why = `unitLabel`; urgency = "Requested today" /
+  "Requested N days ago" from `at`; links to the tour page.
+- Order: oldest `createdAt` first, ties by tourId.
+- A tour drops off when its status leaves `requested` (booked, canceled,
+  closed). When a requested tour is canceled, the pair's share outcome returns
+  to replied / no_reply (`app/src/lib/listingSendTour.ts`: a canceled tour is
+  no signal), so the person can reappear in Quiet shares. That is intended -
+  they no longer have a tour.
 
 Why this section exists: Interested creates a requested tour with no date, and
-creating a tour removes the tenant from quiet shares (section 6). Without this
-section, a tenant who says yes falls off the checklist entirely at the moment
-they need booking.
+creating a tour removes the person from Quiet shares. Without this section, a
+tenant who says yes falls off the checklist at the moment they need booking.
 
 ### 5.5 Relay groups to close
 
-Unchanged rows, Close / Keep-open card and behavior; it moves from the top of
-the page to position 6 and takes the 5-row limit.
+Unchanged rows, Close / Keep-open card and behavior; moves from the top of the
+page to position 6 and takes the 5-row limit.
 
 ### 5.6 Placements
 
@@ -227,7 +289,7 @@ check" rows), unchanged, under the heading "Placements".
 
 ### 6.1 The rule
 
-Candidates are exactly the rows the Matching page's Follow up tab can list
+Candidates are exactly the rows the Follow up tab can list
 (`app/src/services/followUps.ts` `buildFollowUps`): listed sends on available
 properties, sent within the last 14 days (FOLLOW_UP_LOOKBACK_MS), outcome
 `no_reply` or `replied`, recipient eligible (`isEligibleRecipient`). Every
@@ -237,42 +299,59 @@ unknowns) - Cameron, 2026-10-23.
 For each candidate:
 
 ```
-quietSince = max(sentAt,
-                 last_heard_from_at   if later than sentAt,
-                 last_reached_out_at  if later than sentAt)
+quietSince = the latest of:
+               sentAt,
+               last_heard_from_at,   when later than sentAt,
+               last_reached_out_at,  when later than sentAt
 threshold  = 2 days  when outcome = replied   (they replied, then went quiet)
              5 days  when outcome = no_reply  (never replied)
 shown      = now - quietSince >= threshold
 ```
 
-- Days are fixed durations (48h and 120h), matching how the existing 24h and
-  14-day constants work; not calendar days.
-- `state` on the wire is the outcome (`replied` / `no_reply`). A person who
-  never replied keeps `no_reply` even after staff reached out again; staff
-  outreach restarts the clock but does not change the state.
+- Days are fixed durations (48h and 120h), like the existing 24h and 14-day
+  constants; not calendar days.
+- `state` is the outcome. A person who never replied stays `no_reply` after
+  staff reach out; outreach restarts the clock but does not change the state.
+- Each share has its own clock from its own `sentAt`. Sending someone another
+  property does not restart the clock on the properties they were sent before
+  (Cameron, 2026-10-23), because shares do not move `last_reached_out_at`
+  (7.2).
+- Subset: every Today row is also a Follow up tab row, because Today's clock is
+  never earlier than the tab's (`waitingSince` = max of sentAt and heard) and
+  both thresholds exceed the tab's 24 hours. Nobody should "fix" Today to show
+  rows the tab does not.
 
-A person drops off when any of these happens (all but the clock are existing
-Follow up tab rules):
+Mechanism: `buildFollowUps` is split into an internal core that returns the
+waiting rows together with each row's recipient (the projection it already
+reads, now including `last_reached_out_at`), and the existing Follow up
+projection on top of it. The Follow up route's output stays byte-for-byte the
+same; Today applies the rule above to the core's rows. One contacts read, not
+two.
+
+A person drops off when any of these happens:
 
 - staff mark them Interested or Not interested, or a tour is created for them
-  on that property;
-- any new message, call or email either way restarts the clock (inbound moves
-  `last_heard_from_at`; staff outbound moves the new `last_reached_out_at`,
-  section 7);
+  on that property (existing outcome rules);
+- they send a message, call or email (`last_heard_from_at` moves), or staff
+  message, email or call them (`last_reached_out_at` moves, 7.2) - this
+  restarts the clock, so they come back if the quiet continues;
 - the send passes 14 days old;
-- they become ineligible (opted out, unreachable, Inactive, placed, deleted,
-  no phone) or the property stops being available.
+- they become ineligible (opted out, unreachable, Inactive, placed, deleted, no
+  phone) or the property stops being available.
 
 ### 6.2 What a person row shows
 
-- Name (the Follow up tab's name rule, so unknown contacts show their phone),
-  a role tag for a caseworker, then the quiet text and a state tag:
+- Name, a role tag for a caseworker, then the quiet text and a state tag:
   - replied: "Replied, then quiet N days", tag "Replied";
   - no_reply: "No reply in N days", tag "No reply yet".
   N = whole days since quietSince, rounded down.
 - The row opens the contact's page. NO Interested / Not interested buttons on
-  Today (Cameron, 2026-10-23): deciding needs the conversation in view, and
-  the contact page's Properties sent list already has the buttons.
+  Today (Cameron, 2026-10-23): deciding needs the conversation in view. For a
+  tenant or caseworker, the contact page's Properties sent list has the
+  buttons. An unknown contact's page has no such list
+  (`dashboard/src/routes/contact/UnknownFile.tsx`): an unknown leaves Quiet
+  shares when staff reach them (restarting the clock), identify them (a
+  tenant's page then has the buttons), or mark them Inactive.
 - Inside a property: `replied` people first, then `no_reply`; within each,
   the longest quiet first (oldest quietSince); ties by contactId.
 
@@ -283,178 +362,216 @@ Follow up tab rules):
   ("3 people: 3 never replied"); one person reads "1 person: ...".
 - Properties are ordered by their longest-quiet person (oldest quietSince
   first); ties by unitId.
-- The first property is open by default; the rest are folded. Opening and
-  folding is per-viewer page state; a live refetch keeps the viewer's choices
-  by unitId, and a newly appearing property starts folded.
+- Opening: when the section first renders with at least one property, the
+  first property in order is open and the rest are folded. After that, the
+  viewer's choices are kept by unitId across live refetches; a property that
+  appears later starts folded. Per-viewer page state only.
 - The 5-row limit counts property lines: with more than 5 properties, "Show
   all N properties" expands in place. An open property shows all its people.
-- The heading count is `people` (distinct contacts).
-- Each property line is a button with `aria-expanded`; the people list is a
-  list with an accessible name naming the property.
+- The heading count is `people`.
+- Each property line is a button with `aria-expanded`; its people list has an
+  accessible name naming the property.
 
 Prod volume (read-only replay, 2026-10-23): about 17-26 people a day since
 Oct 16 across about 5 properties; peak 44 on Oct 12, left over from a blast. In
-the last 14 days all 116 shares went to one person each. A normal day fits in
-the 5 property lines without Show all.
+the last 14 days all 116 shares went to one person each.
 
-### 6.4 Failure isolation
+### 6.4 The Follow up tab is unchanged
 
-The Follow up tab answers 503 when its required contacts read is incomplete.
-On Today that failure must not fail the page: the route still answers 200 with
-`quietShares: { status: 'unavailable' }`, logs the failure (ids and counts
-only), and the section shows "We couldn't load quiet shares." with a retry by
-reload, like the past-tours section error. "All caught up" is withheld while
-quiet shares is unavailable.
+The Follow up tab keeps its 24-hour rule and its inbound-only clock. Its wire
+shape and rows do not change. "Last heard from" anywhere in the app keeps
+meaning inbound only.
 
-### 6.5 The Follow up tab is unchanged
+### 6.5 Cost
 
-The Follow up tab keeps its 24-hour quiet rule and its inbound-only clock
-(`last_heard_from_at`). Its wire shape and rows do not change. "Last heard
-from" anywhere in the app keeps meaning inbound only.
+Each Today load now also runs the Follow up core: the available-properties
+walk (capped at 100 properties), two Queries per property with recent sends at
+10-way concurrency, and one contacts BatchGet. Prod has tens of available
+properties, so this is tens of small Queries per load. Today refetches on live
+events debounced by 300 ms. No cache is added; if load grows, a short-lived
+cache of the core is the follow-up (record it as a `docs/issues/` entry).
 
 ## 7. The new signal: `last_reached_out_at`
 
 ### 7.1 What it is
 
 A per-contact ISO timestamp on the contact item: the latest instant staff
-reached out to that contact. Outbound only. It sits beside
+followed up with that contact. Outbound only. It sits beside
 `last_heard_from_at` (inbound only), which must NOT move on our outbound
 (Cameron: "We don't want our message outbound to a tenant to restart that
-clock"). Together the two give "last communication either way" as the later
-of the two, so no combined field is stored.
+clock"). "Last communication either way" is the later of the two, so no
+combined field is stored.
 
 ### 7.2 What counts (Cameron, 2026-10-23)
 
 - Counts: messages (SMS/MMS), emails and calls that staff send themselves, in
-  any thread - one-to-one and relay groups. Property shares count (a share is
-  a staff-sent message).
-- A call counts on ANY attempt, answered or not.
-- A staff post in a relay group counts for EVERY contact member of the group.
-- Does not count: automated sends - tour reminders, auto-replies, opt-in and
-  opt-out confirmations, system notices, scheduled ladder messages and any
-  other message the system sends on its own.
-- Future: an agent that sends "as staff" will count when it is built. The
-  write goes through one shared helper (7.3) so that path only has to call it.
+  any thread - one-to-one, relay groups and group texts.
+- A call counts on any attempt to reach the CONTACT, answered or not: it
+  counts once the contact's leg is dialed, not when only the staff member's own
+  cell has rung.
+- A staff post in a relay group counts for every contact member it is sent
+  to.
+- Does NOT count:
+  - property shares and broadcasts (a share starts its own clock; Cameron,
+    2026-10-23);
+  - automated sends: tour reminders, nudges, auto-replies, opt-in and opt-out
+    confirmations, missed-call texts, welcome texts, relay system
+    announcements, and any message the system sends on its own;
+  - machine resends of a staff message that already counted.
+- Future: an agent that sends "as staff" will count when built. It calls the
+  same helper (7.3).
 
 ### 7.3 How it is written
 
-Mechanism: copy `last_heard_from_at`'s writer.
+- A repo method `touchLastReachedOut(contactId, at)` beside
+  `touchLastHeardFrom` (`app/src/repos/contactsRepo.ts`), copying it exactly:
+  the pointer-row guard, the instant normalization, the conditional
+  forward-only UpdateItem (`attribute_exists(contactId) AND
+  (attribute_not_exists(f) OR f < :at)`), the `'written' | 'skipped' |
+  'failed'` result, never throwing.
+- One shared helper, for example `recordStaffOutreach({ contacts, events, log },
+  contactIds, at)`: awaited inline, after the outbound row exists, inside
+  try/catch, ERROR log on 'failed' (ids only), best-effort (a failed stamp never
+  fails or retries the send). When at least one stamp is 'written' it emits
+  `contact.updated` for that contact, so an open Today refetches AFTER the
+  stamp has landed (Today already subscribes to it; this closes the race with
+  the earlier `conversation.updated`). Its doc comment says every new outbound
+  writer must decide stamp or no stamp explicitly.
+- The instant is the outbound row's own timestamp (or, for a call, the dial
+  instant), not the request time.
+- The field is server-owned, in all four places `last_heard_from_at` sits: the
+  `ContactItem` type, the `RecipientDisplay` type, the recipient projection
+  (`getRecipientDisplaysByIds`), and `SERVER_OWNED_CONTACT_FIELDS` in
+  `app/src/routes/contacts.ts` (read by both the create and PATCH parsers).
 
-- A new repo method `touchLastReachedOut(contactId, at)` beside
-  `touchLastHeardFrom` (`app/src/repos/contactsRepo.ts` ~2007): a conditional
-  UpdateItem, forward-only (`attribute_exists(contactId) AND
-  (attribute_not_exists(f) OR f < :at)`), the instant normalized the same way,
-  returning 'moved' / 'skipped' / 'failed' and never throwing.
-- One shared helper (for example `recordStaffOutreach(contacts, contactIds,
-  at, log)`) that every staff writer calls, awaited inline AFTER the message or
-  call row is persisted, inside try/catch, logging ERROR on 'failed' (ids
-  only). Best-effort: a failed stamp never fails or retries the send. The future
-  "agent as staff" sender calls the same helper.
-- The instant is the outbound row's own timestamp (the time the message or
-  call was created), not the request time.
-- The field is server-owned: add it to the contact PATCH's server-owned list
-  (`app/src/routes/contacts.ts` ~312), the contact type, and the recipient
-  projection the Follow up builder reads (`getRecipientDisplaysByIds`,
-  contactsRepo ~401 and ~1098), the same three places `last_heard_from_at`
-  sits.
+The stamp sits at each writer, not in `messagesRepo.append`: no stored field
+separates staff from automated sends. Automated sends also carry
+`author 'teammate'`, the `automated` flag describes how a send is gated, and no
+message row stores the sending user's id.
 
-The stamp goes at each CALL SITE, not in `messagesRepo.append`: no stored
-field separates staff from automated sends. Automated sends also carry
-`author 'teammate'`, and the `automated` flag describes how a send is gated
-(quiet hours, consent), not who started it. No message row stores the sending
-user's id.
+Writers that STAMP:
 
-Writers that STAMP (staff outreach):
+| # | Writer | Where the stamp goes | Contact(s) stamped |
+|---|---|---|---|
+| W1 | One-to-one SMS/MMS send, POST /api/conversations/:id/messages (`routes/api.ts` -> `services/sendMessage.ts`) | inside `sendMessage`, after the row is persisted, when the caller passes a staff-outreach option (only W1 and W2 pass it). The service owns the judged recipient (`heldRecipient ?? phoneContact`), which its outcome does not return | the judged recipient |
+| W2 | Staff Retry button, POST .../messages/:sid/retry | as W1 | as W1 |
+| W3 | Email send, POST .../email (`services/sendEmailMessage.ts`) | after SES accepts the message | the addressed contact |
+| W4 | Relay group team post (`sendRelayTeamMessage` in `routes/api.ts`, open or still connecting) | where each member's leg is SENT in the relay fan-out (`jobs/relayFanOut.ts`), only for legs of a team post. A suppressed member gets no leg and no stamp; a post queued while the group connects stamps when its legs go out | each member whose leg was sent and who has a contactId |
+| W5 | Native group text post (`services/groupSend.ts`) | after the post succeeds (the row is written only then) | every resolved member contact |
+| W6 | Outbound call (`services/originateCall.ts` + `routes/webhooks/voice.ts`) | in the outbound whisper-gate branch (`POST /voice/whisper-gate`, outbound=1) at the point it returns the `<Dial>` to the target, after the DNC re-check passes. Not at originate (that rings the staff cell first) | the called contact |
+| W7 | Relay group intro whose body staff wrote (`intro_body` set on the create routes for relay groups, tours and placements; `jobs/relayFanOut.ts` applies it) | as W4, for the intro's legs | as W4 |
+| W8 | Dev seams that write outbound rows: `/__dev/voice/transcript-fixture` and `/__dev/extraction/message-fixture` (`routes/dev.ts`) | as their inbound twin `touchFixtureHeardFrom` does, when the fixture row is outbound | the fixture's contact |
 
-| # | Writer | Contact(s) stamped |
-|---|---|---|
-| W1 | One-to-one SMS/MMS send, POST /api/conversations/:id/messages (`routes/api.ts` ~1564 -> `services/sendMessage.ts`) | the recipient the send judged (`heldRecipient ?? phoneContact`) |
-| W2 | Staff Retry button, POST .../messages/:sid/retry (`api.ts` ~1872) | the retried row's recipient |
-| W3 | Email send, POST .../email (`api.ts` ~1667 -> `services/sendEmailMessage.ts`) | the addressed contact; only once SES accepts it |
-| W4 | Relay group team post, group open (`api.ts` ~2042 `sendRelayTeamMessage`) | every participant with a contactId |
-| W5 | Relay group team post while the group is still connecting (`api.ts` ~1950, queued_pending) | every participant with a contactId, at compose time |
-| W6 | Native group text post (`services/groupSend.ts` ~651) | every resolved member contact; only after the post succeeds (the row is written only then) |
-| W7 | Outbound call, POST /:contactId/call (`services/originateCall.ts` ~171) | the called contact, on any attempt |
-| W8 | Share fan-out send, one per recipient (`jobs/broadcastFanOut.ts` ~925) | the recipient - every share, whatever its `automated` flag |
-| W9 | Share adoption by the reconcile (`broadcastFanOut.ts` ~1409 via `jobs/sendReconcile.ts` ~843) | the recipient, unless the adopted row is failed |
-| W10 | Dev seams that write outbound rows: `/__dev/voice/transcript-fixture` (`routes/dev.ts` ~904) and `/__dev/extraction/message-fixture` (dev.ts ~1112, ~1177) | as their inbound twin `touchFixtureHeardFrom` (dev.ts ~821) does |
-| W11 | Reseed: a sibling of `deriveSeedHeardFrom` (`lib/seed/heardFrom.ts` ~59) derives the field from the seeded outbound rows (lean and full) | seeded contacts |
+Writers that do NOT stamp:
 
-Writers that do NOT stamp, and why:
-
-| Writer | Why not |
+| Writer | Why |
 |---|---|
-| Automatic 30003 retry job (`jobs/retrySend.ts` ~551) and the reconcile's retry adoption (`sendReconcile.ts` ~923) | A machine resend of a staff message that already stamped. Told apart from a manual Retry by `retryAttempt` / `retry_window_start` |
-| Relay 30003 retry rung (`webhooks/twilio.ts` ~3077) | A machine resend to one member of a post that already stamped |
-| Tour reminder and placement nudge "Send now" (`jobs/tourReminders.ts` ~1998, ~1646; `jobs/placementNudges.ts` ~854) | Staff only pick the time; the copy is the automated reminder or nudge (ruling: reminders do not count), even though the row carries `automated:false` |
-| Missed-call auto text, housing-fair welcome text, tour reminder poll, nudge poll | Automated |
-| Relay announcements (intro, member added, group closed, group tour reminder; `services/relayAnnouncements.ts` ~229) | System messages (`author 'system'`) |
-| Quo importer (`lib/import/apply.ts` ~468, ~504) | Historical data with no staff/automated split; consistent with no backfill (7.4) |
-| Performance seed | Load data only; it derives no heard-from either |
+| Share fan-out sends and their reconcile adoption (`jobs/broadcastFanOut.ts`, `jobs/sendReconcile.ts`), including broadcasts with no property | shares and broadcasts do not count (7.2) |
+| Automatic 30003 retry job (`jobs/retrySend.ts`) and the reconcile's retry adoption | machine resend of a staff message that already stamped |
+| Relay 30003 retry rung (`webhooks/twilio.ts`) | machine resend to one member |
+| Tour reminder and placement nudge "Send now" | staff pick only the time; the copy is the automated reminder or nudge, even though the row carries `automated:false` |
+| Missed-call auto text, housing-fair welcome text, tour reminder poll, nudge poll | automated |
+| Relay announcements with system copy (default intro, member added, group closed, group tour reminder) | system messages |
+| Quo importer (`lib/import/apply.ts`) | historical data with no staff/automated split; consistent with no backfill |
+| Reseed (lean, full) and the performance seed | no seeded contact carries the field; tests that need it drive a real staff send (9) |
 
 Edge rules:
 
-- Failed sends: no row means no stamp. An SMS the provider accepts and that
-  fails later keeps its stamp (a max field cannot be un-stamped, and staff
-  did reach out). Email stamps only after SES accepts; an adopted row that is
-  failed does not stamp.
-- A relay or group member with no contactId (a phone-only member) is skipped:
-  there is no contact item to stamp, and such a member cannot be a quiet-share
-  candidate keyed by contactId.
-- A queued relay post (W5) stamps at compose time even though it leaves when
-  the group connects, usually within minutes. A group that never connects is
-  a failure surfaced elsewhere.
-- New outbound writers added later must decide stamp / no stamp explicitly;
-  the GLOSSARY entry and the helper's doc comment say so.
+- Failed sends: no row (or no leg) means no stamp. An SMS the provider accepts
+  and that fails later keeps its stamp - staff did reach out, and a max field
+  cannot be un-stamped.
+- A member or contact with no contactId is skipped: there is no contact item
+  to stamp, and quiet shares are keyed by contactId.
 
 ### 7.4 No display, no backfill
 
-- The field is not shown anywhere in this mission; it only feeds the quiet
-  clock.
-- No backfill (recommended; Cameron to confirm at the spec gate). The replay
-  showed staff outreach removed only 0-3 rows a day historically, and every
+- The field is not shown anywhere in this mission.
+- No backfill (recommended; Cameron to confirm at the spec gate). Every
   candidate share ages out in 14 days, so the gap closes on its own two weeks
-  after deploy. A backfill would be an ops script run against prod.
+  after deploy; until then a person staff texted before the deploy can show a
+  few days early. A backfill would be an ops script against prod.
 
 ## 8. Live updates
 
-The existing Today refetch triggers cover the new sections: conversation and
-message events (a message either way), tour.updated (Interested, a tour
-created, a tour booked), contact.updated (a status change), placement and
-suggestion events. The Interested / Not interested route emits no live event
-today; staff mark those on the contact page, and returning to Today remounts
-and refetches it. A second open Today tab picks up a Not interested on its next
-refetch. No new event is added (deliberate; see open questions).
+- Today already refetches (debounced 300 ms) on placement, conversation,
+  suggestion, tour and contact events.
+- A staff message, email or call that stamps `last_reached_out_at` emits
+  `contact.updated` after the stamp (7.3), which covers calls (they emit no
+  `conversation.updated`) and closes the race with the earlier event.
+- An inbound message moves `last_heard_from_at` before its
+  `conversation.updated` fires (UNVERIFIED for every inbound path; the plan
+  checks each and adds the same post-stamp `contact.updated` where the order is
+  wrong).
+- Tour CREATE emits no event today, on both POST /api/tours (a requested
+  create) and the Interested outcome route (`routes/units.ts`). This mission
+  adds a `tour.updated` emit to both, so a new request appears in Tours to book
+  and the person leaves Quiet shares live.
+- Not interested emits no event. Staff mark it on the contact page, and
+  returning to Today remounts and refetches it; a second open Today tab picks
+  it up on its next refetch. No event is added (open question 2).
+- Rows that appear only because time passes (a share crossing 2 or 5 days, a
+  property becoming unavailable) show on the next refetch or reload, as due
+  deadlines already do.
 
 ## 9. Testing
 
-- Server route tests (`app/src/routes/today.ts`): Unreplied gone; the unread
-  pass keeps only unknown_1to1 rows ahead of the cap; identify grouping and
-  order; tours_to_book rows, deleted tenant skip and order; quiet shares rule
-  at both thresholds and both boundaries, each drop-off, the outbound restart,
-  property grouping, ordering and distinct-people count; unavailable path
-  answers 200.
-- The Follow up tab: a regression test that its rows are unchanged when
-  `last_reached_out_at` is set.
-- Writers: every writer in 7.3 has a test that it moves the field, and every
-  automated sender listed there has a test that it does not.
-- Dashboard: section order, the 5-row limit and Show all / Show fewer, the
-  quiet-shares property lines (first open, others folded, toggles kept across a
-  refetch), All caught up ignoring At a glance and withheld on a section error,
-  the AI suggestions collapsed line.
-- e2e: extend the Today spec (lean seed) for the new section order, a quiet
-  share appearing and dropping off after a staff message, and Tours to book.
+- Server route tests (`app/test/todayApi.test.ts` and siblings): Unreplied
+  gone; the type filter runs first in the unread pass; identify rows only for
+  unknown-type owners, their order and the triage partition; tours_to_book rows,
+  deleted-tenant skip, order and `at` / `unitLabel`; tours_today `at`,
+  `unitLabel` and time order; quiet shares at both thresholds and both
+  boundaries, each drop-off, staff outreach restarting the clock, a second
+  share NOT restarting the first, property grouping, ordering and the
+  distinct-people count; quiet shares and tours to book each unavailable on a
+  thrown read while the route answers 200.
+- The Follow up tab: its route output is unchanged when `last_reached_out_at`
+  is set (regression).
+- Writers: each W1-W8 has a test that it moves the field and emits
+  `contact.updated`; each no-stamp writer has a test that it does not move it.
+  The PATCH and create parsers refuse the field.
+- Dashboard: section order, help lines, the 5-row limit and Show all / Show
+  fewer, quiet-shares property lines (first open, others folded, choices kept
+  across a refetch, a later property folded), All caught up ignoring At a
+  glance and withheld for an unavailable section and for the fallback, the AI
+  suggestions collapsed line, Tours today compact rows.
+- e2e: extend the Today coverage (lean seed) for the section order, a quiet
+  share that drops off after a staff message, and Tours to book. Seeding a
+  quiet share needs the listing-send fixture (`/__dev/listing-send-fixture`)
+  plus a way to set `last_heard_from_at` for the replied case; the plan names
+  it.
+- Existing tests that pin the old page and must be updated deliberately (do
+  not weaken them to make them pass):
+  - `e2e/tests/dashboard-next/unknown-caller-triage.spec.ts` (row in Needs you
+    now -> Identify)
+  - `e2e/tests/dashboard-next/unknown-inactive.spec.ts` (Needs you now server
+    truth and DOM -> Identify)
+  - `e2e/tests/flows/conversation-fact-extraction.spec.ts` (the "AI
+    suggestions to review" list is now behind the collapsed line)
+  - `e2e/tests/dashboard-next/caseworkers.spec.ts`
+  - `e2e/tests/scenarios/participant-names.spec.ts` (Unreplied)
+  - `e2e/scenarios/steps.ts` ("Needs you now", "Follow-ups due")
+  - `e2e/performance/routes.ts` (headings and "All caught up")
+  - `app/test/todayApi.test.ts`, `app/test/todayUnmatchedNonRegression.test.ts`
+  - the dashboard `buildToday`, `Today`, `useToday` and `useTodayPastTours`
+    tests
+  The plan re-greps for every reader of the old headings, groups and copy;
+  this list is a floor, not the full set.
 
 ## 10. Docs
 
 - GLOSSARY.md: "Quiet shares" (the Today section), `last_reached_out_at`
-  (staff outbound clock), "At a glance".
+  (staff follow-up clock; shares do not move it), "At a glance".
+- `docs/superpowers/specs/2026-06-16-new-dashboard-design.md` "Today action
+  queue": a short note that this spec supersedes its grouping rules.
+- `docs/issues/imported-unknown-threads-surface-as-unknown-on-today.md`:
+  record that Today no longer shows those rows (5.2).
+- `docs/issues/`: a new entry for the Today quiet-shares read cost (6.5).
 - Tracker #31: record the Oct 23 decisions and Sam's option C pick when the
   build ends.
 
 ## 11. Open questions for the spec gate
 
 1. No backfill of `last_reached_out_at` (7.4) - confirm.
-2. No live event from Interested / Not interested (8) - confirm.
+2. No live event from Not interested (8) - confirm.
 </content>
 </invoke>

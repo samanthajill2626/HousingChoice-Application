@@ -60,6 +60,7 @@ import {
 import type { SendAttemptFacts } from '../repos/sendAttemptsRepo.js';
 import { isKillSwitchOff, isManualMode, isOptedOut } from './scheduledSendSuppression.js';
 import { TRANSPORT_SCHEMA_VERSION } from '../lib/messageTransport.js';
+import { recordStaffOutreach } from './staffOutreach.js';
 
 // --- Typed errors (route maps these to HTTP statuses) ----------------------
 
@@ -395,6 +396,17 @@ export interface SendMessageInput {
    * sent). Absent on every other send.
    */
   beforeProviderSend?: () => Promise<boolean>;
+  /**
+   * today-checklist spec 7.3 (W1, W2): this send is staff outreach - a person
+   * on the team chose to text this contact now. A successful send stamps the
+   * judged contact's last_reached_out_at (recordStaffOutreach) at the
+   * provider-accepted instant and, when that stamp was written, emits
+   * contact.updated as the last event of the send. Set ONLY by the staff send
+   * and staff Retry routes; never by automated, share or machine-retry
+   * callers (the broadcast fan-out, retrySend, tour reminders, nudges and
+   * their Send now, the missed-call and welcome texts). Absent: no stamp.
+   */
+  staffOutreach?: true;
 }
 
 export interface SendMessageOutcome {
@@ -458,6 +470,7 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
       retryRoot,
       recipient,
       beforeProviderSend,
+      staffOutreach,
     } = input;
     mergeContext({ conversationId });
 
@@ -736,6 +749,23 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
       deliveryStatus: result.status,
     });
     if (touched !== undefined) events.emit('conversation.updated', toConversationUpdatedEvent(touched));
+
+    // (7) Staff outreach (today-checklist spec 7.3, W1/W2): stamp the contact
+    // the gates judged - the caller's held recipient, else the phone-matched
+    // one - at the provider-accepted instant (this send's providerTs; on a
+    // deduped append the stored key may carry an earlier write's). Best-effort:
+    // recordStaffOutreach never throws and logs its own failure, so a text that
+    // is out and recorded still returns its normal result. Its contact.updated
+    // is the LAST event of the send, after conversation.updated.
+    if (staffOutreach === true && contact !== undefined) {
+      const written = await recordStaffOutreach(
+        { contacts, log },
+        [{ contactId: contact.contactId, at: result.providerTs }],
+      );
+      if (written.includes(contact.contactId)) {
+        events.emit('contact.updated', { contactId: contact.contactId });
+      }
+    }
 
     log.info(
       { conversationId, providerSid: result.providerSid, status: result.status, automated },

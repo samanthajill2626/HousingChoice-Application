@@ -55,6 +55,8 @@ interface Fakes {
   modeSets: string[];
   auditEvents: { entityKey: string; eventType: string; payload?: Record<string, unknown> }[];
   emitted: { event: AppEventName; payload: unknown }[];
+  /** today-checklist W1/W2: every touchLastReachedOut call, in order. */
+  reachedOutTouches: { contactId: string; at: string }[];
   counterValue: number;
   capture: LogCapture;
   service: ReturnType<typeof createSendMessageService>;
@@ -77,6 +79,8 @@ function makeFakes(
     appendError?: unknown;
     touchError?: unknown;
     auditError?: unknown;
+    /** today-checklist W1/W2: touchLastReachedOut's answer (default 'written'). */
+    reachedOut?: (contactId: string, at: string) => Promise<'written' | 'skipped' | 'failed'>;
   } = {},
 ): Fakes {
   const conversation: ConversationItem = {
@@ -113,6 +117,7 @@ function makeFakes(
     modeSets: [] as string[],
     auditEvents: [] as Fakes['auditEvents'],
     emitted: [] as Fakes['emitted'],
+    reachedOutTouches: [] as Fakes['reachedOutTouches'],
     counterValue: 0,
   };
 
@@ -274,8 +279,9 @@ function makeFakes(
     touchLastHeardFrom: async () => {
       throw new Error('touchLastHeardFrom: not used in this suite');
     },
-    touchLastReachedOut: async () => {
-      throw new Error('touchLastReachedOut: not used in this suite');
+    touchLastReachedOut: async (contactId, at) => {
+      fakes.reachedOutTouches.push({ contactId, at });
+      return overrides.reachedOut !== undefined ? overrides.reachedOut(contactId, at) : 'written';
     },
   };
   const messagesRepo: MessagesRepo = {
@@ -449,6 +455,7 @@ function makeFakes(
   const events = createEventBus();
   events.on('conversation.updated', (payload) => fakes.emitted.push({ event: 'conversation.updated', payload }));
   events.on('message.persisted', (payload) => fakes.emitted.push({ event: 'message.persisted', payload }));
+  events.on('contact.updated', (payload) => fakes.emitted.push({ event: 'contact.updated', payload }));
 
   const capture = createLogCapture();
   const service = createSendMessageService({
@@ -1404,5 +1411,107 @@ describe('the pre-send hook (code review ADV-1)', () => {
     }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ContactOptedOutError);
     expect(called).toBe(0);
+  });
+});
+
+// today-checklist spec 7.3 (W1, W2; ruling PR9): `staffOutreach: true` marks a
+// person's send to this contact. After the row is written the service stamps
+// the JUDGED contact (the held recipient, else the phone-matched one) at the
+// provider-accepted instant, and emits contact.updated - the last event of the
+// send - only when that stamp was written. Best-effort: a stamp never fails
+// the send.
+describe('staff outreach stamp (today-checklist W1/W2, PR9)', () => {
+  const base = { conversationId: 'conv-1', body: 'checking in' };
+  const contactUpdates = (f: Fakes) => f.emitted.filter((e) => e.event === 'contact.updated');
+
+  it('stamps the phone-matched contact at the provider timestamp and emits ONE contact.updated, after conversation.updated', async () => {
+    const f = makeFakes();
+    const outcome = await f.service({ ...base, staffOutreach: true });
+    expect(outcome.providerSid).toBe('SMfake-1');
+    expect(f.reachedOutTouches).toEqual([{ contactId: 'contact-1', at: '2026-06-12T10:00:00.000Z' }]);
+    expect(f.emitted.map((e) => e.event)).toEqual(['message.persisted', 'conversation.updated', 'contact.updated']);
+    expect(contactUpdates(f)).toEqual([{ event: 'contact.updated', payload: { contactId: 'contact-1' } }]);
+  });
+
+  it('stamps the HELD recipient, not the phone-matched duplicate', async () => {
+    const f = makeFakes();
+    const held: ContactItem = {
+      contactId: 'c-real',
+      type: 'tenant',
+      phone: '+15550100001',
+      consent_method: 'verbal_in_person',
+    };
+    await f.service({ ...base, recipient: held, staffOutreach: true });
+    expect(f.reachedOutTouches).toEqual([{ contactId: 'c-real', at: '2026-06-12T10:00:00.000Z' }]);
+    expect(contactUpdates(f).map((e) => e.payload)).toEqual([{ contactId: 'c-real' }]);
+  });
+
+  it('a named recipient that no longer holds the number is not stamped - the phone-matched contact is', async () => {
+    const f = makeFakes();
+    const moved: ContactItem = {
+      contactId: 'c-moved',
+      type: 'tenant',
+      phone: '+15550100099',
+      consent_method: 'verbal_in_person',
+    };
+    await f.service({ ...base, recipient: moved, staffOutreach: true });
+    expect(f.reachedOutTouches.map((t) => t.contactId)).toEqual(['contact-1']);
+  });
+
+  it('stamps nothing without the option - the default, automated or not', async () => {
+    const f = makeFakes();
+    await f.service(base);
+    await f.service({ ...base, automated: true });
+    await f.service({ ...base, automated: false });
+    expect(f.sent).toHaveLength(3);
+    expect(f.reachedOutTouches).toEqual([]);
+    expect(contactUpdates(f)).toEqual([]);
+  });
+
+  it('stamps nothing when no contact holds the thread number', async () => {
+    const f = makeFakes({ contact: null });
+    await f.service({ ...base, staffOutreach: true });
+    expect(f.sent).toHaveLength(1);
+    expect(f.reachedOutTouches).toEqual([]);
+    expect(contactUpdates(f)).toEqual([]);
+  });
+
+  it('emits contact.updated ONLY when the stamp was written', async () => {
+    for (const answer of ['skipped', 'failed'] as const) {
+      const f = makeFakes({ reachedOut: async () => answer });
+      await f.service({ ...base, staffOutreach: true });
+      expect(f.reachedOutTouches).toHaveLength(1);
+      expect(contactUpdates(f)).toEqual([]);
+    }
+  });
+
+  it('a failed or rejecting stamp never fails the send: the outcome returns, ERROR names the contact id', async () => {
+    const failed = makeFakes({ reachedOut: async () => 'failed' });
+    await expect(failed.service({ ...base, staffOutreach: true })).resolves.toMatchObject({ providerSid: 'SMfake-1' });
+    expect(failed.capture.atLevel(ERROR).some((l) => l['contactId'] === 'contact-1')).toBe(true);
+
+    const rejecting = makeFakes({
+      reachedOut: async () => {
+        throw new Error('dynamo down');
+      },
+    });
+    await expect(rejecting.service({ ...base, staffOutreach: true })).resolves.toMatchObject({
+      providerSid: 'SMfake-1',
+    });
+    expect(contactUpdates(rejecting)).toEqual([]);
+  });
+
+  it('a refused send and an append failure never stamp', async () => {
+    const refused = makeFakes({
+      contact: { contactId: 'contact-1', type: 'tenant', phone: '+15550100001', sms_opt_out: true },
+    });
+    await expect(refused.service({ ...base, staffOutreach: true })).rejects.toBeInstanceOf(ContactOptedOutError);
+    expect(refused.reachedOutTouches).toEqual([]);
+
+    const unrecorded = makeFakes({ appendError: new Error('dynamo down') });
+    await expect(unrecorded.service({ ...base, staffOutreach: true })).rejects.toBeInstanceOf(
+      SendAcceptedNotRecordedError,
+    );
+    expect(unrecorded.reachedOutTouches).toEqual([]);
   });
 });

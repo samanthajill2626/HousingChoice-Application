@@ -2,23 +2,20 @@
 
 ## STATE (replace on every move)
 
-- Phase: LAUNCH GATE. Spec r7 and plan v3 FINAL @f3f85451 (plan review
-  closed after 2 rounds, 23 findings, no reject). Mission block:
-  `mission-block.md` beside this file.
+- Phase: LAUNCH GATE REVISION. Cameron picked AUTO with 55-minute checks
+  and a compaction first, after two revisions (2026-10-24, quoted below):
+  no heading counts; a Retry or Send now of anything automated from its
+  first send never counts. Spec r8 written; plan rulings PR102-PR105 and
+  their write-through next, then one review round of the delta (reviewer A
+  continued, round 3 of 4), then COMPACTION GATE B, then AUTO dispatch.
 - Worktree `W:\tmp\today-checklist`, branch `feat/today-checklist`, cut from
   main @970a29b9. Nothing built; docs only.
-- Launch mode: asked at the launch gate (AskUserQuestion AUTO / MANUAL /
-  Revise); not chosen yet.
-- For Cameron at the launch gate: PR64 heading counts (reverses the
-  2026-08-03 no-bare-counts ruling, commit 2f0db66f); spec r7's four
-  refinements (Retry of an automated row does not stamp; a provider-accepted
-  stranded relay leg stamps; one after-loop event per fan-out pass; backfill
-  retry and reconcile-leg rules).
-- NEXT STEP: on a Go pick, COMPACTION GATE B (confirm the registration with
-  --show, start the watcher, offer /compact), then AUTO: dispatch
-  abt:build-orchestrator in the background with mission-block.md verbatim,
-  arm the watchdog (30-min checkpoints, 55-min ceiling) and the mirror;
-  MANUAL: hand over the orchestration prompt. On Revise: take his changes.
+- Launch mode: AUTO (Cameron, 2026-10-24). Watchdog checkpoints every 55
+  minutes (his words: "go auto with 55-minute checks").
+- NEXT STEP: after the delta review closes, gate B (register --show,
+  watcher, offer /compact), then dispatch abt:build-orchestrator in the
+  background with `mission-block.md` verbatim (updated for r8/plan v4), arm
+  the watchdog at 3300 s and the mirror.
 
 ## What Cameron asked for (verbatim, with dates)
 
@@ -89,6 +86,19 @@ with option C that you created.").
 > That looks good, except I think we should run a quick backfill for hte last
 > reached out time.
 
+2026-10-24, launch gate (revisions, then the launch pick):
+> I don't know if we need counts in the section headings. We can probably
+> remove those unless there's a specific reason to keep them. I did see them
+> on the mockup, but that really wasn't something that I thought needed to
+> be removed or discussed at this point. Let's remove it now. I agree.
+> Retrying a failed automated text does not count as a staff context. A
+> retry of a reminder or nudge should be the same as an automated text. If a
+> reminder was going to go out automatically and we click Retry or Send Now
+> on an automated text, that also doesn't count because it was supposed to
+> be automated from the first part. I think that we need to update the spec.
+> Other than that, we can go auto with 55-minute checks and do a compaction
+> before we start.
+
 ## Why
 
 Sam rarely opened Today (Oct 16 check-in). She and her new VA need a start-
@@ -115,6 +125,12 @@ urgent clutters it, (3) the reference bits stay small.
   its own clock); Identify lists only contacts whose type is Unknown.
 - Spec gate 2026-10-24: one-time backfill (7.5); no live event from Not
   interested.
+
+- Launch gate 2026-10-24: section headings carry NO count (the 2026-08-03
+  no-bare-counts rule stands); "Show all N" still names the count. A staff
+  Retry or Send now of an automated text, reminder or nudge, and any Retry
+  of one, never counts as staff outreach (spec r8, `system_copy`). The other
+  r7 refinements stand (accepted by his "Other than that").
 
 ## Preferences and taste
 

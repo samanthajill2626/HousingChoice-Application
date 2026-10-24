@@ -1,6 +1,8 @@
 # Today as the daily checklist - design (tracker #31)
 
-Status: r7. Design review closed after round 3; Cameron passed the spec gate
+Status: r8 (2026-10-24, Cameron at the launch gate: no counts in section
+headings; a Retry or Send now of anything automated from its first send
+never counts as staff outreach). r7. Design review closed after round 3; Cameron passed the spec gate
 2026-10-24 and added the backfill (7.5), reviewed in round 4 (folded in). r7
 (2026-10-24, plan review): four precision refinements from the plan's
 rulings PR88, PR91, PR93 - the W2 row (a Retry of an automated row does not
@@ -81,7 +83,9 @@ select by `getByRole('list', { name: <heading> })`.
 
 ### 2.1 Every section shows 5 rows
 
-- Each section shows its first 5 rows. The heading carries the section's
+- Each section shows its first 5 rows. The heading carries NO count
+  (Cameron, 2026-10-24: "We can probably remove those unless there's a
+  specific reason to keep them"); the "Show all N" button names the full
   count.
 - When a section has more than 5, a "Show all N" button under the list expands
   it in place. Once expanded, the button reads "Show fewer". Expansion is
@@ -168,7 +172,7 @@ unavailable.
 
 ```
 quietShares:
-  | { status: 'ok'; properties: QuietShareProperty[]; people: number; truncated: boolean }
+  | { status: 'ok'; properties: QuietShareProperty[]; truncated: boolean }
   | { status: 'unavailable' }
 toursToBook: 'ok' | 'unavailable'    // whether the tours_to_book group was computed
 
@@ -187,9 +191,8 @@ QuietSharePerson {
 }
 ```
 
-`people` is the number of DISTINCT contacts across all properties (the heading
-count). A person waiting on two properties counts once and has a row under
-each property. `truncated` is the Follow up builder's flag (more than 100
+A person waiting on two properties has a row under each property. (r8: no
+distinct-people count is sent; headings carry no count.) `truncated` is the Follow up builder's flag (more than 100
 available properties); the dashboard shows "Showing the first 100 properties"
 under the section when it is true.
 
@@ -258,8 +261,8 @@ Identify lists contacts we do not yet know: contacts whose type is `unknown`
   (Cameron, 2026-10-23) so the oldest tours do not wait for the two-week
   auto-close. The Past tab's own order is unchanged.
 - The section labels EVERY Past row (point reads of tenant and property,
-  memoized as now), not only the first five, so the heading count and "Show
-  all N" are the rows Today actually qualifies (deleted tenants excluded). The
+  memoized as now), not only the first five, so "Show
+  all N" counts the rows Today actually qualifies (deleted tenants excluded). The
   "See all N on the Past tab" link keeps the Past tab's own count. Prod: about
   23 rows. Cost: a live reload (tour.updated, now also fired on tour create)
   re-reads every listed tenant for its delete state, about 23 point reads,
@@ -387,7 +390,7 @@ A person drops off when any of these happens:
   appears later starts folded. Per-viewer page state only.
 - The 5-row limit counts property lines: with more than 5 properties, "Show
   all N properties" expands in place. An open property shows all its people.
-- The heading count is `people`.
+- The heading carries no count (2.1).
 - Each property line is a button with `aria-expanded`; its people list has an
   accessible name naming the property.
 
@@ -436,7 +439,11 @@ combined field is stored.
   - automated sends: tour reminders, nudges, auto-replies, opt-in and opt-out
     confirmations, missed-call texts, welcome texts, relay system
     announcements, and any message the system sends on its own;
-  - machine resends of a staff message that already counted.
+  - machine resends of a staff message that already counted;
+  - a staff Retry or Send now of anything that was automated from its first
+    send: an automated text, a tour reminder or a placement nudge (sent on
+    its own or through Send now), and any later Retry of one (Cameron,
+    2026-10-24: "it was supposed to be automated from the first part").
 - Future: an agent that sends "as staff" will count when built. It calls the
   same helper (7.3).
 
@@ -482,6 +489,13 @@ combined field is stored.
   (`getRecipientDisplaysByIds`), and `SERVER_OWNED_CONTACT_FIELDS` in
   `app/src/routes/contacts.ts` (read by both the create and PATCH parsers).
 
+`system_copy` (r8): a boolean on the message row, `true` when a person pressed
+send but the copy is the system's. Written by tour reminder and placement
+nudge Send now (`jobs/tourReminders.ts` forceSendReminder,
+`jobs/placementNudges.ts` forceSendNudge) and by a staff Retry of a row that
+is `automated: true` or `system_copy: true`. It changes no gating (the row
+stays `automated: false`, a person's send); only W2 and the backfill read it.
+
 The stamp sits at each writer, not in `messagesRepo.append`: no stored field
 separates staff from automated sends. Automated sends also carry
 `author 'teammate'`, the `automated` flag describes how a send is gated, and no
@@ -492,7 +506,7 @@ Writers that STAMP:
 | # | Writer | Where the stamp goes | Contact(s) stamped |
 |---|---|---|---|
 | W1 | One-to-one SMS/MMS send, POST /api/conversations/:id/messages (`routes/api.ts` -> `services/sendMessage.ts`) | inside `sendMessage`, after the row is persisted, when the caller passes a staff-outreach option (only W1 and W2 pass it). The service owns the judged recipient (`heldRecipient ?? phoneContact`), which its outcome does not return | the judged recipient |
-| W2 | Staff Retry button, POST .../messages/:sid/retry | as W1, EXCEPT a retry of a share text (the retried row carries `broadcast_id`, `routes/api.ts` ~1880) or of an automated row (`automated: true`, for example the missed-call text) does not stamp: shares and automated copy do not count (7.2). r7: a Retry of a reminder / nudge "Send now" row (stored `automated: false`) or of an earlier manual retry of an automated row still stamps - rare, accepted | as W1 |
+| W2 | Staff Retry button, POST .../messages/:sid/retry | as W1, EXCEPT it does not stamp when the retried row is a share text (it carries `broadcast_id`, `routes/api.ts` ~1880), automated (`automated: true`) or system copy (`system_copy: true`, 7.3): shares and automated copy do not count (7.2). The new row inherits `system_copy: true` when the retried row is automated or system copy, so a Retry of a Retry is judged by the first send (r8) | as W1 |
 | W3 | Email send, POST .../email (`services/sendEmailMessage.ts`) | after SES accepts the message | the addressed contact |
 | W4 | Relay group team post (`sendRelayTeamMessage` in `routes/api.ts`, open or still connecting) | in the relay fan-out LOOP (`jobs/relayFanOut.ts`, around the `sendOneRelayLeg` call ~1535), when a leg of a team post comes back sent or `sent_unrecorded`, or (r7) `stranded` after the provider accepted it (`afterSend`) - NOT inside `sendOneRelayLeg`, which the 30003 retry rung also calls (`relayRetryLeg.ts`). The instant is the leg's send time, so a post queued while the group connects stamps when its legs actually go out. A suppressed member gets no leg and no stamp. The reconcile's relay-leg adoption does not stamp (a rare recovery path; best-effort) | each member whose leg was sent and who has a contactId |
 | W5 | Native group text post (`services/groupSend.ts`) | after the post succeeds (the row is written only then) | every resolved member contact EXCEPT members whose slot is seeded `excluded` (suppressed, `groupSend.ts` ~607-637) |
@@ -507,7 +521,7 @@ Writers that do NOT stamp:
 | Share fan-out sends and their reconcile adoption (`jobs/broadcastFanOut.ts`, `jobs/sendReconcile.ts`), including broadcasts with no property | shares and broadcasts do not count (7.2) |
 | Automatic 30003 retry job (`jobs/retrySend.ts`) and the reconcile's retry adoption | machine resend of a staff message that already stamped |
 | Relay 30003 retry rung (`webhooks/twilio.ts`) | machine resend to one member |
-| Tour reminder and placement nudge "Send now" | staff pick only the time; the copy is the automated reminder or nudge, even though the row carries `automated:false` |
+| Tour reminder and placement nudge "Send now" | staff pick only the time; the copy is the automated reminder or nudge, even though the row carries `automated:false`. r8: the row is written with `system_copy: true`, so a later staff Retry of it does not stamp either |
 | Missed-call auto text, housing-fair welcome text, tour reminder poll, nudge poll | automated |
 | Relay announcements with system copy (default intro, member added, group closed, group tour reminder) | system messages |
 | Quo importer (`lib/import/apply.ts`) | historical data with no staff/automated split; Quo rows are older than the backfill window (7.5) anyway |
@@ -559,10 +573,12 @@ people staff followed up with before the deploy do not show as quiet early.
   - one-to-one text and email: `type` sms, mms or email; `automated` not
     true; no `broadcast_id` (shares and their retries); no automatic-retry
     fields (`retry_attempt` / `retry_window_start`); an email only once it
-    left for SES (not failed, and not still queued); (r7) a manual retry
-    (`retry_of`) whose retried row is in the thread's window and is
-    automated or a Send-now row does not count, while one whose retried row
-    is outside the window counts;
+    left for SES (not failed, and not still queued); no `system_copy`; (r8)
+    a manual retry (`retry_of`) does not count when its retried row or its
+    chain root (`retry_root`) is in the thread's window and is automated,
+    system copy or a Send-now row (the body rules below), while one whose
+    retried row and root are both outside the window counts (residue,
+    reported);
   - relay posts: rows with `relay_sender_key` 'team', not relay retry rows
     (`relay_retry_of`); a member counts only when their slot shows the leg
     was SENT (the slot's sid / sent instant - not its status, which can stay
@@ -624,8 +640,8 @@ people staff followed up with before the deploy do not show as quiet early.
   deleted-tenant skip, order and `at` / `unitLabel`; tours_today `at`,
   `unitLabel` and time order; quiet shares at both thresholds and both
   boundaries, each drop-off, staff outreach restarting the clock, a second
-  share NOT restarting the first, property grouping, ordering and the
-  distinct-people count; quiet shares and tours to book each unavailable on a
+  share NOT restarting the first, property grouping and ordering; quiet
+  shares and tours to book each unavailable on a
   thrown read while the route answers 200.
 - The Follow up tab: its route output is unchanged when `last_reached_out_at`
   is set (regression).

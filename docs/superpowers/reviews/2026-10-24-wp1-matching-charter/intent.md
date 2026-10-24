@@ -163,3 +163,26 @@ quality Sam trusts, then her review of it, then the two views.
   He also floated "a blanket model for everybody once a day" (NOTE: the
   signed A1 lists background re-rank as NOT included; WP1 is computed on
   open).
+
+## Decisions, round 4 (Cameron, 2026-10-24)
+
+- D-on-demand: a ranking is NOT computed automatically on page open. A
+  button fires it. When the stored ranking's anchor or candidates have
+  changed since, the page shows an out-of-date warning (per candidate where
+  only candidates changed: "this ranking of this candidate is out of
+  date") with a button to update. Reasons: "It's not just firing off LLM
+  calls, which costs money" and avoiding the latency when "we might have
+  just been wanting to go back to the page where everything already
+  existed just fine."
+- D-cache: change-driven, by fingerprint: anchor changed -> full re-rank
+  offered; only candidates changed -> single-candidate re-score offered
+  per changed candidate (existing scores as context, one output); new
+  eligible candidate = insertion; candidate leaving eligibility = dropped,
+  no call; drift guard = full re-rank after N incremental updates or when
+  the ranking is older than a week. Cameron: "that's probably right."
+- Nightly blanket pass: NOT in WP1 and not wanted - Cameron did not intend
+  it ("I don't ever think that a nightly blanket pass was something we
+  talked about"); the planner had read it out of his round-3 line "a
+  blanket model for everybody once a day". Dropped. WP3 may want a
+  scheduled caller of the same engine; the charter may mention the seam
+  only.

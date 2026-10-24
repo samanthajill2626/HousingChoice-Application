@@ -360,3 +360,17 @@ quality Sam trusts, then her review of it, then the two views.
   and the edit form). Cameron: "The former is really what we need to do
   because we can't think of all of the pieces of information that might be
   relevant."
+
+## Decisions, round 14 (Cameron, 2026-10-24)
+
+- D-landlord-card-seam: NOT built in WP1 either way. "We build it so that
+  we can add the landlord card in if we decide to after we talk to Sam" -
+  the property card has a switch (config) that, when on, appends the
+  landlord-of-record's recorded requirements, notes and matching facts.
+  Off by default; Sam question added.
+- D-file-landlord-extraction: landlord-conversation extraction targeting
+  the property is FILED, not built:
+  docs/issues/landlord-conversation-extraction-to-property.md (deferred;
+  "part of the landlord onboarding or the property onboarding step, and
+  possibly part of the sharing step ... work package 3 and work package
+  4").

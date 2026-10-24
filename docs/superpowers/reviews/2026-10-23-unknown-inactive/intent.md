@@ -36,7 +36,14 @@
   order (Cameron's taste call), W8 second refetch, SPEC-F3 emit on audit
   failure, SPEC-F4 importer issue note, SPEC-F2 porting wording, R3-2/R4-1
   unfenced re-type (pre-existing).
-- NEXT STEP (after handback): gate results -> reviewer findings ->
+- VERDICT 2026-10-23 ~21:10: MERGE-READY, UNMERGED. Planner gates 0/0/0/0,
+  lint 1 pre-existing; reviews adjudicated, no code wave; live QA passed
+  (planner-verdict.md). Nothing in flight.
+- NEXT STEP: Cameron's answer on OR-1 (Contacts > Unknown order; default
+  keep) and his merge. Then: re-count (unknown, active) before deploy;
+  unregister compact-resume (--off) when the mission ends; cleanup only on
+  his go.
+- (superseded) gate results -> reviewer findings ->
   adjudicate -> live QA (hermetic e2e:session, after the gates) -> verdict.
 - (superseded) supervise. On each watchdog wake: CHECKPOINT -> ledger tail,
   one "**Checkpoint:**" line, re-arm (55 min); QUESTION -> relay to

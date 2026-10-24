@@ -217,6 +217,17 @@ function isUndated(t: Tour): boolean {
   return typeof t.scheduledAt !== 'string' || t.scheduledAt.length === 0;
 }
 
+/** True for a Past row the RANGE read cannot reach (spec 4.2a): undated, or
+ *  dated after the Past window's end (`pastToursDateRange(now).to`). Only the
+ *  status=toured read returns such rows, and selectPastTours' rows (the range
+ *  read's) are never such rows, so this splits the Past list into its two
+ *  parts. selectOffRangeTours keeps exactly these; Today orders the two parts
+ *  differently (spec 2026-10-23-today-checklist-design 5.3) without
+ *  re-deriving the rule. */
+export function isOffRangePastTour(t: Tour, now: Date = new Date()): boolean {
+  return isUndated(t) || (t.scheduledAt as string) > pastToursDateRange(now).to;
+}
+
 /** Toured tours the range read cannot reach (spec 4.2a), listed LAST. The
  *  Past view reads status=toured as well, for two kinds of row:
  *  - UNDATED: a requested tour marked "already toured" with the date left
@@ -237,10 +248,10 @@ function isUndated(t: Tour): boolean {
  *     is the clock;
  *  4. most recently touched first, ties by tourId. */
 export function selectOffRangeTours(tours: Tour[], now: Date = new Date()): Tour[] {
-  const { from, to } = pastToursDateRange(now);
+  const { from } = pastToursDateRange(now);
   const touched = (t: Tour): string => t.updatedAt ?? t.createdAt ?? '';
   return tours
-    .filter((t) => t.status === 'toured' && (isUndated(t) || (t.scheduledAt as string) > to))
+    .filter((t) => t.status === 'toured' && isOffRangePastTour(t, now))
     .filter((t) => t.outcome === undefined || needsPlacement(t))
     .filter((t) => touched(t) >= from)
     .sort((a, b) => {

@@ -89,3 +89,10 @@ export function whenLabel(iso: string | undefined): string {
     .join(', ')
     .replace(NBSP_LIKE, ' ');
 }
+
+/** Just the time ("2:30 PM"), with plain spaces only (the whenLabel rule) -
+ *  the Today page's At a glance Tours today rows. '' when absent or
+ *  unparseable. */
+export function timeLabel(iso: string | undefined): string {
+  return formatTime(iso).replace(NBSP_LIKE, ' ');
+}

@@ -24,6 +24,7 @@ vi.mock('../../api/index.js', async () => {
 });
 
 import {
+  isOffRangePastTour,
   pastState,
   pastToursDateRange,
   selectPastTours,
@@ -290,6 +291,28 @@ describe('selectPastTours', () => {
     const input = [...ROWS];
     selectPastTours(input, NOW);
     expect(input.map((t) => t.tourId)).toEqual(ROWS.map((t) => t.tourId));
+  });
+});
+
+// The Past list's two parts (spec 4.2a): Today orders them differently (spec
+// 2026-10-23-today-checklist-design 5.3) through this one exported rule.
+describe('isOffRangePastTour (the split selectOffRangeTours keeps)', () => {
+  /** A fixed "now": 2026-09-26 15:30 local. */
+  const NOW = new Date(2026, 8, 26, 15, 30, 0, 0);
+  const base = { tourId: 't', tenantId: 'c', unitId: 'u', tourType: 'self_guided', status: 'toured' } as const;
+
+  it('an undated tour is off-range (no scheduledAt, or an empty one)', () => {
+    expect(isOffRangePastTour({ ...base } as Tour, NOW)).toBe(true);
+    expect(isOffRangePastTour({ ...base, scheduledAt: '' } as Tour, NOW)).toBe(true);
+  });
+
+  it('a tour dated after the end of today is off-range', () => {
+    expect(isOffRangePastTour({ ...base, scheduledAt: new Date(2026, 8, 27, 9, 0).toISOString() } as Tour, NOW)).toBe(true);
+  });
+
+  it('a tour dated today - even later today - or earlier is in range', () => {
+    expect(isOffRangePastTour({ ...base, scheduledAt: new Date(2026, 8, 26, 17, 0).toISOString() } as Tour, NOW)).toBe(false);
+    expect(isOffRangePastTour({ ...base, scheduledAt: new Date(2026, 8, 23, 14, 0).toISOString() } as Tour, NOW)).toBe(false);
   });
 });
 

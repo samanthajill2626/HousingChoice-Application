@@ -8,6 +8,7 @@ import {
   formatDate,
   formatTime,
   pastTourTimeWarning,
+  timeLabel,
   tourTimeWarning,
   whenLabel,
 } from './tourTime.js';
@@ -96,6 +97,20 @@ describe('currentHourLocal', () => {
 
   it('zero-pads single-digit months, days, and hours', () => {
     expect(currentHourLocal(new Date(2026, 0, 5, 8, 59))).toBe('2026-01-05T08:00');
+  });
+});
+
+// Today's At a glance Tours today rows (spec 2026-10-23-today-checklist 2.4).
+describe('timeLabel', () => {
+  it('is the time alone, with plain spaces only (the whenLabel rule)', () => {
+    // A plain-space expected value: on an ICU 72+ host formatTime emits a
+    // narrow no-break space before PM, which this must have replaced.
+    expect(timeLabel(new Date(2026, 8, 24, 14, 30).toISOString())).toBe('2:30 PM');
+  });
+
+  it('an absent or unparseable value is empty', () => {
+    expect(timeLabel(undefined)).toBe('');
+    expect(timeLabel('not-a-date')).toBe('');
   });
 });
 

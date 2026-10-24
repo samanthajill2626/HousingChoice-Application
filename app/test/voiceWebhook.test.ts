@@ -865,6 +865,51 @@ describe('inbound masked voice - last heard from (spec 5.1)', () => {
     expect(world.heardFromTouches.map((t) => t.at)).toEqual([at, at]);
     expect(world.heardFromTouches.map((t) => t.outcome)).toEqual(['written', 'skipped']);
   });
+
+  // today-checklist PR15 (spec 8): a masked call emits no conversation.updated
+  // (announceCallStamp), so Today would never hear its touch. A WRITTEN touch
+  // is followed by ONE contact.updated.
+  const contactUpdates = (world: FakeWorld) =>
+    world.emitted.filter((e) => e.event === 'contact.updated').map((e) => e.payload);
+
+  it('today-checklist PR15: a refused member call emits ONE contact.updated after its written touch', async () => {
+    const world = createFakeWorld();
+    seedRelay(world, { status: 'closed' });
+    world.contacts.push({ contactId: 'c-alice', type: 'tenant', phone: ALICE });
+    const { app } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoiceParams({ CallSid: 'CAcu-closed' }));
+
+    expect(contactUpdates(world)).toEqual([{ contactId: 'c-alice' }]);
+  });
+
+  it('today-checklist PR15: a bridged member call emits ONE contact.updated; its redelivery (skipped) adds none', async () => {
+    const world = createFakeWorld();
+    seedRelay(world);
+    world.contacts.push({ contactId: 'c-alice', type: 'tenant', phone: ALICE });
+    const { app } = makeWebhookHarness({ world });
+    const params = inboundVoiceParams({ CallSid: 'CAcu-bridge' });
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice', params);
+    await signedTwilioPost(app, '/webhooks/twilio/voice', params);
+
+    expect(world.heardFromTouches.map((t) => t.outcome)).toEqual(['written', 'skipped']);
+    expect(contactUpdates(world)).toEqual([{ contactId: 'c-alice' }]);
+    // WL-4 (spec 7.2, "calls that staff send themselves"): a member-to-member
+    // bridge is not staff outreach - no callee (the OTHER roster members) is
+    // stamped, on either delivery.
+    expect(world.reachedOutTouches).toEqual([]);
+  });
+
+  it('today-checklist PR15: an unmatched non-member caller touches nobody and emits none', async () => {
+    const world = createFakeWorld();
+    seedRelay(world);
+    const { app } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoiceParams({ From: CAROL, CallSid: 'CAcu-nobody' }));
+
+    expect(contactUpdates(world)).toEqual([]);
+  });
 });
 
 describe('whisper + press-1/press-0/timeout gate (M1.9a)', () => {

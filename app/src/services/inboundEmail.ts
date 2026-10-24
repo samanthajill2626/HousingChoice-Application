@@ -834,6 +834,10 @@ export async function ingestInboundEmail(
         if (outcome === 'failed') {
           log.error({ bucket, key, conversationId }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
         }
+        // today-checklist PR15 (spec 8): conversation.updated fired ABOVE, before
+        // this touch, so a refetch on it can miss the new last_heard_from_at.
+        // ONE contact.updated after a written touch closes that race.
+        if (outcome === 'written') deps.events.emit('contact.updated', { contactId: heardFromId });
       }
     } catch (err) {
       log.error(

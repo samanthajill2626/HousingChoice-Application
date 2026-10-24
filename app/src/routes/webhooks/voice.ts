@@ -856,6 +856,11 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
           if (outcome === 'failed') {
             log.error({ callSid: CallSid }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
           }
+          // today-checklist PR81 (spec 8): ring time emits only
+          // message.persisted, and an abandoned ring has no Dial summary, so
+          // Today would never hear this touch. ONE contact.updated after a
+          // written touch.
+          if (outcome === 'written') events.emit('contact.updated', { contactId: heardFromId });
         }
       } catch (err) {
         log.error({ err, callSid: CallSid }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
@@ -1144,6 +1149,9 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
             if (outcome === 'failed') {
               log.error({ callSid: CallSid, reason }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
             }
+            // today-checklist PR15 (spec 8): a masked call emits no
+            // conversation.updated, so Today would never hear this touch.
+            if (outcome === 'written') events.emit('contact.updated', { contactId: heardFromId });
           }
         } catch (err) {
           // The error NAME only, never the message: a failed phone lookup's
@@ -1242,6 +1250,9 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
           if (outcome === 'failed') {
             log.error({ callSid: CallSid }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
           }
+          // today-checklist PR15 (spec 8): as on the refusal branch - a masked
+          // call emits no conversation.updated for Today to hear.
+          if (outcome === 'written') events.emit('contact.updated', { contactId: heardFromId });
         }
       } catch (err) {
         // The error NAME only (as on the refusal branch): a failed phone

@@ -941,6 +941,41 @@ describe('last heard from (spec 5.1) - inbound email', () => {
         .some((l) => l['msg'] === 'last_heard_from touch failed - message persisted, last_heard_from stale'),
     ).toBe(true);
   });
+
+  // today-checklist PR15 (spec 8): this path emits conversation.updated BEFORE
+  // the touch, so a refetch on it can miss the new last_heard_from_at. A
+  // WRITTEN touch is followed by ONE contact.updated; the existing emits keep
+  // their order.
+  it('today-checklist PR15: a written touch is followed by ONE contact.updated, after conversation.updated', async () => {
+    const w = makeWorld({});
+    const out = await ingestInboundEmail(notice(), w.deps);
+    expect(out.outcome).toBe('threaded');
+    const names = w.emit.mock.calls.map((c) => c[0]);
+    expect(names.filter((n) => n === 'contact.updated')).toHaveLength(1);
+    expect(names.indexOf('contact.updated')).toBeGreaterThan(names.indexOf('conversation.updated'));
+    expect(w.emit).toHaveBeenCalledWith('contact.updated', { contactId: 'c1' });
+  });
+
+  it('today-checklist PR15: a skipped or failed touch emits no contact.updated', async () => {
+    for (const touchHeardFromResult of ['skipped', 'failed'] as const) {
+      const w = makeWorld({ touchHeardFromResult });
+      await ingestInboundEmail(notice(), w.deps);
+      expect(w.emit.mock.calls.filter((c) => c[0] === 'contact.updated')).toEqual([]);
+    }
+  });
+
+  it('today-checklist PR15: the unmatched-email re-ingest reuses the path and inherits the emit', async () => {
+    const w = makeWorld({});
+    const out = await ingestInboundEmail(notice(), w.deps, { reingest: true });
+    expect(out.outcome).toBe('threaded');
+    expect(w.emit).toHaveBeenCalledWith('contact.updated', { contactId: 'c1' });
+  });
+
+  it('today-checklist PR15: a deduped append touches nobody and emits no contact.updated', async () => {
+    const w = makeWorld({ appendDeduped: true });
+    await ingestInboundEmail(notice(), w.deps);
+    expect(w.emit.mock.calls.filter((c) => c[0] === 'contact.updated')).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------

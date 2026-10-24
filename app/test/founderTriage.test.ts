@@ -600,6 +600,24 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
     const at = splitTsMsgId(m.tsMsgId).providerTs;
     expect(world.heardFromTouches).toEqual([{ contactId: 'c-caller', at, outcome: 'written' }]);
   });
+
+  // today-checklist PR81 (spec 8): at ring time this path emits only
+  // message.persisted, which Today does not hear, and a caller who abandons
+  // during the ring produces no Dial summary - so a WRITTEN touch is followed
+  // by ONE contact.updated. A redelivery (skipped touch) adds none.
+  it('today-checklist PR81: a written ring-time touch is followed by ONE contact.updated; its redelivery adds none', async () => {
+    const world = createFakeWorld();
+    world.contacts.push({ contactId: 'c-caller', type: 'tenant', phone: CALLER });
+    const { app } = founderHarness(world);
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+    await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+
+    expect(world.heardFromTouches.map((t) => t.outcome)).toEqual(['written', 'skipped']);
+    expect(world.emitted.filter((e) => e.event === 'contact.updated').map((e) => e.payload)).toEqual([
+      { contactId: 'c-caller' },
+    ]);
+  });
 });
 
 describe('founder whisper leg (M1.9b)', () => {

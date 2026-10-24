@@ -409,3 +409,82 @@
   font-size: var(--fs-sm);
   color: var(--c-text-muted);
 }
+
+/* --- Quiet shares, option C (spec 2026-10-23 6.3) -------------------------- */
+
+/* One expandable line per property: the address, the summary, Show / Hide. */
+.propLine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.propLine:hover {
+  border-color: var(--c-border-strong);
+}
+
+.propLine:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
+.propAddr {
+  flex: 1 1 16rem;
+  min-width: 0;
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+
+.propSummary {
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+
+.propChevron {
+  flex: 0 0 auto;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+}
+
+/* An open property's people, indented under its line. */
+.propPeople {
+  margin: var(--sp-2) 0 0 var(--sp-5);
+  padding-left: var(--sp-3);
+  border-left: 2px solid var(--c-border);
+}
+
+/* A caseworker's role tag beside the name (spec 6.2). */
+.roleTag {
+  flex: 0 0 auto;
+  padding: 0 var(--sp-2);
+  border-radius: var(--radius-pill);
+  background: var(--c-evt-purple-bg);
+  color: var(--c-evt-purple-text);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+/* The "Replied" state tag reads apart from "No reply yet". */
+.tagReplied {
+  background: var(--c-brand-soft);
+  border-color: transparent;
+  color: var(--c-brand);
+}
+
+/* A muted note under a section ("Showing the first 100 properties"). */
+.note {
+  margin: var(--sp-2) 0 0;
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}

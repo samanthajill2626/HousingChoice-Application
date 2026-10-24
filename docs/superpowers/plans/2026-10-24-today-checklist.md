@@ -12,7 +12,7 @@
 - Status: PLAN v1 (2026-10-24). Sections 0-4 are BINDING and written by the
   planner; slice sections 5-11 (S1-S7) are opus section drafts assembled
   verbatim; section 12 (S8) is the planner's.
-  Section 4 (planner rulings PR1-PR40) wins over any slice text it
+  Section 4 (planner rulings PR1-PR80) wins over any slice text it
   contradicts. "Plan section N" always means this file's top-level sections.
 
 ## 0. Ground rules for this plan
@@ -151,7 +151,7 @@ tree).
   always consistent, so no test can see this; record it only.
 - WI9 Lean seed byte-stability: no seed file is edited by this plan. If a
   test seems to need one, STOP and report.
-- WI10 `TODAY_PAST_TOURS_CAP` (S5, PR30): record whether it is still used
+- WI10 `TODAY_PAST_TOURS_CAP` (S5, PR35): record whether it is still used
   after S5; if not, it is removed with its pin.
 - WI11 The fallback (S5): record when `buildToday` runs (only a 404 from
   GET /api/today) and that it never shows "All caught up".
@@ -534,3 +534,22984 @@ tree).
   participant-names-through-Today case (~1993-2047) moves to a vehicle
   Today still shows (a tours_to_book or identify row). Each inversion is
   named in the S4 report.
+
+### Assembly rulings (from the seven section drafts)
+
+Each draft's own "Contradictions" block is the record of what it found;
+where it differs from these, these win.
+
+- PR41 (S1 C1) Hand-rolled full `ContactsRepo` fakes: exactly the five full
+  literals S1.2 names get the stub (harness, sendMessage,
+  audienceResolution, contactCapture, scheduledSendSuppression). The two
+  dev-fixture rigs are updated in S2, when PR14 widens the `Pick` at
+  `dev.ts` ~160.
+- PR42 (S1 C2) The three full `ConversationsRepo` literals
+  (`contactCapture.test.ts` ~161, `scheduledSendSuppression.test.ts` ~154,
+  `sendMessage.test.ts` ~119) get throwing `getByIdConsistent` stubs.
+- PR43 (S1 C3) Recording `contact.updated` in `world.emitted` makes the
+  exact pins at `contactTriage.test.ts` ~151 and ~357 include the event the
+  PATCH already emits (stricter, deliberate); the comments at
+  `contactTriage.test.ts` ~61-65 and `sse.test.ts` ~217-218 are rewritten.
+- PR44 (S1 C4) PR5's signature (stamps array in, written contactIds out)
+  binds over the spec 7.3 sketch.
+- PR45 (S1 C5) `getByIdConsistent` filters nothing, exactly like `getById`;
+  its doc comment says so.
+- PR46 (S2 C1) W8 stamps on direction outbound only (the transcript seam
+  writes `author: 'unknown'` both ways); the author test in PR14 is struck.
+- PR47 (S2 C2) The extracted one-to-one contact helper returns undefined for
+  `relay_group` and `group_text` threads; `attributeInbound` behaves as
+  before.
+- PR48 (S2 C3) The W6 tests build a second app with `buildApp` over the
+  same world to inject `afterResponse`; the harness is not edited (PR37
+  stands).
+- PR49 (S2 C4) `toursApi.test.ts` ~585 and ~1402-1412 and
+  `toursReopenApi.test.ts` ~492 count `tour.updated` across a create; each
+  is updated deliberately and named in the S2 report.
+- PR50 (S2 C5) The call-shape pins at `apiRoutes.test.ts` ~84, ~709-719,
+  ~860-870 gain `staffOutreach: true`, deliberately.
+- PR51 (S2 C6) The W1/W2 stamp instant is the send result's `providerTs`
+  (`result.providerTs`), never a deduped append's earlier key.
+- PR52 (S2 C7) The units router dep is `events?: EventBus`; its
+  router-scope local is named `eventBus` (a handler-local `events` exists).
+- PR53 (S2 C8) The two poll no-stamp cases also assert that no
+  `staffOutreach` reaches the send input.
+- PR54 (S3 C1) PR18 amended: no edit to `worker.ts` or
+  `jobs/registerHandlers.ts`; the relay fan-out handler defaults its bus to
+  `appEvents` (`events ??= appEvents`, the relayRetryLeg pattern), which is
+  the bus the worker bridge is attached to.
+- PR55 (S3 C2, C3) `RelayLegSendOutcome` gains `sentAt?: string` (doc
+  comment names the three kinds); ONLY the three return statements inside
+  `sendOneRelayLeg` (~2240, ~2302, ~2304) set it - nothing else there
+  changes. The loop requires the kind AND `sentAt !== undefined`.
+- PR56 (S3 notes) The member-added announcement call keeps its default
+  bus. A lost hand-off after a known send (`skipped_terminal`) does not
+  stamp; accepted residue, recorded in the S3 report.
+- PR57 (S4 C1) `todayUnmatchedNonRegression.test.ts` also injects the
+  prefixed `unitsRepo` and `listingSendsRepo` and asserts quiet shares and
+  Tours to book are 'ok' there, so the pin cannot pass vacuously.
+- PR58 (S4 C2) The new throw-path WARNs carry `err` plus section and counts,
+  like their siblings (`today.ts` ~365, ~395); tests assert no seeded name
+  appears in any WARN line.
+- PR59 (S4 C3) The ~13 further `todayApi.test.ts` cases that saw the unread
+  pass only through Unreplied rows are re-expressed on `unknown_1to1`
+  threads as the S4 draft writes them; each is named in the S4 report.
+- PR60 (S4 C4) `world.recipientDisplayCalls` entries are
+  `{ contactIds, opts? }` (S1's shape binds). S4's assertions read
+  `call.opts?.consistentRead`; the S4 builder adapts the three assertions
+  that read the entry as the opts object.
+- PR61 (S4 C5) The now-unused `isOneToOneBucket` import leaves `today.ts`.
+- PR62 (S4 WI7) In the read-budget test, the pre-existing harness read
+  counts the draft inferred may be set to the observed value, with both
+  numbers recorded; the six S4-owned counts are not changed.
+- PR63 (S5 C1) PR35 amended: export the off-range rule as
+  `isOffRangePastTour` from `useTours.ts` and have `selectOffRangeTours`
+  call it; Today splits on it.
+- PR64 (S5 C2) Section headings carry the count (spec 2.1, the mockup
+  Cameron and Sam saw). This reverses the 2026-08-03 "no bare counts" pins
+  (commit 2f0db66f, `Today.test.tsx` ~167-168), deliberately; the planner
+  raises it with Cameron at the launch gate.
+- PR65 (S5 C3) The shared component takes a `level` prop. "At a glance" is
+  an h2; "Tours today" is an h3 under it; the AI part is a disclosure
+  button whose opened list uses the shared limited list.
+- PR66 (S5 C4) `useToday` exposes `generatedAt`; the quiet-share "N days"
+  is computed from it. The route derives `now` from `nowIso`
+  (`today.ts` ~332-333), so the server threshold and the shown N share one
+  instant.
+- PR67 (S5 C5) The Past-tab link rule is unchanged (`total > rows.length`).
+  With every row labeled it reads "Open the Past tab" unless deleted
+  tenants' tours were skipped.
+- PR68 (S5 C6) Where the mockup's copy differs from the spec, the spec's
+  copy is used.
+- PR69 (S5 ordering) The dashboard union keeps `'unreplied'` with no
+  producer from S5.4 until S5.6 so every commit typechecks; accepted.
+- PR70 (S6 C1) The backfill counts reconcile-adopted relay legs and
+  one-to-one staff sends (they were staff sends; spec 7.2); recorded in the
+  S6 report and the RUNBOOK entry.
+- PR71 (S6 C2) Email and call rows have no `recipient_contact_id`; the
+  backfill names the thread's contact (differs from live W3 only on a
+  shared address); recorded.
+- PR72 (S6 C3) System-author rows go to the staff-edited intro rule before
+  the teammate test (the spec's named exception).
+- PR73 (S7 C1) `tours-page.spec.ts` ~268-271 is scoped to the Tours today
+  list, plus a positive Tours to book check.
+- PR74 (S7 C2) participant-names reuses the scenario's existing requested
+  tour and asserts the renamed name inside the Tours to book row matched by
+  the tour link.
+- PR75 (S7 C3) The shared e2e helper `expectNoAiSuggestionFor` (server
+  truth first) replaces the vacuous hidden-list checks in caseworkers and
+  conversation-fact-extraction.
+- PR76 (S7 C4) `PAST_TAB_LINK_AT_SEVEN` = "Open the Past tab" (PR67).
+- PR77 (S7 C5) `TODAY_TERMINAL` = the seven checklist lists, the "All
+  caught up" text and the load-error alert; At a glance is not a terminal;
+  `routes.test.ts` gains the pin.
+- PR78 (S7 C6) APPROVED: the lane-only helper that clears one contact's
+  stamp for the rehearsal. It lives under `.superpowers/` (gitignored),
+  and it refuses to run unless the endpoint host is localhost/127.0.0.1 AND
+  the table prefix is the lane's `hc-local-<L>-` prefix.
+- PR79 (S7 C7) APPROVED: the extra docs drift fixes (GLOSSARY ~699-703 and
+  ~719-732, STATUS-MODEL ~231-233 and ~282-295, the open issue
+  `public-signup-abuse-hardening.md`). Resolved issues are not edited.
+- PR80 WI10's ruling is PR35 (amended by PR63), not PR30.
+
+## 5. S1 - The signal: last_reached_out_at, touchLastReachedOut, recordStaffOutreach
+
+Scope: plan section 2 row S1; rulings PR1-PR8 and PR37 (binding). Spec 6.1
+(the consistent contacts read), 7.1, 7.3 (the repo method, the helper, the
+four server-owned places), 9 (the parser refusal test). S1 adds the field,
+the one writer method, the helper every later writer calls, the consistent
+reads S3/S4 need, and every fake those slices test against. It adds NO
+writer call site and NO emit (S2/S3 do those). Every line number below is a
+hint against main @970a29b9; the QUOTED text is the anchor.
+
+Notation used ONLY inside "old text" anchors: this plan is ASCII, so where a
+CURRENT file line holds a non-ASCII character the anchor writes it as
+`[U+2192]` (right arrow). Copy that line from your own Read of the file into
+`old_string` (the real character, not the bracket notation). Replacement
+text is always ASCII. A changed line that held a non-ASCII character is
+replaced WHOLE by an ASCII line; never edit a substring of such a line.
+
+Before S1.1 (plan section 0): the worktree has no `node_modules` today. Run
+`npm ci` once at the worktree root (bare; expect exit 0):
+```
+cd W:/tmp/today-checklist; npm ci
+```
+App vitest runs below need DynamoDB Local (`npm run db:start` STARTS it;
+never restart the shared container). If `env | grep '^AWS_'` shows an
+exported `AWS_ACCESS_KEY_ID`, prefix every app vitest command with
+`env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY`.
+
+### Contradictions
+
+C1. Brief vs tree - which hand-rolled `ContactsRepo` fakes stop compiling.
+The brief lists `importOrgNames`, `groupTextWebhook`, `inboundEmail`,
+`unmatchedEmailRoutes`, `devTranscriptFixture` and
+`devMessageTransportFixture` beside the full fakes. None of those six is a
+full `ContactsRepo`, so PR2's new interface member does not break them:
+`app/test/importOrgNames.test.ts:76` and `app/test/groupTextWebhook.test.ts:155`
+mention `touchLastHeardFrom` only in a comment / an expected call-label
+string; `app/test/inboundEmail.test.ts:312` builds a literal for
+`Pick<ContactsRepo, ...>` (`app/src/services/inboundEmail.ts:214`);
+`app/test/unmatchedEmailRoutes.test.ts:129-138` types its fake with its own
+`MemoryContacts` interface for `app/src/routes/unmatchedEmail.ts:83`'s Pick;
+`app/test/devTranscriptFixture.test.ts:27` and
+`app/test/devMessageTransportFixture.test.ts:24` fill the dev router's
+`Pick<ContactsRepo, 'findByPhone' | 'findByEmail' | 'touchLastHeardFrom'>`
+(`app/src/routes/dev.ts:160`). The only full `ContactsRepo` literals in the
+tree are `app/test/helpers/twilioWebhookHarness.ts:2253`,
+`app/test/sendMessage.test.ts:225`, `app/test/audienceResolution.test.ts:52`
+(`ContactsRepo & {...}` return), `app/test/contactCapture.test.ts:61` and
+`app/test/scheduledSendSuppression.test.ts:244` (method: every full fake must
+already define `touchLastHeardFrom`; the set of files that do was read one by
+one; the rest of the `as unknown as ContactsRepo` casts do not type-check
+members). Resolution: S1.2 edits exactly those five. The dev-fixture rigs
+break in S2, when PR14 widens `dev.ts:160` (cross-slice note).
+
+C2. PR6 names only the harness fake for `getByIdConsistent`. Three more
+hand-rolled FULL `ConversationsRepo` literals stop compiling when the
+interface gains it: `app/test/contactCapture.test.ts:161`,
+`app/test/scheduledSendSuppression.test.ts:154`,
+`app/test/sendMessage.test.ts:119` (found by `: ConversationsRepo = {`, and
+cross-checked as the only test files defining both
+`createOrGetByParticipantPhone` and `setTypeIfCurrent`). Resolution (S1.5):
+a throwing stub in each, the PR7 rule applied to the conversations repo.
+
+C3. PR7 "the harness event recorder also records `contact.updated`" breaks
+two EXACT pins whose paths already emit it (`app/src/routes/contacts.ts:2225-2228`,
+the #30 AR3 emit): `app/test/contactTriage.test.ts:151` (`world.emitted`
+toEqual ONE conversation.updated, on a type=tenant PATCH) and
+`app/test/contactTriage.test.ts:357` (`toHaveLength(0)` on a type=team_member
+PATCH). It also makes two comments false: `app/test/contactTriage.test.ts:61-65`
+("The harness does not record this event in world.emitted") and
+`app/test/sse.test.ts:217-218`. Every other unfiltered `world.emitted`
+assert in the app tests was read: none is on a path that emits
+`contact.updated` (`contactTriage.test.ts:326` is a name-only PATCH, :859-878
+and `contactTypeChangeRefusals.test.ts:118` / `contactStaffNotes.test.ts:183`
+are refused writes; `statusTransition`, `transitionRoutes`,
+`caseworkerConversion` filter by event). Resolution (S1.7): both pins are
+updated to INCLUDE the `contact.updated` the route really emits (stricter,
+not weaker), both comments rewritten.
+
+C4. Spec 7.3 sketches the helper as `recordStaffOutreach({ contacts, log },
+contactIds, at)` returning whether any stamp was written. PR5 binds a
+different shape (a stamps array with per-contact instants, returning the
+written ids). S1.6 follows PR5. No action; recorded so a reviewer reading the
+spec does not flag it.
+
+C5. PR6 "same pointer handling as `getById`": `getById`
+(`app/src/repos/conversationsRepo.ts:1124-1127`) does NO pointer or claim
+filtering - a raw GetItem returning whatever item the key holds. S1.5's
+`getByIdConsistent` mirrors that exactly (no filtering) and says so in its
+doc comment. Callers pass real conversation ids only (relay/group threads).
+
+No other ruling conflicts with the code.
+
+### Cross-slice notes (for the planner)
+
+- Names S1 introduces (later slices use them verbatim):
+  - `ContactItem.last_reached_out_at?: string`,
+    `RecipientDisplay.last_reached_out_at?: string`, projection placeholder
+    `#lastReachedOutAt` (`app/src/repos/contactsRepo.ts`).
+  - `ContactsRepo.touchLastReachedOut(contactId, at): Promise<'written' | 'skipped' | 'failed'>`.
+  - `ContactsRepo.getRecipientDisplaysByIds(ids, opts?: { requireComplete?; consistentRead? })`.
+  - `ConversationsRepo.getByIdConsistent(conversationId)`.
+  - `app/src/services/staffOutreach.ts`: `recordStaffOutreach(deps, stamps)`
+    and `interface StaffOutreachStamp { contactId: string; at: string }`.
+    Deps type is the PR5 inline `{ contacts: Pick<ContactsRepo, 'touchLastReachedOut'>; log: Logger }`
+    (no named deps type is exported).
+  - Harness: `world.reachedOutTouches: { contactId; at (RAW, as passed);
+    outcome }[]`, `world.recipientDisplayCalls: { contactIds: string[];
+    opts?: { requireComplete?; consistentRead? } }[]` (`opts` present only
+    when the caller passed one), `contact.updated` now in `world.emitted`,
+    `world.conversationsRepo.getByIdConsistent` (= `getById`).
+- `recordStaffOutreach` swallows a THROWING or REJECTING touch as 'failed'
+  (ERROR log, not returned). So a writer test whose fake still has S1's
+  throwing stub sees "no stamp + one ERROR line", not a crash. S1 leaves
+  throwing `touchLastReachedOut` stubs in `sendMessage.test.ts`,
+  `contactCapture.test.ts`, `scheduledSendSuppression.test.ts`,
+  `audienceResolution.test.ts`; S2's W1/W2 tests in `sendMessage.test.ts`
+  replace that stub with a recording one (PR7 exception). Same for the
+  throwing `getByIdConsistent` stubs (S1.5) if S3 ever drives those fakes.
+- `app/test/sendEmailMessage.test.ts:119` passes `{...} as unknown as ContactsRepo`
+  WITHOUT `touchLastReachedOut`: after S2's W3 wiring the helper logs ERROR
+  'failed' there unless S2 adds a recording method to that cast.
+- S2 PR14 widens `app/src/routes/dev.ts:160` (`heardFromRepos.contactsRepo`
+  Pick); the rigs at `app/test/devTranscriptFixture.test.ts:27` and
+  `app/test/devMessageTransportFixture.test.ts:24` then need a
+  `touchLastReachedOut` (C1).
+- The harness `touchLastReachedOut` is a TWIN of its `touchLastHeardFrom`: it
+  does NOT refuse a pointer id (the real repo does, `contactsRepo.ts:2010`).
+  Writer tests stamp real contact ids only.
+- S4 (PR22/PR30): the harness records the recipient-read options in
+  `world.recipientDisplayCalls` - route tests assert `consistentRead: true`
+  there. The `app/test/followUps.test.ts` fake (~90,
+  `async getRecipientDisplaysByIds(ids: string[], o?: { requireComplete?: boolean })`)
+  records only `requireComplete` into `calls.batches`; S4 widens it if a
+  `collectWaitingFollowUps` unit test must see `consistentRead`.
+  `RECIPIENT_ATTRS` there already carries the new field after S1.1.
+- `app/test/helpers/twilioWebhookHarness.ts` is S1-only (PR37). If S2-S4
+  need another harness seam, that is a planner call.
+- S1 does not touch `app/src/lib/events.ts` (S7 owns the
+  `ContactUpdatedEvent` doc comment, PR8). S1 edits the comments in
+  `app/test/contactTriage.test.ts:61-65` and `app/test/sse.test.ts:217-218`.
+- `app/test/caseworkerRepoParity.integration.test.ts` gains three describe
+  blocks (S1.2, S1.5) above its `// END OF PARITY CASES` line and one edited
+  case (S1.1).
+- S6's backfill calls `touchLastReachedOut` directly (it is not a live send);
+  its doc comments and the helper's header say so.
+
+---
+
+### Task S1.1 - The field: ContactItem, RecipientDisplay, the recipient projection and its fakes
+
+PR1. Adds `last_reached_out_at` to the two types and to
+`RECIPIENT_PROJECTION`, copies it in the harness `projectRecipient`, and
+updates the exact-projection pin deliberately. Nothing writes the field yet.
+
+Files:
+- `app/src/repos/contactsRepo.ts` (ContactItem ~230, RecipientDisplay ~401,
+  RECIPIENT_PROJECTION ~1093-1110)
+- `app/test/helpers/twilioWebhookHarness.ts` (`projectRecipient` ~2232-2251)
+- `app/test/followUps.test.ts` (`RECIPIENT_ATTRS` ~46, a fixture)
+- Tests: `app/test/contactsBatchIncomplete.test.ts`,
+  `app/test/caseworkerRepoParity.integration.test.ts`
+
+#### Step 1 - failing tests
+
+1a. `app/test/contactsBatchIncomplete.test.ts` (~280, the case "asks for
+status through a placeholder (a DynamoDB reserved word) and the three new
+attributes"; pure stub client, no database). Edit:
+
+old:
+```ts
+    expect(Object.values(names)).toEqual(
+      expect.arrayContaining(['last_heard_from_at', 'sms_opt_out', 'sms_unreachable', 'type', 'role', 'deleted_at', 'phone']),
+    );
+```
+new:
+```ts
+    expect(Object.values(names)).toEqual(
+      expect.arrayContaining([
+        'last_heard_from_at',
+        'last_reached_out_at',
+        'sms_opt_out',
+        'sms_unreachable',
+        'type',
+        'role',
+        'deleted_at',
+        'phone',
+      ]),
+    );
+    // today-checklist PR1: the quiet clock's outbound half rides the same
+    // projection, through its own placeholder.
+    expect(projection).toContain('#lastReachedOutAt');
+    expect(names['#lastReachedOutAt']).toBe('last_reached_out_at');
+```
+
+1b. `app/test/caseworkerRepoParity.integration.test.ts` (~446-470) - the
+exact-projection pin, updated DELIBERATELY (PR1). It runs against the
+harness fake and DynamoDB Local. Edit:
+
+old:
+```ts
+  parity('projects last_heard_from_at, sms_opt_out and sms_unreachable (last-heard-from spec 5.5)', async (w, id) => {
+    const phone = nextPhone();
+    await w.putContact({
+      contactId: id,
+      type: 'tenant',
+      status: 'placed',
+      firstName: 'Ray',
+      phone,
+      sms_opt_out: true,
+      sms_unreachable: false,
+      last_heard_from_at: '2026-10-01T12:00:00.000Z',
+      notes: 'not projected',
+    });
+    expect((await w.contacts.getRecipientDisplaysByIds([id])).get(id)).toEqual({
+      contactId: id,
+      firstName: 'Ray',
+      phone,
+      type: 'tenant',
+      status: 'placed',
+      sms_opt_out: true,
+      sms_unreachable: false,
+      last_heard_from_at: '2026-10-01T12:00:00.000Z',
+    });
+  });
+```
+new:
+```ts
+  // today-checklist PR1 (spec 7.3): last_reached_out_at joins the projection
+  // - the Today quiet clock reads it from this batch. Updated deliberately.
+  parity('projects last_heard_from_at, last_reached_out_at, sms_opt_out and sms_unreachable (last-heard-from spec 5.5; today-checklist PR1)', async (w, id) => {
+    const phone = nextPhone();
+    await w.putContact({
+      contactId: id,
+      type: 'tenant',
+      status: 'placed',
+      firstName: 'Ray',
+      phone,
+      sms_opt_out: true,
+      sms_unreachable: false,
+      last_heard_from_at: '2026-10-01T12:00:00.000Z',
+      last_reached_out_at: '2026-10-02T12:00:00.000Z',
+      notes: 'not projected',
+    });
+    expect((await w.contacts.getRecipientDisplaysByIds([id])).get(id)).toEqual({
+      contactId: id,
+      firstName: 'Ray',
+      phone,
+      type: 'tenant',
+      status: 'placed',
+      sms_opt_out: true,
+      sms_unreachable: false,
+      last_heard_from_at: '2026-10-01T12:00:00.000Z',
+      last_reached_out_at: '2026-10-02T12:00:00.000Z',
+    });
+  });
+```
+The case above it ("projects the display fields plus type, role, status and
+the reachability facts - nothing else; a missing id is absent", ~405-444)
+stays as written: it seeds no `last_reached_out_at`, so its "nothing else"
+pin still holds.
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/contactsBatchIncomplete.test.ts test/caseworkerRepoParity.integration.test.ts
+```
+Expected failures, and why:
+- contactsBatchIncomplete.test.ts: "asks for status through a placeholder
+  ..." - `arrayContaining` misses `last_reached_out_at` (the projection has
+  no such name yet).
+- caseworkerRepoParity.integration.test.ts: "projects last_heard_from_at,
+  last_reached_out_at, ..." `[harness fake]` and `[DynamoDB Local]` - the
+  received map value lacks `last_reached_out_at`.
+Every other case in both files stays green.
+
+#### Step 3 - implementation
+
+3a. `app/src/repos/contactsRepo.ts`, ContactItem (~230-234). Edit:
+
+old:
+```ts
+   *  touchLastHeardFrom (and the seed derivation). NOT an index key. */
+  last_heard_from_at?: string;
+```
+new:
+```ts
+   *  touchLastHeardFrom (and the seed derivation). NOT an index key. */
+  last_heard_from_at?: string;
+  /** ISO. The latest instant staff followed up with this contact (message,
+   *  email, call). Outbound only; shares and automated sends never move it.
+   *  Written only by touchLastReachedOut. See spec
+   *  2026-10-23-today-checklist-design.md 7. NOT an index key; never
+   *  displayed (spec 7.4). */
+  last_reached_out_at?: string;
+```
+
+3b. Same file, RecipientDisplay (~401-409). Edit:
+
+old:
+```ts
+  status?: string;
+  last_heard_from_at?: string;
+  sms_opt_out?: boolean;
+  sms_unreachable?: boolean;
+};
+```
+new:
+```ts
+  status?: string;
+  last_heard_from_at?: string;
+  /** today-checklist spec 6.1: the quiet clock's outbound half (ContactItem). */
+  last_reached_out_at?: string;
+  sms_opt_out?: boolean;
+  sms_unreachable?: boolean;
+};
+```
+
+3c. Same file, RECIPIENT_PROJECTION (~1093-1110). Edit:
+
+old:
+```ts
+  /**
+   * The recipient projection (plan 3.3; R3-F4): the display fields plus `type`
+   * and `role` - both DynamoDB reserved words, hence placeholders - plus
+   * status (reserved - placeholder) and the last-heard-from reachability facts.
+   */
+  const RECIPIENT_PROJECTION = {
+    ProjectionExpression:
+      '#contactId, #firstName, #lastName, #phone, #deletedAt, #type, #role, #status, #lastHeardFromAt, #smsOptOut, #smsUnreachable',
+    ExpressionAttributeNames: {
+      ...DISPLAY_PROJECTION.ExpressionAttributeNames,
+      '#type': 'type',
+      '#role': 'role',
+      '#status': 'status',
+      '#lastHeardFromAt': 'last_heard_from_at',
+      '#smsOptOut': 'sms_opt_out',
+      '#smsUnreachable': 'sms_unreachable',
+    },
+  } as const;
+```
+new:
+```ts
+  /**
+   * The recipient projection (plan 3.3; R3-F4): the display fields plus `type`
+   * and `role` - both DynamoDB reserved words, hence placeholders - plus
+   * status (reserved - placeholder) and the last-heard-from reachability facts,
+   * plus last_reached_out_at (today-checklist spec 6.1/7.3: the Today quiet
+   * clock reads both halves from this one batch).
+   */
+  const RECIPIENT_PROJECTION = {
+    ProjectionExpression:
+      '#contactId, #firstName, #lastName, #phone, #deletedAt, #type, #role, #status, #lastHeardFromAt, #lastReachedOutAt, #smsOptOut, #smsUnreachable',
+    ExpressionAttributeNames: {
+      ...DISPLAY_PROJECTION.ExpressionAttributeNames,
+      '#type': 'type',
+      '#role': 'role',
+      '#status': 'status',
+      '#lastHeardFromAt': 'last_heard_from_at',
+      '#lastReachedOutAt': 'last_reached_out_at',
+      '#smsOptOut': 'sms_opt_out',
+      '#smsUnreachable': 'sms_unreachable',
+    },
+  } as const;
+```
+
+3d. `app/test/helpers/twilioWebhookHarness.ts`, `projectRecipient`
+(~2232-2251). Edit the doc comment:
+
+old:
+```ts
+   * `type` and `role` - and, for last-heard-from (spec 5.5), `status`,
+   * `last_heard_from_at`, `sms_opt_out` and `sms_unreachable` - exactly as
+```
+new:
+```ts
+   * `type` and `role` - and, for last-heard-from (spec 5.5), `status`,
+   * `last_heard_from_at`, `sms_opt_out` and `sms_unreachable`, and for the
+   * Today quiet clock (today-checklist PR1) `last_reached_out_at` - exactly as
+```
+and Edit the body:
+
+old:
+```ts
+      ...(typeof contact.last_heard_from_at === 'string' && { last_heard_from_at: contact.last_heard_from_at }),
+```
+new:
+```ts
+      ...(typeof contact.last_heard_from_at === 'string' && { last_heard_from_at: contact.last_heard_from_at }),
+      ...(typeof contact.last_reached_out_at === 'string' && { last_reached_out_at: contact.last_reached_out_at }),
+```
+
+3e. `app/test/followUps.test.ts` (~46), the projection fixture (PR7). Edit:
+
+old:
+```ts
+const RECIPIENT_ATTRS = ['contactId', 'firstName', 'lastName', 'phone', 'deleted_at', 'type', 'role', 'status', 'last_heard_from_at', 'sms_opt_out', 'sms_unreachable'] as const;
+```
+new:
+```ts
+const RECIPIENT_ATTRS = ['contactId', 'firstName', 'lastName', 'phone', 'deleted_at', 'type', 'role', 'status', 'last_heard_from_at', 'last_reached_out_at', 'sms_opt_out', 'sms_unreachable'] as const;
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/contactsBatchIncomplete.test.ts test/caseworkerRepoParity.integration.test.ts test/followUps.test.ts test/followUpsApi.test.ts test/listingSendsApi.test.ts test/listingSendOutcomeApi.test.ts
+```
+Expect all green (the last four read the recipient projection and must not
+move: WI1). Then (bare):
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0.
+
+#### Step 5 - ASCII check on added lines
+
+```
+cd W:/tmp/today-checklist; git diff -U0 | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0`.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+```
+(The `ls` must report "No such file or directory"; in PowerShell use
+`Test-Path` and expect `False`.)
+```
+git -C W:/tmp/today-checklist add app/src/repos/contactsRepo.ts app/test/helpers/twilioWebhookHarness.ts app/test/followUps.test.ts app/test/contactsBatchIncomplete.test.ts app/test/caseworkerRepoParity.integration.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(contacts): last_reached_out_at on ContactItem, RecipientDisplay and the recipient projection (tracker #31 S1.1)" -m "The staff follow-up clock's field (spec 7.1/7.3). Projected by getRecipientDisplaysByIds and copied by the harness projectRecipient; the exact-projection parity pin is updated deliberately. Nothing writes it yet." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S1.2 - `touchLastReachedOut`: repo, harness twin, compile-forced stubs
+
+PR2, PR7 (the touch half). The outbound twin of `touchLastHeardFrom`: same
+pointer guard, normalization, guarded forward-only UpdateItem, never
+throws; its own attribute (`#lro`) and its own log lines. The harness gets a
+recording twin; the four hand-rolled full fakes get throwing stubs (C1).
+
+Files:
+- `app/src/repos/contactsRepo.ts` (interface ~978-983, implementation
+  ~2007-2045)
+- `app/test/helpers/twilioWebhookHarness.ts` (FakeWorld ~532-536, locals
+  ~570, fake ~2629-2648, return literal ~5480)
+- `app/test/sendMessage.test.ts`, `app/test/audienceResolution.test.ts`,
+  `app/test/contactCapture.test.ts`, `app/test/scheduledSendSuppression.test.ts`
+  (throwing stubs)
+- Tests: `app/test/contactsRepoReachedOut.test.ts` (NEW),
+  `app/test/contactsRepo.integration.test.ts`,
+  `app/test/caseworkerRepoParity.integration.test.ts`,
+  `app/test/twilioWebhookHarnessStaffOutreach.test.ts` (NEW)
+
+#### Step 1 - failing tests
+
+1a. Create `app/test/contactsRepoReachedOut.test.ts`:
+```ts
+// contactsRepo.touchLastReachedOut against a stub document client (no
+// database): the exact conditional UpdateItem on its OWN attribute,
+// normalization, the pointer and unparseable short-circuits, and the
+// never-throws result mapping. The outbound twin of touchLastHeardFrom
+// (contactsRepoHeardFrom.test.ts) - spec
+// docs/superpowers/specs/2026-10-23-today-checklist-design.md section 7.3,
+// plan ruling PR2. The integration suite proves the condition against
+// DynamoDB Local (contactsRepo.integration.test.ts).
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
+import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { createLogger } from '../src/lib/logger.js';
+import { createContactsRepo, type ContactsRepo } from '../src/repos/contactsRepo.js';
+import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
+
+describe('contactsRepo.touchLastReachedOut (stub client)', () => {
+  let sent: unknown[];
+  let answer: (command: unknown) => Promise<unknown>;
+  let capture: LogCapture;
+  let contacts: ContactsRepo;
+
+  beforeEach(() => {
+    sent = [];
+    answer = async () => ({});
+    capture = createLogCapture();
+    const stub = {
+      send: async (command: unknown) => {
+        sent.push(command);
+        return answer(command);
+      },
+    };
+    const logger = createLogger({ destination: capture.stream, level: 'debug' });
+    contacts = createContactsRepo({ doc: stub as never, env: { TABLE_PREFIX: 'hc-test-lro-' }, logger });
+  });
+
+  it("writes the guarded, forward-only UpdateItem on last_reached_out_at and answers 'written'", async () => {
+    await expect(contacts.touchLastReachedOut('contact-a', '2026-10-20T10:00:00.000Z')).resolves.toBe('written');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toBeInstanceOf(UpdateCommand);
+    // Exactly one attribute name: the stamp can never touch last_heard_from_at.
+    expect((sent[0] as UpdateCommand).input).toEqual({
+      TableName: 'hc-test-lro-contacts',
+      Key: { contactId: 'contact-a' },
+      UpdateExpression: 'SET #lro = :at',
+      ConditionExpression: 'attribute_exists(contactId) AND (attribute_not_exists(#lro) OR #lro < :at)',
+      ExpressionAttributeNames: { '#lro': 'last_reached_out_at' },
+      ExpressionAttributeValues: { ':at': '2026-10-20T10:00:00.000Z' },
+    });
+  });
+
+  it('stores the canonical ISO form of an offset instant', async () => {
+    await expect(contacts.touchLastReachedOut('contact-a', '2026-10-20T06:00:00-04:00')).resolves.toBe('written');
+    expect(sent).toHaveLength(1);
+    const input = (sent[0] as UpdateCommand).input;
+    expect(input.ExpressionAttributeValues).toEqual({ ':at': '2026-10-20T10:00:00.000Z' });
+  });
+
+  it("refuses an unparseable instant with 'skipped', no write, and its own warn line", async () => {
+    await expect(contacts.touchLastReachedOut('contact-a', 'yesterday')).resolves.toBe('skipped');
+    expect(sent).toEqual([]);
+    const warns = capture.atLevel(40);
+    expect(warns).toHaveLength(1);
+    expect(String(warns[0]!['msg'])).toContain('touchLastReachedOut');
+    expect(String(warns[0]!['msg'])).toContain('unparseable');
+    expect(warns[0]!['contactId']).toBe('contact-a');
+  });
+
+  it("answers 'skipped' without a write for a phone or email pointer id", async () => {
+    await expect(contacts.touchLastReachedOut('phoneref#+15550100105', '2026-10-20T10:00:00.000Z')).resolves.toBe(
+      'skipped',
+    );
+    await expect(contacts.touchLastReachedOut('emailref#a@b.test', '2026-10-20T10:00:00.000Z')).resolves.toBe(
+      'skipped',
+    );
+    expect(sent).toEqual([]);
+  });
+
+  it("maps a lost condition (no row, or already as late) to 'skipped' with its own debug line", async () => {
+    answer = async () => {
+      throw new ConditionalCheckFailedException({ message: 'x', $metadata: {} });
+    };
+    await expect(contacts.touchLastReachedOut('contact-a', '2026-10-20T10:00:00.000Z')).resolves.toBe('skipped');
+    const debug = capture.atLevel(20);
+    expect(debug.some((line) => String(line['msg']).includes('last_reached_out_at not moved'))).toBe(true);
+  });
+
+  it("maps any other error to 'failed' without throwing or logging an error (the CALLER logs)", async () => {
+    answer = async () => {
+      throw new Error('throttled');
+    };
+    await expect(contacts.touchLastReachedOut('contact-a', '2026-10-20T10:00:00.000Z')).resolves.toBe('failed');
+    expect(capture.atLevel(50)).toEqual([]);
+  });
+});
+```
+
+1b. `app/test/contactsRepo.integration.test.ts` - import `phoneRefId`. Edit:
+
+old:
+```ts
+  IndexKeyWriteError,
+  PrimaryPhoneRemovalError,
+```
+new:
+```ts
+  IndexKeyWriteError,
+  phoneRefId,
+  PrimaryPhoneRemovalError,
+```
+Then insert the real-repo case directly after the touchLastHeardFrom case
+(~314-333). Edit:
+
+old:
+```ts
+    expect((await contacts.getById(c.contactId))?.last_heard_from_at).toBe('2026-09-02T10:00:00.000Z');
+  });
+```
+new:
+```ts
+    expect((await contacts.getById(c.contactId))?.last_heard_from_at).toBe('2026-09-02T10:00:00.000Z');
+  });
+
+  // Today checklist (spec 2026-10-23 section 7.3, plan PR2): the OUTBOUND
+  // twin - the same guard and forward-only condition on its own attribute.
+  // It never moves last_heard_from_at, never creates a row, and a real pointer
+  // row is refused before any write.
+  it('touchLastReachedOut is guarded, forward-only, normalizing and independent of last_heard_from_at', async () => {
+    await expect(
+      contacts.touchLastReachedOut('contact-never-existed-lro', '2026-10-20T10:00:00.000Z'),
+    ).resolves.toBe('skipped');
+    expect(await contacts.getById('contact-never-existed-lro')).toBeUndefined();
+
+    const c = await contacts.create({ type: 'tenant', phone: nextPhone() });
+    await expect(contacts.touchLastHeardFrom(c.contactId, '2026-10-19T10:00:00.000Z')).resolves.toBe('written');
+    await expect(contacts.touchLastReachedOut(c.contactId, '2026-10-20T06:00:00-04:00')).resolves.toBe('written');
+    let read = await contacts.getById(c.contactId);
+    expect(read?.last_reached_out_at).toBe('2026-10-20T10:00:00.000Z');
+    expect(read?.last_heard_from_at).toBe('2026-10-19T10:00:00.000Z');
+
+    // An EARLIER instant never moves it back; the SAME instant is not a move.
+    await expect(contacts.touchLastReachedOut(c.contactId, '2026-10-20T09:00:00.000Z')).resolves.toBe('skipped');
+    await expect(contacts.touchLastReachedOut(c.contactId, '2026-10-20T10:00:00.000Z')).resolves.toBe('skipped');
+    // A LATER instant moves it forward - and only it.
+    await expect(contacts.touchLastReachedOut(c.contactId, '2026-10-21T10:00:00.000Z')).resolves.toBe('written');
+    read = await contacts.getById(c.contactId);
+    expect(read?.last_reached_out_at).toBe('2026-10-21T10:00:00.000Z');
+    expect(read?.last_heard_from_at).toBe('2026-10-19T10:00:00.000Z');
+
+    // A REAL pointer row (a non-primary number) exists and is never stamped.
+    const second = nextPhone();
+    await contacts.addPhone(c.contactId, { phone: second });
+    expect(await contacts.getById(phoneRefId(second))).toBeDefined();
+    await expect(contacts.touchLastReachedOut(phoneRefId(second), '2026-10-22T10:00:00.000Z')).resolves.toBe('skipped');
+    expect((await contacts.getById(phoneRefId(second)))?.last_reached_out_at).toBeUndefined();
+  });
+```
+
+1c. `app/test/caseworkerRepoParity.integration.test.ts` - the fake and the
+real repo answer the same. Edit (insert above the closing marker line):
+
+old:
+```ts
+// END OF PARITY CASES - Tasks 2.2-2.5 insert their describe blocks ABOVE this line.
+```
+new:
+```ts
+// today-checklist PR2/PR7: writer tests (S2, S3) stamp through the harness
+// twin, so it must answer exactly what the real conditional write answers.
+describe('contactsRepo.touchLastReachedOut (today-checklist PR2, PR7)', () => {
+  parity('forward-only on its own attribute; never creates a row; never moves last_heard_from_at', async (w, id) => {
+    await expect(w.contacts.touchLastReachedOut(`${id}-missing`, '2026-10-20T10:00:00.000Z')).resolves.toBe('skipped');
+    expect(await w.readContact(`${id}-missing`)).toBeUndefined();
+
+    await w.putContact({
+      contactId: id,
+      type: 'tenant',
+      status: 'searching',
+      phone: nextPhone(),
+      last_heard_from_at: '2026-10-19T10:00:00.000Z',
+    });
+    await expect(w.contacts.touchLastReachedOut(id, '2026-10-20T06:00:00-04:00')).resolves.toBe('written');
+    expect((await w.readContact(id))?.last_reached_out_at).toBe('2026-10-20T10:00:00.000Z');
+    await expect(w.contacts.touchLastReachedOut(id, '2026-10-20T09:00:00.000Z')).resolves.toBe('skipped');
+    await expect(w.contacts.touchLastReachedOut(id, '2026-10-20T10:00:00.000Z')).resolves.toBe('skipped');
+    await expect(w.contacts.touchLastReachedOut(id, 'not a time')).resolves.toBe('skipped');
+    await expect(w.contacts.touchLastReachedOut(id, '2026-10-21T10:00:00.000Z')).resolves.toBe('written');
+    const stored = await w.readContact(id);
+    expect(stored?.last_reached_out_at).toBe('2026-10-21T10:00:00.000Z');
+    expect(stored?.last_heard_from_at).toBe('2026-10-19T10:00:00.000Z');
+  });
+});
+
+// END OF PARITY CASES - Tasks 2.2-2.5 insert their describe blocks ABOVE this line.
+```
+
+1d. Create `app/test/twilioWebhookHarnessStaffOutreach.test.ts`:
+```ts
+// The harness FAKE's today-checklist seams, pinned (plan rulings PR6, PR7).
+//
+// WHY THIS FILE EXISTS. Writer tests in S2-S4 read these records instead of
+// spying: world.reachedOutTouches says which contacts a send stamped, and
+// world.recipientDisplayCalls says which read Today asked for. A record that
+// silently stopped filling would turn every "no stamp" assertion vacuous.
+// The real repos are covered against DynamoDB Local
+// (contactsRepo.integration.test.ts, caseworkerRepoParity.integration.test.ts).
+import { describe, expect, it } from 'vitest';
+import type { ContactItem } from '../src/repos/contactsRepo.js';
+import { createFakeWorld } from './helpers/twilioWebhookHarness.js';
+
+type World = ReturnType<typeof createFakeWorld>;
+
+function seedTenant(world: World, contactId: string, over: Partial<ContactItem> = {}): void {
+  world.contacts.push({ contactId, type: 'tenant', status: 'searching', ...over });
+}
+
+describe('harness contactsRepo.touchLastReachedOut (PR7)', () => {
+  it('records every call with the RAW at and its outcome, and moves only forward', async () => {
+    const world = createFakeWorld();
+    seedTenant(world, 'c-1', { last_heard_from_at: '2026-10-19T10:00:00.000Z' });
+
+    expect(await world.contactsRepo.touchLastReachedOut('c-1', '2026-10-20T06:00:00-04:00')).toBe('written');
+    expect(await world.contactsRepo.touchLastReachedOut('c-1', '2026-10-20T09:00:00.000Z')).toBe('skipped');
+    expect(await world.contactsRepo.touchLastReachedOut('c-1', 'garbage')).toBe('skipped');
+    expect(await world.contactsRepo.touchLastReachedOut('c-missing', '2026-10-20T11:00:00.000Z')).toBe('skipped');
+    expect(await world.contactsRepo.touchLastReachedOut('c-1', '2026-10-21T10:00:00.000Z')).toBe('written');
+
+    expect(world.reachedOutTouches).toEqual([
+      { contactId: 'c-1', at: '2026-10-20T06:00:00-04:00', outcome: 'written' },
+      { contactId: 'c-1', at: '2026-10-20T09:00:00.000Z', outcome: 'skipped' },
+      { contactId: 'c-1', at: 'garbage', outcome: 'skipped' },
+      { contactId: 'c-missing', at: '2026-10-20T11:00:00.000Z', outcome: 'skipped' },
+      { contactId: 'c-1', at: '2026-10-21T10:00:00.000Z', outcome: 'written' },
+    ]);
+    const stored = world.contacts.find((c) => c.contactId === 'c-1');
+    expect(stored?.last_reached_out_at).toBe('2026-10-21T10:00:00.000Z');
+    // The inbound clock is a different field and a different record.
+    expect(stored?.last_heard_from_at).toBe('2026-10-19T10:00:00.000Z');
+    expect(world.heardFromTouches).toEqual([]);
+    // Never creates a contact.
+    expect(world.contacts.some((c) => c.contactId === 'c-missing')).toBe(false);
+  });
+
+  it('starts empty on a fresh world', () => {
+    expect(createFakeWorld().reachedOutTouches).toEqual([]);
+  });
+});
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/contactsRepoReachedOut.test.ts test/contactsRepo.integration.test.ts test/caseworkerRepoParity.integration.test.ts test/twilioWebhookHarnessStaffOutreach.test.ts
+```
+Expected failures, and why:
+- contactsRepoReachedOut.test.ts: all six cases,
+  `TypeError: contacts.touchLastReachedOut is not a function`.
+- contactsRepo.integration.test.ts: the new case, the same TypeError.
+- caseworkerRepoParity.integration.test.ts: the new case, `[harness fake]`
+  and `[DynamoDB Local]`, the same TypeError.
+- twilioWebhookHarnessStaffOutreach.test.ts: the first case TypeError; the
+  second `expected undefined to deeply equal []`.
+Every other case stays green.
+
+#### Step 3 - implementation
+
+3a. `app/src/repos/contactsRepo.ts`, the interface (~978-985). Edit:
+
+old:
+```ts
+  touchLastHeardFrom(contactId: string, at: string): Promise<'written' | 'skipped' | 'failed'>;
+}
+
+export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
+```
+new:
+```ts
+  touchLastHeardFrom(contactId: string, at: string): Promise<'written' | 'skipped' | 'failed'>;
+  /** Forward-only, best-effort bump of last_reached_out_at - the OUTBOUND twin
+   *  of touchLastHeardFrom (today-checklist spec 7.3). Same outcomes:
+   *  'skipped' when the contact row does not exist, the stored value is
+   *  already as late, `at` is unparseable or the id is a pointer row;
+   *  'failed' on any other error (logged by the CALLER); never throws. Live
+   *  send paths reach it ONLY through services/staffOutreach.ts
+   *  recordStaffOutreach; the one-time backfill script is the other caller. */
+  touchLastReachedOut(contactId: string, at: string): Promise<'written' | 'skipped' | 'failed'>;
+}
+
+export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
+```
+
+3b. Same file, the implementation - after `touchLastHeardFrom` (the file's
+last lines, ~2036-2045). Edit:
+
+old:
+```ts
+          log.debug({ contactId }, 'contacts: last_heard_from_at not moved (no row, or already as late)');
+          return 'skipped';
+        }
+        return 'failed';
+      }
+    },
+  };
+}
+```
+new:
+```ts
+          log.debug({ contactId }, 'contacts: last_heard_from_at not moved (no row, or already as late)');
+          return 'skipped';
+        }
+        return 'failed';
+      }
+    },
+
+    async touchLastReachedOut(contactId, at) {
+      // The outbound twin of touchLastHeardFrom (today-checklist spec 7.3):
+      // the same pointer guard, normalization and forward-only condition, on
+      // its own attribute. Pointer rows are never stamp targets.
+      if (contactId.startsWith(PHONE_REF_PREFIX) || contactId.startsWith(EMAIL_REF_PREFIX)) {
+        return 'skipped';
+      }
+      // The condition compares stored strings lexically, so the one writer
+      // stores the canonical ISO form.
+      const normalized = normalizeInstant(at);
+      if (normalized === undefined) {
+        log.warn({ contactId }, 'contacts: touchLastReachedOut refused an unparseable instant - skipped');
+        return 'skipped';
+      }
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { contactId },
+            UpdateExpression: 'SET #lro = :at',
+            // attribute_exists is LOAD-BEARING, as in touchLastHeardFrom:
+            // UpdateItem on an absent key CREATES the item, and stamp targets
+            // come from rosters and member keys that can outlive a contact.
+            ConditionExpression: 'attribute_exists(contactId) AND (attribute_not_exists(#lro) OR #lro < :at)',
+            ExpressionAttributeNames: { '#lro': 'last_reached_out_at' },
+            ExpressionAttributeValues: { ':at': normalized },
+          }),
+        );
+        return 'written';
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          // "No such contact" and "already as late" share one exception.
+          log.debug({ contactId }, 'contacts: last_reached_out_at not moved (no row, or already as late)');
+          return 'skipped';
+        }
+        return 'failed';
+      }
+    },
+  };
+}
+```
+(`PHONE_REF_PREFIX`, `EMAIL_REF_PREFIX`, `normalizeInstant`, `UpdateCommand`
+and `ConditionalCheckFailedException` are already in scope - the
+`touchLastHeardFrom` body above uses each.)
+
+3c. `app/test/helpers/twilioWebhookHarness.ts`, FakeWorld (~532-536). Edit:
+
+old:
+```ts
+  /** Every contactsRepo.touchLastHeardFrom call, in order (spec 5.1): the raw
+   *  `at` the caller passed and the outcome the fake answered. A test that
+   *  replaces world.contactsRepo.touchLastHeardFrom bypasses this record. */
+  heardFromTouches: { contactId: string; at: string; outcome: 'written' | 'skipped' | 'failed' }[];
+}
+```
+new:
+```ts
+  /** Every contactsRepo.touchLastHeardFrom call, in order (spec 5.1): the raw
+   *  `at` the caller passed and the outcome the fake answered. A test that
+   *  replaces world.contactsRepo.touchLastHeardFrom bypasses this record. */
+  heardFromTouches: { contactId: string; at: string; outcome: 'written' | 'skipped' | 'failed' }[];
+  /** Every contactsRepo.touchLastReachedOut call, in order (today-checklist
+   *  PR7): the raw `at` the caller passed and the outcome the fake answered -
+   *  the outbound twin of heardFromTouches. Writer tests read stamps here. A
+   *  test that replaces world.contactsRepo.touchLastReachedOut bypasses it. */
+  reachedOutTouches: { contactId: string; at: string; outcome: 'written' | 'skipped' | 'failed' }[];
+}
+```
+
+3d. Same file, the locals (~570). Edit:
+
+old:
+```ts
+  const heardFromTouches: FakeWorld['heardFromTouches'] = [];
+```
+new:
+```ts
+  const heardFromTouches: FakeWorld['heardFromTouches'] = [];
+  const reachedOutTouches: FakeWorld['reachedOutTouches'] = [];
+```
+
+3e. Same file, the fake (after `touchLastHeardFrom`, ~2645-2650). Edit:
+
+old:
+```ts
+      heardFromTouches.push({ contactId, at, outcome });
+      return outcome;
+    },
+  };
+
+  const auditRepo: AuditRepo = {
+```
+new:
+```ts
+      heardFromTouches.push({ contactId, at, outcome });
+      return outcome;
+    },
+    // Today checklist (spec 2026-10-23 section 7.3, plan PR7): the outbound
+    // twin of touchLastHeardFrom above - the same outcomes on its own
+    // attribute. Every call is recorded in world.reachedOutTouches with the
+    // RAW `at` the caller passed. Like its twin it does not model the real
+    // repo's pointer-id refusal; writers stamp real contact ids only.
+    async touchLastReachedOut(contactId, at) {
+      const normalized = normalizeInstant(at);
+      const contact = contacts.find((c) => c.contactId === contactId);
+      let outcome: 'written' | 'skipped' = 'skipped';
+      if (
+        normalized !== undefined &&
+        contact !== undefined &&
+        !(typeof contact.last_reached_out_at === 'string' && contact.last_reached_out_at >= normalized)
+      ) {
+        contact.last_reached_out_at = normalized;
+        outcome = 'written';
+      }
+      reachedOutTouches.push({ contactId, at, outcome });
+      return outcome;
+    },
+  };
+
+  const auditRepo: AuditRepo = {
+```
+
+3f. Same file, the return literal (~5480). Edit:
+
+old:
+```ts
+    heardFromTouches,
+    groupRailEnqueuer,
+  };
+```
+new:
+```ts
+    heardFromTouches,
+    reachedOutTouches,
+    groupRailEnqueuer,
+  };
+```
+
+3g. The four hand-rolled full `ContactsRepo` fakes (C1): a throwing stub in
+each file's own convention (`'<method>: not used in this suite'`; PR7's
+"throw" rule). In EACH of `app/test/sendMessage.test.ts` (~271),
+`app/test/audienceResolution.test.ts` (~138),
+`app/test/contactCapture.test.ts` (~156) and
+`app/test/scheduledSendSuppression.test.ts` (~287) the text below occurs
+exactly once. Edit:
+
+old:
+```ts
+    touchLastHeardFrom: async () => {
+      throw new Error('touchLastHeardFrom: not used in this suite');
+    },
+```
+new:
+```ts
+    touchLastHeardFrom: async () => {
+      throw new Error('touchLastHeardFrom: not used in this suite');
+    },
+    touchLastReachedOut: async () => {
+      throw new Error('touchLastReachedOut: not used in this suite');
+    },
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/contactsRepoReachedOut.test.ts test/contactsRepoHeardFrom.test.ts test/contactsRepo.integration.test.ts test/caseworkerRepoParity.integration.test.ts test/twilioWebhookHarnessStaffOutreach.test.ts test/sendMessage.test.ts test/audienceResolution.test.ts test/contactCapture.test.ts test/scheduledSendSuppression.test.ts
+```
+Expect all green. Then (bare):
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0. If typecheck names ANOTHER literal that lacks
+`touchLastReachedOut`, it is a full fake C1 missed: add the same throwing
+stub, re-run that file, and record the file in the slice report.
+
+#### Step 5 - ASCII check
+
+```
+cd W:/tmp/today-checklist; git diff -U0 | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+tr -d '\11\12\15\40-\176' < W:/tmp/today-checklist/app/test/contactsRepoReachedOut.test.ts | wc -c
+tr -d '\11\12\15\40-\176' < W:/tmp/today-checklist/app/test/twilioWebhookHarnessStaffOutreach.test.ts | wc -c
+```
+Expect `0` three times.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add app/src/repos/contactsRepo.ts app/test/helpers/twilioWebhookHarness.ts app/test/sendMessage.test.ts app/test/audienceResolution.test.ts app/test/contactCapture.test.ts app/test/scheduledSendSuppression.test.ts app/test/contactsRepoReachedOut.test.ts app/test/contactsRepo.integration.test.ts app/test/caseworkerRepoParity.integration.test.ts app/test/twilioWebhookHarnessStaffOutreach.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(contacts): touchLastReachedOut - the forward-only staff follow-up stamp (tracker #31 S1.2)" -m "The outbound twin of touchLastHeardFrom on last_reached_out_at: pointer guard, normalizeInstant, guarded forward-only UpdateItem, never throws. Harness twin records world.reachedOutTouches; the four hand-rolled full ContactsRepo fakes get throwing stubs." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S1.3 - `getRecipientDisplaysByIds` takes `consistentRead`; the harness records the options
+
+PR3, PR7 (the recipient-read half). Today's quiet-shares read (S4, PR30)
+passes `consistentRead: true` so a refetch fired by a stamp's event sees the
+stamp (spec 6.1). The batch walk already supports it (`getManyByIds`).
+
+Files:
+- `app/src/repos/contactsRepo.ts` (interface ~765-772, implementation
+  ~1369-1374)
+- `app/test/helpers/twilioWebhookHarness.ts` (FakeWorld, locals, the fake
+  ~2295-2302, return literal)
+- Tests: `app/test/contactsRepoConsistentBatchRead.test.ts`,
+  `app/test/twilioWebhookHarnessStaffOutreach.test.ts`
+
+#### Step 1 - failing tests
+
+1a. `app/test/contactsRepoConsistentBatchRead.test.ts` - append at the end
+of the file (the existing pin "the display reads never send it", ~98-107,
+stays as written):
+```ts
+
+// today-checklist spec 6.1 (plan ruling PR3): Today's quiet-shares read asks
+// the RECIPIENT projection for a consistent batch, so the refetch a stamp's
+// event triggers sees the stamp. The same walk, so the same every-request
+// rule; the projection rides along unchanged.
+describe('contactsRepo.getRecipientDisplaysByIds - consistentRead (today-checklist PR3)', () => {
+  it('asked for it: ConsistentRead true beside the recipient projection, on every request', async () => {
+    const { doc, requests } = stubDoc(1);
+    const contacts = makeRepo(doc);
+    const ids = Array.from({ length: 150 }, (_, i) => `c-${String(i).padStart(3, '0')}`);
+
+    const found = await contacts.getRecipientDisplaysByIds(ids, { requireComplete: true, consistentRead: true });
+
+    expect(found.size).toBe(150);
+    // Chunk 1 (one key withheld), its retry of that key, then chunk 2.
+    expect(requests.map((request) => entryOf(request)?.Keys?.length)).toEqual([100, 1, 50]);
+    for (const request of requests) {
+      expect(entryOf(request)).toMatchObject({
+        ConsistentRead: true,
+        ProjectionExpression: expect.stringContaining('#lastReachedOutAt'),
+      });
+    }
+  });
+
+  it('(PIN) consistentRead false or absent: no ConsistentRead at all', async () => {
+    const { doc, requests } = stubDoc();
+    const contacts = makeRepo(doc);
+
+    await contacts.getRecipientDisplaysByIds(['c-1']);
+    await contacts.getRecipientDisplaysByIds(['c-1'], { requireComplete: true, consistentRead: false });
+
+    expect(requests).toHaveLength(2);
+    for (const request of requests) expect(entryOf(request)).not.toHaveProperty('ConsistentRead');
+  });
+});
+```
+
+1b. `app/test/twilioWebhookHarnessStaffOutreach.test.ts` - append at the end
+of the file:
+```ts
+
+describe('harness contactsRepo.getRecipientDisplaysByIds records its options (PR7)', () => {
+  it('records the ids and the options exactly as passed; the answer ignores them', async () => {
+    const world = createFakeWorld();
+    seedTenant(world, 'c-1', { last_reached_out_at: '2026-10-20T10:00:00.000Z' });
+
+    const plain = await world.contactsRepo.getRecipientDisplaysByIds(['c-1']);
+    const consistent = await world.contactsRepo.getRecipientDisplaysByIds(['c-1', 'c-2'], {
+      requireComplete: true,
+      consistentRead: true,
+    });
+
+    expect(world.recipientDisplayCalls).toEqual([
+      { contactIds: ['c-1'] },
+      { contactIds: ['c-1', 'c-2'], opts: { requireComplete: true, consistentRead: true } },
+    ]);
+    // In memory every read is complete and consistent: same answer either way.
+    expect(consistent.get('c-1')).toEqual(plain.get('c-1'));
+    expect(consistent.get('c-1')?.last_reached_out_at).toBe('2026-10-20T10:00:00.000Z');
+    expect(consistent.has('c-2')).toBe(false);
+  });
+});
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/contactsRepoConsistentBatchRead.test.ts test/twilioWebhookHarnessStaffOutreach.test.ts
+```
+Expected failures, and why:
+- contactsRepoConsistentBatchRead.test.ts: "asked for it: ConsistentRead
+  true beside the recipient projection ..." - the entries carry no
+  `ConsistentRead` (the implementation does not pass the option through).
+  The new (PIN) case is green.
+- twilioWebhookHarnessStaffOutreach.test.ts: the new case,
+  `world.recipientDisplayCalls` is `undefined`.
+Every other case stays green.
+
+#### Step 3 - implementation
+
+3a. `app/src/repos/contactsRepo.ts`, the interface (~768-772). Edit:
+
+old:
+```ts
+   * requireComplete: throw IncompleteBatchReadError on an unread key (an
+   * OUTCOME read - the outcome-serving routes, spec D12); a genuinely missing
+   * contact is still just absent.
+   */
+  getRecipientDisplaysByIds(contactIds: string[], opts?: { requireComplete?: boolean }): Promise<Map<string, RecipientDisplay>>;
+```
+new:
+```ts
+   * requireComplete: throw IncompleteBatchReadError on an unread key (an
+   * OUTCOME read - the outcome-serving routes, spec D12); a genuinely missing
+   * contact is still just absent.
+   * consistentRead: BatchGetItem's ConsistentRead on every request of the
+   * walk, exactly as getManyByIds; absent = eventually consistent. Only
+   * Today's quiet-shares read asks for it (today-checklist spec 6.1), so a
+   * refetch fired by a stamp's event sees the stamp; the Follow up tab and
+   * the recipients routes keep the default.
+   */
+  getRecipientDisplaysByIds(
+    contactIds: string[],
+    opts?: { requireComplete?: boolean; consistentRead?: boolean },
+  ): Promise<Map<string, RecipientDisplay>>;
+```
+
+3b. Same file, the implementation (~1369-1374). Edit:
+
+old:
+```ts
+    async getRecipientDisplaysByIds(contactIds, opts) {
+      return batchGetByIds<RecipientDisplay>(contactIds, {
+        projection: RECIPIENT_PROJECTION,
+        requireComplete: opts?.requireComplete,
+      });
+    },
+```
+new:
+```ts
+    async getRecipientDisplaysByIds(contactIds, opts) {
+      return batchGetByIds<RecipientDisplay>(contactIds, {
+        projection: RECIPIENT_PROJECTION,
+        requireComplete: opts?.requireComplete,
+        consistentRead: opts?.consistentRead,
+      });
+    },
+```
+
+3c. `app/test/helpers/twilioWebhookHarness.ts`, FakeWorld - after the
+`reachedOutTouches` member S1.2 added. Edit:
+
+old:
+```ts
+  reachedOutTouches: { contactId: string; at: string; outcome: 'written' | 'skipped' | 'failed' }[];
+}
+```
+new:
+```ts
+  reachedOutTouches: { contactId: string; at: string; outcome: 'written' | 'skipped' | 'failed' }[];
+  /** Every contactsRepo.getRecipientDisplaysByIds call, in order
+   *  (today-checklist PR7): the ids and the options exactly as passed (`opts`
+   *  absent when the caller passed none). The fake IGNORES the options - in
+   *  memory every read is complete and consistent - so a test of WHICH read a
+   *  caller asked for (Today's consistentRead) reads it here. */
+  recipientDisplayCalls: {
+    contactIds: string[];
+    opts?: { requireComplete?: boolean; consistentRead?: boolean };
+  }[];
+}
+```
+
+3d. Same file, the locals. Edit:
+
+old:
+```ts
+  const reachedOutTouches: FakeWorld['reachedOutTouches'] = [];
+```
+new:
+```ts
+  const reachedOutTouches: FakeWorld['reachedOutTouches'] = [];
+  const recipientDisplayCalls: FakeWorld['recipientDisplayCalls'] = [];
+```
+
+3e. Same file, the fake (~2295). Edit:
+
+old:
+```ts
+    async getRecipientDisplaysByIds(contactIds) {
+      const wanted = new Set(contactIds);
+```
+new:
+```ts
+    // The real signature (`requireComplete`, `consistentRead`), both IGNORED
+    // here (every in-memory read is complete and consistent); each call is
+    // recorded in world.recipientDisplayCalls so a test can read the options.
+    async getRecipientDisplaysByIds(contactIds, opts) {
+      recipientDisplayCalls.push({ contactIds: [...contactIds], ...(opts !== undefined && { opts: { ...opts } }) });
+      const wanted = new Set(contactIds);
+```
+
+3f. Same file, the return literal. Edit:
+
+old:
+```ts
+    reachedOutTouches,
+    groupRailEnqueuer,
+  };
+```
+new:
+```ts
+    reachedOutTouches,
+    recipientDisplayCalls,
+    groupRailEnqueuer,
+  };
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/contactsRepoConsistentBatchRead.test.ts test/twilioWebhookHarnessStaffOutreach.test.ts test/contactsBatchIncomplete.test.ts test/followUps.test.ts test/followUpsApi.test.ts test/listingSendsApi.test.ts test/listingSendOutcomeApi.test.ts
+```
+Expect all green. Then (bare):
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0 (the hand-rolled fakes' zero-argument
+`getRecipientDisplaysByIds: async () => {...}` stubs and the
+`followUps.test.ts` fake's narrower `o?` both stay assignable).
+
+#### Step 5 - ASCII check
+
+```
+cd W:/tmp/today-checklist; git diff -U0 | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0`.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add app/src/repos/contactsRepo.ts app/test/helpers/twilioWebhookHarness.ts app/test/contactsRepoConsistentBatchRead.test.ts app/test/twilioWebhookHarnessStaffOutreach.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(contacts): getRecipientDisplaysByIds consistentRead option (tracker #31 S1.3)" -m "Passed through to the batch walk exactly as getManyByIds does (spec 6.1); the default stays eventually consistent. The harness records each call's options in world.recipientDisplayCalls." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S1.4 - `last_reached_out_at` is server-owned on create and PATCH
+
+PR4, spec 7.3 ("all four places") and spec 9 ("The PATCH and create
+parsers refuse the field"). Today both parsers silently IGNORE an unknown
+key, so a client value is dropped rather than refused.
+
+Files:
+- `app/src/routes/contacts.ts` (~303-317)
+- Tests: `app/test/contactsCrud.test.ts` (~550-556)
+
+#### Step 1 - failing tests
+
+`app/test/contactsCrud.test.ts`, the `OWNED` table of the "server-owned
+contact fields" describe - each row drives one POST and one PATCH case.
+Edit:
+
+old:
+```ts
+    ['last_heard_from_at', '2030-01-01T00:00:00.000Z'],
+  ] as const;
+```
+new:
+```ts
+    ['last_heard_from_at', '2030-01-01T00:00:00.000Z'],
+    // today-checklist PR4 (spec 7.3): written only by touchLastReachedOut.
+    ['last_reached_out_at', '2030-01-01T00:00:00.000Z'],
+  ] as const;
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/contactsCrud.test.ts
+```
+Expected failures, and why:
+- "POST refuses a client-sent last_reached_out_at with 400 and creates
+  nothing" - 201 (the create parser ignores the key; a partner is created).
+- "PATCH refuses a client-sent last_reached_out_at with 400 and writes
+  nothing" - 200 (the triage parser ignores the key; firstName is written).
+Every other case stays green.
+
+#### Step 3 - implementation
+
+`app/src/routes/contacts.ts` (~309-317). Edit:
+
+old:
+```ts
+ * `last_heard_from_at` is written only by contactsRepo.touchLastHeardFrom
+ * (spec 5.1, invariant I1).
+ */
+const SERVER_OWNED_CONTACT_FIELDS = [
+  'caseworker_review',
+  'caseworker_conversion',
+  'type_source',
+  'last_heard_from_at',
+] as const;
+```
+new:
+```ts
+ * `last_heard_from_at` is written only by contactsRepo.touchLastHeardFrom
+ * (spec 5.1, invariant I1); `last_reached_out_at` only by
+ * contactsRepo.touchLastReachedOut (today-checklist spec 7.3 - the
+ * staff-outreach helper and the one-time backfill).
+ */
+const SERVER_OWNED_CONTACT_FIELDS = [
+  'caseworker_review',
+  'caseworker_conversion',
+  'type_source',
+  'last_heard_from_at',
+  'last_reached_out_at',
+] as const;
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/contactsCrud.test.ts test/contactTriage.test.ts
+```
+Expect all green.
+
+#### Step 5 - ASCII check
+
+```
+cd W:/tmp/today-checklist; git diff -U0 | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0`.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add app/src/routes/contacts.ts app/test/contactsCrud.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(contacts): refuse a client-sent last_reached_out_at on create and PATCH (tracker #31 S1.4)" -m "SERVER_OWNED_CONTACT_FIELDS gains it; both parsers answer 400 with the existing message (spec 7.3, 9)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S1.5 - `conversationsRepo.getByIdConsistent`
+
+PR6. A strongly consistent GetItem, the same raw item `getById` returns
+(C5). S3 uses it ONLY to build the after-loop `conversation.updated`
+payloads (PR17, PR20), which must carry the thread's CURRENT unread_count.
+
+Files:
+- `app/src/repos/conversationsRepo.ts` (interface ~561, implementation
+  ~1124-1127, return literal ~1275)
+- `app/test/helpers/twilioWebhookHarness.ts` (conversations fake ~670)
+- `app/test/contactCapture.test.ts`, `app/test/scheduledSendSuppression.test.ts`,
+  `app/test/sendMessage.test.ts` (throwing stubs, C2)
+- Tests: `app/test/conversationsRepoConsistentGet.test.ts` (NEW),
+  `app/test/caseworkerRepoParity.integration.test.ts`,
+  `app/test/twilioWebhookHarnessStaffOutreach.test.ts`
+
+#### Step 1 - failing tests
+
+1a. Create `app/test/conversationsRepoConsistentGet.test.ts`:
+```ts
+// conversationsRepo.getByIdConsistent (today-checklist plan ruling PR6)
+// against a stub document client (no database): ONE strongly consistent
+// GetItem on the conversation's key, answering the raw item exactly as
+// getById does. The relay/group writers build their after-loop
+// conversation.updated from it (spec 7.3), because two dashboard consumers
+// set unread_count straight from that event. DynamoDB Local's acceptance of
+// the consistent GetItem, and the harness fake's agreement with the real
+// repo, are pinned in caseworkerRepoParity.integration.test.ts.
+import { GetCommand } from '@aws-sdk/lib-dynamodb';
+import { describe, expect, it } from 'vitest';
+import { createLogger } from '../src/lib/logger.js';
+import { createConversationsRepo } from '../src/repos/conversationsRepo.js';
+import { createLogCapture } from './helpers/logCapture.js';
+
+function rig(item: Record<string, unknown> | undefined) {
+  const sent: unknown[] = [];
+  const stub = {
+    send: async (command: unknown) => {
+      sent.push(command);
+      return item === undefined ? {} : { Item: item };
+    },
+  };
+  const logger = createLogger({ destination: createLogCapture().stream });
+  const conversations = createConversationsRepo({ doc: stub as never, env: { TABLE_PREFIX: 'hc-test-gbc-' }, logger });
+  return { sent, conversations };
+}
+
+describe('conversationsRepo.getByIdConsistent (stub client)', () => {
+  it('sends ONE GetItem on the key with ConsistentRead true and answers the item', async () => {
+    const item = { conversationId: 'conv-1', type: 'relay_group', status: 'open', unread_count: 3 };
+    const { sent, conversations } = rig(item);
+
+    await expect(conversations.getByIdConsistent('conv-1')).resolves.toEqual(item);
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toBeInstanceOf(GetCommand);
+    expect((sent[0] as GetCommand).input).toEqual({
+      TableName: 'hc-test-gbc-conversations',
+      Key: { conversationId: 'conv-1' },
+      ConsistentRead: true,
+    });
+  });
+
+  it('answers undefined when the key holds no item', async () => {
+    const { conversations } = rig(undefined);
+    await expect(conversations.getByIdConsistent('conv-missing')).resolves.toBeUndefined();
+  });
+
+  it('(PIN) getById stays eventually consistent - no ConsistentRead', async () => {
+    const { sent, conversations } = rig({ conversationId: 'conv-1' });
+    await conversations.getById('conv-1');
+    expect((sent[0] as GetCommand).input).toEqual({
+      TableName: 'hc-test-gbc-conversations',
+      Key: { conversationId: 'conv-1' },
+    });
+  });
+});
+```
+
+1b. `app/test/caseworkerRepoParity.integration.test.ts` - Edit (insert above
+the closing marker line, below the S1.2 block):
+
+old:
+```ts
+// END OF PARITY CASES - Tasks 2.2-2.5 insert their describe blocks ABOVE this line.
+```
+new:
+```ts
+// today-checklist PR6: S3's writer tests build their after-loop event through
+// the harness fake, so it answers exactly what the real consistent read does.
+describe('conversationsRepo.getByIdConsistent (today-checklist PR6)', () => {
+  parity('answers exactly what getById answers - the stored row, or undefined', async (w, id) => {
+    const row = {
+      conversationId: `${id}-conv`,
+      type: 'relay_group',
+      status: 'open',
+      last_activity_at: '2026-10-20T10:00:00.000Z',
+      unread_count: 2,
+    };
+    await w.putConversation(row);
+    const consistent = await w.conversations.getByIdConsistent(`${id}-conv`);
+    expect(consistent).toEqual(row);
+    expect(consistent).toEqual(await w.conversations.getById(`${id}-conv`));
+    expect(await w.conversations.getByIdConsistent(`${id}-missing`)).toBeUndefined();
+  });
+});
+
+// END OF PARITY CASES - Tasks 2.2-2.5 insert their describe blocks ABOVE this line.
+```
+
+1c. `app/test/twilioWebhookHarnessStaffOutreach.test.ts` - append at the end
+of the file:
+```ts
+
+describe('harness conversationsRepo.getByIdConsistent (PR6)', () => {
+  it('answers what getById answers (in memory every read is consistent)', async () => {
+    const world = createFakeWorld();
+    const conv = await world.conversationsRepo.createOrGetByParticipantPhone('+15550109901', 'tenant_1to1');
+    expect(await world.conversationsRepo.getByIdConsistent(conv.conversationId)).toBe(
+      await world.conversationsRepo.getById(conv.conversationId),
+    );
+    expect(await world.conversationsRepo.getByIdConsistent('conv-missing')).toBeUndefined();
+  });
+});
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/conversationsRepoConsistentGet.test.ts test/caseworkerRepoParity.integration.test.ts test/twilioWebhookHarnessStaffOutreach.test.ts
+```
+Expected failures, and why:
+- conversationsRepoConsistentGet.test.ts: the first two cases,
+  `TypeError: conversations.getByIdConsistent is not a function`. The (PIN)
+  is green.
+- caseworkerRepoParity.integration.test.ts: the new case, both halves, the
+  same TypeError.
+- twilioWebhookHarnessStaffOutreach.test.ts: the new case, the same
+  TypeError.
+Every other case stays green.
+
+#### Step 3 - implementation
+
+3a. `app/src/repos/conversationsRepo.ts`, the interface (~561). Edit:
+
+old:
+```ts
+  getById(conversationId: string): Promise<ConversationItem | undefined>;
+```
+new:
+```ts
+  getById(conversationId: string): Promise<ConversationItem | undefined>;
+  /**
+   * getById with `ConsistentRead: true` (today-checklist plan ruling PR6):
+   * the same key and the same raw item - no pointer or claim filtering,
+   * exactly as getById does none - at about twice the read cost. Used ONLY to
+   * build the after-loop `conversation.updated` payload of a staff relay or
+   * group post (spec 7.3): two dashboard consumers set unread_count straight
+   * from that event, so it must not be a stale snapshot.
+   */
+  getByIdConsistent(conversationId: string): Promise<ConversationItem | undefined>;
+```
+(This line occurs once; the implementation's `async function getById(` line
+differs.)
+
+3b. Same file, the implementation (~1124-1127). Edit:
+
+old:
+```ts
+  async function getById(conversationId: string): Promise<ConversationItem | undefined> {
+    const { Item } = await doc.send(new GetCommand({ TableName: table, Key: { conversationId } }));
+    return Item as ConversationItem | undefined;
+  }
+```
+new:
+```ts
+  async function getById(conversationId: string): Promise<ConversationItem | undefined> {
+    const { Item } = await doc.send(new GetCommand({ TableName: table, Key: { conversationId } }));
+    return Item as ConversationItem | undefined;
+  }
+
+  /** getById, strongly consistent (PR6; see the interface). */
+  async function getByIdConsistent(conversationId: string): Promise<ConversationItem | undefined> {
+    const { Item } = await doc.send(
+      new GetCommand({ TableName: table, Key: { conversationId }, ConsistentRead: true }),
+    );
+    return Item as ConversationItem | undefined;
+  }
+```
+
+3c. Same file, the return literal (~1274-1275). Edit:
+
+old:
+```ts
+  return {
+    getById,
+
+```
+new:
+```ts
+  return {
+    getById,
+    getByIdConsistent,
+
+```
+(If that two-line anchor is not unique, anchor on the single line
+`    getById,` - it occurs once in the file, ~1275.)
+
+3d. `app/test/helpers/twilioWebhookHarness.ts`, the conversations fake
+(~670-672). Edit:
+
+old:
+```ts
+    async getById(conversationId) {
+      return conversations.get(conversationId);
+    },
+    async touchLastActivity(conversationId, previewText, ts) {
+```
+new:
+```ts
+    async getById(conversationId) {
+      return conversations.get(conversationId);
+    },
+    // today-checklist PR6: in memory every read is consistent - same answer.
+    async getByIdConsistent(conversationId) {
+      return conversations.get(conversationId);
+    },
+    async touchLastActivity(conversationId, previewText, ts) {
+```
+
+3e. The three hand-rolled full `ConversationsRepo` fakes (C2), each file's
+own stub convention.
+
+`app/test/contactCapture.test.ts` (~161-164). Edit:
+
+old:
+```ts
+  const conversationsRepo: ConversationsRepo = {
+    async getById(id) {
+      return id === conversation.conversationId ? conversation : undefined;
+    },
+```
+new:
+```ts
+  const conversationsRepo: ConversationsRepo = {
+    async getById(id) {
+      return id === conversation.conversationId ? conversation : undefined;
+    },
+    async getByIdConsistent() {
+      throw new Error('getByIdConsistent: not used in this suite');
+    },
+```
+
+`app/test/scheduledSendSuppression.test.ts` (~156). Edit:
+
+old:
+```ts
+    getById: async (id) => (id === conversation.conversationId ? conversation : undefined),
+```
+new:
+```ts
+    getById: async (id) => (id === conversation.conversationId ? conversation : undefined),
+    getByIdConsistent: async () => {
+      throw new Error('getByIdConsistent: not used in this suite');
+    },
+```
+
+`app/test/sendMessage.test.ts` (~121-124). Edit:
+
+old:
+```ts
+    getById: async (id) => {
+      if (overrides.getByIdError !== undefined) throw overrides.getByIdError;
+      return id === conversation.conversationId ? conversation : undefined;
+    },
+```
+new:
+```ts
+    getById: async (id) => {
+      if (overrides.getByIdError !== undefined) throw overrides.getByIdError;
+      return id === conversation.conversationId ? conversation : undefined;
+    },
+    getByIdConsistent: async () => {
+      throw new Error('getByIdConsistent: not used in this suite');
+    },
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/conversationsRepoConsistentGet.test.ts test/caseworkerRepoParity.integration.test.ts test/twilioWebhookHarnessStaffOutreach.test.ts test/contactCapture.test.ts test/scheduledSendSuppression.test.ts test/sendMessage.test.ts test/repoPagingWiring.test.ts
+```
+Expect all green. Then (bare):
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0. A literal typecheck names as missing `getByIdConsistent` is a
+full fake C2 missed: add the same throwing stub, re-run that file, record it
+in the slice report.
+
+#### Step 5 - ASCII check
+
+```
+cd W:/tmp/today-checklist; git diff -U0 | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+tr -d '\11\12\15\40-\176' < W:/tmp/today-checklist/app/test/conversationsRepoConsistentGet.test.ts | wc -c
+```
+Expect `0` twice.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add app/src/repos/conversationsRepo.ts app/test/helpers/twilioWebhookHarness.ts app/test/contactCapture.test.ts app/test/scheduledSendSuppression.test.ts app/test/sendMessage.test.ts app/test/conversationsRepoConsistentGet.test.ts app/test/caseworkerRepoParity.integration.test.ts app/test/twilioWebhookHarnessStaffOutreach.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(conversations): getByIdConsistent for the after-loop relay/group event (tracker #31 S1.5)" -m "A ConsistentRead GetItem answering getById's raw item (PR6), so the one conversation.updated a staff relay or group post emits carries the current unread_count. Harness fake answers getById's; three hand-rolled full ConversationsRepo fakes get throwing stubs." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S1.6 - `recordStaffOutreach`, the one helper every staff writer calls
+
+PR5 (binding shape; C4). Pure service, no event: callers emit their own
+one event per send (PR8). Tests: latest-per-contact, empty id dropped,
+failed logged and not thrown, a rejecting or synchronously throwing touch
+caught, the written ids returned.
+
+Files:
+- `app/src/services/staffOutreach.ts` (NEW)
+- Tests: `app/test/staffOutreach.test.ts` (NEW)
+
+#### Step 1 - failing tests
+
+Create `app/test/staffOutreach.test.ts`:
+```ts
+// services/staffOutreach.ts recordStaffOutreach (today-checklist spec
+// docs/superpowers/specs/2026-10-23-today-checklist-design.md section 7.3;
+// plan ruling PR5): the ONE path a live send uses to move
+// last_reached_out_at. Pure - a recording contacts fake and a captured
+// logger. Every writer (S2, S3) and a future staff agent rely on these
+// rules: one touch per contact at its LATEST instant, an empty id dropped,
+// a failure logged and swallowed (a stamp never fails a send), and the
+// written ids returned so the caller can emit its one event.
+import { describe, expect, it } from 'vitest';
+import { createLogger } from '../src/lib/logger.js';
+import { recordStaffOutreach, type StaffOutreachStamp } from '../src/services/staffOutreach.js';
+import { createLogCapture } from './helpers/logCapture.js';
+
+type Answer = 'written' | 'skipped' | 'failed' | 'reject' | 'throw';
+
+/** A touchLastReachedOut fake answering per contact (default 'written'). */
+function rig(answers: Record<string, Answer> = {}) {
+  const calls: Array<{ contactId: string; at: string }> = [];
+  const capture = createLogCapture();
+  const log = createLogger({ destination: capture.stream, level: 'debug' });
+  const contacts = {
+    touchLastReachedOut(contactId: string, at: string): Promise<'written' | 'skipped' | 'failed'> {
+      calls.push({ contactId, at });
+      const answer = answers[contactId] ?? 'written';
+      if (answer === 'throw') throw new Error('synchronous fake failure');
+      if (answer === 'reject') return Promise.reject(new Error('throttled'));
+      return Promise.resolve(answer);
+    },
+  };
+  return { calls, capture, deps: { contacts, log } };
+}
+
+const AT = '2026-10-24T09:00:00.000Z';
+
+describe('recordStaffOutreach (today-checklist PR5)', () => {
+  it('touches each contact ONCE at its latest instant, in first-seen order, and returns the written ids', async () => {
+    const { calls, deps } = rig();
+    const stamps: StaffOutreachStamp[] = [
+      { contactId: 'c-a', at: '2026-10-24T09:00:00.000Z' },
+      { contactId: 'c-b', at: '2026-10-24T08:00:00.000Z' },
+      { contactId: 'c-a', at: '2026-10-24T11:00:00.000Z' },
+      { contactId: 'c-a', at: '2026-10-24T10:00:00.000Z' },
+    ];
+
+    await expect(recordStaffOutreach(deps, stamps)).resolves.toEqual(['c-a', 'c-b']);
+
+    expect(calls).toEqual([
+      { contactId: 'c-a', at: '2026-10-24T11:00:00.000Z' },
+      { contactId: 'c-b', at: '2026-10-24T08:00:00.000Z' },
+    ]);
+  });
+
+  it('compares instants as TIME, not as text', async () => {
+    // 06:00-04:00 is 10:00Z - later than 09:00Z, though it sorts first as text.
+    const { calls, deps } = rig();
+    await recordStaffOutreach(deps, [
+      { contactId: 'c-a', at: '2026-10-24T09:00:00.000Z' },
+      { contactId: 'c-a', at: '2026-10-24T06:00:00-04:00' },
+    ]);
+    expect(calls).toEqual([{ contactId: 'c-a', at: '2026-10-24T06:00:00-04:00' }]);
+  });
+
+  it('an unparseable instant never beats a parseable one for the same contact', async () => {
+    const { calls, deps } = rig();
+    await recordStaffOutreach(deps, [
+      { contactId: 'c-a', at: 'not a time' },
+      { contactId: 'c-a', at: AT },
+      { contactId: 'c-a', at: 'also not a time' },
+    ]);
+    expect(calls).toEqual([{ contactId: 'c-a', at: AT }]);
+  });
+
+  it('drops a stamp with an empty contactId and makes no call for it', async () => {
+    const { calls, deps } = rig();
+    await expect(
+      recordStaffOutreach(deps, [
+        { contactId: '', at: AT },
+        { contactId: 'c-a', at: AT },
+      ]),
+    ).resolves.toEqual(['c-a']);
+    expect(calls.map((c) => c.contactId)).toEqual(['c-a']);
+  });
+
+  it('no stamps: no call, no log line, nothing written', async () => {
+    const { calls, capture, deps } = rig();
+    await expect(recordStaffOutreach(deps, [])).resolves.toEqual([]);
+    expect(calls).toEqual([]);
+    expect(capture.lines).toEqual([]);
+  });
+
+  it("'skipped' (no row, already as late) is neither returned nor logged", async () => {
+    const { capture, deps } = rig({ 'c-a': 'skipped' });
+    await expect(recordStaffOutreach(deps, [{ contactId: 'c-a', at: AT }])).resolves.toEqual([]);
+    expect(capture.atLevel(40)).toEqual([]);
+    expect(capture.atLevel(50)).toEqual([]);
+  });
+
+  it("'failed' logs ERROR with the contactId only, never throws, and the other contacts are still stamped", async () => {
+    const { calls, capture, deps } = rig({ 'c-b': 'failed' });
+
+    await expect(
+      recordStaffOutreach(deps, [
+        { contactId: 'c-a', at: AT },
+        { contactId: 'c-b', at: AT },
+        { contactId: 'c-c', at: AT },
+      ]),
+    ).resolves.toEqual(['c-a', 'c-c']);
+
+    expect(calls.map((c) => c.contactId)).toEqual(['c-a', 'c-b', 'c-c']);
+    const errors = capture.atLevel(50);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!['contactId']).toBe('c-b');
+    expect(String(errors[0]!['msg'])).toContain('last_reached_out_at');
+    // ids only: no instant, no error object (spec 7.3).
+    expect(errors[0]).not.toHaveProperty('at');
+    expect(errors[0]).not.toHaveProperty('err');
+  });
+
+  for (const answer of ['reject', 'throw'] as const) {
+    it(`a touch that ${answer === 'reject' ? 'rejects' : 'throws synchronously'} is caught and treated as 'failed'`, async () => {
+      const { capture, deps } = rig({ 'c-a': answer });
+      await expect(
+        recordStaffOutreach(deps, [
+          { contactId: 'c-a', at: AT },
+          { contactId: 'c-b', at: AT },
+        ]),
+      ).resolves.toEqual(['c-b']);
+      expect(capture.atLevel(50).map((line) => line['contactId'])).toEqual(['c-a']);
+    });
+  }
+});
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/staffOutreach.test.ts
+```
+Expected: the file fails to load - `Failed to load url
+../src/services/staffOutreach.js` / "Cannot find module" (the module does
+not exist yet). No case runs.
+
+#### Step 3 - implementation
+
+Create `app/src/services/staffOutreach.ts`:
+```ts
+// Staff outreach - the ONE path a live send uses to move a contact's
+// last_reached_out_at (spec docs/superpowers/specs/2026-10-23-today-checklist-design.md
+// section 7; plan ruling PR5).
+//
+// THE RULE: every outbound writer decides, explicitly, whether its send is
+// staff follow-up (stamp) or not (no stamp). The writer table - which send
+// paths stamp (W1-W8) and which never do - lives in the spec, section 7.3.
+// Shares, broadcasts, automated sends and machine resends never stamp. A NEW
+// send path, including a future agent that sends AS STAFF, either calls this
+// helper or is added to the spec's no-stamp table - it never writes the
+// attribute itself and never calls touchLastReachedOut directly (the one-time
+// backfill script is the only other caller).
+//
+// Best-effort: awaited, but it never throws and never retries, so a failed
+// stamp never fails or retries the send it follows. It emits NO event: the
+// caller emits its own ONE event per send operation (contact.updated for a
+// one-to-one send, email or call; one conversation.updated for a relay or
+// group post), and only when this returned a contact as written. Logs carry
+// the contactId only - never a name, phone, body or instant.
+import type { Logger } from '../lib/logger.js';
+import type { ContactsRepo } from '../repos/contactsRepo.js';
+
+/** One contact an outbound reached, and when. */
+export interface StaffOutreachStamp {
+  contactId: string;
+  /** ISO. The outbound row's own timestamp (a call: the dial instant). */
+  at: string;
+}
+
+/** Date.parse, with an unparseable instant ordered before every real one. */
+function instantMs(at: string): number {
+  const ms = Date.parse(at);
+  return Number.isNaN(ms) ? Number.NEGATIVE_INFINITY : ms;
+}
+
+/**
+ * Stamp last_reached_out_at for every contact in `stamps`. A stamp with an
+ * empty contactId is dropped; each remaining contact is touched ONCE (one
+ * call at a time - at most a relay roster) at its LATEST instant, compared as
+ * time, in first-seen order. Returns the contactIds whose touch answered
+ * 'written' - the caller's cue to emit. 'skipped' (no row, already as late,
+ * unparseable) is silent; 'failed', or a touch that throws or rejects, logs
+ * ERROR { contactId } and is not returned. Never throws.
+ */
+export async function recordStaffOutreach(
+  deps: { contacts: Pick<ContactsRepo, 'touchLastReachedOut'>; log: Logger },
+  stamps: readonly StaffOutreachStamp[],
+): Promise<string[]> {
+  const latest = new Map<string, string>();
+  for (const { contactId, at } of stamps) {
+    if (typeof contactId !== 'string' || contactId.length === 0) continue;
+    const held = latest.get(contactId);
+    if (held === undefined || instantMs(at) > instantMs(held)) latest.set(contactId, at);
+  }
+  const written: string[] = [];
+  for (const [contactId, at] of latest) {
+    let outcome: 'written' | 'skipped' | 'failed';
+    try {
+      outcome = await deps.contacts.touchLastReachedOut(contactId, at);
+    } catch {
+      outcome = 'failed';
+    }
+    if (outcome === 'written') {
+      written.push(contactId);
+    } else if (outcome === 'failed') {
+      deps.log.error({ contactId }, 'staff outreach: last_reached_out_at stamp failed (best-effort; the send stands)');
+    }
+  }
+  return written;
+}
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/staffOutreach.test.ts
+```
+Expect all green. Then (bare):
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0.
+
+#### Step 5 - ASCII check
+
+```
+tr -d '\11\12\15\40-\176' < W:/tmp/today-checklist/app/src/services/staffOutreach.ts | wc -c
+tr -d '\11\12\15\40-\176' < W:/tmp/today-checklist/app/test/staffOutreach.test.ts | wc -c
+```
+Expect `0` twice.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add app/src/services/staffOutreach.ts app/test/staffOutreach.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(services): recordStaffOutreach - the one helper staff writers call to stamp last_reached_out_at (tracker #31 S1.6)" -m "Latest instant per contact (Date.parse), empty ids dropped, one touch per contact, a failed or throwing touch logged ERROR with the id only and swallowed; returns the written ids. Emits nothing - callers emit their one event (spec 7.3)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S1.7 - The harness records `contact.updated` in `world.emitted`
+
+PR7 (the recorder half), C3. Writer tests in S2/S3 count events per send
+(WI4) straight off `world.emitted`. The two exact pins whose routes ALREADY
+emit `contact.updated` are updated to include it - deliberately, and
+stricter than before.
+
+Files:
+- `app/test/helpers/twilioWebhookHarness.ts` (the recorder ~616-623)
+- `app/test/contactTriage.test.ts` (comment ~61-65, pins ~149-162 and
+  ~344-358)
+- `app/test/sse.test.ts` (comment ~217-218)
+- Tests: `app/test/twilioWebhookHarnessStaffOutreach.test.ts`
+
+#### Step 1 - failing tests
+
+1a. `app/test/twilioWebhookHarnessStaffOutreach.test.ts` - append at the end
+of the file:
+```ts
+
+describe('harness event recorder records contact.updated (PR7)', () => {
+  it('a contact.updated emit lands in world.emitted, in order with the others', () => {
+    const world = createFakeWorld();
+    world.events.emit('contact.updated', { contactId: 'c-1' });
+    world.events.emit('contact.updated', { contactId: 'c-2' });
+    expect(world.emitted).toEqual([
+      { event: 'contact.updated', payload: { contactId: 'c-1' } },
+      { event: 'contact.updated', payload: { contactId: 'c-2' } },
+    ]);
+  });
+});
+```
+
+1b. `app/test/contactTriage.test.ts`, the type=tenant triage pin (~149-162).
+Edit:
+
+old:
+```ts
+    // LIVE EMIT (Cluster C): one conversation.updated carrying the new wire
+    // shape (type + the denormalized resolved name) for the touched thread.
+    expect(world.emitted).toEqual([
+      {
+        event: 'conversation.updated',
+        payload: {
+          conversationId: 'conv-triage-1',
+          last_activity_at: '2026-06-12T10:00:00.000Z',
+          type: 'tenant_1to1',
+          unread_count: 0,
+          participant_display_name: 'Keisha Jones',
+        },
+      },
+    ]);
+```
+new:
+```ts
+    // LIVE EMIT (Cluster C): one conversation.updated carrying the new wire
+    // shape (type + the denormalized resolved name) for the touched thread,
+    // THEN the PATCH's one ID-only contact.updated (unknown-inactive AR3 -
+    // the type changed). The harness records contact.updated since
+    // today-checklist PR7, so this exact list now names both.
+    expect(world.emitted).toEqual([
+      {
+        event: 'conversation.updated',
+        payload: {
+          conversationId: 'conv-triage-1',
+          last_activity_at: '2026-06-12T10:00:00.000Z',
+          type: 'tenant_1to1',
+          unread_count: 0,
+          participant_display_name: 'Keisha Jones',
+        },
+      },
+      { event: 'contact.updated', payload: { contactId: 'contact-triage-1' } },
+    ]);
+```
+
+1c. Same file, the type=team_member pin (~344-358). Edit the title:
+
+old:
+```ts
+  it('setting type=team_member/unknown does NOT propagate a 1:1 type, auto-advance status, or emit', async () => {
+```
+new:
+```ts
+  it('setting type=team_member/unknown does NOT propagate a 1:1 type, auto-advance status, or emit conversation.updated', async () => {
+```
+and Edit (the comment line holds two arrows; copy it from your Read and
+replace the WHOLE line):
+
+old:
+```ts
+    // No name known and no type flip [U+2192] nothing to denormalize [U+2192] no live emit.
+    expect(world.emitted).toHaveLength(0);
+```
+new:
+```ts
+    // No name known and no thread type flip - nothing to denormalize, so no
+    // conversation.updated. The contact's type DID change, so the PATCH's one
+    // ID-only contact.updated (unknown-inactive AR3) is the only event; the
+    // harness records it since today-checklist PR7.
+    expect(world.emitted).toEqual([{ event: 'contact.updated', payload: { contactId: 'contact-triage-1' } }]);
+```
+
+1d. Same file, the AR3 describe's preamble (~61-65; comment only). Edit:
+
+old:
+```ts
+// linked thread was touched - and none otherwise. The harness does not
+// record this event in world.emitted (that list is asserted exactly above
+// and below), so each case subscribes its own listener.
+```
+new:
+```ts
+// linked thread was touched - and none otherwise. Since today-checklist PR7
+// the harness also records it in world.emitted (the exact-list pins below
+// name it); these cases keep their own listener, which hears ONLY this
+// event.
+```
+
+1e. `app/test/sse.test.ts` (~217-218; comment only). Edit:
+
+old:
+```ts
+    // contact.updated is not recorded by the harness either (unknown-inactive
+    // keeps it out of world.emitted), so it carries its own baseline too.
+```
+new:
+```ts
+    // contact.updated: the harness records it too since today-checklist
+    // (plan PR7), so today this equals the shared baseline; it keeps its own
+    // so a change to the recorder list cannot break this cleanup test.
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/twilioWebhookHarnessStaffOutreach.test.ts test/contactTriage.test.ts test/sse.test.ts
+```
+Expected failures, and why:
+- twilioWebhookHarnessStaffOutreach.test.ts: the new case, `world.emitted`
+  is `[]`.
+- contactTriage.test.ts: "setting type=tenant propagates ..." (received one
+  event, expected two) and "setting type=team_member/unknown does NOT ... or
+  emit conversation.updated" (received `[]`).
+- sse.test.ts: green (comment only).
+Every other case stays green.
+
+#### Step 3 - implementation
+
+`app/test/helpers/twilioWebhookHarness.ts`, the recorder (~623). Edit:
+
+old:
+```ts
+  events.on('suggestion.updated', (payload) => emitted.push({ event: 'suggestion.updated', payload }));
+```
+new:
+```ts
+  events.on('suggestion.updated', (payload) => emitted.push({ event: 'suggestion.updated', payload }));
+  // contact.updated (today-checklist PR7): a staff-outreach writer emits it
+  // after its stamp and its tests count events per send (spec 7.3), so it is
+  // recorded like the others. The exact-list pins that predate this were
+  // updated deliberately (contactTriage.test.ts).
+  events.on('contact.updated', (payload) => emitted.push({ event: 'contact.updated', payload }));
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/twilioWebhookHarnessStaffOutreach.test.ts test/contactTriage.test.ts test/sse.test.ts test/contactTypeChangeRefusals.test.ts test/contactStaffNotes.test.ts test/statusTransition.test.ts test/transitionRoutes.test.ts test/caseworkerConversion.test.ts test/caseworkerReviewApi.test.ts test/contactOrgNames.test.ts test/contactIntakeFields.test.ts test/landlordRequirementsPatch.test.ts
+```
+(Every app test file that drives a `contact.updated` emitter: the contact
+PATCH, the status transition, the caseworker conversion.) Expect all green.
+A red case whose only diff is an added `contact.updated` entry in an exact
+`world.emitted` list is a C3 pin this draft missed: update it the same way
+(add the entry the route really emits; never filter it out), re-run, and
+record the file and case in the slice report.
+
+#### Step 5 - ASCII check
+
+```
+cd W:/tmp/today-checklist; git diff -U0 | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0` (the replaced arrow line is an ASCII line; `contactTriage.test.ts`
+keeps its other pre-existing non-ASCII lines untouched).
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add app/test/helpers/twilioWebhookHarness.ts app/test/contactTriage.test.ts app/test/sse.test.ts app/test/twilioWebhookHarnessStaffOutreach.test.ts
+git -C W:/tmp/today-checklist commit -m "test(harness): record contact.updated in world.emitted (tracker #31 S1.7)" -m "Staff-outreach writer tests count events per send off world.emitted (spec 7.3, PR7). The two contactTriage exact-list pins whose PATCH already emitted contact.updated now name it; the stale comments in contactTriage.test.ts and sse.test.ts are rewritten." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S1.8 - Typecheck, the app workspace, ASCII sweep, slice report
+
+#### Step 1 - no seed file and no events doc touched (WI9, PR8)
+
+```
+git -C W:/tmp/today-checklist diff --stat 970a29b9 -- app/src/lib/seed app/src/lib/performanceSeed.ts app/scripts/db-seed.ts app/src/lib/events.ts
+```
+Expect NO output. (S1 adds no emit: `contact.updated` already exists in
+`AppEventMap` and `ALL_APP_EVENTS`, `app/src/lib/events.ts:329, :351`; its
+doc comment is S7's.)
+
+#### Step 2 - typecheck (bare)
+
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Exit 0.
+
+#### Step 3 - lint the slice's own files
+
+```
+cd W:/tmp/today-checklist; npx eslint app/src/repos/contactsRepo.ts app/src/repos/conversationsRepo.ts app/src/routes/contacts.ts app/src/services/staffOutreach.ts app/test/helpers/twilioWebhookHarness.ts app/test/contactsRepoReachedOut.test.ts app/test/conversationsRepoConsistentGet.test.ts app/test/staffOutreach.test.ts app/test/twilioWebhookHarnessStaffOutreach.test.ts app/test/contactsRepo.integration.test.ts app/test/caseworkerRepoParity.integration.test.ts app/test/contactsRepoConsistentBatchRead.test.ts app/test/contactsBatchIncomplete.test.ts app/test/contactsCrud.test.ts app/test/contactTriage.test.ts app/test/sse.test.ts app/test/followUps.test.ts app/test/sendMessage.test.ts app/test/audienceResolution.test.ts app/test/contactCapture.test.ts app/test/scheduledSendSuppression.test.ts
+```
+Expect exit 0 (the repo's lint backlog is dashboard `react-hooks/*` only;
+S8 runs the real gate 5). Any error: attribute it by baseline (AGENTS.md
+gate 5) without moving HEAD - for each file with an error, write its
+merge-base version next to it as an untracked scratch copy (never staged;
+deleted right after - eslint's root config only applies inside the repo) and
+lint that,
+e.g.
+`git -C W:/tmp/today-checklist show 970a29b9:app/src/repos/contactsRepo.ts > W:/tmp/today-checklist/app/src/repos/.lint-base-contactsRepo.ts`
+then `npx eslint` that copy, diff the two outputs, and delete the copy. An
+error present now and absent at the base is this slice's and blocking: fix
+it and commit with explicit paths. Name any pre-existing one in the report.
+
+#### Step 4 - the app workspace, once
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run
+```
+Needs DynamoDB Local. Expect green. If any file is red, follow AGENTS.md
+re-run-and-compare: re-run that FILE alone more than once
+(`cd W:/tmp/today-checklist/app; npx vitest run test/<file>`). A file that
+stays red and that this slice touched, or that exercises a path S1 changed
+(the recipient projection, the contact parsers, a harness recorder list, a
+fake S1 edited), is this slice's bug: fix it in a follow-up commit with
+explicit paths (an exact `world.emitted` pin is handled as in S1.7 Step 4).
+A file that stays red with no connection to S1: do NOT create another
+worktree or move HEAD to test the merge base - stop and record the file, the
+failing case and the error in the report for the planner. Any
+`[dynamoAdmin]` line in the output is a real container fault: capture
+`err.$metadata.httpStatusCode` and `attempts` into the report.
+
+#### Step 5 - ASCII check across the slice
+
+```
+cd W:/tmp/today-checklist; git diff -U0 970a29b9 -- app | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0`.
+
+#### Step 6 - slice report
+
+Write `W:/tmp/today-checklist/docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S1-report.md`
+(ASCII, findings only, code cited by `file:line`). It must record at least:
+- C1-C5 as resolved (one line each with the evidence `file:line`), and any
+  extra fake typecheck named in S1.2 Step 4 or S1.5 Step 4.
+- The fake inventory: full `ContactsRepo` literals edited (harness,
+  `sendMessage.test.ts`, `audienceResolution.test.ts`,
+  `contactCapture.test.ts`, `scheduledSendSuppression.test.ts`); full
+  `ConversationsRepo` literals edited (harness, `contactCapture.test.ts`,
+  `scheduledSendSuppression.test.ts`, `sendMessage.test.ts`); the
+  Pick-typed fakes deliberately NOT edited and why (C1), with the S2 note
+  for the dev-fixture rigs.
+- The `world.emitted` change: the pins updated in S1.7 (and any found in
+  S1.7 Step 4 / Step 4 here), each as file:line + old count -> new list.
+- WI1 (S1 part): the four Follow-up / recipients files stayed green with
+  only the additive `RECIPIENT_ATTRS` change (S1.1 Step 4).
+- WI9: Step 1's empty diff.
+- The typecheck and lint exits, the app workspace totals (files / tests
+  passed / skipped), and any red file with its re-runs.
+- Untrimmed input paths: none new (the field is server-owned and never
+  parsed from a client; spec 7.3).
+
+Commit:
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S1-report.md
+git -C W:/tmp/today-checklist commit -m "docs(records): today-checklist S1 slice report" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### S1 coverage
+
+Rulings:
+- PR1 - ContactItem and RecipientDisplay field, `#lastReachedOutAt` in
+  RECIPIENT_PROJECTION, harness `projectRecipient`, the exact-projection
+  parity pin updated deliberately (S1.1); `followUps.test.ts`
+  `RECIPIENT_ATTRS` (S1.1, PR7).
+- PR2 - `touchLastReachedOut` interface + implementation (`#lro`, own log
+  lines, pointer refusal, `normalizeInstant`, guarded forward-only write,
+  never throws): stub-client test, DynamoDB Local integration test, parity
+  with the harness twin (S1.2).
+- PR3 - `getRecipientDisplaysByIds` `consistentRead` pass-through; the
+  existing no-ConsistentRead pin kept, the positive case added (S1.3).
+- PR4 - `SERVER_OWNED_CONTACT_FIELDS` gains the field; create and PATCH
+  refusals (S1.4).
+- PR5 - `app/src/services/staffOutreach.ts` `recordStaffOutreach` +
+  `StaffOutreachStamp`: latest per contact by `Date.parse`, empty id
+  dropped, sequential one touch per contact, never throws (rejecting and
+  synchronously throwing touches caught), ERROR `{ contactId }` only on
+  'failed', returns the written ids, emits nothing, doc comment states the
+  rule and points to spec 7.3 (S1.6).
+- PR6 - `conversationsRepo.getByIdConsistent` interface + implementation +
+  harness fake (S1.5), plus the three hand-rolled full fakes (C2).
+- PR7 - harness `touchLastReachedOut` twin + `world.reachedOutTouches`
+  (S1.2), `projectRecipient` copy (S1.1), `getRecipientDisplaysByIds`
+  records into `world.recipientDisplayCalls` (S1.3), `contact.updated` in
+  `world.emitted` (S1.7); throwing stubs in every full fake that stops
+  compiling (S1.2, C1).
+- PR8 - no S1 code by design: the event already exists and is bridged; the
+  helper emits nothing (S1.6, doc comment); S2/S3 emit; S7 updates the
+  `ContactUpdatedEvent` doc comment.
+- PR37 - `app/test/helpers/twilioWebhookHarness.ts` edited only in S1
+  (S1.1, S1.2, S1.3, S1.5, S1.7). `app/src/routes/api.ts` untouched.
+
+Spec surfaces:
+- 7.1 / 7.3 "a repo method beside touchLastHeardFrom, copying it exactly"
+  (S1.2); "one shared helper ... best-effort ... its doc comment says every
+  new outbound writer must decide" (S1.6, PR5 shape - C4); "the field is
+  server-owned, in all four places" - ContactItem, RecipientDisplay, the
+  projection (S1.1), SERVER_OWNED_CONTACT_FIELDS (S1.4).
+- 6.1 "the option is added there ..., passed through FollowUpsDeps, and
+  added to the test fakes": the repo option and the harness fake (S1.3);
+  `FollowUpsDeps` threading is S4 (PR22).
+- 7.3 "a payload built from a FRESH, consistent read of the thread": the
+  read primitive (S1.5); its use is S3.
+- 9 "The PATCH and create parsers refuse the field" (S1.4).
+- 7.4 "not shown anywhere": no dashboard or wire field is added by S1.
+
+## 6. S2 - Direct writers W1, W2, W3, W6, W8, inbound order fixes, tour-create events
+
+Scope: plan section 2 row S2; rulings PR8-PR16 and PR37 (binding). Spec 7.2,
+7.3 (writers W1, W2, W3, W6, W8 and the no-stamp table), 8 (live updates), 9
+(writer tests). Every line number below is a hint against main @970a29b9;
+the QUOTED text is the anchor. S1 is built first and provides, with exactly
+these names: `ContactItem.last_reached_out_at`,
+`ContactsRepo.touchLastReachedOut(contactId, at)`,
+`app/src/services/staffOutreach.ts` `recordStaffOutreach(deps: { contacts,
+log }, stamps: { contactId, at }[]): Promise<string[]>` (never throws; a
+failed, throwing or rejecting touch logs ERROR `{ contactId }` and is not
+returned), the harness `world.reachedOutTouches: { contactId; at (raw, as
+passed); outcome }[]` recorded by the harness fake `touchLastReachedOut`
+(forward-only onto `world.contacts`), `contact.updated` recorded in
+`world.emitted`, and a throwing `touchLastReachedOut` stub in
+`app/test/sendMessage.test.ts`.
+
+Every anchor in this section is ASCII. Where a target file already carries
+non-ASCII characters (`sendMessage.ts`, `api.ts`, `voice.ts`, `dev.ts`,
+`tours.ts`, `units.ts`), no anchor below includes one of those lines, and
+only ADDED lines are checked for ASCII (plan section 0).
+
+Before Task S2.1, record the slice base (the slice-closing task diffs from
+it):
+```
+git -C W:/tmp/today-checklist rev-parse HEAD
+```
+Write the SHA down as S2_BASE.
+
+### Contradictions
+
+C1. PR14: "for an OUTBOUND fixture row whose author is `teammate`". The
+transcript seam writes `author: 'unknown'` for BOTH directions
+(`app/src/routes/dev.ts:910`, and its comment :901-903 says the author is
+cosmetic on that row), so an author gate would make
+`/__dev/voice/transcript-fixture` never stamp - contradicting PR14's "Both
+seams ... call it for outbound rows". The message seam's outbound rows are
+always `author: 'teammate'` (`dev.ts:1118`, `:1161`), so an author test adds
+nothing there. Resolution (S2.5): the twin gates on `direction ===
+'outbound'` only.
+
+C2. PR14 "resolve the thread's one-to-one contact (the same thread-participant
+-> phone -> email order `attributeInbound` uses)". On a relay or group thread
+that order would name the FIRST roster member, which is wrong for a team post
+(the message seam accepts `relaySenderKey` on any thread, `dev.ts:978-984`).
+Resolution (S2.5): the extracted `oneToOneThreadContactId` returns undefined
+for `relay_group` / `group_text`; `attributeInbound` already returns before
+step 3 on those types (`app/src/lib/heardFrom.ts:65-87`), so its behavior is
+unchanged.
+
+C3. PR37 makes `app/test/helpers/twilioWebhookHarness.ts` S1-only, but the W6
+tests must inject PR13's `afterResponse` into the voice router, and the
+harness `webhooks:` block (`twilioWebhookHarness.ts:5819-5890`) has no way to
+pass it. Resolution (S2.4): the W6 tests build a SECOND app with `buildApp`
+over the SAME world (`gateApp`, local to `app/test/voiceOutbound.test.ts`),
+using `harness.config` so `signedTwilioPost` signs for it. No harness edit.
+
+C4. PR16 names one inverted pin (`app/test/toursApi.test.ts` ~1395). Three
+more count `tour.updated` across a `POST /api/tours` and go red:
+`toursApi.test.ts:585` (`toHaveLength(0)` after `createPastTour`),
+`toursApi.test.ts:1402-1412` (reschedule: 1 -> 2) and
+`app/test/toursReopenApi.test.ts:492` (1 -> 2; `createTour` POSTs, :91).
+Resolution (S2.7): each is updated deliberately and named in the S2 report.
+
+C5. PR10/PR11 add `staffOutreach: true` to the route's send input. Three
+exact `toEqual` pins on that input go red: `app/test/apiRoutes.test.ts:84`,
+`:709-719`, `:860-870`. Resolution (S2.2): each gains `staffOutreach: true`,
+deliberately (they are the staff send and staff Retry, which must stamp).
+
+C6. PR9 "at: <the appended row's providerTs>". On a deduped append the
+persisted row's key carries the FIRST write's providerTs
+(`app/src/repos/messagesRepo.ts:1292`). Resolution (S2.1): the stamp uses
+`result.providerTs` - the provider-accepted instant of THIS send, which is
+also `appendInput.providerTs`; identical on every fresh append.
+
+C7. PR16(b) names the dep `events`. `createUnitsRouter` already declares a
+handler-local `const events = rows.map(...)` (`app/src/routes/units.ts:2233`).
+Resolution (S2.7): the dep is `events?: EventBus` as ruled; the router-scope
+local is named `eventBus` so nothing is shadowed.
+
+C8. The brief asks every no-stamp caller test to assert
+`world.reachedOutTouches` stays empty. The two POLLS' existing fixtures drive
+a spy send service (`app/test/tourRemindersApi.test.ts:2374-2376`; the nudge
+poll has no world-based fixture at all, `app/test/placementNudges.test.ts:431-463`
+is hand-rolled), so a world assertion there is vacuous on its own.
+Resolution (S2.2): the poll cases assert at the input seam (no
+`staffOutreach` on the send input - the ONLY stamp trigger, proven by S2.1)
+AND keep the world assertion; every other no-stamp case (share fan-out,
+automatic retry, missed-call text, welcome text, both Send now routes) runs
+the REAL send wrapper over the world's recording fake.
+
+No other ruling conflicts with the tree. PR15's two order claims hold:
+`app/src/services/inboundEmail.ts:770` emits `conversation.updated` before the
+touch at :833, and masked calls emit no `conversation.updated`
+(`app/src/routes/webhooks/voice.ts:1359-1362`).
+
+### Cross-slice notes (for the planner)
+
+- Names S2 introduces:
+  - `SendMessageInput.staffOutreach?: true` (`app/src/services/sendMessage.ts`).
+  - `TwilioVoiceWebhookDeps.afterResponse?: (work: Promise<void>) => void`
+    (`app/src/routes/webhooks/voice.ts`); it rides `WebhooksRouterDeps`
+    (`routes/webhooks/index.ts:16-19`) so `buildApp({ webhooks: { afterResponse } })`
+    reaches it.
+  - `resolveOutboundTarget` return gains `contactId?: string`; local
+    `stampOutboundDial(deps, contactId, dialAt)` in the voice router.
+  - `app/src/lib/heardFrom.ts` exports `oneToOneThreadContactId(thread,
+    lookup)`; `attributeInbound` step 3 delegates to it.
+  - `DevRouterDeps.heardFromRepos.contactsRepo` Pick gains
+    `'touchLastReachedOut'`; local `touchFixtureReachedOut` in `dev.ts`.
+  - `UnitsRouterDeps.events?: EventBus`.
+- Shared file `app/src/routes/api.ts` (PR37): S2.2 moves the `contacts`
+  construction above `sendMessage` (~694-709) and edits the 1:1 send loop
+  (~1564) and the Retry call (~1872); S2.7 adds `events,` to the
+  `createUnitsRouter({...})` mount (~1000-1026). S4 (PR24) re-reads api.ts
+  after S2 and anchors on current text.
+- S7 (docs): the `ContactUpdatedEvent` doc comment
+  (`app/src/lib/events.ts:296-314`) gains the S2 emitters: `sendMessage`
+  (W1/W2), `sendEmailMessage` (W3), the outbound whisper gate (W6), the dev
+  fixture twin (W8), inbound email and the two masked-call paths after a
+  written last-heard-from touch (PR15). S2 changes no comment there.
+- After S2.2, the `/api` router's DEFAULT send service reads the router's
+  contacts repo. In the harness that is `world.contactsRepo` (complete fake),
+  where before it was a real DynamoDB repo (harness comment
+  `twilioWebhookHarness.ts:5591-5596` describes the old behavior and becomes
+  stale; it is S1-owned per PR37 - the planner may fold a one-line comment
+  fix into S7 or leave it).
+- The W6 post-response stamp in harness-based tests (no injected
+  `afterResponse`) settles within microtasks: it has finished before the
+  next supertest request in the same test resolves. Existing
+  `voiceOutbound.test.ts` cases that clear `world.emitted` between requests
+  are therefore unaffected.
+- WI4 counts S2 records: W1 one `contact.updated` per send (a multi-batch MMS
+  too), W2 one, W3 one, W6 one, W8 one, inbound email one per written touch,
+  each masked call one per written touch, each tour create one `tour.updated`.
+
+---
+
+### Task S2.1 - `sendMessage` gains the `staffOutreach` option: stamp, then `contact.updated` last
+
+PR9 (service half). The judged contact (`heldRecipient ?? phoneContact`) is
+stamped at the provider-accepted instant after the row is written, and
+`contact.updated` is emitted after the existing `conversation.updated` only
+when the stamp was written. Best-effort.
+
+Files:
+- `app/src/services/sendMessage.ts`
+- Tests: `app/test/sendMessage.test.ts`
+
+#### Step 1 - failing tests
+
+1a. `app/test/sendMessage.test.ts` - the `Fakes` interface. Edit:
+
+old:
+```ts
+  emitted: { event: AppEventName; payload: unknown }[];
+  counterValue: number;
+```
+new:
+```ts
+  emitted: { event: AppEventName; payload: unknown }[];
+  /** today-checklist W1/W2: every touchLastReachedOut call, in order. */
+  reachedOutTouches: { contactId: string; at: string }[];
+  counterValue: number;
+```
+
+1b. The `makeFakes` overrides. Edit:
+
+old:
+```ts
+    touchError?: unknown;
+    auditError?: unknown;
+  } = {},
+): Fakes {
+```
+new:
+```ts
+    touchError?: unknown;
+    auditError?: unknown;
+    /** today-checklist W1/W2: touchLastReachedOut's answer (default 'written'). */
+    reachedOut?: (contactId: string, at: string) => Promise<'written' | 'skipped' | 'failed'>;
+  } = {},
+): Fakes {
+```
+
+1c. The `fakes` literal. Edit:
+
+old:
+```ts
+    emitted: [] as Fakes['emitted'],
+    counterValue: 0,
+  };
+```
+new:
+```ts
+    emitted: [] as Fakes['emitted'],
+    reachedOutTouches: [] as Fakes['reachedOutTouches'],
+    counterValue: 0,
+  };
+```
+
+1d. Replace S1's throwing stub with a recording fake (PR7 exception). Edit:
+
+old:
+```ts
+    touchLastReachedOut: async () => {
+      throw new Error('touchLastReachedOut: not used in this suite');
+    },
+```
+new:
+```ts
+    touchLastReachedOut: async (contactId, at) => {
+      fakes.reachedOutTouches.push({ contactId, at });
+      return overrides.reachedOut !== undefined ? overrides.reachedOut(contactId, at) : 'written';
+    },
+```
+
+1e. Record `contact.updated`. Edit:
+
+old:
+```ts
+  events.on('message.persisted', (payload) => fakes.emitted.push({ event: 'message.persisted', payload }));
+```
+new:
+```ts
+  events.on('message.persisted', (payload) => fakes.emitted.push({ event: 'message.persisted', payload }));
+  events.on('contact.updated', (payload) => fakes.emitted.push({ event: 'contact.updated', payload }));
+```
+
+1f. Append at the end of the file:
+```ts
+
+// today-checklist spec 7.3 (W1, W2; ruling PR9): `staffOutreach: true` marks a
+// person's send to this contact. After the row is written the service stamps
+// the JUDGED contact (the held recipient, else the phone-matched one) at the
+// provider-accepted instant, and emits contact.updated - the last event of the
+// send - only when that stamp was written. Best-effort: a stamp never fails
+// the send.
+describe('staff outreach stamp (today-checklist W1/W2, PR9)', () => {
+  const base = { conversationId: 'conv-1', body: 'checking in' };
+  const contactUpdates = (f: Fakes) => f.emitted.filter((e) => e.event === 'contact.updated');
+
+  it('stamps the phone-matched contact at the provider timestamp and emits ONE contact.updated, after conversation.updated', async () => {
+    const f = makeFakes();
+    const outcome = await f.service({ ...base, staffOutreach: true });
+    expect(outcome.providerSid).toBe('SMfake-1');
+    expect(f.reachedOutTouches).toEqual([{ contactId: 'contact-1', at: '2026-06-12T10:00:00.000Z' }]);
+    expect(f.emitted.map((e) => e.event)).toEqual(['message.persisted', 'conversation.updated', 'contact.updated']);
+    expect(contactUpdates(f)).toEqual([{ event: 'contact.updated', payload: { contactId: 'contact-1' } }]);
+  });
+
+  it('stamps the HELD recipient, not the phone-matched duplicate', async () => {
+    const f = makeFakes();
+    const held: ContactItem = {
+      contactId: 'c-real',
+      type: 'tenant',
+      phone: '+15550100001',
+      consent_method: 'verbal_in_person',
+    };
+    await f.service({ ...base, recipient: held, staffOutreach: true });
+    expect(f.reachedOutTouches).toEqual([{ contactId: 'c-real', at: '2026-06-12T10:00:00.000Z' }]);
+    expect(contactUpdates(f).map((e) => e.payload)).toEqual([{ contactId: 'c-real' }]);
+  });
+
+  it('a named recipient that no longer holds the number is not stamped - the phone-matched contact is', async () => {
+    const f = makeFakes();
+    const moved: ContactItem = {
+      contactId: 'c-moved',
+      type: 'tenant',
+      phone: '+15550100099',
+      consent_method: 'verbal_in_person',
+    };
+    await f.service({ ...base, recipient: moved, staffOutreach: true });
+    expect(f.reachedOutTouches.map((t) => t.contactId)).toEqual(['contact-1']);
+  });
+
+  it('stamps nothing without the option - the default, automated or not', async () => {
+    const f = makeFakes();
+    await f.service(base);
+    await f.service({ ...base, automated: true });
+    await f.service({ ...base, automated: false });
+    expect(f.sent).toHaveLength(3);
+    expect(f.reachedOutTouches).toEqual([]);
+    expect(contactUpdates(f)).toEqual([]);
+  });
+
+  it('stamps nothing when no contact holds the thread number', async () => {
+    const f = makeFakes({ contact: null });
+    await f.service({ ...base, staffOutreach: true });
+    expect(f.sent).toHaveLength(1);
+    expect(f.reachedOutTouches).toEqual([]);
+    expect(contactUpdates(f)).toEqual([]);
+  });
+
+  it('emits contact.updated ONLY when the stamp was written', async () => {
+    for (const answer of ['skipped', 'failed'] as const) {
+      const f = makeFakes({ reachedOut: async () => answer });
+      await f.service({ ...base, staffOutreach: true });
+      expect(f.reachedOutTouches).toHaveLength(1);
+      expect(contactUpdates(f)).toEqual([]);
+    }
+  });
+
+  it('a failed or rejecting stamp never fails the send: the outcome returns, ERROR names the contact id', async () => {
+    const failed = makeFakes({ reachedOut: async () => 'failed' });
+    await expect(failed.service({ ...base, staffOutreach: true })).resolves.toMatchObject({ providerSid: 'SMfake-1' });
+    expect(failed.capture.atLevel(ERROR).some((l) => l['contactId'] === 'contact-1')).toBe(true);
+
+    const rejecting = makeFakes({
+      reachedOut: async () => {
+        throw new Error('dynamo down');
+      },
+    });
+    await expect(rejecting.service({ ...base, staffOutreach: true })).resolves.toMatchObject({
+      providerSid: 'SMfake-1',
+    });
+    expect(contactUpdates(rejecting)).toEqual([]);
+  });
+
+  it('a refused send and an append failure never stamp', async () => {
+    const refused = makeFakes({
+      contact: { contactId: 'contact-1', type: 'tenant', phone: '+15550100001', sms_opt_out: true },
+    });
+    await expect(refused.service({ ...base, staffOutreach: true })).rejects.toBeInstanceOf(ContactOptedOutError);
+    expect(refused.reachedOutTouches).toEqual([]);
+
+    const unrecorded = makeFakes({ appendError: new Error('dynamo down') });
+    await expect(unrecorded.service({ ...base, staffOutreach: true })).rejects.toBeInstanceOf(
+      SendAcceptedNotRecordedError,
+    );
+    expect(unrecorded.reachedOutTouches).toEqual([]);
+  });
+});
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/sendMessage.test.ts
+```
+Expected failures, and why: the first three, "emits contact.updated ONLY
+when", and "a failed or rejecting stamp" fail because the service ignores
+`staffOutreach` (no `touchLastReachedOut` call: `reachedOutTouches` is `[]`,
+no `contact.updated`, no ERROR line). "stamps nothing without the option",
+"stamps nothing when no contact" and "a refused send and an append failure"
+pass already (PIN). Every pre-existing case stays green (no existing send
+passes the option, and the new `contact.updated` listener records nothing
+for them).
+
+#### Step 3 - implementation
+
+3a. `app/src/services/sendMessage.ts` - the import. Edit:
+
+old:
+```ts
+import { TRANSPORT_SCHEMA_VERSION } from '../lib/messageTransport.js';
+```
+new:
+```ts
+import { TRANSPORT_SCHEMA_VERSION } from '../lib/messageTransport.js';
+import { recordStaffOutreach } from './staffOutreach.js';
+```
+
+3b. The input field. Edit:
+
+old:
+```ts
+  beforeProviderSend?: () => Promise<boolean>;
+}
+
+export interface SendMessageOutcome {
+```
+new:
+```ts
+  beforeProviderSend?: () => Promise<boolean>;
+  /**
+   * today-checklist spec 7.3 (W1, W2): this send is staff outreach - a person
+   * on the team chose to text this contact now. A successful send stamps the
+   * judged contact's last_reached_out_at (recordStaffOutreach) at the
+   * provider-accepted instant and, when that stamp was written, emits
+   * contact.updated as the last event of the send. Set ONLY by the staff send
+   * and staff Retry routes; never by automated, share or machine-retry
+   * callers (the broadcast fan-out, retrySend, tour reminders, nudges and
+   * their Send now, the missed-call and welcome texts). Absent: no stamp.
+   */
+  staffOutreach?: true;
+}
+
+export interface SendMessageOutcome {
+```
+
+3c. Destructure it. Edit:
+
+old:
+```ts
+      recipient,
+      beforeProviderSend,
+    } = input;
+```
+new:
+```ts
+      recipient,
+      beforeProviderSend,
+      staffOutreach,
+    } = input;
+```
+
+3d. The stamp, after the existing emits. Edit:
+
+old:
+```ts
+    if (touched !== undefined) events.emit('conversation.updated', toConversationUpdatedEvent(touched));
+```
+new:
+```ts
+    if (touched !== undefined) events.emit('conversation.updated', toConversationUpdatedEvent(touched));
+
+    // (7) Staff outreach (today-checklist spec 7.3, W1/W2): stamp the contact
+    // the gates judged - the caller's held recipient, else the phone-matched
+    // one - at the provider-accepted instant (this send's providerTs; on a
+    // deduped append the stored key may carry an earlier write's). Best-effort:
+    // recordStaffOutreach never throws and logs its own failure, so a text that
+    // is out and recorded still returns its normal result. Its contact.updated
+    // is the LAST event of the send, after conversation.updated.
+    if (staffOutreach === true && contact !== undefined) {
+      const written = await recordStaffOutreach(
+        { contacts, log },
+        [{ contactId: contact.contactId, at: result.providerTs }],
+      );
+      if (written.includes(contact.contactId)) {
+        events.emit('contact.updated', { contactId: contact.contactId });
+      }
+    }
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/sendMessage.test.ts
+```
+Expect all green. Then (bare):
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0.
+
+#### Step 5 - ASCII check on added lines
+
+```
+git -C W:/tmp/today-checklist diff -U0 -- app/src/services/sendMessage.ts app/test/sendMessage.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0`.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+```
+(The `ls` must report "No such file or directory"; in PowerShell use
+`Test-Path` and expect `False`.)
+```
+git -C W:/tmp/today-checklist add app/src/services/sendMessage.ts app/test/sendMessage.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(send): staffOutreach option stamps last_reached_out_at on the judged contact (tracker #31 S2.1)" -m "A successful send with staffOutreach: true calls recordStaffOutreach for heldRecipient ?? phoneContact at the provider-accepted instant and emits contact.updated last, only when written. Best-effort; no caller passes it yet (spec 7.3 W1/W2, PR9)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S2.2 - The `/api` router wires its contacts repo into the send service; W1 and W2 pass the option; every other `sendMessage` caller pinned as no-stamp
+
+PR9 (wiring, WI2), PR10, PR11, and the no-stamp half of spec 9 for every
+other `sendMessage` caller: the share fan-out, the automatic 30003 retry, the
+missed-call text, the housing-fair welcome, the tour reminder poll and Send
+now, the nudge poll and Send now. The cases marked (PIN) are green on
+unchanged code; the harness W1/W2 cases are the RED.
+
+Files:
+- `app/src/routes/api.ts` (contacts construction order; the 1:1 send loop;
+  the Retry call)
+- Tests: `app/test/apiRoutes.test.ts`, `app/test/broadcastFanOut.test.ts`,
+  `app/test/retrySendAttempt.test.ts`, `app/test/missedCallAutoText.test.ts`,
+  `app/test/publicIntake.test.ts`, `app/test/tourRemindersApi.test.ts`,
+  `app/test/placementNudgesApi.test.ts`
+
+#### Step 1 - failing tests
+
+1a. `app/test/apiRoutes.test.ts` - the staff-send call-shape pin (C5). Edit:
+
+old:
+```ts
+    expect(calls).toEqual([{ conversationId: 'conv-1', body: 'hello', automated: false }]);
+```
+new:
+```ts
+    // today-checklist W1 (PR10): the staff send marks itself staff outreach.
+    expect(calls).toEqual([{ conversationId: 'conv-1', body: 'hello', automated: false, staffOutreach: true }]);
+```
+
+1b. The Retry call-shape pin (C5). Edit:
+
+old:
+```ts
+        retryOf: '2026-06-12T09:00:00.000Z#SMorig',
+        // retry-send-adoption R7: a root row is its own chain's root.
+        retryRoot: '2026-06-12T09:00:00.000Z#SMorig',
+      },
+    ]);
+```
+new:
+```ts
+        retryOf: '2026-06-12T09:00:00.000Z#SMorig',
+        // retry-send-adoption R7: a root row is its own chain's root.
+        retryRoot: '2026-06-12T09:00:00.000Z#SMorig',
+        // today-checklist W2 (PR11): a staff Retry of a non-share text stamps.
+        staffOutreach: true,
+      },
+    ]);
+```
+
+1c. The D14 Retry call-shape pin (C5). Edit:
+
+old:
+```ts
+        retryRoot: '2026-06-12T09:00:00.000Z#SMorig',
+        recipient: real,
+      },
+    ]);
+```
+new:
+```ts
+        retryRoot: '2026-06-12T09:00:00.000Z#SMorig',
+        recipient: real,
+        // today-checklist W2 (PR11): a staff Retry of a non-share text stamps.
+        staffOutreach: true,
+      },
+    ]);
+```
+
+1d. W1 first-batch-only at the input seam. Edit (the end of the existing
+"SPLITS an over-budget send" case):
+
+old:
+```ts
+    expect(calls.slice(1).every((c) => c.body === undefined)).toBe(true);
+  });
+```
+new:
+```ts
+    expect(calls.slice(1).every((c) => c.body === undefined)).toBe(true);
+  });
+
+  it('today-checklist W1 (PR10): only the FIRST batch carries staffOutreach, so a split send stamps once', async () => {
+    const sizes = [58_101, 929_757, 76_934, 918_527, 923_368, 73_092, 89_528];
+    const key = (i: number): string => `uploads/deadbee${i}`;
+    const { app, calls } = makeMmsApp(
+      Object.fromEntries(sizes.map((size, i) => [key(i), { contentType: 'image/jpeg', size }])),
+    );
+    const res = await send(app, { body: 'here are the photos', attachmentKeys: sizes.map((_, i) => key(i)) });
+    expect(res.status).toBe(201);
+    expect(calls.length).toBeGreaterThan(1);
+    expect(calls[0]?.staffOutreach).toBe(true);
+    expect(calls.slice(1).every((c) => !('staffOutreach' in c))).toBe(true);
+  });
+```
+
+1e. W2 share exception at the input seam. Edit (the end of the existing
+"the route's append carries retryRoot and broadcastId" case):
+
+old:
+```ts
+    expect(plain.calls[0]).not.toHaveProperty('broadcastId');
+  });
+```
+new:
+```ts
+    expect(plain.calls[0]).not.toHaveProperty('broadcastId');
+  });
+
+  it('today-checklist W2 (PR11): a Retry passes staffOutreach, EXCEPT a retry of a share text (broadcast_id)', async () => {
+    const share = makeRetryApp({ ...FAILED_ORIGINAL, broadcast_id: 'b-1' });
+    expect((await press(share.app)).status).toBe(201);
+    expect(share.calls[0]).toMatchObject({ broadcastId: 'b-1' });
+    expect(share.calls[0]).not.toHaveProperty('staffOutreach');
+
+    const plain = makeRetryApp(FAILED_ORIGINAL);
+    expect((await press(plain.app)).status).toBe(201);
+    expect(plain.calls[0]?.staffOutreach).toBe(true);
+  });
+```
+
+1f. The route-level proof of the wiring (RED). Append at the end of
+`app/test/apiRoutes.test.ts`:
+```ts
+
+// today-checklist spec 7.3 (W1, W2) through the harness's DEFAULT send
+// service: since PR9 the /api router hands its OWN contacts repo to the send
+// service it builds, so a real staff send moves the world's
+// last_reached_out_at and emits ONE contact.updated, after its
+// conversation.updated. (Before PR9 the default service built a second, real
+// contacts repo and the world never saw the stamp.)
+describe('staff outreach through the default send service (today-checklist W1/W2, PR9-PR11)', () => {
+  const PHONE = '+15550100001';
+
+  async function seedThread(world: FakeWorld): Promise<string> {
+    const conversation = await world.conversationsRepo.createOrGetByParticipantPhone(PHONE, 'tenant_1to1');
+    world.contacts.push({ contactId: 'c-1', type: 'tenant', phone: PHONE, consent_method: 'inbound_text' });
+    return conversation.conversationId;
+  }
+  const contactUpdates = (world: FakeWorld) =>
+    world.emitted.filter((e) => e.event === 'contact.updated').map((e) => e.payload);
+  const post = (app: ReturnType<typeof makeWebhookHarness>['app'], path: string, body: object) =>
+    request(app).post(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE).send(body);
+
+  it('a staff text stamps the thread contact at the provider instant and emits ONE contact.updated, last', async () => {
+    const { app, world } = makeWebhookHarness();
+    const conversationId = await seedThread(world);
+
+    const res = await post(app, `/api/conversations/${conversationId}/messages`, { body: 'checking in' });
+
+    expect(res.status).toBe(201);
+    const sentAt = world.sentDetails[0]!.providerTs;
+    expect(world.reachedOutTouches).toEqual([{ contactId: 'c-1', at: sentAt, outcome: 'written' }]);
+    expect(world.contacts.find((c) => c.contactId === 'c-1')?.last_reached_out_at).toBe(sentAt);
+    expect(contactUpdates(world)).toEqual([{ contactId: 'c-1' }]);
+    const names = world.emitted.map((e) => e.event);
+    expect(names.lastIndexOf('contact.updated')).toBeGreaterThan(names.lastIndexOf('conversation.updated'));
+    // last_heard_from_at never moves on outbound (spec 7.1).
+    expect(world.heardFromTouches).toEqual([]);
+  });
+
+  it('a multi-batch MMS stamps and emits ONCE - on the first batch only (PR10)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const conversationId = await seedThread(world);
+    const sizes = [58_101, 929_757, 76_934, 918_527, 923_368, 73_092, 89_528];
+    const key = (i: number): string => `uploads/deadbee${i}`;
+    sizes.forEach((size, i) => world.mediaObjects.set(key(i), { body: Buffer.alloc(size), contentType: 'image/jpeg' }));
+
+    const res = await post(app, `/api/conversations/${conversationId}/messages`, {
+      body: 'here are the photos',
+      attachmentKeys: sizes.map((_, i) => key(i)),
+    });
+
+    expect(res.status).toBe(201);
+    expect(world.sent.length).toBeGreaterThan(1);
+    expect(world.reachedOutTouches.map((t) => t.at)).toEqual([world.sentDetails[0]!.providerTs]);
+    expect(contactUpdates(world)).toEqual([{ contactId: 'c-1' }]);
+  });
+
+  it('a staff Retry of a failed text stamps; a Retry of a share text (broadcast_id) does not (PR11)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const conversationId = await seedThread(world);
+    const failedRow = (providerSid: string, agoMs: number, extra: { broadcastId?: string } = {}) => ({
+      conversationId,
+      providerSid,
+      providerTs: new Date(Date.now() - agoMs).toISOString(),
+      type: 'sms' as const,
+      direction: 'outbound' as const,
+      author: 'teammate' as const,
+      body: `failed ${providerSid}`,
+      deliveryStatus: 'undelivered' as const,
+      errorCode: '30003',
+      ...extra,
+    });
+    await world.messagesRepo.append(failedRow('SMplainfail', 60_000));
+    await world.messagesRepo.append(failedRow('SMsharefail', 50_000, { broadcastId: 'b-1' }));
+    const retry = (sid: string) => post(app, `/api/conversations/${conversationId}/messages/${sid}/retry`, {});
+
+    expect((await retry('SMsharefail')).status).toBe(201);
+    expect(world.reachedOutTouches).toEqual([]);
+    expect(contactUpdates(world)).toEqual([]);
+
+    expect((await retry('SMplainfail')).status).toBe(201);
+    expect(world.reachedOutTouches.map((t) => t.contactId)).toEqual(['c-1']);
+    expect(contactUpdates(world)).toEqual([{ contactId: 'c-1' }]);
+  });
+});
+```
+
+1g. (PIN) The share fan-out never stamps. `app/test/broadcastFanOut.test.ts`,
+inside `describe('broadcast.send (M1.8a)', ...)`. Edit:
+
+old:
+```ts
+  it('writes a units# broadcast_sent audit row with the recipient count on completion', async () => {
+```
+new:
+```ts
+  // today-checklist spec 7.2: a share starts its own clock - it never moves
+  // last_reached_out_at, even through the REAL send wrapper over the world's
+  // recording contacts fake.
+  it('today-checklist: a share send never stamps last_reached_out_at', async () => {
+    const alice = seedTenant(world, { contactId: 'c-alice', firstName: 'Alice', phone: '+15550100001' });
+    seedUnit(world);
+    seedBroadcast(world, [alice]);
+    wireHandler(world, logger);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(1);
+    expect(world.reachedOutTouches).toEqual([]);
+    expect(world.emitted.filter((e) => e.event === 'contact.updated')).toEqual([]);
+  });
+
+  it('writes a units# broadcast_sent audit row with the recipient count on completion', async () => {
+```
+
+1h. (PIN) The automatic 30003 retry never stamps.
+`app/test/retrySendAttempt.test.ts`, inside the top-level describe. Edit:
+
+old:
+```ts
+  it('7b a record-phase fence LOST after a recorded send is a WARN, never sent_unrecorded: the row exists, the takeover reconcile repairs', async () => {
+```
+new:
+```ts
+  // today-checklist spec 7.2: the automatic retry is a machine resend of a
+  // staff text that already counted - no stamp, even through the REAL wrapper.
+  it('today-checklist: a successful automatic retry never stamps last_reached_out_at', async () => {
+    wire();
+    const row = await seedRetried('SMnostamp1');
+    await run(row);
+    expect(world.sent).toHaveLength(1);
+    expect(world.reachedOutTouches).toEqual([]);
+    expect(world.emitted.filter((e) => e.event === 'contact.updated')).toEqual([]);
+  });
+
+  it('7b a record-phase fence LOST after a recorded send is a WARN, never sent_unrecorded: the row exists, the takeover reconcile repairs', async () => {
+```
+
+1i. (PIN) The missed-call auto text never stamps.
+`app/test/missedCallAutoText.test.ts`. Edit:
+
+old:
+```ts
+  it('gate: tenant with the full intake profile - skips', async () => {
+```
+new:
+```ts
+  it('today-checklist spec 7.2: the missed-call auto text never stamps last_reached_out_at (automated)', async () => {
+    seedCallerContact(world, { type: 'unknown', status: 'needs_review' });
+    await enqueueImmediate(MISSED_CALL_AUTOTEXT_JOB, { callSid: CALL_SID, conversationId: CONV_ID });
+    await queueAdapter.settle();
+    expect(world.sent).toHaveLength(1);
+    expect(world.reachedOutTouches).toEqual([]);
+  });
+
+  it('gate: tenant with the full intake profile - skips', async () => {
+```
+
+1j. (PIN) The housing-fair welcome never stamps. `app/test/publicIntake.test.ts`.
+Edit:
+
+old:
+```ts
+  it('is idempotent on a repeat phone: NO second contact, NO second welcome text (no SMS spam)', async () => {
+```
+new:
+```ts
+  it('today-checklist spec 7.2: the welcome text never stamps last_reached_out_at (automated)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const res = await request(app).post(FAIR).set('x-origin-verify', SECRET).send(signupBody());
+    expect(res.status).toBe(200);
+    expect(world.sent).toHaveLength(1);
+    expect(world.reachedOutTouches).toEqual([]);
+  });
+
+  it('is idempotent on a repeat phone: NO second contact, NO second welcome text (no SMS spam)', async () => {
+```
+
+1k. (PIN) Tour reminder Send now never stamps - through the REAL default send
+service (no spy). `app/test/tourRemindersApi.test.ts`, inside
+`describe('POST /api/tours/:tourId/reminders/:reminderId/send-now', ...)`.
+Edit:
+
+old:
+```ts
+  // S7 T7.8, the send-now half. Same `.find(...)!` shape, same fix, one
+```
+new:
+```ts
+  // today-checklist spec 7.2: staff pick only the time; the copy is the
+  // automated reminder, so Send now never moves last_reached_out_at. Driven
+  // through the /api router's REAL default send service (no spy), which since
+  // PR9 reads the world's recording contacts fake.
+  it('today-checklist: Send now through the real default send service never stamps last_reached_out_at', async () => {
+    const { app, world } = makeWebhookHarness();
+    const { tourId, reminderId } = await seedSendNowTour(world);
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(200);
+    expect(world.sent).toHaveLength(1);
+    expect(world.reachedOutTouches).toEqual([]);
+  });
+
+  // S7 T7.8, the send-now half. Same `.find(...)!` shape, same fix, one
+```
+
+1l. (PIN) The tour reminder poll never asks for a stamp (C8). Append at the
+end of `app/test/tourRemindersApi.test.ts`:
+```ts
+
+// today-checklist spec 7.2 (C8): the reminder poll is automated. Its fixture
+// drives a spy, so the case asserts at the input seam - no staffOutreach, the
+// ONLY stamp trigger (sendMessage.test.ts proves it) - and on the world.
+describe('today-checklist: the tour reminder poll never asks for a staff-outreach stamp', () => {
+  it('a poll send carries no staffOutreach and moves no last_reached_out_at', async () => {
+    const spy = makeSendSpy();
+    const { world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const deps = pollDepsFrom(world, spy.service);
+    const tourId = await seedQuietTour(world, 'nostamp', '+15550720009');
+    Object.assign(
+      world.contacts.find((c) => c.contactId === 'contact-quiet-nostamp')!,
+      { consent_method: 'inbound_text' },
+    );
+    seedReminder(world, {
+      reminderId: 'rem-nostamp',
+      tourId,
+      kind: 'day_before',
+      dueAt: '2098-12-09T15:00:00.000Z',
+    });
+
+    await runDueTourReminders('2098-12-09T15:00:01.000Z', deps);
+
+    expect(spy.sent).toHaveLength(1);
+    expect(spy.sent[0]).not.toHaveProperty('staffOutreach');
+    expect(world.reachedOutTouches).toEqual([]);
+  });
+});
+```
+
+1m. (PIN) Nudge Send now (real default service) and the nudge poll (input
+seam, C8). `app/test/placementNudgesApi.test.ts` - imports. Edit:
+
+old:
+```ts
+import { MANUAL_ONLY_NUDGE_KINDS, NUDGE_RUNGS } from '../src/jobs/placementNudges.js';
+```
+new:
+```ts
+import { MANUAL_ONLY_NUDGE_KINDS, NUDGE_RUNGS, runDuePlacementNudges } from '../src/jobs/placementNudges.js';
+```
+Edit:
+
+old:
+```ts
+import {
+  isoHoursFromNow,
+  quietWindowAroundNow,
+  quietWindowAwayFromNow,
+} from './helpers/settingsStub.js';
+```
+new:
+```ts
+import {
+  isoHoursFromNow,
+  quietOffSettingsRepo,
+  quietWindowAroundNow,
+  quietWindowAwayFromNow,
+} from './helpers/settingsStub.js';
+```
+Then, inside `describe('POST /api/placements/:placementId/nudges/:nudgeId/send-now', ...)`.
+Edit:
+
+old:
+```ts
+  it('409s nudge_not_pending with the honest current view when the rung already fired', async () => {
+```
+new:
+```ts
+  // today-checklist spec 7.2: a nudge's copy is the automated nudge, so
+  // neither Send now nor the poll moves last_reached_out_at.
+  it('today-checklist: Send now through the real default send service never stamps last_reached_out_at', async () => {
+    const { app, world } = makeWebhookHarness();
+    const { placementId, nudgeId } = await seedSendNowNudge(world);
+
+    const res = await authed(app).post(`/api/placements/${placementId}/nudges/${nudgeId}/send-now`);
+
+    expect(res.status).toBe(200);
+    expect(world.sent).toHaveLength(1);
+    expect(world.reachedOutTouches).toEqual([]);
+  });
+
+  it('today-checklist (C8): the nudge poll never asks for a staff-outreach stamp', async () => {
+    const spy = makeSendSpy();
+    const { world } = makeWebhookHarness({ sendMessageService: spy.service });
+    await seedSendNowNudge(world);
+
+    await runDuePlacementNudges(new Date().toISOString(), {
+      placementNudgesRepo: world.placementNudgesRepo,
+      placementsRepo: world.placementsRepo,
+      contactsRepo: world.contactsRepo,
+      unitsRepo: world.unitsRepo,
+      conversationsRepo: world.conversationsRepo,
+      sendMessageService: spy.service,
+      settingsRepo: quietOffSettingsRepo(),
+      // Every nudge kind is held back by default (founder decision
+      // 2026-08-18); an empty set lets the poll send so its input can be read.
+      manualOnlyKinds: new Set(),
+    });
+
+    expect(spy.sent).toHaveLength(1);
+    expect(spy.sent[0]).not.toHaveProperty('staffOutreach');
+    expect(world.reachedOutTouches).toEqual([]);
+  });
+
+  it('409s nudge_not_pending with the honest current view when the rung already fired', async () => {
+```
+
+#### Step 2 - RED
+
+Needs DynamoDB Local up (`npm run db:start` STARTS it; never restart it).
+Before PR9 the harness's default send service builds a real contacts repo.
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/apiRoutes.test.ts test/broadcastFanOut.test.ts test/retrySendAttempt.test.ts test/missedCallAutoText.test.ts test/publicIntake.test.ts test/tourRemindersApi.test.ts test/placementNudgesApi.test.ts
+```
+Expected failures, and why:
+- apiRoutes.test.ts: the three edited call-shape pins (no `staffOutreach` in
+  the call); "only the FIRST batch carries staffOutreach" (`calls[0]
+  .staffOutreach` undefined); "a Retry passes staffOutreach, EXCEPT ..." (the
+  plain call lacks it); the three harness cases (`world.reachedOutTouches` is
+  `[]`: the default service never calls the world fake, and no caller passes
+  the option).
+- Every other new case is a (PIN) and passes already. Every pre-existing case
+  in these files stays green.
+
+#### Step 3 - implementation
+
+3a. `app/src/routes/api.ts` - build the contacts repo BEFORE the send service
+and pass it (PR9, WI2). Edit:
+
+old:
+```ts
+  const sseHeartbeatMs = deps.sseHeartbeatMs ?? SSE_HEARTBEAT_MS;
+  const sendMessage =
+    deps.sendMessageService ??
+    createSendMessageService({
+      config,
+      logger: deps.logger,
+      conversationsRepo: conversations,
+      messagesRepo: messages,
+      auditRepo: audit,
+      events,
+    });
+  // Email-channel A5: the outbound email send service. Default-constructed HERE
+  // (the sendMessage precedent lives in this router, not index.ts) so the
+  // production composition root needs no change; it builds its own EmailAdapter
+  // from config. The email send route also resolves the recipient contact by
+  // address, so a contacts repo is shared with it.
+  const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
+```
+new:
+```ts
+  const sseHeartbeatMs = deps.sseHeartbeatMs ?? SSE_HEARTBEAT_MS;
+  // ONE contacts repo for every send path in this router: the 1:1 send
+  // service (its opt-out / deleted / consent gates and, since the
+  // today-checklist spec 7.3, the W1/W2 staff-outreach stamp), the email path
+  // and the group reply path. Built BEFORE the send service so the service
+  // reads the router's repo instead of default-constructing a second one; an
+  // injected fake wins through `??`, as for every repo above.
+  const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
+  const sendMessage =
+    deps.sendMessageService ??
+    createSendMessageService({
+      config,
+      logger: deps.logger,
+      conversationsRepo: conversations,
+      messagesRepo: messages,
+      contactsRepo: contacts,
+      auditRepo: audit,
+      events,
+    });
+  // Email-channel A5: the outbound email send service. Default-constructed HERE
+  // (the sendMessage precedent lives in this router, not index.ts) so the
+  // production composition root needs no change; it builds its own EmailAdapter
+  // from config. The email send route also resolves the recipient contact by
+  // address, so it shares the contacts repo built above.
+```
+
+3b. W1 - the 1:1 send loop passes the option on the FIRST batch only (PR10).
+Edit:
+
+old:
+```ts
+          ...(outboundMediaUrls !== undefined && { mediaUrls: outboundMediaUrls }),
+          ...(batchAttachments.length > 0 && { attachments: batchAttachments }),
+          automated: false,
+        });
+        if (i === 0) first = outcome;
+```
+new:
+```ts
+          ...(outboundMediaUrls !== undefined && { mediaUrls: outboundMediaUrls }),
+          ...(batchAttachments.length > 0 && { attachments: batchAttachments }),
+          automated: false,
+          // today-checklist W1 (spec 7.3, PR10): a staff text is staff
+          // outreach. The FIRST batch only, so a photo drop split across
+          // several messages stamps and emits once.
+          ...(i === 0 && { staffOutreach: true as const }),
+        });
+        if (i === 0) first = outcome;
+```
+
+3c. W2 - the Retry passes it except for a share text (PR11). Edit:
+
+old:
+```ts
+        retryRoot,
+        ...(original.broadcast_id !== undefined && { broadcastId: original.broadcast_id }),
+        // retry-send-window D14: the recorded recipient, when it still exists.
+        ...(recipient !== undefined && { recipient }),
+      });
+```
+new:
+```ts
+        retryRoot,
+        ...(original.broadcast_id !== undefined && { broadcastId: original.broadcast_id }),
+        // retry-send-window D14: the recorded recipient, when it still exists.
+        ...(recipient !== undefined && { recipient }),
+        // today-checklist W2 (spec 7.3, PR11): a staff Retry is staff outreach -
+        // EXCEPT a retry of a share text (broadcast_id), which is a share, and
+        // shares never move last_reached_out_at (spec 7.2).
+        ...(original.broadcast_id === undefined && { staffOutreach: true as const }),
+      });
+```
+
+WI2 record (for the S2 report): before, `createSendMessageService` received
+no `contactsRepo` and default-constructed `createContactsRepo({ logger:
+deps.logger })`; `const contacts` was built after it and went to the email
+service, the group service and every sub-router below. After, `contacts` is
+built first with the SAME expression and goes to the send service too;
+nothing between the old and new positions referenced `contacts` (a `const`
+read before its line would throw), so every other consumer gets the same
+repo object as before. In production the only change is one fewer client
+object. In tests the default send service now reads an injected
+`deps.contactsRepo`; a scan of every test that drives a 1:1 send, Retry or
+Send now WITHOUT `sendMessageService` found only harness-based ones
+(`world.contactsRepo`, a complete fake) - list them in the report from
+`grep -rln "conversations/.*/messages\|send-now" app/test`.
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/apiRoutes.test.ts test/broadcastFanOut.test.ts test/retrySendAttempt.test.ts test/missedCallAutoText.test.ts test/publicIntake.test.ts test/tourRemindersApi.test.ts test/placementNudgesApi.test.ts test/rateLimit.test.ts test/relayApi.test.ts test/groupSendRoute.test.ts test/emailRoute.test.ts
+```
+Expect all green. Then (bare):
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0.
+
+#### Step 5 - ASCII check on added lines
+
+```
+git -C W:/tmp/today-checklist diff -U0 -- app/src/routes/api.ts app/test/apiRoutes.test.ts app/test/broadcastFanOut.test.ts app/test/retrySendAttempt.test.ts app/test/missedCallAutoText.test.ts app/test/publicIntake.test.ts app/test/tourRemindersApi.test.ts app/test/placementNudgesApi.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0`.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add app/src/routes/api.ts app/test/apiRoutes.test.ts app/test/broadcastFanOut.test.ts app/test/retrySendAttempt.test.ts app/test/missedCallAutoText.test.ts app/test/publicIntake.test.ts app/test/tourRemindersApi.test.ts app/test/placementNudgesApi.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(api): staff send and Retry stamp last_reached_out_at; the send service reads the router's contacts repo (tracker #31 S2.2)" -m "W1 passes staffOutreach on the first MMS batch only; W2 on every Retry except a share text. The contacts repo is built before the send service and passed in (PR9, WI2). No-stamp pins for the share fan-out, automatic retry, missed-call and welcome texts, both polls and both Send now routes." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S2.3 - W3: an email SES accepted stamps the addressed contact
+
+PR12. The stamp follows `adapter.send` resolving; a send that throws stamps
+nothing; `contact.updated` is emitted once, after the `sent` emit, when
+written.
+
+Files:
+- `app/src/services/sendEmailMessage.ts`
+- Tests: `app/test/sendEmailMessage.test.ts`
+
+#### Step 1 - failing tests
+
+1a. `app/test/sendEmailMessage.test.ts` - the overrides. Edit:
+
+old:
+```ts
+  /** Prior messages listByConversation returns (newest-first) for reply threading. */
+  priorMessages?: MessageItem[];
+}
+```
+new:
+```ts
+  /** Prior messages listByConversation returns (newest-first) for reply threading. */
+  priorMessages?: MessageItem[];
+  /** today-checklist W3: touchLastReachedOut's answer (default 'written'). */
+  reachedOutResult?: 'written' | 'skipped' | 'failed';
+}
+```
+
+1b. The fake. Edit:
+
+old:
+```ts
+  const touchEmailLastSeen = vi.fn(async () => {});
+  const head = vi.fn();
+```
+new:
+```ts
+  const touchEmailLastSeen = vi.fn(async () => {});
+  const touchLastReachedOut = vi.fn(async (_id: string, _at: string) => over.reachedOutResult ?? 'written');
+  const head = vi.fn();
+```
+Edit:
+
+old:
+```ts
+      getById: async (id: string) => (contact?.contactId === id ? contact : undefined),
+      touchEmailLastSeen,
+    } as unknown as ContactsRepo,
+```
+new:
+```ts
+      getById: async (id: string) => (contact?.contactId === id ? contact : undefined),
+      touchEmailLastSeen,
+      touchLastReachedOut,
+    } as unknown as ContactsRepo,
+```
+Edit (the returned bag):
+
+old:
+```ts
+    touchLastActivity,
+    touchEmailLastSeen,
+    head,
+```
+new:
+```ts
+    touchLastActivity,
+    touchEmailLastSeen,
+    touchLastReachedOut,
+    head,
+```
+
+1c. Append at the end of the file:
+```ts
+
+// today-checklist spec 7.3 (W3, ruling PR12): an email counts as staff
+// outreach once SES ACCEPTED it. The addressed contact is stamped at the row's
+// own instant; ONE contact.updated follows the sent emit, only when written. A
+// send the adapter rejects stamps nothing, and a stamp never fails a sent mail.
+describe('sendEmailMessage - W3 staff-outreach stamp (today-checklist)', () => {
+  const contactUpdates = (f: ReturnType<typeof makeFakes>) =>
+    f.emit.mock.calls.filter((c) => c[0] === 'contact.updated');
+
+  it('stamps the addressed contact at the row instant AFTER SES accepted, and emits ONE contact.updated after the sent emit', async () => {
+    const f = makeFakes();
+    const out = await f.service(input());
+    expect(out.status).toBe('sent');
+    expect(f.touchLastReachedOut).toHaveBeenCalledTimes(1);
+    expect(f.touchLastReachedOut).toHaveBeenCalledWith('c1', NOW);
+    expect(f.touchLastReachedOut.mock.invocationCallOrder[0]).toBeGreaterThan(f.send.mock.invocationCallOrder[0]!);
+    expect(contactUpdates(f)).toEqual([['contact.updated', { contactId: 'c1' }]]);
+    const names = f.emit.mock.calls.map((c) => c[0]);
+    expect(names.indexOf('contact.updated')).toBeGreaterThan(names.lastIndexOf('conversation.updated'));
+    expect(names.at(-1)).toBe('contact.updated');
+  });
+
+  it('a send the adapter rejects stamps nothing and emits no contact.updated', async () => {
+    const send = vi.fn(async () => {
+      throw new Error('SES boom');
+    });
+    const f = makeFakes({ send });
+    await expect(f.service(input())).rejects.toThrow('SES boom');
+    expect(f.touchLastReachedOut).not.toHaveBeenCalled();
+    expect(contactUpdates(f)).toEqual([]);
+  });
+
+  it('a skipped or failed stamp emits no contact.updated, and the mail still reports sent', async () => {
+    for (const reachedOutResult of ['skipped', 'failed'] as const) {
+      const f = makeFakes({ reachedOutResult });
+      const out = await f.service(input());
+      expect(out.status).toBe('sent');
+      expect(f.touchLastReachedOut).toHaveBeenCalledTimes(1);
+      expect(contactUpdates(f)).toEqual([]);
+    }
+  });
+
+  it('a REJECTING stamp never fails, marks failed or rethrows a sent mail (M2)', async () => {
+    const f = makeFakes();
+    f.touchLastReachedOut.mockRejectedValueOnce(new Error('dynamo down'));
+    const out = await f.service(input());
+    expect(out.status).toBe('sent');
+    const statuses = f.updateDeliveryStatus.mock.calls.map((c) => (c as unknown[])[1]);
+    expect(statuses).not.toContain('failed');
+    expect(contactUpdates(f)).toEqual([]);
+  });
+
+  it('a redirected thread still stamps the ADDRESSED contact', async () => {
+    const f = makeFakes({ attachReturns: 'conv-OTHER' });
+    const out = await f.service(input());
+    expect(out.redirected).toBe(true);
+    expect(f.touchLastReachedOut).toHaveBeenCalledWith('c1', NOW);
+  });
+
+  it('a refused send (suppressed contact) stamps nothing', async () => {
+    const f = makeFakes({ contact: { email_opt_out: true } });
+    await expect(f.service(input())).rejects.toBeInstanceOf(EmailSuppressedError);
+    expect(f.touchLastReachedOut).not.toHaveBeenCalled();
+  });
+});
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/sendEmailMessage.test.ts
+```
+Expected failures, and why: the first, "a skipped or failed", and "a
+redirected thread" cases fail because the service never calls
+`touchLastReachedOut` (called 0 times; no `contact.updated`). The adapter
+throw, rejecting-stamp and suppressed cases pass already (PIN). Every
+pre-existing case stays green.
+
+#### Step 3 - implementation
+
+3a. `app/src/services/sendEmailMessage.ts` - the import. Edit:
+
+old:
+```ts
+import { isKillSwitchOff } from './scheduledSendSuppression.js';
+```
+new:
+```ts
+import { isKillSwitchOff } from './scheduledSendSuppression.js';
+import { recordStaffOutreach } from './staffOutreach.js';
+```
+
+3b. The stamp, right after the adapter's failure-mapping try. Edit:
+
+old:
+```ts
+      log.error({ conversationId: effectiveConversationId, providerSid: bareId }, 'email send failed at adapter');
+      throw err;
+    }
+
+```
+new:
+```ts
+      log.error({ conversationId: effectiveConversationId, providerSid: bareId }, 'email send failed at adapter');
+      throw err;
+    }
+
+    // today-checklist W3 (spec 7.3, PR12): SES accepted the mail - staff reached
+    // the addressed contact. Stamped at the row's own instant (nowIso, the
+    // providerTs it was appended under). recordStaffOutreach never throws (a
+    // failed stamp is its own ERROR line), so it can never mark this sent mail
+    // failed or rethrow (M2). Its contact.updated follows the sent emit below.
+    const reachedOut = await recordStaffOutreach({ contacts, log }, [{ contactId, at: nowIso }]);
+
+```
+
+3c. The event, after the `sent` emit. Edit:
+
+old:
+```ts
+        'email post-send SSE/touch failed - mail sent; the timeline may be briefly stale',
+      );
+    }
+
+```
+new:
+```ts
+        'email post-send SSE/touch failed - mail sent; the timeline may be briefly stale',
+      );
+    }
+
+    // W3: ONE contact.updated, the last event of the send, only when the stamp
+    // above was written.
+    if (reachedOut.includes(contactId)) events.emit('contact.updated', { contactId });
+
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/sendEmailMessage.test.ts test/emailRoute.test.ts test/emailEvents.test.ts
+```
+Expect all green. Then (bare):
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0.
+
+#### Step 5 - ASCII check
+
+`sendEmailMessage.ts` holds no non-ASCII today, so check the whole files:
+```
+tr -d '\11\12\15\40-\176' < W:/tmp/today-checklist/app/src/services/sendEmailMessage.ts | wc -c
+git -C W:/tmp/today-checklist diff -U0 -- app/test/sendEmailMessage.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0` twice.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add app/src/services/sendEmailMessage.ts app/test/sendEmailMessage.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(email): an email SES accepted stamps last_reached_out_at on the addressed contact (tracker #31 S2.3)" -m "Stamped at the row instant right after adapter.send resolves; contact.updated follows the sent emit only when written. An adapter throw stamps nothing; a stamp never fails a sent mail (spec 7.3 W3, PR12)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S2.4 - W6: the outbound press-1 that dials the contact stamps, after the TwiML is sent
+
+PR13, WI3. `resolveOutboundTarget` carries the contactId; the press-1 instant
+is hoisted into `dialAt` (used for `answeredAt` and the stamp); the stamp
+starts only AFTER `sendTwiml` and is handed, un-awaited, to the new
+`afterResponse` dep. No stamp on any refusal branch, on an inbound press-1,
+or in `originateCall`.
+
+Files:
+- `app/src/routes/webhooks/voice.ts`
+- Tests: `app/test/voiceOutbound.test.ts`
+
+#### Step 1 - failing tests
+
+1a. `app/test/voiceOutbound.test.ts` - imports. Edit:
+
+old:
+```ts
+import {
+  createFakeWorld,
+  makeWebhookHarness,
+  signedTwilioPost,
+  ORIGIN_SECRET,
+  OUR_NUMBER,
+  type FakeWorld,
+} from './helpers/twilioWebhookHarness.js';
+```
+new:
+```ts
+import {
+  createFakeWorld,
+  makeWebhookHarness,
+  signedTwilioPost,
+  ORIGIN_SECRET,
+  OUR_NUMBER,
+  type FakeWorld,
+  type Harness,
+} from './helpers/twilioWebhookHarness.js';
+import { buildApp } from '../src/app.js';
+import { createLogger } from '../src/lib/logger.js';
+```
+
+1b. Append at the end of the file:
+```ts
+
+// ---------------------------------------------------------------------------
+// today-checklist W6 (spec 7.3, ruling PR13): the outbound press-1 that dials
+// the CONTACT is staff outreach. The stamp runs AFTER the TwiML is sent,
+// through the voice router's afterResponse seam, which these cases capture and
+// await - supertest resolves when the response ends, so an immediate
+// assertion would race the post-response work. The harness has no option for
+// the seam (it is S1-owned), so gateApp builds a SECOND app over the SAME
+// world with the harness's config, which signedTwilioPost signs for.
+// ---------------------------------------------------------------------------
+describe('outbound press-1 - the staff-outreach stamp (today-checklist W6)', () => {
+  function gateApp(harness: Harness, works: Promise<void>[]): ReturnType<typeof buildApp> {
+    const { world } = harness;
+    return buildApp({
+      config: harness.config,
+      logger: createLogger({ level: 'info', destination: harness.capture.stream }),
+      auth: { usersRepo: harness.fakeUsers.repo },
+      webhooks: {
+        adapter: world.adapter,
+        conversationsRepo: world.conversationsRepo,
+        messagesRepo: world.messagesRepo,
+        contactsRepo: world.contactsRepo,
+        auditRepo: world.auditRepo,
+        settingsRepo: world.settingsRepo,
+        usersRepo: harness.fakeUsers.repo,
+        pushService: world.pushService,
+        events: world.events,
+        extractionRepo: world.extractionRepo,
+        afterResponse: (work) => {
+          works.push(work);
+        },
+      },
+    });
+  }
+
+  /** Originate through the harness so a ringing outbound row + its thread exist. */
+  async function originate(): Promise<{
+    world: FakeWorld;
+    harness: ReturnType<typeof makeWebhookHarness>;
+    conversationId: string;
+    callSid: string;
+  }> {
+    const world = createFakeWorld();
+    const contactId = seedContact(world);
+    const harness = makeWebhookHarness({ world });
+    seedNavigatorCell(harness);
+    const res = await request(harness.app)
+      .post(`/api/contacts/${contactId}/call`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(res.status).toBe(200);
+    const twimlUrl = world.initiatedCalls[0]!.twimlUrl;
+    const conversationId = new URL(twimlUrl).searchParams.get('conversationId')!;
+    return { world, harness, conversationId, callSid: res.body.callSid };
+  }
+
+  const outboundGate = (conversationId: string, callSid: string): string =>
+    `/webhooks/twilio/voice/whisper-gate?conversationId=${encodeURIComponent(conversationId)}&parentCallSid=${encodeURIComponent(callSid)}&outbound=1`;
+  const contactUpdates = (world: FakeWorld) =>
+    world.emitted.filter((e) => e.event === 'contact.updated').map((e) => e.payload);
+
+  it('originating a call never stamps (it rings the staff cell first)', async () => {
+    const { world } = await originate();
+    expect(world.reachedOutTouches).toEqual([]);
+    expect(contactUpdates(world)).toEqual([]);
+  });
+
+  it('press-1 that dials the contact stamps at the press-1 instant (= answered_at) and emits ONE contact.updated', async () => {
+    const { world, harness, conversationId, callSid } = await originate();
+    const works: Promise<void>[] = [];
+
+    const res = await signedTwilioPost(gateApp(harness, works), outboundGate(conversationId, callSid), {
+      Digits: '1',
+      CallSid: 'CAnav-leg',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain(`<Number>${TARGET}</Number>`);
+    expect(works).toHaveLength(1);
+    await Promise.all(works);
+    const entry = world.messages.find((m) => m.provider_sid === callSid)!;
+    expect(typeof entry.answered_at).toBe('string');
+    expect(world.reachedOutTouches).toEqual([{ contactId: 'c-target', at: entry.answered_at, outcome: 'written' }]);
+    expect(contactUpdates(world)).toEqual([{ contactId: 'c-target' }]);
+    // last_heard_from_at never moves on outbound (spec 7.1).
+    expect(world.heardFromTouches).toEqual([]);
+  });
+
+  it('the response does not wait for the stamp: a parked stamp still lets the <Dial> answer (WI3)', async () => {
+    const { world, harness, conversationId, callSid } = await originate();
+    let release!: () => void;
+    const parked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const realTouch = world.contactsRepo.touchLastReachedOut;
+    world.contactsRepo.touchLastReachedOut = async (contactId, at) => {
+      await parked;
+      return realTouch(contactId, at);
+    };
+    const works: Promise<void>[] = [];
+
+    const res = await signedTwilioPost(gateApp(harness, works), outboundGate(conversationId, callSid), {
+      Digits: '1',
+      CallSid: 'CAnav-leg',
+    });
+
+    expect(res.text).toContain('<Dial');
+    expect(world.reachedOutTouches).toEqual([]);
+    release();
+    await Promise.all(works);
+    expect(world.reachedOutTouches.map((t) => t.contactId)).toEqual(['c-target']);
+  });
+
+  it('no refusal stamps: an unresolvable target, a voice opt-out at press-1, and a timeout', async () => {
+    for (const refusal of ['unresolved', 'opted_out', 'timeout'] as const) {
+      const { world, harness, conversationId, callSid } = await originate();
+      if (refusal === 'opted_out') world.contacts.find((c) => c.contactId === 'c-target')!.voice_opt_out = true;
+      const works: Promise<void>[] = [];
+
+      const res = await signedTwilioPost(
+        gateApp(harness, works),
+        outboundGate(refusal === 'unresolved' ? 'conv-does-not-exist' : conversationId, callSid),
+        refusal === 'timeout' ? { CallSid: 'CAnav-leg' } : { Digits: '1', CallSid: 'CAnav-leg' },
+      );
+
+      expect(res.text, refusal).toContain('<Hangup');
+      expect(res.text, refusal).not.toContain('<Dial');
+      await Promise.all(works);
+      expect(world.reachedOutTouches, refusal).toEqual([]);
+      expect(contactUpdates(world), refusal).toEqual([]);
+    }
+  });
+
+  it('an INBOUND-leg press-1 (no outbound=1) stamps nothing', async () => {
+    const { world, harness, conversationId, callSid } = await originate();
+    const works: Promise<void>[] = [];
+
+    const res = await signedTwilioPost(
+      gateApp(harness, works),
+      `/webhooks/twilio/voice/whisper-gate?conversationId=${encodeURIComponent(conversationId)}&parentCallSid=${encodeURIComponent(callSid)}`,
+      { Digits: '1', CallSid: 'CAcallee-leg' },
+    );
+
+    expect(res.text).toContain('<Pause');
+    expect(works).toEqual([]);
+    expect(world.reachedOutTouches).toEqual([]);
+  });
+
+  it('a dial to a number no contact holds runs the work and stamps nobody', async () => {
+    const { world, harness, conversationId, callSid } = await originate();
+    world.contacts.find((c) => c.contactId === 'c-target')!.phone = '+15550199999';
+    const works: Promise<void>[] = [];
+
+    const res = await signedTwilioPost(gateApp(harness, works), outboundGate(conversationId, callSid), {
+      Digits: '1',
+      CallSid: 'CAnav-leg',
+    });
+
+    expect(res.text).toContain('<Dial');
+    await Promise.all(works);
+    expect(world.reachedOutTouches).toEqual([]);
+    expect(contactUpdates(world)).toEqual([]);
+  });
+
+  it('a stamp that throws never breaks the dial, and the handed-off work never rejects', async () => {
+    const { world, harness, conversationId, callSid } = await originate();
+    world.contactsRepo.touchLastReachedOut = async () => {
+      throw new Error('dynamo down');
+    };
+    const works: Promise<void>[] = [];
+
+    const res = await signedTwilioPost(gateApp(harness, works), outboundGate(conversationId, callSid), {
+      Digits: '1',
+      CallSid: 'CAnav-leg',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Dial');
+    await expect(Promise.all(works)).resolves.toBeDefined();
+    expect(contactUpdates(world)).toEqual([]);
+  });
+
+  it('the production default seam (no injected afterResponse): press-1 still dials and the stamp lands', async () => {
+    const { world, harness, conversationId, callSid } = await originate();
+
+    const res = await signedTwilioPost(harness.app, outboundGate(conversationId, callSid), {
+      Digits: '1',
+      CallSid: 'CAnav-leg',
+    });
+
+    expect(res.text).toContain('<Dial');
+    // The harness fake settles within microtasks; a status callback round
+    // trip is more than enough for the dropped promise to finish.
+    await signedTwilioPost(harness.app, '/webhooks/twilio/voice/status', {
+      CallSid: callSid,
+      DialCallStatus: 'completed',
+      DialCallDuration: '12',
+      ApiVersion: '2010-04-01',
+    });
+    expect(world.reachedOutTouches.map((t) => t.contactId)).toEqual(['c-target']);
+  });
+});
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/voiceOutbound.test.ts
+```
+Expected failures, and why: "press-1 that dials the contact ..." (`works`
+is `[]` - nothing calls `afterResponse` - and `reachedOutTouches` is `[]`),
+"the response does not wait ..." (`reachedOutTouches` stays `[]` after the
+release) and "the production default seam" (no stamp). The other five cases
+assert only absences and pass already (PIN): "originating a call never
+stamps", "no refusal stamps", "an INBOUND-leg press-1", "a dial to a number
+no contact holds" and "a stamp that throws" (with no work handed off,
+`Promise.all([])` resolves). Every pre-existing case stays green.
+
+#### Step 3 - implementation
+
+3a. `app/src/routes/webhooks/voice.ts` - the import. Edit:
+
+old:
+```ts
+import { createContactCapture } from '../../services/contactCapture.js';
+```
+new:
+```ts
+import { createContactCapture } from '../../services/contactCapture.js';
+import { recordStaffOutreach } from '../../services/staffOutreach.js';
+```
+
+3b. The dep. Edit:
+
+old:
+```ts
+  voicemailGreetingLookupBudgetMs?: number;
+}
+
+export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Router {
+```
+new:
+```ts
+  voicemailGreetingLookupBudgetMs?: number;
+  /**
+   * today-checklist W6 (spec 7.3): receives work a handler starts AFTER its
+   * TwiML response is sent - the outbound press-1 staff-outreach stamp. The
+   * production default attaches a .catch that logs and drops the promise.
+   * Tests pass a collector and await it: supertest resolves when the response
+   * ends, so an immediate assertion would race the post-response work.
+   */
+  afterResponse?: (work: Promise<void>) => void;
+}
+
+export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Router {
+```
+
+3c. The default. Edit:
+
+old:
+```ts
+  const greetingLookupBudgetMs = deps.voicemailGreetingLookupBudgetMs ?? VOICEMAIL_GREETING_LOOKUP_BUDGET_MS;
+```
+new:
+```ts
+  const greetingLookupBudgetMs = deps.voicemailGreetingLookupBudgetMs ?? VOICEMAIL_GREETING_LOOKUP_BUDGET_MS;
+  // today-checklist W6: post-response work (the outbound press-1 stamp). The
+  // default keeps a rejection from going unhandled and drops the promise.
+  const afterResponse =
+    deps.afterResponse ??
+    ((work: Promise<void>): void => {
+      work.catch((err: unknown) => {
+        log.error(
+          { errName: err instanceof Error ? err.name : typeof err },
+          'voice: post-response work failed (best-effort)',
+        );
+      });
+    });
+```
+
+3d. `resolveOutboundTarget` carries the contactId, and the stamp function
+follows it. Edit (the whole function, lines ~1305-1321):
+
+old:
+```ts
+  async function resolveOutboundTarget(
+    conversationId: string,
+  ): Promise<{ targetPhone: string; label: string; optedOut: boolean } | undefined> {
+    if (conversationId.length === 0) return undefined;
+    const conversation = await conversations.getById(conversationId);
+    const targetPhone =
+      typeof conversation?.participant_phone === 'string' && conversation.participant_phone.length > 0
+        ? conversation.participant_phone
+        : undefined;
+    if (conversation === undefined || targetPhone === undefined) return undefined;
+    const contact = await contacts.findByPhone(targetPhone);
+    return {
+      targetPhone,
+      label: maskedCallerLabel(contact),
+      optedOut: contact?.voice_opt_out === true,
+    };
+  }
+```
+new:
+```ts
+  async function resolveOutboundTarget(
+    conversationId: string,
+  ): Promise<{ targetPhone: string; label: string; optedOut: boolean; contactId?: string } | undefined> {
+    if (conversationId.length === 0) return undefined;
+    const conversation = await conversations.getById(conversationId);
+    const targetPhone =
+      typeof conversation?.participant_phone === 'string' && conversation.participant_phone.length > 0
+        ? conversation.participant_phone
+        : undefined;
+    if (conversation === undefined || targetPhone === undefined) return undefined;
+    const contact = await contacts.findByPhone(targetPhone);
+    return {
+      targetPhone,
+      label: maskedCallerLabel(contact),
+      optedOut: contact?.voice_opt_out === true,
+      // today-checklist W6: the contact the press-1 stamp moves - the SAME
+      // read, no extra round trip. Absent when no contact holds the number.
+      ...(contact !== undefined && { contactId: contact.contactId }),
+    };
+  }
+
+  /**
+   * today-checklist W6 (spec 7.3, PR13): an outbound call counts as staff
+   * outreach once the CONTACT's leg is dialed - the press-1 accept that returns
+   * the <Dial>, never originate (that rings the staff cell first). Started
+   * only AFTER the TwiML is sent and never awaited by the handler: nothing may
+   * be awaited between press-1 and the <Dial> (fix wave 4, N-1). Never
+   * rejects: recordStaffOutreach never throws, and the emit is guarded.
+   */
+  async function stampOutboundDial(
+    stampDeps: { contacts: Pick<ContactsRepo, 'touchLastReachedOut'>; log: Logger; events: EventBus },
+    contactId: string | undefined,
+    dialAt: string,
+  ): Promise<void> {
+    if (contactId === undefined) return;
+    const written = await recordStaffOutreach(
+      { contacts: stampDeps.contacts, log: stampDeps.log },
+      [{ contactId, at: dialAt }],
+    );
+    if (!written.includes(contactId)) return;
+    try {
+      stampDeps.events.emit('contact.updated', { contactId });
+    } catch (err) {
+      stampDeps.log.warn(
+        { contactId, errName: err instanceof Error ? err.name : typeof err },
+        'outbound whisper gate: contact.updated emit failed (best-effort) - the stamp itself COMMITTED',
+      );
+    }
+  }
+```
+(`type ContactsRepo` is already imported from `../../repos/contactsRepo.js`
+at lines 63-68; `Logger` and `EventBus` at lines 56 and 53. No import change
+beyond 3a.)
+
+3e. Hoist the press-1 instant. Edit:
+
+old:
+```ts
+      // Mark the bridge accepted NOW (press-1 is the authoritative "answered"
+      // signal, same as the inbound legs). Best-effort.
+      if (parentCallSid.length > 0) {
+        let stamp: CallStatusUpdate | undefined;
+        try {
+          stamp = await messages.updateCallStatus(parentCallSid, {
+            callStatus: 'in-progress',
+            answeredAt: new Date().toISOString(),
+          });
+```
+new:
+```ts
+      // Mark the bridge accepted NOW (press-1 is the authoritative "answered"
+      // signal, same as the inbound legs). Best-effort. `dialAt` is the ONE
+      // press-1 instant: the row's answered_at AND the staff-outreach stamp
+      // after the response (today-checklist W6), so the two always agree.
+      const dialAt = new Date().toISOString();
+      if (parentCallSid.length > 0) {
+        let stamp: CallStatusUpdate | undefined;
+        try {
+          stamp = await messages.updateCallStatus(parentCallSid, {
+            callStatus: 'in-progress',
+            answeredAt: dialAt,
+          });
+```
+
+3f. Start the stamp AFTER the TwiML. Edit (the line before the anchor holds
+a non-ASCII character; the anchor starts after it):
+
+old:
+```ts
+      );
+      sendTwiml(res, vr);
+      return;
+    }
+    if (digits === '1') {
+```
+new:
+```ts
+      );
+      sendTwiml(res, vr);
+      // today-checklist W6 (spec 7.3, PR13): the contact's leg is now dialed -
+      // staff reached out. Started only HERE, after the TwiML went out, and
+      // handed off un-awaited: nothing may be awaited between press-1 and the
+      // <Dial> (fix wave 4, N-1).
+      afterResponse(stampOutboundDial({ contacts, log, events }, target.contactId, dialAt));
+      return;
+    }
+    if (digits === '1') {
+```
+(`target` is narrowed to defined here: the unresolved branch returned above.)
+
+WI3 record (for the S2 report): between the press-1 `updateCallStatus` stamp
+and `sendTwiml` the diff adds NOTHING; the only new line before the stamp is
+the synchronous `const dialAt`. The new code after `sendTwiml` is one
+synchronous call that starts the promise. The reviewer reads this handler's
+diff line by line and records it.
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/voiceOutbound.test.ts test/voiceWebhook.test.ts test/voiceInboxActivity.test.ts test/founderTriage.test.ts
+```
+Expect all green. Then (bare):
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0.
+
+#### Step 5 - ASCII check on added lines
+
+```
+git -C W:/tmp/today-checklist diff -U0 -- app/src/routes/webhooks/voice.ts app/test/voiceOutbound.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0`.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add app/src/routes/webhooks/voice.ts app/test/voiceOutbound.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(voice): the outbound press-1 dial stamps last_reached_out_at after the TwiML is sent (tracker #31 S2.4)" -m "resolveOutboundTarget carries the contactId it already reads; the press-1 instant is hoisted into dialAt for answered_at and the stamp; the stamp starts after sendTwiml and is handed un-awaited to the new afterResponse dep. No stamp on refusals, inbound legs or originate (spec 7.3 W6, PR13, WI3)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S2.5 - W8: the dev fixture seams' outbound twin
+
+PR14, C1, C2. `oneToOneThreadContactId` is extracted from `attributeInbound`
+step 3 (behavior unchanged); `touchFixtureReachedOut` stamps the one-to-one
+thread's contact for an OUTBOUND fixture row and emits `contact.updated` on
+`appEvents` when written. Both seams, every branch that calls
+`touchFixtureHeardFrom`.
+
+Files:
+- `app/src/lib/heardFrom.ts`
+- `app/src/routes/dev.ts`
+- Tests: `app/test/heardFrom.test.ts`, `app/test/devTranscriptFixture.test.ts`,
+  `app/test/devMessageTransportFixture.test.ts`
+
+#### Step 1 - failing tests
+
+1a. `app/test/heardFrom.test.ts` - import. Edit:
+
+old:
+```ts
+import {
+  attributeInbound,
+  normalizeInstant,
+  repoLookup,
+```
+new:
+```ts
+import {
+  attributeInbound,
+  normalizeInstant,
+  oneToOneThreadContactId,
+  repoLookup,
+```
+Append at the end of the file:
+```ts
+
+// today-checklist W8 (PR14, C2): the ONE-TO-ONE half of the attribution rule,
+// shared with the dev fixtures' outbound twin. A multi-party thread names no
+// single contact.
+describe('oneToOneThreadContactId', () => {
+  const makeLookup = () => ({
+    byPhone: vi.fn((p: string) => (p === '+15550100005' ? { contactId: 'c-phone' } : undefined)),
+    byEmail: vi.fn((e: string) => (e === 'e@x.test' ? { contactId: 'c-email' } : undefined)),
+  });
+
+  it('names the first roster contact, else the phone holder, else the email holder', async () => {
+    expect(
+      await oneToOneThreadContactId(
+        {
+          type: 'tenant_1to1',
+          participants: [
+            { contactId: '', phone: '+15550100009' },
+            { contactId: 'c-t', phone: '+15550100001' },
+          ],
+        },
+        makeLookup(),
+      ),
+    ).toBe('c-t');
+    expect(await oneToOneThreadContactId({ type: 'tenant_1to1', participant_phone: '+15550100005' }, makeLookup())).toBe(
+      'c-phone',
+    );
+    expect(await oneToOneThreadContactId({ type: 'unknown_1to1', participant_email: 'e@x.test' }, makeLookup())).toBe(
+      'c-email',
+    );
+    expect(
+      await oneToOneThreadContactId({ type: 'tenant_1to1', participant_phone: '+15550100099' }, makeLookup()),
+    ).toBeUndefined();
+  });
+
+  it('a relay group or a group text names nobody and reads no repo', async () => {
+    const lookup = makeLookup();
+    expect(
+      await oneToOneThreadContactId(
+        { type: 'relay_group', participants: [{ contactId: 'c-r', phone: '+15550100002' }], participant_phone: '+15550109000' },
+        lookup,
+      ),
+    ).toBeUndefined();
+    expect(
+      await oneToOneThreadContactId({ type: 'group_text', participants: [{ contactId: 'c-g', phone: '+15550100003' }] }, lookup),
+    ).toBeUndefined();
+    expect(lookup.byPhone).not.toHaveBeenCalled();
+  });
+});
+```
+
+1b. `app/test/devTranscriptFixture.test.ts` - import. Edit:
+
+old:
+```ts
+import { loadConfig } from '../src/lib/config.js';
+```
+new:
+```ts
+import { loadConfig } from '../src/lib/config.js';
+import { appEvents } from '../src/lib/events.js';
+```
+The rig. Edit:
+
+old:
+```ts
+function rig(threads: Record<string, Record<string, unknown>> = {}, touchResult: TouchResult = 'written') {
+  const puts: Record<string, unknown>[] = [];
+  const touches: { contactId: string; at: string }[] = [];
+```
+new:
+```ts
+function rig(
+  threads: Record<string, Record<string, unknown>> = {},
+  touchResult: TouchResult = 'written',
+  reachedOutResult: TouchResult = 'written',
+) {
+  const puts: Record<string, unknown>[] = [];
+  const touches: { contactId: string; at: string }[] = [];
+  // today-checklist W8: the outbound twin's stamps, recorded like the touches.
+  const reachedOut: { contactId: string; at: string }[] = [];
+```
+Edit:
+
+old:
+```ts
+      touchLastHeardFrom: async (contactId: string, at: string): Promise<TouchResult> => {
+        touches.push({ contactId, at });
+        return touchResult;
+      },
+    },
+```
+new:
+```ts
+      touchLastHeardFrom: async (contactId: string, at: string): Promise<TouchResult> => {
+        touches.push({ contactId, at });
+        return touchResult;
+      },
+      touchLastReachedOut: async (contactId: string, at: string): Promise<TouchResult> => {
+        reachedOut.push({ contactId, at });
+        return reachedOutResult;
+      },
+    },
+```
+Edit:
+
+old:
+```ts
+  return { app, puts, touches, appends };
+```
+new:
+```ts
+  return { app, puts, touches, appends, reachedOut };
+```
+Append at the end of the file:
+```ts
+
+/** Run `post` with a listener on the module bus the dev router emits on. */
+async function contactUpdatesDuring(post: () => Promise<unknown>): Promise<{ contactId: string }[]> {
+  const seen: { contactId: string }[] = [];
+  const listener = (payload: { contactId: string }): void => {
+    seen.push(payload);
+  };
+  appEvents.on('contact.updated', listener);
+  try {
+    await post();
+  } finally {
+    appEvents.off('contact.updated', listener);
+  }
+  return seen;
+}
+
+// today-checklist W8 (spec 7.3, PR14, C1): an OUTBOUND call fixture stands for
+// a staff call, so it stamps the one-to-one thread's contact at the append
+// instant and emits ONE contact.updated when written. The fixture's author is
+// 'unknown' for both directions, so the gate is the direction alone.
+describe('dev transcript fixture - last reached out (today-checklist W8)', () => {
+  it('an outbound call fixture stamps the thread participant at the append instant and emits ONE contact.updated', async () => {
+    const { app, reachedOut, appends, touches } = rig(TENANT_THREAD);
+    const seen = await contactUpdatesDuring(async () => {
+      const response = await request(app)
+        .post('/__dev/voice/transcript-fixture')
+        .send({ ...body, direction: 'outbound' });
+      expect(response.status).toBe(200);
+    });
+    expect(reachedOut).toEqual([{ contactId: 'c-t', at: appends[0]!.providerTs }]);
+    expect(seen).toEqual([{ contactId: 'c-t' }]);
+    // last_heard_from_at never moves on outbound (spec 7.1).
+    expect(touches).toEqual([]);
+  });
+
+  it('an inbound call fixture stamps nobody', async () => {
+    const { app, reachedOut } = rig(TENANT_THREAD);
+    const response = await request(app).post('/__dev/voice/transcript-fixture').send(body);
+    expect(response.status).toBe(200);
+    expect(reachedOut).toEqual([]);
+  });
+
+  it('a failed stamp still answers 200 and emits nothing', async () => {
+    const { app, reachedOut } = rig(TENANT_THREAD, 'written', 'failed');
+    const seen = await contactUpdatesDuring(async () => {
+      const response = await request(app)
+        .post('/__dev/voice/transcript-fixture')
+        .send({ ...body, direction: 'outbound' });
+      expect(response.status).toBe(200);
+    });
+    expect(reachedOut).toHaveLength(1);
+    expect(seen).toEqual([]);
+  });
+});
+```
+
+1c. `app/test/devMessageTransportFixture.test.ts` - import. Edit:
+
+old:
+```ts
+import { loadConfig } from '../src/lib/config.js';
+```
+new:
+```ts
+import { loadConfig } from '../src/lib/config.js';
+import { appEvents } from '../src/lib/events.js';
+```
+The rig. Edit:
+
+old:
+```ts
+function rig(threads: Record<string, Record<string, unknown>> = {}) {
+  const puts: Record<string, unknown>[] = [];
+  const touches: { contactId: string; at: string }[] = [];
+```
+new:
+```ts
+function rig(
+  threads: Record<string, Record<string, unknown>> = {},
+  reachedOutResult: 'written' | 'skipped' | 'failed' = 'written',
+) {
+  const puts: Record<string, unknown>[] = [];
+  const touches: { contactId: string; at: string }[] = [];
+  // today-checklist W8: the outbound twin's stamps, recorded like the touches.
+  const reachedOut: { contactId: string; at: string }[] = [];
+```
+Edit:
+
+old:
+```ts
+      touchLastHeardFrom: async (contactId: string, at: string) => {
+        touches.push({ contactId, at });
+        return 'written' as const;
+      },
+    },
+```
+new:
+```ts
+      touchLastHeardFrom: async (contactId: string, at: string) => {
+        touches.push({ contactId, at });
+        return 'written' as const;
+      },
+      touchLastReachedOut: async (contactId: string, at: string) => {
+        reachedOut.push({ contactId, at });
+        return reachedOutResult;
+      },
+    },
+```
+Edit:
+
+old:
+```ts
+  return { app, puts, touches, appends };
+```
+new:
+```ts
+  return { app, puts, touches, appends, reachedOut };
+```
+Append at the end of the file:
+```ts
+
+/** Run `post` with a listener on the module bus the dev router emits on. */
+async function contactUpdatesDuring(post: () => Promise<unknown>): Promise<{ contactId: string }[]> {
+  const seen: { contactId: string }[] = [];
+  const listener = (payload: { contactId: string }): void => {
+    seen.push(payload);
+  };
+  appEvents.on('contact.updated', listener);
+  try {
+    await post();
+  } finally {
+    appEvents.off('contact.updated', listener);
+  }
+  return seen;
+}
+
+// today-checklist W8 (spec 7.3, PR14): an OUTBOUND message fixture stands for a
+// staff text, so it stamps the one-to-one thread's contact at the planted
+// instant and emits ONE contact.updated when written. Inbound rows and
+// multi-party threads stamp nobody (C2).
+describe('dev message fixture - last reached out (today-checklist W8)', () => {
+  const OUTBOUND = { ...base, direction: 'outbound', transport: { mode: 'versioned', requested: 'sms' } };
+
+  it('direct-Put branch, outbound: stamps the thread participant at the planted instant and emits ONE contact.updated', async () => {
+    const { app, reachedOut, touches } = rig(TENANT_THREAD);
+    const seen = await contactUpdatesDuring(async () => {
+      const response = await request(app).post('/__dev/extraction/message-fixture').send(OUTBOUND);
+      expect(response.status).toBe(200);
+    });
+    expect(reachedOut).toEqual([{ contactId: 'c-t', at: '2026-08-01T00:00:00.000Z' }]);
+    expect(seen).toEqual([{ contactId: 'c-t' }]);
+    expect(touches).toEqual([]);
+  });
+
+  it('append branch, outbound: stamps the thread participant', async () => {
+    const { app, reachedOut, appends } = rig(TENANT_THREAD);
+    const response = await request(app)
+      .post('/__dev/extraction/message-fixture')
+      .send({ ...OUTBOUND, providerSid: 'SM' + 'b'.repeat(32) });
+    expect(response.status).toBe(200);
+    expect(appends).toHaveLength(1);
+    expect(reachedOut).toEqual([{ contactId: 'c-t', at: '2026-08-01T00:00:00.000Z' }]);
+  });
+
+  it('an inbound fixture stamps nobody', async () => {
+    const { app, reachedOut } = rig(TENANT_THREAD);
+    const response = await request(app).post('/__dev/extraction/message-fixture').send(base);
+    expect(response.status).toBe(200);
+    expect(reachedOut).toEqual([]);
+  });
+
+  it('an outbound team post on a relay thread stamps nobody (no single contact)', async () => {
+    const { app, reachedOut } = rig({
+      'conversation-fixture': { type: 'relay_group', participants: [{ contactId: 'c-r', phone: '+15550100002' }] },
+    });
+    const response = await request(app)
+      .post('/__dev/extraction/message-fixture')
+      .send({ ...OUTBOUND, relaySenderKey: 'team' });
+    expect(response.status).toBe(200);
+    expect(reachedOut).toEqual([]);
+  });
+
+  it('a skipped stamp emits no contact.updated', async () => {
+    const { app, reachedOut } = rig(TENANT_THREAD, 'skipped');
+    const seen = await contactUpdatesDuring(async () => {
+      await request(app).post('/__dev/extraction/message-fixture').send(OUTBOUND);
+    });
+    expect(reachedOut).toHaveLength(1);
+    expect(seen).toEqual([]);
+  });
+});
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/heardFrom.test.ts test/devTranscriptFixture.test.ts test/devMessageTransportFixture.test.ts
+```
+Expected failures, and why: heardFrom.test.ts - `oneToOneThreadContactId is
+not a function`. The two dev files - every outbound stamping case
+(`reachedOut` is `[]`, nothing on the bus); "a failed stamp" and "a skipped
+stamp" (`reachedOut` length 0, not 1). The inbound and relay cases pass
+already (PIN). Every pre-existing case stays green.
+
+#### Step 3 - implementation
+
+3a. `app/src/lib/heardFrom.ts` - extract the 1:1 order. Edit:
+
+old:
+```ts
+  if (row.type === 'email' && row.email_new_address === true) return undefined;
+  const participant = (thread.participants ?? []).find((p) => nonEmpty(p.contactId));
+  if (participant !== undefined) return participant.contactId;
+  if (nonEmpty(thread.participant_phone)) {
+    const hit = await lookup.byPhone(thread.participant_phone);
+    if (hit !== undefined) return hit.contactId;
+  }
+  if (nonEmpty(thread.participant_email)) {
+    const hit = await lookup.byEmail(thread.participant_email);
+    if (hit !== undefined) return hit.contactId;
+  }
+  return undefined;
+}
+```
+new:
+```ts
+  if (row.type === 'email' && row.email_new_address === true) return undefined;
+  return oneToOneThreadContactId(thread, lookup);
+}
+
+/** The ONE contact a ONE-TO-ONE thread belongs to: its first roster contact,
+ *  else the contact holding its phone, else the contact holding its email.
+ *  undefined for a multi-party thread (relay_group, group_text), which names
+ *  no single contact. Step 3 of attributeInbound, shared with the outbound
+ *  twin of the dev fixtures (routes/dev.ts touchFixtureReachedOut,
+ *  today-checklist W8). */
+export async function oneToOneThreadContactId(
+  thread: HeardFromThread,
+  lookup: HeardFromLookup,
+): Promise<string | undefined> {
+  if (GROUP_THREAD_TYPES.has(thread.type)) return undefined;
+  const participant = (thread.participants ?? []).find((p) => nonEmpty(p.contactId));
+  if (participant !== undefined) return participant.contactId;
+  if (nonEmpty(thread.participant_phone)) {
+    const hit = await lookup.byPhone(thread.participant_phone);
+    if (hit !== undefined) return hit.contactId;
+  }
+  if (nonEmpty(thread.participant_email)) {
+    const hit = await lookup.byEmail(thread.participant_email);
+    if (hit !== undefined) return hit.contactId;
+  }
+  return undefined;
+}
+```
+
+3b. `app/src/routes/dev.ts` - imports. Edit:
+
+old:
+```ts
+import { createSendMessageService } from '../services/sendMessage.js';
+```
+new:
+```ts
+import { createSendMessageService } from '../services/sendMessage.js';
+import { recordStaffOutreach } from '../services/staffOutreach.js';
+```
+Edit:
+
+old:
+```ts
+import { attributeInbound, repoLookup, type HeardFromRow } from '../lib/heardFrom.js';
+```
+new:
+```ts
+import { attributeInbound, oneToOneThreadContactId, repoLookup, type HeardFromRow } from '../lib/heardFrom.js';
+```
+
+3c. The injectable dep. Edit:
+
+old:
+```ts
+  /** Repos for the last-heard-from touch in the two inbound fixture seams
+   *  (spec 5.1 / 14.2) - injected in tests; default to the real repos. */
+  heardFromRepos?: {
+    contactsRepo: Pick<ContactsRepo, 'findByPhone' | 'findByEmail' | 'touchLastHeardFrom'>;
+```
+new:
+```ts
+  /** Repos for the last-heard-from touch in the two fixture seams (spec 5.1 /
+   *  14.2) and its outbound twin, the last-reached-out stamp (today-checklist
+   *  W8) - injected in tests; default to the real repos. */
+  heardFromRepos?: {
+    contactsRepo: Pick<ContactsRepo, 'findByPhone' | 'findByEmail' | 'touchLastHeardFrom' | 'touchLastReachedOut'>;
+```
+
+3d. The twin, right after `touchFixtureHeardFrom`. Edit:
+
+old:
+```ts
+      log.error(
+        { err, conversationId: persisted.conversationId },
+        'last_heard_from touch failed - message persisted, last_heard_from stale',
+      );
+    }
+  };
+  router.post('/__dev/voice/transcript-fixture', json(), async (req, res) => {
+```
+new:
+```ts
+      log.error(
+        { err, conversationId: persisted.conversationId },
+        'last_heard_from touch failed - message persisted, last_heard_from stale',
+      );
+    }
+  };
+  // W8 (today-checklist spec 7.3, PR14): the OUTBOUND twin. A fixture row
+  // planted outbound stands for a staff send or call, so it stamps
+  // last_reached_out_at on the one-to-one thread's contact at the row's own
+  // instant, the way the live staff writers do, and emits contact.updated on
+  // the module bus when written. Gated on the direction alone: the transcript
+  // seam's author is 'unknown' either way. A multi-party thread names no single
+  // contact and stamps nobody. Best-effort, like its twin.
+  const touchFixtureReachedOut = async (
+    row: Pick<MessageItem, 'direction'>,
+    persisted: { conversationId: string; tsMsgId: string },
+  ): Promise<void> => {
+    if (row.direction !== 'outbound') return;
+    try {
+      const { contactsRepo, conversationsRepo } = heardFromDeps();
+      const thread = await conversationsRepo.getById(persisted.conversationId);
+      const contactId =
+        thread === undefined ? undefined : await oneToOneThreadContactId(thread, repoLookup(contactsRepo));
+      if (contactId === undefined) return;
+      const written = await recordStaffOutreach(
+        { contacts: contactsRepo, log },
+        [{ contactId, at: splitTsMsgId(persisted.tsMsgId).providerTs }],
+      );
+      if (written.includes(contactId)) appEvents.emit('contact.updated', { contactId });
+    } catch (err) {
+      log.error(
+        { err, conversationId: persisted.conversationId },
+        'last_reached_out stamp failed - fixture planted, last_reached_out stale',
+      );
+    }
+  };
+  router.post('/__dev/voice/transcript-fixture', json(), async (req, res) => {
+```
+
+3e. The transcript seam calls it. Edit:
+
+old:
+```ts
+    await touchFixtureHeardFrom({ direction, type: 'call' }, appended);
+```
+new:
+```ts
+    await touchFixtureHeardFrom({ direction, type: 'call' }, appended);
+    await touchFixtureReachedOut({ direction }, appended);
+```
+
+3f. The message seam's append branch. Edit:
+
+old:
+```ts
+          ...(reqBody.relaySenderKey !== undefined && { relay_sender_key: reqBody.relaySenderKey }),
+        },
+        appended,
+      );
+```
+new:
+```ts
+          ...(reqBody.relaySenderKey !== undefined && { relay_sender_key: reqBody.relaySenderKey }),
+        },
+        appended,
+      );
+      await touchFixtureReachedOut({ direction }, appended);
+```
+
+3g. The message seam's direct-Put branch. Edit:
+
+old:
+```ts
+    await touchFixtureHeardFrom(item, item);
+```
+new:
+```ts
+    await touchFixtureHeardFrom(item, item);
+    await touchFixtureReachedOut(item, item);
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/heardFrom.test.ts test/devTranscriptFixture.test.ts test/devMessageTransportFixture.test.ts test/seedHeardFrom.test.ts test/backfillLastHeardFrom.test.ts test/devGating.test.ts
+```
+Expect all green (the last three pin `attributeInbound` callers and the dev
+router's gating unchanged). Then (bare):
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0.
+
+#### Step 5 - ASCII check
+
+```
+tr -d '\11\12\15\40-\176' < W:/tmp/today-checklist/app/src/lib/heardFrom.ts | wc -c
+git -C W:/tmp/today-checklist diff -U0 -- app/src/routes/dev.ts app/test/heardFrom.test.ts app/test/devTranscriptFixture.test.ts app/test/devMessageTransportFixture.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0` twice.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add app/src/lib/heardFrom.ts app/src/routes/dev.ts app/test/heardFrom.test.ts app/test/devTranscriptFixture.test.ts app/test/devMessageTransportFixture.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(dev): outbound fixture rows stamp last_reached_out_at - the twin of touchFixtureHeardFrom (tracker #31 S2.5)" -m "oneToOneThreadContactId is extracted from attributeInbound step 3 (unchanged behavior; multi-party threads name nobody). Both seams stamp the one-to-one contact for an outbound row and emit contact.updated on appEvents when written (spec 7.3 W8, PR14)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S2.6 - Inbound order fixes: inbound email and masked relay calls emit `contact.updated` after a written touch
+
+PR15. Spec 8: an inbound path whose last-heard-from touch lands after its
+`conversation.updated` (inbound email) or that emits no event Today hears
+(masked relay calls, refused and bridged) gains a post-touch
+`contact.updated` when the touch answered 'written'. Existing emits are not
+reordered.
+
+Files:
+- `app/src/services/inboundEmail.ts`
+- `app/src/routes/webhooks/voice.ts`
+- Tests: `app/test/inboundEmail.test.ts`, `app/test/voiceWebhook.test.ts`
+
+#### Step 1 - failing tests
+
+1a. `app/test/inboundEmail.test.ts` - inside `describe('last heard from (spec
+5.1) - inbound email', ...)`, at its end. Edit:
+
+old:
+```ts
+        .some((l) => l['msg'] === 'last_heard_from touch failed - message persisted, last_heard_from stale'),
+    ).toBe(true);
+  });
+});
+```
+new:
+```ts
+        .some((l) => l['msg'] === 'last_heard_from touch failed - message persisted, last_heard_from stale'),
+    ).toBe(true);
+  });
+
+  // today-checklist PR15 (spec 8): this path emits conversation.updated BEFORE
+  // the touch, so a refetch on it can miss the new last_heard_from_at. A
+  // WRITTEN touch is followed by ONE contact.updated; the existing emits keep
+  // their order.
+  it('today-checklist PR15: a written touch is followed by ONE contact.updated, after conversation.updated', async () => {
+    const w = makeWorld({});
+    const out = await ingestInboundEmail(notice(), w.deps);
+    expect(out.outcome).toBe('threaded');
+    const names = w.emit.mock.calls.map((c) => c[0]);
+    expect(names.filter((n) => n === 'contact.updated')).toHaveLength(1);
+    expect(names.indexOf('contact.updated')).toBeGreaterThan(names.indexOf('conversation.updated'));
+    expect(w.emit).toHaveBeenCalledWith('contact.updated', { contactId: 'c1' });
+  });
+
+  it('today-checklist PR15: a skipped or failed touch emits no contact.updated', async () => {
+    for (const touchHeardFromResult of ['skipped', 'failed'] as const) {
+      const w = makeWorld({ touchHeardFromResult });
+      await ingestInboundEmail(notice(), w.deps);
+      expect(w.emit.mock.calls.filter((c) => c[0] === 'contact.updated')).toEqual([]);
+    }
+  });
+
+  it('today-checklist PR15: the unmatched-email re-ingest reuses the path and inherits the emit', async () => {
+    const w = makeWorld({});
+    const out = await ingestInboundEmail(notice(), w.deps, { reingest: true });
+    expect(out.outcome).toBe('threaded');
+    expect(w.emit).toHaveBeenCalledWith('contact.updated', { contactId: 'c1' });
+  });
+
+  it('today-checklist PR15: a deduped append touches nobody and emits no contact.updated', async () => {
+    const w = makeWorld({ appendDeduped: true });
+    await ingestInboundEmail(notice(), w.deps);
+    expect(w.emit.mock.calls.filter((c) => c[0] === 'contact.updated')).toEqual([]);
+  });
+});
+```
+
+1b. `app/test/voiceWebhook.test.ts` - inside `describe('inbound masked voice -
+last heard from (spec 5.1)', ...)`, at its end. Edit:
+
+old:
+```ts
+    expect(world.heardFromTouches.map((t) => t.outcome)).toEqual(['written', 'skipped']);
+  });
+});
+
+describe('whisper + press-1/press-0/timeout gate (M1.9a)', () => {
+```
+new:
+```ts
+    expect(world.heardFromTouches.map((t) => t.outcome)).toEqual(['written', 'skipped']);
+  });
+
+  // today-checklist PR15 (spec 8): a masked call emits no conversation.updated
+  // (announceCallStamp), so Today would never hear its touch. A WRITTEN touch
+  // is followed by ONE contact.updated.
+  const contactUpdates = (world: FakeWorld) =>
+    world.emitted.filter((e) => e.event === 'contact.updated').map((e) => e.payload);
+
+  it('today-checklist PR15: a refused member call emits ONE contact.updated after its written touch', async () => {
+    const world = createFakeWorld();
+    seedRelay(world, { status: 'closed' });
+    world.contacts.push({ contactId: 'c-alice', type: 'tenant', phone: ALICE });
+    const { app } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoiceParams({ CallSid: 'CAcu-closed' }));
+
+    expect(contactUpdates(world)).toEqual([{ contactId: 'c-alice' }]);
+  });
+
+  it('today-checklist PR15: a bridged member call emits ONE contact.updated; its redelivery (skipped) adds none', async () => {
+    const world = createFakeWorld();
+    seedRelay(world);
+    world.contacts.push({ contactId: 'c-alice', type: 'tenant', phone: ALICE });
+    const { app } = makeWebhookHarness({ world });
+    const params = inboundVoiceParams({ CallSid: 'CAcu-bridge' });
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice', params);
+    await signedTwilioPost(app, '/webhooks/twilio/voice', params);
+
+    expect(world.heardFromTouches.map((t) => t.outcome)).toEqual(['written', 'skipped']);
+    expect(contactUpdates(world)).toEqual([{ contactId: 'c-alice' }]);
+  });
+
+  it('today-checklist PR15: an unmatched non-member caller touches nobody and emits none', async () => {
+    const world = createFakeWorld();
+    seedRelay(world);
+    const { app } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoiceParams({ From: CAROL, CallSid: 'CAcu-nobody' }));
+
+    expect(contactUpdates(world)).toEqual([]);
+  });
+});
+
+describe('whisper + press-1/press-0/timeout gate (M1.9a)', () => {
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/inboundEmail.test.ts test/voiceWebhook.test.ts
+```
+Expected failures, and why: inboundEmail.test.ts - "a written touch is
+followed by ONE contact.updated" and "the unmatched-email re-ingest" (no
+`contact.updated` emit). voiceWebhook.test.ts - the refused and bridged
+cases (`contactUpdates` is `[]`). The skipped/failed, deduped and unmatched
+cases pass already (PIN). Every pre-existing case stays green.
+
+#### Step 3 - implementation
+
+3a. `app/src/services/inboundEmail.ts`. Edit:
+
+old:
+```ts
+        const outcome = await deps.contacts.touchLastHeardFrom(heardFromId, splitTsMsgId(appended.tsMsgId).providerTs);
+        if (outcome === 'failed') {
+          log.error({ bucket, key, conversationId }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
+        }
+```
+new:
+```ts
+        const outcome = await deps.contacts.touchLastHeardFrom(heardFromId, splitTsMsgId(appended.tsMsgId).providerTs);
+        if (outcome === 'failed') {
+          log.error({ bucket, key, conversationId }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
+        }
+        // today-checklist PR15 (spec 8): conversation.updated fired ABOVE, before
+        // this touch, so a refetch on it can miss the new last_heard_from_at.
+        // ONE contact.updated after a written touch closes that race.
+        if (outcome === 'written') deps.events.emit('contact.updated', { contactId: heardFromId });
+```
+
+3b. `app/src/routes/webhooks/voice.ts` - the refused masked call. Edit:
+
+old:
+```ts
+            const outcome = await contacts.touchLastHeardFrom(heardFromId, splitTsMsgId(appended.tsMsgId).providerTs);
+            if (outcome === 'failed') {
+              log.error({ callSid: CallSid, reason }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
+            }
+```
+new:
+```ts
+            const outcome = await contacts.touchLastHeardFrom(heardFromId, splitTsMsgId(appended.tsMsgId).providerTs);
+            if (outcome === 'failed') {
+              log.error({ callSid: CallSid, reason }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
+            }
+            // today-checklist PR15 (spec 8): a masked call emits no
+            // conversation.updated, so Today would never hear this touch.
+            if (outcome === 'written') events.emit('contact.updated', { contactId: heardFromId });
+```
+
+3c. The bridged masked call. Edit:
+
+old:
+```ts
+          const outcome = await contacts.touchLastHeardFrom(heardFromId, splitTsMsgId(appended.tsMsgId).providerTs);
+          if (outcome === 'failed') {
+            log.error({ callSid: CallSid }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
+          }
+        }
+      } catch (err) {
+        // The error NAME only (as on the refusal branch): a failed phone
+```
+new:
+```ts
+          const outcome = await contacts.touchLastHeardFrom(heardFromId, splitTsMsgId(appended.tsMsgId).providerTs);
+          if (outcome === 'failed') {
+            log.error({ callSid: CallSid }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
+          }
+          // today-checklist PR15 (spec 8): as on the refusal branch - a masked
+          // call emits no conversation.updated for Today to hear.
+          if (outcome === 'written') events.emit('contact.updated', { contactId: heardFromId });
+        }
+      } catch (err) {
+        // The error NAME only (as on the refusal branch): a failed phone
+```
+(The founder-triage touch at `voice.ts:834` has the same `log.error({
+callSid: CallSid }, ...)` line but is followed by `      } catch (err) {\n
+log.error({ err, callSid: CallSid }, ...` - the trailing comment line above
+makes this anchor unique. It needs no change: its thread's
+`conversation.updated` comes later, from the Dial summary's
+`stampCallActivity`.)
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/inboundEmail.test.ts test/voiceWebhook.test.ts test/voiceInboxActivity.test.ts test/founderTriage.test.ts test/unmatchedEmailRoutes.test.ts test/inboundMailConsumer.test.ts
+```
+Expect all green. Then (bare):
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0.
+
+#### Step 5 - ASCII check
+
+```
+tr -d '\11\12\15\40-\176' < W:/tmp/today-checklist/app/src/services/inboundEmail.ts | wc -c
+git -C W:/tmp/today-checklist diff -U0 -- app/src/routes/webhooks/voice.ts app/test/inboundEmail.test.ts app/test/voiceWebhook.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0` twice.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add app/src/services/inboundEmail.ts app/src/routes/webhooks/voice.ts app/test/inboundEmail.test.ts app/test/voiceWebhook.test.ts
+git -C W:/tmp/today-checklist commit -m "fix(live): inbound email and masked relay calls emit contact.updated after a written last-heard-from touch (tracker #31 S2.6)" -m "Inbound email fired conversation.updated before its touch; masked calls fire none Today hears. Each now emits ONE contact.updated when the touch answered written; existing emits keep their order (spec 8, PR15)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S2.7 - `tour.updated` on both tour-create paths
+
+PR16, C4, C7. POST /api/tours emits after the create (and its pointer
+patch), before the 201; the Interested outcome route emits after
+`tours.create`. `UnitsRouterDeps` gains `events?` (default `appEvents`),
+passed from api.ts. Four pins move deliberately.
+
+Files:
+- `app/src/routes/tours.ts`
+- `app/src/routes/units.ts`
+- `app/src/routes/api.ts` (the units mount)
+- Tests: `app/test/toursApi.test.ts`, `app/test/toursReopenApi.test.ts`,
+  `app/test/listingSendOutcomeApi.test.ts`
+
+#### Step 1 - failing tests
+
+1a. `app/test/toursApi.test.ts` - the INVERTED pin (PR16). Edit:
+
+old:
+```ts
+    expect(tourUpdates(world)).toHaveLength(0); // create does not emit (1a scope)
+
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' }).expect(200);
+    expect(tourUpdates(world)).toHaveLength(1);
+    expect(tourUpdates(world)[0]!.payload).toEqual({ tourId, status: 'toured' });
+```
+new:
+```ts
+    // INVERTED deliberately (today-checklist PR16, spec 8): a create emits too -
+    // a new tour is live news for Today's Tours to book. Was "create does not
+    // emit (1a scope)".
+    expect(tourUpdates(world).map((e) => e.payload)).toEqual([{ tourId, status: 'scheduled' }]);
+
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' }).expect(200);
+    expect(tourUpdates(world)).toHaveLength(2);
+    expect(tourUpdates(world)[1]!.payload).toEqual({ tourId, status: 'toured' });
+```
+
+1b. The reschedule count (C4). Edit:
+
+old:
+```ts
+      .send({ scheduledAt: '2026-07-22T10:00:00.000Z' })
+      .expect(200);
+    expect(tourUpdates(world)).toHaveLength(1);
+    expect(tourUpdates(world)[0]!.payload).toEqual({ tourId, status: 'scheduled' });
+```
+new:
+```ts
+      .send({ scheduledAt: '2026-07-22T10:00:00.000Z' })
+      .expect(200);
+    // The create's own emit (today-checklist PR16) first, then the PATCH's.
+    expect(tourUpdates(world)).toHaveLength(2);
+    expect(tourUpdates(world)[1]!.payload).toEqual({ tourId, status: 'scheduled' });
+```
+
+1c. New create cases, at the end of `describe('tour.updated bus emissions',
+...)`. Edit:
+
+old:
+```ts
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'bogus' }).expect(400);
+    expect(tourUpdates(world)).toHaveLength(afterClose);
+  });
+});
+```
+new:
+```ts
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'bogus' }).expect(400);
+    expect(tourUpdates(world)).toHaveLength(afterClose);
+  });
+
+  it('today-checklist PR16: a REQUESTED create (no scheduledAt) emits ONE tour.updated { tourId, status: requested }', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send({
+      tenantId: BASE_CREATE_BODY.tenantId,
+      unitId: BASE_CREATE_BODY.unitId,
+      tourType: BASE_CREATE_BODY.tourType,
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.tour.status).toBe('requested');
+    expect(tourUpdates(world).map((e) => e.payload)).toEqual([
+      { tourId: created.body.tour.tourId, status: 'requested' },
+    ]);
+  });
+
+  it('today-checklist PR16: a refused create (400) emits nothing', async () => {
+    const { app, world } = makeWebhookHarness();
+    const res = await authed(app).post('/api/tours').send({ ...BASE_CREATE_BODY, tourType: 'bogus' });
+    expect(res.status).toBe(400);
+    expect(tourUpdates(world)).toEqual([]);
+  });
+});
+```
+
+1d. The concurrent-change pin (C4). Edit:
+
+old:
+```ts
+    expect(world.emitted.filter((e) => e.event === 'tour.updated')).toHaveLength(0);
+```
+new:
+```ts
+    // The create's own emit (today-checklist PR16) is the ONLY tour.updated:
+    // the refused PATCH adds none.
+    expect(world.emitted.filter((e) => e.event === 'tour.updated').map((e) => e.payload)).toEqual([
+      { tourId, status: 'scheduled' },
+    ]);
+```
+
+1e. `app/test/toursReopenApi.test.ts` (C4). Edit:
+
+old:
+```ts
+    expect(world.emitted.filter((e) => e.event === 'tour.updated')).toHaveLength(1);
+    expect(world.toursMap.get(tourId)).toMatchObject({ status: 'scheduled', lastMarkedAt: NOW });
+```
+new:
+```ts
+    // The create's own emit (today-checklist PR16) plus exactly ONE reopen.
+    expect(world.emitted.filter((e) => e.event === 'tour.updated')).toHaveLength(2);
+    expect(world.toursMap.get(tourId)).toMatchObject({ status: 'scheduled', lastMarkedAt: NOW });
+```
+
+1f. `app/test/listingSendOutcomeApi.test.ts` - append at the end of the file:
+```ts
+
+// today-checklist PR16 (spec 8): an Interested that CREATES the requested tour
+// is live news - Today's Tours to book gains the row and the pair leaves Quiet
+// shares - so it emits ONE tour.updated (ID + status only). Nothing that
+// creates no tour emits one (Not interested adds no event, spec 8).
+describe('outcome route - tour.updated on the Interested create (today-checklist PR16)', () => {
+  const tourUpdates = (world: FakeWorld) =>
+    world.emitted.filter((e) => e.event === 'tour.updated').map((e) => e.payload);
+
+  it('an Interested that creates the requested tour emits ONE tour.updated { tourId, status: requested }', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, { tour_type: 'landlord_led' });
+    seedContact(world, 'c-1');
+    await seedSend(world);
+    const res = await post(app, { outcome: 'interested' });
+    expect(res.status).toBe(200);
+    const tourId = [...world.toursMap.values()][0]!.tourId;
+    expect(tourUpdates(world)).toEqual([{ tourId, status: 'requested' }]);
+  });
+
+  it('an Interested that finds a tour, a Not interested and an Undo create nothing and emit nothing', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, { tour_type: 'landlord_led' });
+    seedContact(world, 'c-1');
+    await seedSend(world);
+    await world.toursRepo.create({
+      tourId: 't-held',
+      tenantId: 'c-1',
+      unitId: 'unit-1',
+      tourType: 'landlord_led',
+      status: 'scheduled',
+      createdAt: '2026-06-20T00:00:00.000Z',
+    });
+    expect((await post(app, { outcome: 'interested' })).status).toBe(200);
+    expect((await post(app, { outcome: 'not_interested' })).status).toBe(200);
+    expect((await post(app, { outcome: 'clear' })).status).toBe(200);
+    expect(world.toursMap.size).toBe(1);
+    expect(tourUpdates(world)).toEqual([]);
+  });
+});
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/toursApi.test.ts test/toursReopenApi.test.ts test/listingSendOutcomeApi.test.ts
+```
+Expected failures, and why: toursApi.test.ts - the inverted create pin and
+the reschedule case (lengths 1 not 2 / payloads at [0] not [1]), the
+concurrent-change pin (`[]` not the create's payload) and the REQUESTED
+create case (`[]`). toursReopenApi.test.ts - the edited count (1 not 2).
+listingSendOutcomeApi.test.ts - the Interested create case (`[]`). The two
+"emits nothing" cases pass already (PIN). Every other case stays green.
+
+#### Step 3 - implementation
+
+3a. `app/src/routes/tours.ts` - POST /api/tours (PR16(a)). Edit:
+
+old:
+```ts
+    log.info({ tourId: tour.tourId, tenantId: tour.tenantId, unitId: tour.unitId }, 'tour created via api');
+    res.status(201).json({ tour });
+```
+new:
+```ts
+    // today-checklist PR16 (spec 8): a create is a live change too - a new
+    // requested tour appears in Today's Tours to book and the pair leaves Quiet
+    // shares. The final `tour` (after the ladder pointer write). ID + status
+    // only (PII), the PATCH emit's shape.
+    events.emit('tour.updated', { tourId: tour.tourId, status: tour.status });
+
+    log.info({ tourId: tour.tourId, tenantId: tour.tenantId, unitId: tour.unitId }, 'tour created via api');
+    res.status(201).json({ tour });
+```
+
+3b. `app/src/routes/units.ts` - import. Edit:
+
+old:
+```ts
+import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+```
+new:
+```ts
+import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import { appEvents, type EventBus } from '../lib/events.js';
+```
+(If units.ts already imports from `../lib/events.js` when the builder reads
+it, extend that import instead. At main @970a29b9 it does not.)
+
+3c. The dep (PR16(b), C7). Edit:
+
+old:
+```ts
+  orgNamesService?: OrgNamesService;
+}
+
+/** BE3/C3: a valid roster role (C3 `UnitContact.role`). */
+```
+new:
+```ts
+  orgNamesService?: OrgNamesService;
+  /**
+   * today-checklist PR16 (spec 8): the live bus. The Interested outcome route
+   * emits tour.updated when it CREATES the requested tour. Defaults to the
+   * process singleton.
+   */
+  events?: EventBus;
+}
+
+/** BE3/C3: a valid roster role (C3 `UnitContact.role`). */
+```
+
+3d. The router-scope bus. Edit:
+
+old:
+```ts
+  const orgNames = deps.orgNamesService ?? createOrgNamesService({ logger: deps.logger });
+
+  const router = Router();
+```
+new:
+```ts
+  const orgNames = deps.orgNamesService ?? createOrgNamesService({ logger: deps.logger });
+  // Named eventBus, not events: the activity handler below holds a local
+  // `events` (its rows).
+  const eventBus = deps.events ?? appEvents;
+
+  const router = Router();
+```
+
+3e. The emit. Edit:
+
+old:
+```ts
+          createdTour = await tours.create({ tenantId: contactId, unitId, tourType, status: 'requested' });
+          wrote = true;
+```
+new:
+```ts
+          createdTour = await tours.create({ tenantId: contactId, unitId, tourType, status: 'requested' });
+          wrote = true;
+          // today-checklist PR16 (spec 8): the new requested tour is live news -
+          // Today's Tours to book gains it and the pair leaves Quiet shares. ID
+          // + status only (PII), the tours PATCH emit's shape.
+          eventBus.emit('tour.updated', { tourId: createdTour.tourId, status: createdTour.status });
+```
+
+3f. `app/src/routes/api.ts` - pass the bus to the units mount. Edit:
+
+old:
+```ts
+      ...(deps.transcodeGate !== undefined && { transcodeGate: deps.transcodeGate }),
+      // Organization names (spec 2026-10-06 D5): the ONE service built above.
+      orgNamesService: orgNames,
+    }),
+```
+new:
+```ts
+      ...(deps.transcodeGate !== undefined && { transcodeGate: deps.transcodeGate }),
+      // Organization names (spec 2026-10-06 D5): the ONE service built above.
+      orgNamesService: orgNames,
+      // today-checklist PR16: the Interested create emits tour.updated here.
+      events,
+    }),
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/toursApi.test.ts test/toursReopenApi.test.ts test/listingSendOutcomeApi.test.ts test/listingSendsApi.test.ts test/toursCreateContactType.test.ts test/scheduledUpdatedEvent.test.ts test/unitsApiActivity.test.ts
+```
+Expect all green. Then (bare):
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0.
+
+#### Step 5 - ASCII check on added lines
+
+```
+git -C W:/tmp/today-checklist diff -U0 -- app/src/routes/tours.ts app/src/routes/units.ts app/src/routes/api.ts app/test/toursApi.test.ts app/test/toursReopenApi.test.ts app/test/listingSendOutcomeApi.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0`.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add app/src/routes/tours.ts app/src/routes/units.ts app/src/routes/api.ts app/test/toursApi.test.ts app/test/toursReopenApi.test.ts app/test/listingSendOutcomeApi.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(tours): both tour-create paths emit tour.updated (tracker #31 S2.7)" -m "POST /api/tours emits after the create and its pointer write; the Interested outcome route emits after it creates the requested tour (UnitsRouterDeps.events, passed from api.ts). The create-does-not-emit pin is inverted and three count pins move, deliberately (spec 8, PR16)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S2.8 - Slice close: typecheck, the app workspace once, ASCII sweep, S2 report
+
+No code. Runs the slice's checks and commits its report.
+
+Files:
+- `docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S2-report.md` (new)
+
+#### Step 1 - typecheck (bare)
+
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0.
+
+#### Step 2 - the app workspace, once
+
+Needs DynamoDB Local up (`npm run db:start` STARTS it; never restart it).
+Check `env | grep '^AWS_'` first; if anything is exported, prefix the run
+with `env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY`.
+```
+cd W:/tmp/today-checklist/app; npx vitest run
+```
+Run it bare (no pipe) under a hard outer timeout and read the captured
+output after it finishes. Expect exit 0. Any `[dynamoAdmin]` line in the
+output is a real container fault: capture `err.$metadata.httpStatusCode` and
+`attempts` (AGENTS.md). A red FILE is first re-run alone, more than once
+(`npx vitest run test/<file>`); compare failing FILES, not cases, against a
+run at S2_BASE before attributing it (AGENTS.md re-run-and-compare). Record
+both runs in the report.
+
+#### Step 3 - ASCII sweep of the whole slice
+
+```
+git -C W:/tmp/today-checklist diff -U0 <S2_BASE>..HEAD | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+(Replace `<S2_BASE>` with the SHA recorded before S2.1.) Expect `0`. Also:
+```
+git -C W:/tmp/today-checklist diff --stat <S2_BASE>..HEAD
+```
+and confirm no seed file and no `twilioWebhookHarness.ts` line is in the list
+(WI9, PR37).
+
+#### Step 4 - write the report
+
+Write `docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S2-report.md`,
+ASCII, findings only, citing code by `file:line` (re-read the lines; the
+numbers below are hints against main @970a29b9). It must contain, filled in
+from the builder's own runs:
+
+```
+# S2 report - direct writers, inbound order fixes, tour-create events
+
+S2_BASE: <sha>. Commits: <S2.1 .. S2.7 shas>.
+
+## What the tree held that the plan got wrong
+<C1-C8 of plan section 6 as resolved, one line each, plus anything new.>
+
+## Inbound order table (PR15, spec 8)
+| Path | Touch | Live event Today hears | Order before S2 | S2 action |
+|---|---|---|---|---|
+| 1:1 SMS inbound | routes/webhooks/twilio.ts:2695 | conversation.updated :2768 | touch first | none |
+| relay member inbound | twilio.ts:961 (handleRelayInbound) | conversation.updated :1076 | touch first | none |
+| closed-group inbound (sender's 1:1) | twilio.ts:1388 | conversation.updated :1421 | touch first | none |
+| group text inbound | twilio.ts:2192 | conversation.updated :2225 | touch first | none |
+| founder-triage inbound call | routes/webhooks/voice.ts:834 (ring) | conversation.updated from the Dial summary's stampCallActivity (:2014) | touch first | none |
+| masked relay call, refused | voice.ts:1122 | none (announceCallStamp emits message.persisted only, :1359-1362) | no event | contact.updated after a written touch (S2.6) |
+| masked relay call, bridged | voice.ts:1220 | none | no event | contact.updated after a written touch (S2.6) |
+| inbound email (and the unmatched re-ingest) | services/inboundEmail.ts:833 | conversation.updated :770 | emit BEFORE touch | contact.updated after a written touch (S2.6) |
+| Quo import | lib/import/apply.ts:535 | none (batch, historical) | n/a | none |
+| dev fixtures | routes/dev.ts:836 | none | n/a | none (PR15) |
+<Re-verify each row against the tree; correct any line that moved.>
+
+## WI2 - sendMessage contacts wiring
+<The before/after construction order from S2.2 Step 3 (the WI2 record),
+the list of tests that drive a 1:1 send / Retry / Send now through the
+DEFAULT send service, and the result of the app-workspace run.>
+
+## WI3 - the whisper-gate no-await rule
+<The reviewer's line-by-line read of the outbound accept branch diff: nothing
+between the press-1 updateCallStatus and sendTwiml except `const dialAt`;
+the stamp starts after sendTwiml via afterResponse, un-awaited.>
+
+## WI4 - events per send operation (counted, not just present)
+| Writer | Test | Events after the stamp |
+|---|---|---|
+| W1 staff text | apiRoutes.test.ts harness case | 1 contact.updated, after conversation.updated |
+| W1 multi-batch MMS | apiRoutes.test.ts harness case | 1 contact.updated for N batches |
+| W2 staff Retry | apiRoutes.test.ts harness case | 1 (plain); 0 (share text) |
+| W3 email | sendEmailMessage.test.ts | 1 contact.updated, last |
+| W6 outbound press-1 | voiceOutbound.test.ts | 1 contact.updated |
+| W8 dev fixtures | devTranscriptFixture / devMessageTransportFixture | 1 contact.updated |
+| inbound email (PR15) | inboundEmail.test.ts | 1 contact.updated per written touch |
+| masked calls (PR15) | voiceWebhook.test.ts | 1 per written touch; 0 on the skipped redelivery |
+| tour create (PR16) | toursApi / listingSendOutcomeApi | 1 tour.updated per create |
+<Confirm each count from the green run.>
+
+## Deliberate test changes (never weakened)
+- apiRoutes.test.ts :84, :709-719, :860-870 - staffOutreach: true added (C5).
+- toursApi.test.ts ~1395 - INVERTED: create now emits (PR16).
+- toursApi.test.ts ~1402-1412, ~585; toursReopenApi.test.ts ~492 - counts
+  include the create's emit (C4).
+
+## Gate results
+<typecheck exit code; app workspace run (files, tests, duration, exit code);
+any re-run-and-compare evidence.>
+
+## Risks and follow-ups
+<Anything observed; e.g. the stale harness comment at
+twilioWebhookHarness.ts:5591-5596 (S1-owned) now that the default send
+service reads world.contactsRepo.>
+```
+
+#### Step 5 - ASCII check
+
+```
+tr -d '\11\12\15\40-\176' < W:/tmp/today-checklist/docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S2-report.md | wc -c
+```
+Expect `0`.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S2-report.md
+git -C W:/tmp/today-checklist commit -m "docs(records): S2 slice report - direct writers, inbound order table, WI2/WI3/WI4 (tracker #31 S2.8)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### S2 coverage
+
+| Requirement | Ruling / spec | Task | Proof |
+|---|---|---|---|
+| `staffOutreach` option; stamp judged contact at providerTs; `contact.updated` after `conversation.updated`, only when written; best-effort | PR9; spec 7.3 | S2.1 | sendMessage.test.ts "staff outreach stamp" (held recipient, phone contact, moved recipient, no option, no contact, written-only, failed/rejecting, refused/append failure) |
+| api.ts builds `contacts` before the send service and passes it | PR9; WI2 | S2.2 | apiRoutes.test.ts harness cases move `world.reachedOutTouches`; WI2 record in the report |
+| W1 1:1 send passes the option, first batch only | PR10 | S2.2 | apiRoutes.test.ts spy batch case + harness multi-batch case (1 stamp, 1 event) |
+| W2 Retry passes the option except `broadcast_id` rows | PR11; spec 7.3 W2 | S2.2 | apiRoutes.test.ts spy case + harness Retry case |
+| No stamp: share fan-out, automatic retry, missed-call text, welcome text, tour reminder poll and Send now, nudge poll and Send now | spec 7.2, 7.3 no-stamp table, 9 | S2.2 | the (PIN) cases in broadcastFanOut, retrySendAttempt, missedCallAutoText, publicIntake, tourRemindersApi, placementNudgesApi |
+| W3 email: stamp after SES accepts, none on adapter throw, one `contact.updated` | PR12 | S2.3 | sendEmailMessage.test.ts "W3" |
+| W6: contactId from `resolveOutboundTarget`, `dialAt` hoist, post-response stamp via `afterResponse`, none on refusals / inbound legs / originate | PR13; WI3; spec 9 | S2.4 | voiceOutbound.test.ts "outbound press-1 - the staff-outreach stamp" |
+| W8 dev seams outbound twin, `oneToOneThreadContactId`, `heardFromRepos` type | PR14 | S2.5 | heardFrom, devTranscriptFixture, devMessageTransportFixture tests |
+| PR15(a) inbound email post-touch `contact.updated` (re-ingest inherits) | PR15; spec 8 | S2.6 | inboundEmail.test.ts PR15 cases |
+| PR15(b) masked relay call (refused, bridged) post-touch `contact.updated` | PR15; spec 8 | S2.6 | voiceWebhook.test.ts PR15 cases |
+| Inbound order table for every other path | PR15 | S2.8 | S2 report table |
+| `tour.updated` on POST /api/tours and the Interested create; `UnitsRouterDeps.events`; api.ts pass-through; ~1395 inverted | PR16; spec 8 | S2.7 | toursApi, toursReopenApi, listingSendOutcomeApi |
+| Shared api.ts (S4 re-reads after S2); harness untouched | PR37 | S2.2, S2.7, S2.8 | diff --stat in S2.8 Step 3 |
+| WI4 one event per send, counted | plan section 3 | S2.1-S2.7 | every writer test counts events; report table |
+| typecheck, app workspace, ASCII, report | plan section 0 | S2.8 | S2 report |
+
+## 7. S3 - Relay and group writers W4, W5, W7
+
+Scope: plan section 2 row S3; rulings PR17-PR21 with PR5, PR6, PR8
+(binding). Spec 7.2, 7.3 (writers W4, W5, W7 and the no-stamp table), 9
+(writer tests). Depends on S1 only. Every line number is a hint against main
+@970a29b9; the QUOTED text is the anchor. Where S1 or S2 changed a quoted
+region (S3 touches no file S2 touches), re-read and apply on top.
+
+Files S3 touches (and nothing else):
+
+- `app/src/jobs/relayFanOut.ts` - imports; `RelayFanOutJobDeps.events`;
+  the handler's `events` default; `RelayFanOutExecutionDeps.events`; the
+  fan-out loop's stamp collection and its after-loop call;
+  `RelayLegSendOutcome.sentAt`; the three return literals in
+  `sendOneRelayLeg` that carry it; the relay.intro handler's
+  `staffAuthored` flag and `events` pass-through (S3.3).
+- `app/src/services/relayAnnouncements.ts` - the shared after-loop helper
+  `stampRelayOutreach` (S3.1); `RelayAnnouncementInput.staffAuthored` and
+  the member-loop collection (S3.3).
+- `app/src/services/groupSend.ts` - W5 (S3.2).
+- Tests: `app/test/relayFanOut.test.ts`, `app/test/relayRetryLeg.test.ts`,
+  `app/test/sendReconcile.test.ts`, `app/test/groupSend.test.ts`,
+  `app/test/relayAnnouncements.test.ts`.
+- Read only: `app/src/worker.ts`, `app/src/jobs/registerHandlers.ts`,
+  `app/src/jobs/relayRetryLeg.ts`, `app/src/jobs/sendReconcile.ts`,
+  `app/src/services/relayQueuedMessages.ts` (C1, PR17).
+- Record: `docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S3-report.md`.
+
+ASCII: `relayFanOut.ts`, `relayAnnouncements.ts` and `relayFanOut.test.ts`
+already carry non-ASCII (em dashes, a section sign, arrows) in comments. No
+anchor below touches such a line; every added line is ASCII. The other four
+test files and `groupSend.ts` are ASCII today and stay so.
+
+### Contradictions
+
+C1. PR18 / the brief: "`worker.ts` passes `events: appEvents` where it
+registers the handler". `worker.ts` registers no handler itself: it calls
+`registerAllJobHandlers({ tokenBucket: a2pBucket })` (`app/src/worker.ts:113`),
+and the relay registrar is called from
+`app/src/jobs/registerHandlers.ts:64`
+(`registerRelayFanOutJobHandler({ tokenBucket: deps.tokenBucket, sendAttemptsRepo: deps.sendAttemptsRepo });`),
+which `app/src/index.ts:56` also calls for the local in-process path. The
+precedent PR18 names passes nothing either: `registerHandlers.ts:76`
+registers relay.retryLeg with no `events`, and the job defaults it
+(`app/src/jobs/relayRetryLeg.ts:410`, `:418` `events ??= appEvents;`). The
+worker's bridge is attached to that same singleton (`app/src/worker.ts:45-61`,
+`attachEventBridge(appEvents, ...)`). Proposed resolution (S3.1): the
+default IS the wiring - `events ??= appEvents` in the handler, exactly the
+relayRetryLeg pattern; NO edit to `worker.ts` or `registerHandlers.ts`. In
+the worker the singleton's emits reach the app through the bridge; in the
+local in-process path the singleton is the app's own SSE bus. S3.4 records
+this. If the planner wants the dependency explicit anyway, the one-line
+alternative is `events: appEvents` in `registerHandlers.ts:64` (an
+`appEvents` import there), which changes both processes identically.
+
+C2. PR17: "`RelayLegSendOutcome` gains `sentAt` ... NOTHING is added inside
+`sendOneRelayLeg`". The outcome is BUILT inside `sendOneRelayLeg`
+(`relayFanOut.ts:2240` `return { kind: 'sent', providerSid: result.providerSid };`,
+`:2302` the `sent_unrecorded` return, `:2304` `return { kind: 'stranded', afterSend: true };`),
+so the provider instant can reach the loop only through those three return
+literals. Resolution (S3.1): those three literals gain `sentAt:
+result.providerTs` and nothing else changes inside `sendOneRelayLeg` - no
+dep, no stamp, no read, no write. The 30003 rung receives the field and
+ignores it (it never reads `sentAt`; `relayRetryLeg.ts:836-870`).
+
+C3. PR17: "gains `sentAt: string` on the 'sent', 'sent_unrecorded' and
+'stranded'-with-afterSend arms". `RelayLegSendOutcome` is ONE flat interface
+with optional per-arm fields (`relayFanOut.ts:1767-1790`: `providerSid?`,
+`attemptRef?`, `afterSend?`), not a discriminated union, so a per-arm
+required field is not expressible without rewriting the type every caller
+switches on. Resolution: `sentAt?: string` with a doc comment naming the
+three arms; the loop gates on the kind AND `outcome.sentAt !== undefined`.
+
+No other ruling conflicts with the tree. Two notes the builder needs:
+
+- PR20 names only the INTRO's `sendRelayAnnouncement` call for the `events`
+  pass-through. The relay.memberAdded call (`relayFanOut.ts:1190-1215`) keeps
+  its default bus (`appEvents`, the same object in production). S3 does not
+  change it.
+- The record-phase arm whose hand-off fence is LOST returns
+  `{ kind: 'skipped_terminal' }` after a KNOWN send (`relayFanOut.ts:2303`).
+  PR17 does not list it, so it does not stamp. It is the "a takeover owns the
+  record" race; the takeover's reconcile adoption does not stamp either
+  (PR21). Accepted residue; S3.4 records it.
+
+### Cross-slice notes (for the planner)
+
+- Names S3 assumes from S1 (S3.1 Step 0 verifies them):
+  `recordStaffOutreach(deps: { contacts, log }, stamps): Promise<string[]>`
+  and `interface StaffOutreachStamp { contactId: string; at: string }` in
+  `app/src/services/staffOutreach.ts`; `ConversationsRepo.getByIdConsistent`
+  (interface, implementation, harness fake); `ContactsRepo.touchLastReachedOut`;
+  the harness `world.reachedOutTouches` with entries
+  `{ contactId, at, outcome }` (the `heardFromTouches` twin), whose fake
+  answers `'skipped'` for a contact not in `world.contacts`; and
+  `contact.updated` recorded in `world.emitted`.
+- S3 exports ONE new helper, `stampRelayOutreach`, from
+  `app/src/services/relayAnnouncements.ts` (that module must not import from
+  `jobs/`, so the shared helper lives on the services side and relayFanOut
+  imports it). Nothing else in another slice calls it.
+- S7 (events doc comments): S3 adds two `conversation.updated` emitters - the
+  fan-out's after-loop event (a team post pass) and the announcement's
+  after-loop event (a staff-edited intro). Neither emits `contact.updated`.
+  The `ConversationUpdatedEvent` doc comment in `app/src/lib/events.ts` may
+  name them; S3 edits no comment there.
+- `GroupSendServiceDeps.contactsRepo` widens to
+  `Pick<ContactsRepo, 'findByPhone' | 'touchLastReachedOut'>`. Its callers:
+  `app/src/routes/api.ts:717` (passes the router's full `contacts`, which S2
+  moves above the sendMessage service; unaffected), and
+  `app/test/groupGuardrailWiring.test.ts:232` (passes the harness repo;
+  unaffected). The hand-rolled fake in `app/test/groupSend.test.ts` is
+  updated by S3.2.
+- S6 backfill (PR38) consistency: a relay team-post slot's `sentAt` is
+  `result.providerTs` (`relayFanOut.ts:2213`), the instant W4 stamps; a
+  group-text post's row providerTs is `posted.dateCreated`
+  (`groupSend.ts:654`), the instant W5 stamps (normalized); a staff-edited
+  intro slot's `sentAt` is the leg's `result.providerTs`
+  (`relayAnnouncements.ts:347`), the instant W7 stamps. The backfill and the
+  live writers agree.
+- Existing suites that run a team post with seeded contacts (for example
+  `app/test/relayApi.test.ts`) or an edited intro with seeded contacts
+  (`app/test/relayFanOut.test.ts` ~3558, "an operator-edited intro_body
+  still wins over the tour variant") now stamp. Their registrations pass no
+  `events`, so the after-loop event goes to the `appEvents` singleton, which
+  no assertion there reads. S3.4 Step 3 confirms they stay green.
+- S7 e2e: each team-post pass and each staff-edited intro now emits one more
+  `conversation.updated`; the dashboard's consumers refetch debounced.
+
+---
+
+### Task S3.1 - W4: a team post stamps every member it reached, then one fresh-read event
+
+PR17, PR18, PR21 (the 30003 rung, the reconcile adoption, a member inbound
+relay, a suppressed member), WI4, WI5, WI6. Spec 7.3 W4.
+
+Files:
+- `app/src/jobs/relayFanOut.ts`
+- `app/src/services/relayAnnouncements.ts` (the helper and one import only)
+- Tests: `app/test/relayFanOut.test.ts`, `app/test/relayRetryLeg.test.ts`,
+  `app/test/sendReconcile.test.ts`
+- Read only: `app/src/worker.ts`, `app/src/jobs/registerHandlers.ts` (C1)
+
+#### Step 0 - S1 landed, and the slice base
+
+```
+git -C W:/tmp/today-checklist rev-parse HEAD
+git -C W:/tmp/today-checklist grep -n "export async function recordStaffOutreach\|export interface StaffOutreachStamp" -- app/src/services/staffOutreach.ts
+git -C W:/tmp/today-checklist grep -n "getByIdConsistent" -- app/src/repos/conversationsRepo.ts app/test/helpers/twilioWebhookHarness.ts
+git -C W:/tmp/today-checklist grep -n "reachedOutTouches\|touchLastReachedOut\|'contact.updated'" -- app/test/helpers/twilioWebhookHarness.ts
+```
+Write the `rev-parse` SHA down as S3_BASE (S3.4 uses it). Every grep must
+hit. Read the harness `touchLastReachedOut` fake: it must record
+`{ contactId, at, outcome }` into `world.reachedOutTouches` and answer
+`'skipped'` for a contact not in `world.contacts`. If S1 named any of these
+differently, use S1's names in the tests below (the assertions' intent is
+unchanged) and record the mapping in the S3 report. If any is missing, STOP:
+S1 has not landed.
+
+#### Step 1 - failing tests
+
+1a. `app/test/relayFanOut.test.ts` - append at the end of the file (after
+the last `});` of `describe('relay.fanOut token-bucket acquire (retry-send-window D4)'`):
+
+```ts
+
+// ---------------------------------------------------------------------------
+// today-checklist (spec 2026-10-23-today-checklist-design.md 7.3): the relay
+// writers of last_reached_out_at. W4 - a TEAM post stamps every contact
+// member whose leg the provider accepted, at that leg's own provider instant,
+// and the pass ends with ONE conversation.updated built from a FRESH
+// consistent read of the thread. W7 - a relay intro whose body staff edited
+// stamps the same way; no other announcement does. Its own registration, so
+// the job's bus is the harness bus (world.emitted).
+// ---------------------------------------------------------------------------
+describe('relay staff outreach - last_reached_out_at (today-checklist W4, W7)', () => {
+  const DAVE = '+15550100004';
+  let world: FakeWorld;
+  let outbound: InProcessOutboundQueueAdapter;
+  let capture: LogCapture;
+
+  beforeEach(() => {
+    _resetForTests();
+    capture = createLogCapture();
+    const logger = createLogger({ level: 'info', destination: capture.stream });
+    configureJobsLogger(logger);
+    configureScheduler(new InMemorySchedulerAdapter());
+    world = createFakeWorld();
+    registerRelayFanOutJobHandler({
+      sendAttemptsRepo: world.sendAttemptsRepo,
+      adapter: world.adapter,
+      conversationsRepo: world.conversationsRepo,
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      events: world.events,
+      logger,
+    });
+    outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob, logger });
+    configureOutboundQueue(outbound);
+  });
+
+  afterEach(() => {
+    _resetForTests();
+    vi.restoreAllMocks();
+  });
+
+  const DEFAULT_ROSTER = [
+    { contactId: 'c-alice', phone: ALICE },
+    { contactId: 'c-bob', phone: BOB },
+    { contactId: 'c-carol', phone: CAROL },
+  ];
+  /** Contact rows for roster members, so a stamp is 'written' (the harness answers 'skipped' for an unknown contact). */
+  function seedMemberContacts(members: { contactId: string; phone: string }[]): void {
+    for (const m of members) {
+      if (m.contactId.length > 0) world.contacts.push({ contactId: m.contactId, type: 'tenant', phone: m.phone });
+    }
+  }
+  /** The provider instant the harness adapter returned for the leg sent to `phone`. */
+  const legAt = (phone: string): string => world.sentDetails.find((d) => d.params.to === phone)!.providerTs;
+  const stampRows = () => world.reachedOutTouches.map((t) => [t.contactId, t.at, t.outcome]).sort();
+  const conversationUpdates = () => world.emitted.filter((e) => e.event === 'conversation.updated');
+  const contactUpdates = () => world.emitted.filter((e) => e.event === 'contact.updated');
+  async function runTeamPost(source: MessageItem, extra: Record<string, unknown> = {}): Promise<void> {
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: TEAM_SENDER_KEY,
+      senderNameOverride: TEAM_SENDER_LABEL,
+      ...extra,
+    });
+    await outbound.settle();
+  }
+
+  it('W4 a team post stamps every member with a contactId at that leg\'s provider instant, then ONE conversation.updated', async () => {
+    seedRelay(world);
+    seedMemberContacts(DEFAULT_ROSTER);
+    const source = seedTeamSource(world, 'Open house Saturday', ['c-alice', 'c-bob', 'c-carol']);
+
+    await runTeamPost(source);
+
+    expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, BOB, CAROL].sort());
+    expect(stampRows()).toEqual(
+      [
+        ['c-alice', legAt(ALICE), 'written'],
+        ['c-bob', legAt(BOB), 'written'],
+        ['c-carol', legAt(CAROL), 'written'],
+      ].sort(),
+    );
+    expect(world.contacts.find((c) => c.contactId === 'c-bob')?.last_reached_out_at).toBe(legAt(BOB));
+    // WI4: ONE event for the whole pass - never one per leg - and no per-contact event.
+    expect(conversationUpdates()).toHaveLength(1);
+    expect(conversationUpdates()[0]!.payload).toMatchObject({ conversationId: 'conv-relay-1', type: 'relay_group' });
+    expect(contactUpdates()).toHaveLength(0);
+    // A stamp is not thread activity: no touchLastActivity.
+    expect(world.touches).toHaveLength(0);
+  });
+
+  it('W4 the after-loop event is built from a FRESH consistent read: a reply that lands mid-fan-out keeps its unread count', async () => {
+    seedRelay(world);
+    seedMemberContacts(DEFAULT_ROSTER);
+    const source = seedTeamSource(world, 'Open house Saturday', ['c-alice', 'c-bob', 'c-carol']);
+    const realSend = world.adapter.sendPreparedMessage.bind(world.adapter);
+    let replied = false;
+    vi.spyOn(world.adapter, 'sendPreparedMessage').mockImplementation(async (prepared) => {
+      if (!replied) {
+        replied = true;
+        // A member replies while the legs go out. The inbound path writes the
+        // TABLE, never the job's start-of-run snapshot object - modelled by
+        // replacing the stored item rather than mutating the one the job holds.
+        const current = world.conversations.get('conv-relay-1')!;
+        world.conversations.set('conv-relay-1', { ...current, unread_count: 1 });
+      }
+      return realSend(prepared);
+    });
+    const stampsAtRead: number[] = [];
+    const realRead = world.conversationsRepo.getByIdConsistent.bind(world.conversationsRepo);
+    const freshRead = vi.spyOn(world.conversationsRepo, 'getByIdConsistent').mockImplementation(async (id) => {
+      stampsAtRead.push(world.reachedOutTouches.length);
+      return realRead(id);
+    });
+
+    await runTeamPost(source);
+
+    expect(freshRead).toHaveBeenCalledTimes(1);
+    expect(freshRead).toHaveBeenCalledWith('conv-relay-1');
+    // Read AFTER every stamp of the pass.
+    expect(stampsAtRead).toEqual([3]);
+    expect(conversationUpdates()).toHaveLength(1);
+    // The job's snapshot carried no unread count; the event carries the table's.
+    expect(conversationUpdates()[0]!.payload).toMatchObject({ conversationId: 'conv-relay-1', unread_count: 1 });
+  });
+
+  it('W4 a suppressed member (no leg) and a phone-only member (no contact item) are never stamped', async () => {
+    seedRelay(world, {
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+        { contactId: '', phone: DAVE },
+      ],
+    });
+    world.contacts.push({ contactId: 'c-alice', type: 'tenant', phone: ALICE });
+    world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: BOB, sms_opt_out: true });
+    const source = seedTeamSource(world, 'Open house Saturday', ['c-alice', 'c-bob', `phone#${DAVE}`]);
+
+    await runTeamPost(source);
+
+    expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, DAVE].sort());
+    expect(world.reachedOutTouches.map((t) => t.contactId)).toEqual(['c-alice']);
+    expect(conversationUpdates()).toHaveLength(1);
+  });
+
+  it('W4 (PIN) a MEMBER inbound relay never stamps and emits nothing', async () => {
+    seedRelay(world);
+    seedMemberContacts(DEFAULT_ROSTER);
+    const source = seedSource(world, 'is the unit still available?', 'c-alice');
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+
+    expect(world.sent.map((s) => s.to).sort()).toEqual([BOB, CAROL].sort());
+    expect(world.reachedOutTouches).toEqual([]);
+    expect(conversationUpdates()).toHaveLength(0);
+  });
+
+  it('W4 sent_unrecorded and a stranded leg whose send is KNOWN both stamp; an UNKNOWN outcome does not', async () => {
+    seedRelay(world);
+    seedMemberContacts(DEFAULT_ROSTER);
+    const source = seedTeamSource(world, 'Open house Saturday', ['c-alice', 'c-bob', 'c-carol']);
+    const realSend = world.adapter.sendPreparedMessage.bind(world.adapter);
+    vi.spyOn(world.adapter, 'sendPreparedMessage').mockImplementation(async (prepared) => {
+      // carol: the request may have reached the provider - an UNKNOWN outcome.
+      if (prepared.params.to === CAROL) throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+      return realSend(prepared);
+    });
+    const toOf = (sid: string) => world.sentDetails.find((d) => d.sid === sid)?.params.to;
+    // alice: accepted, then the pointer write throws -> sent_unrecorded (handed off with the SID).
+    // bob: the same, AND the hand-off of his SID throws -> stranded, afterSend.
+    const realPointer = world.messagesRepo.claimRelaySidPointer.bind(world.messagesRepo);
+    vi.spyOn(world.messagesRepo, 'claimRelaySidPointer').mockImplementation(async (sid, ref) => {
+      const to = toOf(sid);
+      if (to === ALICE || to === BOB) throw new Error('dynamo blip');
+      return realPointer(sid, ref);
+    });
+    const realHand = world.sendAttemptsRepo.handToReconcile.bind(world.sendAttemptsRepo);
+    vi.spyOn(world.sendAttemptsRepo, 'handToReconcile').mockImplementation(async (owner, ref, sid) => {
+      if (sid !== undefined && toOf(sid) === BOB) throw new Error('dynamo down');
+      return realHand(owner, ref, sid);
+    });
+
+    await runTeamPost(source);
+
+    expect(world.reachedOutTouches.map((t) => [t.contactId, t.at]).sort()).toEqual(
+      [
+        ['c-alice', legAt(ALICE)],
+        ['c-bob', legAt(BOB)],
+      ].sort(),
+    );
+    expect(conversationUpdates()).toHaveLength(1);
+  });
+
+  it('W4 a post queued while the group connected stamps when its legs go out (the relayQueuedMessages flush), not when it was composed', async () => {
+    seedRelay(world);
+    seedMemberContacts(DEFAULT_ROSTER);
+    const source = seedTeamSource(world, 'Composed while connecting', ['c-alice', 'c-bob', 'c-carol']);
+    const composedAt = new Date(Date.now() - 60 * 60_000).toISOString();
+    source.provider_ts = composedAt;
+    source.created_at = composedAt;
+    source.delivery_status = 'queued_pending';
+
+    await flushQueuedMessages('conv-relay-1', {
+      messagesRepo: world.messagesRepo,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+    });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(3);
+    for (const [contactId, phone] of [
+      ['c-alice', ALICE],
+      ['c-bob', BOB],
+      ['c-carol', CAROL],
+    ] as const) {
+      const touch = world.reachedOutTouches.find((t) => t.contactId === contactId);
+      expect(touch?.at, contactId).toBe(legAt(phone));
+      expect(touch?.at, contactId).not.toBe(composedAt);
+    }
+    expect(conversationUpdates()).toHaveLength(1);
+  });
+
+  it('WI6 a team leg the reconcile re-drives (the enqueueRedrive envelope) stamps that member: the staff post reaching them for the first time', async () => {
+    seedRelay(world);
+    seedMemberContacts(DEFAULT_ROSTER);
+    const source = seedTeamSource(world, 'Open house Saturday', ['c-alice', 'c-bob', 'c-carol']);
+    source.fanout_attempt = 3;
+    const owner: SendAttemptOwner = {
+      kind: 'relay_leg',
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      memberKey: 'c-bob',
+    };
+    // The record the reconcile ruled never_sent and re-drove (redriven, redriveCount 1).
+    const at = new Date().toISOString();
+    await world.sendAttemptsRepo.claim(
+      owner,
+      { recipientDigest: 'd'.repeat(32), sender: POOL, bodyHash: 'h'.repeat(64), bodyShort: false, mediaCount: 0 },
+      at,
+    );
+    await world.sendAttemptsRepo.handToReconcile(owner, { attemptNo: 1, attemptedAt: at });
+    await world.sendAttemptsRepo.markRedriven(owner, at);
+
+    // Exactly the payload sendReconcile's enqueueRedrive builds for a team leg
+    // (pinned by sendReconcile.test.ts "15 relay never_sent").
+    await runTeamPost(source, { recipientKeys: ['c-bob'], attempt: 4, redrive: true });
+
+    expect(world.sent.map((s) => s.to)).toEqual([BOB]);
+    expect(await world.sendAttemptsRepo.get(owner)).toMatchObject({ state: 'done', outcome: 'sent', attemptNo: 2, redriveCount: 1 });
+    expect(world.reachedOutTouches.map((t) => [t.contactId, t.at])).toEqual([['c-bob', legAt(BOB)]]);
+    expect(conversationUpdates()).toHaveLength(1);
+  });
+
+  it('WI5 a 30-member team post goes out in ONE pass with ONE event; a transient continuation is its own pass with its own event', async () => {
+    const roster = Array.from({ length: 30 }, (_, i) => {
+      const n = String(i + 1).padStart(2, '0');
+      return { contactId: `c-m${n}`, phone: `+155501020${n}`, name: `Member ${n}` };
+    });
+    seedRelay(world, { participants: roster });
+    seedMemberContacts(roster);
+    const source = seedTeamSource(world, 'Open house Saturday', roster.map((m) => m.contactId));
+    // The first leg is rate-limited once (429 = transient): carried to a continuation.
+    vi.spyOn(world.adapter, 'sendPreparedMessage').mockRejectedValueOnce(
+      Object.assign(new Error('rate limited'), { code: 429 }),
+    );
+
+    await runTeamPost(source);
+
+    expect(world.sent).toHaveLength(29);
+    expect(world.reachedOutTouches).toHaveLength(29);
+    expect(conversationUpdates()).toHaveLength(1);
+    const continuations = outbound.delayed.filter((d) => d.envelope.jobName === RELAY_FANOUT_JOB);
+    expect(continuations).toHaveLength(1);
+    expect(continuations[0]!.envelope.payload).toMatchObject({ recipientKeys: ['c-m01'], attempt: 2 });
+
+    const [item] = outbound.delayed.splice(outbound.delayed.indexOf(continuations[0]!), 1);
+    await dispatchJob(JSON.parse(JSON.stringify(item!.envelope)));
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(30);
+    expect(new Set(world.reachedOutTouches.map((t) => t.contactId)).size).toBe(30);
+    expect(world.reachedOutTouches.find((t) => t.contactId === 'c-m01')?.at).toBe(legAt('+15550102001'));
+    expect(conversationUpdates()).toHaveLength(2);
+    expect(outbound.delayed.filter((d) => d.envelope.jobName === RELAY_FANOUT_JOB)).toHaveLength(0);
+  });
+
+  it.each(['returns nothing', 'throws'] as const)(
+    'W4 a fresh read that %s skips the event with ONE WARN; the stamps stand',
+    async (mode) => {
+      seedRelay(world);
+      seedMemberContacts(DEFAULT_ROSTER);
+      const source = seedTeamSource(world, 'Open house Saturday', ['c-alice', 'c-bob', 'c-carol']);
+      const read = vi.spyOn(world.conversationsRepo, 'getByIdConsistent');
+      if (mode === 'throws') read.mockRejectedValueOnce(new Error('dynamo blip'));
+      else read.mockResolvedValueOnce(undefined);
+
+      await runTeamPost(source);
+
+      expect(world.sent).toHaveLength(3);
+      expect(world.reachedOutTouches.filter((t) => t.outcome === 'written')).toHaveLength(3);
+      expect(conversationUpdates()).toHaveLength(0);
+      const warns = capture.atLevel(40).filter((l) => String(l['msg']).includes('relay staff outreach'));
+      expect(warns).toHaveLength(1);
+      expect(warns[0]).toMatchObject({ conversationId: 'conv-relay-1', written: 3 });
+      expect(capture.atLevel(50)).toHaveLength(0);
+    },
+  );
+
+  // W7 cases (Task S3.3) are inserted above this line.
+});
+```
+
+1b. `app/test/relayRetryLeg.test.ts` - insert after the test
+`it('sends to the failed member ONLY - never to the rest of the roster', ...)`.
+Edit:
+
+old:
+```ts
+  it('sends to the failed member ONLY - never to the rest of the roster', async () => {
+    seedRelay(world);
+    const row = seedRetryRow(world);
+    register();
+
+    await runHandler(payloadFor(row));
+
+    expect(world.sent.map((s) => s.to)).toEqual([BOB]);
+  });
+```
+new:
+```ts
+  it('sends to the failed member ONLY - never to the rest of the roster', async () => {
+    seedRelay(world);
+    const row = seedRetryRow(world);
+    register();
+
+    await runHandler(payloadFor(row));
+
+    expect(world.sent.map((s) => s.to)).toEqual([BOB]);
+  });
+
+  // today-checklist (spec 2026-10-23-today-checklist-design.md 7.2/7.3, PR17,
+  // PR21, WI6): the 30003 rung is a MACHINE resend of a leg that already
+  // counted, so it never stamps last_reached_out_at - not even for a staff
+  // (team) post. It calls sendOneRelayLeg directly; the fan-out loop's stamp
+  // collection never runs here.
+  it('a rung that resends a TEAM post leg never stamps last_reached_out_at (PIN)', async () => {
+    seedRelay(world);
+    world.contacts.push({ contactId: BOB_KEY, type: 'tenant', phone: BOB });
+    const row = seedRetryRow(world, { legBody: 'HousingChoice: Open house Saturday' });
+    Object.assign(row, {
+      direction: 'outbound',
+      author: 'teammate',
+      relay_sender_key: 'team',
+      relay_retry_origin_direction: 'outbound',
+    });
+    register();
+
+    await runHandler(payloadFor(row));
+
+    expect(world.sent.map((s) => s.to)).toEqual([BOB]);
+    expect(world.reachedOutTouches).toEqual([]);
+    expect(world.emitted.filter((e) => e.event === 'contact.updated')).toHaveLength(0);
+  });
+```
+
+1c. `app/test/sendReconcile.test.ts` - inside `describe('the relay owners'`,
+insert immediately BEFORE the line
+`    it('A1 every relay-leg close the job makes tells the thread, in the source row\'s direction; a close that moved nothing tells nobody', async () => {`
+(Edit: use that whole line as old text; new text = the block below followed
+by that same line):
+
+```ts
+    // today-checklist (PR21): the reconcile's relay-leg ADOPTION records a leg
+    // that already went out. It never stamps last_reached_out_at, even for a
+    // team post (a rare recovery path, accepted best-effort - spec 7.3 W4).
+    it('a relay-leg adoption of a TEAM post never stamps last_reached_out_at (PIN)', async () => {
+      register();
+      seedRelay();
+      world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: BOB });
+      const source = seedSource({ direction: 'outbound' });
+      source.relay_sender_key = 'team';
+      source.author = 'teammate';
+      const owner = legOwner(source);
+      const at = await reconciling(owner, legFacts());
+      plantLeg('SMleg-team-1', { providerStatus: 'delivered', createdAt: new Date().toISOString() });
+
+      await runCheck(legPayload(owner, at, 0, { senderKey: 'team', senderNameOverride: 'HousingChoice' }));
+
+      expect(slotAt(source)).toMatchObject({ status: 'delivered', sid: 'SMleg-team-1' });
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMleg-team-1' });
+      expect(world.reachedOutTouches).toEqual([]);
+      expect(world.emitted.filter((e) => e.event === 'contact.updated')).toHaveLength(0);
+    });
+
+```
+
+#### Step 2 - RED
+
+Needs DynamoDB Local up (`npm run db:start` STARTS it; never restart it).
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/relayFanOut.test.ts test/relayRetryLeg.test.ts test/sendReconcile.test.ts
+```
+Expected failures, and why (nothing stamps and the fan-out emits nothing
+yet):
+- `W4 a team post stamps every member ...`: `stampRows()` is `[]`;
+  `conversationUpdates()` has length 0.
+- `W4 the after-loop event is built from a FRESH consistent read ...`:
+  `freshRead` was called 0 times.
+- `W4 a suppressed member ... phone-only member ...`: touches `[]`, expected
+  `['c-alice']`.
+- `W4 sent_unrecorded and a stranded leg ...`: touches `[]`.
+- `W4 a post queued while the group connected ...`: `touch?.at` is
+  `undefined`.
+- `WI6 a team leg the reconcile re-drives ...`: touches `[]`.
+- `WI5 a 30-member team post ...`: `world.reachedOutTouches` has length 0,
+  not 29.
+- `W4 a fresh read that returns nothing / throws ...` (both): no `'written'`
+  touch.
+Green already (PIN): `W4 (PIN) a MEMBER inbound relay ...`, the relayRetryLeg
+`a rung that resends a TEAM post leg ...` and the sendReconcile `a relay-leg
+adoption of a TEAM post ...`. Every pre-existing case in the three files
+stays green. A `TypeError` on `world.reachedOutTouches` or
+`getByIdConsistent` means S1 is missing - go back to Step 0.
+
+#### Step 3 - implementation
+
+3a. `app/src/services/relayAnnouncements.ts` - the import. Edit:
+
+old:
+```ts
+import { SendRefusedError } from './sendMessage.js';
+```
+new:
+```ts
+import { SendRefusedError } from './sendMessage.js';
+import { recordStaffOutreach, type StaffOutreachStamp } from './staffOutreach.js';
+```
+
+3b. `app/src/services/relayAnnouncements.ts` - the shared after-loop helper,
+directly above the `sendRelayAnnouncement` doc comment. Edit (both old lines
+are ASCII):
+
+old:
+```ts
+/**
+ * Send a system announcement into a relay group. Returns undefined (and sends
+```
+new:
+```ts
+/**
+ * today-checklist (spec 2026-10-23-today-checklist-design.md 7.3, writers W4
+ * and W7): stamp last_reached_out_at for the contacts a relay group post
+ * reached, then tell the thread ONCE. Called AFTER a member loop, never per
+ * member: by the relay fan-out (a team post, jobs/relayFanOut.ts) and by
+ * sendRelayAnnouncement below (a staff-edited intro).
+ *
+ * The event is built from a FRESH strongly consistent read of the thread,
+ * never from the caller's start-of-run snapshot: ThreadUnreadToggle.tsx and
+ * ContactDetail.tsx set unread_count straight from the event, so a stale
+ * payload would mark a reply that landed mid-fan-out as read. No
+ * touchLastActivity: a stamp is not thread activity. No event when nothing
+ * was written. A read that returns nothing or throws skips the event with
+ * ONE WARN; the stamps stand and Today sees them on its next refetch.
+ *
+ * Never throws (recordStaffOutreach never does, the read is caught, and the
+ * bus isolates its listeners), so a caller's continuation or reply is never
+ * held back. Returns the contactIds written. PII: ids and counts only.
+ */
+export async function stampRelayOutreach(
+  deps: {
+    contacts: Pick<ContactsRepo, 'touchLastReachedOut'>;
+    conversations: Pick<ConversationsRepo, 'getByIdConsistent'>;
+    events: EventBus;
+    log: Logger;
+  },
+  conversationId: string,
+  stamps: readonly StaffOutreachStamp[],
+): Promise<string[]> {
+  if (stamps.length === 0) return [];
+  const written = await recordStaffOutreach({ contacts: deps.contacts, log: deps.log }, stamps);
+  if (written.length === 0) return written;
+  let fresh: Awaited<ReturnType<ConversationsRepo['getByIdConsistent']>>;
+  try {
+    fresh = await deps.conversations.getByIdConsistent(conversationId);
+  } catch (err) {
+    deps.log.warn(
+      { err, conversationId, written: written.length },
+      'relay staff outreach: the fresh thread read failed - no conversation.updated (the stamps stand)',
+    );
+    return written;
+  }
+  if (fresh === undefined) {
+    deps.log.warn(
+      { conversationId, written: written.length },
+      'relay staff outreach: the thread is missing on the fresh read - no conversation.updated (the stamps stand)',
+    );
+    return written;
+  }
+  deps.events.emit('conversation.updated', toConversationUpdatedEvent(fresh));
+  return written;
+}
+
+/**
+ * Send a system announcement into a relay group. Returns undefined (and sends
+```
+(`ContactsRepo`, `ConversationsRepo`, `EventBus`, `Logger` and
+`toConversationUpdatedEvent` are already imported by this file.)
+
+3c. `app/src/jobs/relayFanOut.ts` - imports. Edit:
+
+old:
+```ts
+import { getContext } from '../lib/context.js';
+import { guardWrite } from '../lib/guardWrite.js';
+```
+new:
+```ts
+import { getContext } from '../lib/context.js';
+import { appEvents, type EventBus } from '../lib/events.js';
+import { guardWrite } from '../lib/guardWrite.js';
+```
+Edit:
+
+old:
+```ts
+import {
+  isMemberSuppressed,
+  logSafeMemberKey,
+  sendRelayAnnouncement,
+} from '../services/relayAnnouncements.js';
+```
+new:
+```ts
+import {
+  isMemberSuppressed,
+  logSafeMemberKey,
+  sendRelayAnnouncement,
+  stampRelayOutreach,
+} from '../services/relayAnnouncements.js';
+import type { StaffOutreachStamp } from '../services/staffOutreach.js';
+```
+
+3d. `relayFanOut.ts` - `RelayFanOutJobDeps` gains `events` (PR18). Edit:
+
+old:
+```ts
+  nowIso?: string;
+  logger?: Logger;
+}
+
+export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): void {
+```
+new:
+```ts
+  nowIso?: string;
+  /**
+   * The live-update bus (today-checklist spec 7.3, W4 and W7): the ONE
+   * conversation.updated a team post's pass - and a staff-edited intro -
+   * emits after its staff-outreach stamps. Defaulted to the appEvents
+   * singleton on the first job run, the jobs/relayRetryLeg.ts pattern; in the
+   * worker process attachEventBridge (worker.ts) forwards every emit on that
+   * singleton to the app's SSE clients. A test injects its fake world's bus.
+   */
+  events?: EventBus;
+  logger?: Logger;
+}
+
+export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): void {
+```
+
+3e. `relayFanOut.ts` - the handler's lazy bus. Edit:
+
+old:
+```ts
+  let mediaStoreInit = deps.mediaStore !== undefined;
+  let sendAttempts = deps.sendAttemptsRepo;
+```
+new:
+```ts
+  let mediaStoreInit = deps.mediaStore !== undefined;
+  let sendAttempts = deps.sendAttemptsRepo;
+  let events = deps.events;
+```
+Edit (inside `defineJobHandler(RELAY_FANOUT_JOB, ...)`):
+
+old:
+```ts
+    contacts ??= createContactsRepo({ logger: deps.logger });
+    sendAttempts ??= createSendAttemptsRepo({ logger: deps.logger });
+```
+new:
+```ts
+    contacts ??= createContactsRepo({ logger: deps.logger });
+    sendAttempts ??= createSendAttemptsRepo({ logger: deps.logger });
+    events ??= appEvents;
+```
+Edit (the execution object, ~1037-1049):
+
+old:
+```ts
+      sendAttempts: attempts,
+      consistent,
+      log,
+    };
+```
+new:
+```ts
+      sendAttempts: attempts,
+      consistent,
+      events,
+      log,
+    };
+```
+
+3f. `relayFanOut.ts` - `RelayFanOutExecutionDeps` (PR18). Edit:
+
+old:
+```ts
+  /** A continuation or a re-drive: every source re-read is strongly consistent (SOR D11). */
+  consistent: boolean;
+  log: Logger;
+}
+```
+new:
+```ts
+  /** A continuation or a re-drive: every source re-read is strongly consistent (SOR D11). */
+  consistent: boolean;
+  /** The live-update bus for the after-loop staff-outreach event (today-checklist W4); appEvents when absent. */
+  events?: EventBus;
+  log: Logger;
+}
+```
+
+3g. `relayFanOut.ts` - the loop collects (PR17). Edit:
+
+old:
+```ts
+  let unknownStreak = 0;
+  let braked = false;
+  let untried = 0;
+  for (const member of recipients) {
+```
+new:
+```ts
+  let unknownStreak = 0;
+  let braked = false;
+  let untried = 0;
+  // today-checklist W4 (spec 2026-10-23-today-checklist-design.md 7.3): a TEAM
+  // post is staff following up with every member it reaches, so each member
+  // with a contactId whose leg the provider ACCEPTED (sent, sent_unrecorded, or
+  // stranded after a known send) is stamped at that leg's own provider
+  // instant - a post queued while the group connected stamps when its legs
+  // actually go out. Collected HERE, in the loop, never inside
+  // sendOneRelayLeg: the 30003 retry rung also calls that unit, and a machine
+  // resend never stamps. A member's inbound relay never stamps. A suppressed
+  // member gets no leg and no stamp.
+  const teamPost = payload.senderKey === TEAM_SENDER_KEY;
+  const outreach: StaffOutreachStamp[] = [];
+  for (const member of recipients) {
+```
+Edit:
+
+old:
+```ts
+      unknown = isUnknownOutcome(outcome);
+      switch (outcome.kind) {
+```
+new:
+```ts
+      unknown = isUnknownOutcome(outcome);
+      if (
+        teamPost &&
+        typeof member.contactId === 'string' &&
+        member.contactId.length > 0 &&
+        outcome.sentAt !== undefined &&
+        (outcome.kind === 'sent' ||
+          outcome.kind === 'sent_unrecorded' ||
+          (outcome.kind === 'stranded' && outcome.afterSend === true))
+      ) {
+        outreach.push({ contactId: member.contactId, at: outcome.sentAt });
+      }
+      switch (outcome.kind) {
+```
+
+3h. `relayFanOut.ts` - after the loop (PR17). Edit:
+
+old:
+```ts
+    'relay fan-out complete',
+  );
+
+  if (transientRemaining.length === 0) return;
+```
+new:
+```ts
+    'relay fan-out complete',
+  );
+
+  // today-checklist W4 (spec 7.3): this pass's staff-outreach stamps, then ONE
+  // conversation.updated built from a fresh consistent read
+  // (stampRelayOutreach). AFTER the loop and BEFORE any continuation is
+  // scheduled, so every pass - the first, a transient continuation, a
+  // re-drive - announces its own legs exactly once (WI5). Never throws.
+  if (outreach.length > 0) {
+    await stampRelayOutreach(
+      { contacts, conversations, events: deps.events ?? appEvents, log },
+      payload.relayConversationId,
+      outreach,
+    );
+  }
+
+  if (transientRemaining.length === 0) return;
+```
+(`contacts`, `conversations` and `log` are the destructured locals at the
+top of `runRelayFanOutExecution`, ~1271.)
+
+3i. `relayFanOut.ts` - `RelayLegSendOutcome.sentAt` (C3). Edit:
+
+old:
+```ts
+  /** On `stranded`: the send is known to have happened. */
+  afterSend?: true;
+}
+```
+new:
+```ts
+  /** On `stranded`: the send is known to have happened. */
+  afterSend?: true;
+  /**
+   * On `sent`, `sent_unrecorded`, and `stranded` with `afterSend`: the
+   * provider-accepted instant (`result.providerTs`). The fan-out loop stamps a
+   * team post's member with it (today-checklist W4); this unit only reports
+   * it. Absent on every other arm.
+   */
+  sentAt?: string;
+}
+```
+
+3j. `relayFanOut.ts` - the three return literals in `sendOneRelayLeg` (C2;
+nothing else in the unit changes). Edit:
+
+old:
+```ts
+    return { kind: 'sent', providerSid: result.providerSid };
+```
+new:
+```ts
+    return { kind: 'sent', providerSid: result.providerSid, sentAt: result.providerTs };
+```
+Edit:
+
+old:
+```ts
+      const providerSid = result!.providerSid;
+      log.error(
+        { err, ...ctx, providerSid },
+        'relayFanOut: sent_unrecorded - member sent but not recorded; its SID goes to reconcile',
+      );
+      const handed = await handToReconcile(held, providerSid);
+      if (handed === 'handed') return { kind: 'sent_unrecorded', providerSid, attemptRef: held.ref };
+      if (handed === 'fence_lost') return { kind: 'skipped_terminal' };
+      return { kind: 'stranded', afterSend: true };
+```
+new:
+```ts
+      const providerSid = result!.providerSid;
+      const sentAt = result!.providerTs;
+      log.error(
+        { err, ...ctx, providerSid },
+        'relayFanOut: sent_unrecorded - member sent but not recorded; its SID goes to reconcile',
+      );
+      const handed = await handToReconcile(held, providerSid);
+      if (handed === 'handed') return { kind: 'sent_unrecorded', providerSid, attemptRef: held.ref, sentAt };
+      if (handed === 'fence_lost') return { kind: 'skipped_terminal' };
+      return { kind: 'stranded', afterSend: true, sentAt };
+```
+
+3k. C1 - no edit to `app/src/worker.ts` or `app/src/jobs/registerHandlers.ts`.
+Confirm the wiring by reading: `worker.ts:45-61` attaches the bridge to
+`appEvents`; `registerHandlers.ts:64` registers the relay handler with no
+`events`, so 3e's `events ??= appEvents` applies in both processes.
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/relayFanOut.test.ts test/relayRetryLeg.test.ts test/sendReconcile.test.ts test/relayQueuedMessages.test.ts test/relayApi.test.ts test/relayAnnouncements.test.ts
+```
+Expect all green. Then (bare):
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0.
+
+#### Step 5 - ASCII check on added lines
+
+```
+cd W:/tmp/today-checklist; git diff -U0 -- app | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0`.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+```
+(The `ls` must report "No such file or directory"; in PowerShell use
+`Test-Path` and expect `False`.)
+```
+git -C W:/tmp/today-checklist add app/src/jobs/relayFanOut.ts app/src/services/relayAnnouncements.ts app/test/relayFanOut.test.ts app/test/relayRetryLeg.test.ts app/test/sendReconcile.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(relay): a team post stamps last_reached_out_at per member it reached, then one fresh-read conversation.updated (today-checklist S3.1, W4)" -m "The fan-out loop collects each contact member whose leg the provider accepted (sent, sent_unrecorded, stranded after a known send) at the leg's providerTs; after the loop stampRelayOutreach records them and emits ONE conversation.updated from getByIdConsistent. sendOneRelayLeg only reports sentAt; the 30003 rung and reconcile adoption never stamp. The job's bus defaults to appEvents." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S3.2 - W5: a group-text post stamps every reached member before its existing event
+
+PR19, PR5, WI4. Spec 7.3 W5.
+
+Files:
+- `app/src/services/groupSend.ts`
+- Tests: `app/test/groupSend.test.ts`
+
+#### Step 1 - failing tests
+
+1a. `app/test/groupSend.test.ts` - the `makeFakes` fake learns the new
+method and records `contact.updated`. Five edits.
+
+Edit (the `Fakes` interface):
+
+old:
+```ts
+  touched: { previewText: string | undefined; ts: string }[];
+  send: ReturnType<typeof createGroupSendService>;
+```
+new:
+```ts
+  touched: { previewText: string | undefined; ts: string }[];
+  /** Every touchLastReachedOut call, with how many events had been emitted at that moment. */
+  reachedOut: { contactId: string; at: string; emittedBefore: number }[];
+  send: ReturnType<typeof createGroupSendService>;
+```
+Edit (the overrides type):
+
+old:
+```ts
+    clearGroupRail?: (conversationId: string, expectedSid: string) => Promise<boolean>;
+  } = {},
+```
+new:
+```ts
+    clearGroupRail?: (conversationId: string, expectedSid: string) => Promise<boolean>;
+    /** today-checklist W5: the stamp's answer (default 'written'), or a rejection. */
+    touchLastReachedOut?: (contactId: string, at: string) => Promise<'written' | 'skipped' | 'failed'>;
+  } = {},
+```
+Edit (the `fakes` object):
+
+old:
+```ts
+    touched: [] as Fakes['touched'],
+  };
+```
+new:
+```ts
+    touched: [] as Fakes['touched'],
+    reachedOut: [] as Fakes['reachedOut'],
+  };
+```
+Edit (the recorded events):
+
+old:
+```ts
+  for (const name of ['message.persisted', 'conversation.updated'] as AppEventName[]) {
+```
+new:
+```ts
+  for (const name of ['message.persisted', 'conversation.updated', 'contact.updated'] as AppEventName[]) {
+```
+Edit (the contacts fake):
+
+old:
+```ts
+      findByPhone: async (phone) => contactsByPhone.get(phone),
+```
+new:
+```ts
+      findByPhone: async (phone) => contactsByPhone.get(phone),
+      touchLastReachedOut: async (contactId, at) => {
+        fakes.reachedOut.push({ contactId, at, emittedBefore: fakes.emitted.length });
+        return overrides.touchLastReachedOut !== undefined ? overrides.touchLastReachedOut(contactId, at) : 'written';
+      },
+```
+
+1b. Append at the end of `app/test/groupSend.test.ts`:
+
+```ts
+
+// today-checklist W5 (spec 2026-10-23-today-checklist-design.md 7.3): a staff
+// post into a native group text stamps last_reached_out_at for every resolved
+// member contact whose slot is NOT seeded `excluded`, at the post's own
+// provider instant, BEFORE the send's one conversation.updated - and adds no
+// event of its own (WI4: zero extra events).
+describe('groupSend - staff outreach stamps (today-checklist W5)', () => {
+  it('stamps every member contact at the post instant, before both SSE events, and emits nothing extra', async () => {
+    const f = makeFakes();
+    await f.send({ conversationId: 'group-1', body: 'on my way' });
+
+    expect(f.reachedOut.map(({ contactId, at }) => ({ contactId, at }))).toEqual([
+      { contactId: 'contact-ann', at: '2026-08-11T13:00:00.500Z' },
+      { contactId: 'contact-marcus', at: '2026-08-11T13:00:00.500Z' },
+    ]);
+    // Every stamp landed before the first event of the send.
+    expect(f.reachedOut.every((r) => r.emittedBefore === 0)).toBe(true);
+    expect(f.emitted.map((e) => e.event)).toEqual(['message.persisted', 'conversation.updated']);
+  });
+
+  it('normalizes the provider instant before stamping', async () => {
+    const f = makeFakes({
+      port: {
+        postGroupMessage: async () => ({
+          messageSid: 'IMposted1',
+          dateCreated: '2026-08-11T13:00:00Z',
+          actualTransport: 'mms' as const,
+        }),
+      },
+    });
+    await f.send({ conversationId: 'group-1', body: 'hi' });
+    expect(f.reachedOut.map((r) => r.at)).toEqual(['2026-08-11T13:00:00.000Z', '2026-08-11T13:00:00.000Z']);
+  });
+
+  it('never stamps a member whose slot is seeded excluded (a known-suppressed handset Twilio skips)', async () => {
+    const f = makeFakes({
+      contacts: [
+        consentingContact('contact-ann', '+16175550111'),
+        { ...consentingContact('contact-marcus', '+16175550222'), sms_opt_out: true } as ContactItem,
+      ],
+    });
+    await f.send({ conversationId: 'group-1', body: 'hi' });
+    expect(f.appended[0]?.deliveryRecipients?.['phone#+16175550222']?.transportAggregationState).toBe('excluded');
+    expect(f.reachedOut.map((r) => r.contactId)).toEqual(['contact-ann']);
+  });
+
+  it('stamps one contact on two numbers of the group ONCE', async () => {
+    const f = makeFakes({
+      members: [ANN, member('+16175550999', 'contact-ann', 'Ann second')],
+      contacts: [consentingContact('contact-ann', '+16175550111')],
+      attachedNumbers: { '+16175550999': consentingContact('contact-ann', '+16175550111') },
+    });
+    await f.send({ conversationId: 'group-1', body: 'hi' });
+    expect(f.reachedOut.map((r) => r.contactId)).toEqual(['contact-ann']);
+  });
+
+  it('stamps nothing when the post fails - no row, no stamp', async () => {
+    const f = makeFakes({
+      port: {
+        postGroupMessage: async () => {
+          throw new Error('twilio exploded');
+        },
+      },
+    });
+    await expect(f.send({ conversationId: 'group-1', body: 'hi' })).rejects.toBeInstanceOf(GroupSendFailedError);
+    expect(f.reachedOut).toEqual([]);
+  });
+
+  it('a stamp that fails never fails a post that already left', async () => {
+    const f = makeFakes({
+      touchLastReachedOut: async () => {
+        throw new Error('dynamo down');
+      },
+    });
+    const out = await f.send({ conversationId: 'group-1', body: 'hi' });
+    expect(out).toMatchObject({ providerSid: 'IMposted1', status: 'queued' });
+    expect(f.reachedOut).toHaveLength(2);
+    expect(f.emitted.map((e) => e.event)).toEqual(['message.persisted', 'conversation.updated']);
+  });
+});
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/groupSend.test.ts
+```
+Expected failures, and why (the service never calls the new method yet):
+- `stamps every member contact ...`, `normalizes the provider instant ...`,
+  `never stamps a member whose slot is seeded excluded ...`, `stamps one
+  contact on two numbers ... ONCE`, `a stamp that fails never fails ...`:
+  `f.reachedOut` is `[]` (expected entries / length 2).
+Green already: `stamps nothing when the post fails ...` (no stamp exists yet)
+and every pre-existing case (the fake only GAINED a method and a recorded
+event name; `touches last activity, audits the send, and emits both SSE
+events` still sees exactly the two events).
+
+#### Step 3 - implementation (all in `app/src/services/groupSend.ts`)
+
+3a. Imports. Edit:
+
+old:
+```ts
+import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
+import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+```
+new:
+```ts
+import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
+import { normalizeInstant } from '../lib/heardFrom.js';
+import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+```
+Edit:
+
+old:
+```ts
+import { readNumberSuppression } from './numberSuppression.js';
+```
+new:
+```ts
+import { readNumberSuppression } from './numberSuppression.js';
+import { recordStaffOutreach, type StaffOutreachStamp } from './staffOutreach.js';
+```
+
+3b. The dep type. Edit:
+
+old:
+```ts
+  contactsRepo?: Pick<ContactsRepo, 'findByPhone'>;
+```
+new:
+```ts
+  // `touchLastReachedOut` (today-checklist W5): the staff-outreach stamp the
+  // post makes for every member it reached (recordStaffOutreach).
+  contactsRepo?: Pick<ContactsRepo, 'findByPhone' | 'touchLastReachedOut'>;
+```
+
+3c. The seeding loop collects the excluded slots (PR19). Edit:
+
+old:
+```ts
+    const deliveryRecipients: Record<string, RelayRecipientDelivery> = {};
+    for (const { member, contact } of resolved) {
+      const key = groupMemberKey(member.phone);
+```
+new:
+```ts
+    const deliveryRecipients: Record<string, RelayRecipientDelivery> = {};
+    // The slots seeded `excluded` below (a known-suppressed handset): W5 never
+    // stamps those members (today-checklist spec 7.3).
+    const excludedKeys = new Set<string>();
+    for (const { member, contact } of resolved) {
+      const key = groupMemberKey(member.phone);
+```
+Edit:
+
+old:
+```ts
+      deliveryRecipients[key] = suppressed
+        ? {
+```
+new:
+```ts
+      if (suppressed) excludedKeys.add(key);
+      deliveryRecipients[key] = suppressed
+        ? {
+```
+
+3d. The stamp, after the row is written and the parked receipts drained,
+BEFORE the existing emits (PR19). Edit:
+
+old:
+```ts
+    // (8) Inbox touch + audit trail (ids only, never the body).
+```
+new:
+```ts
+    // (7c) today-checklist W5 (spec 2026-10-23-today-checklist-design.md 7.3).
+    // The post is a staff follow-up to every member it reached, so each
+    // resolved member contact whose slot was NOT seeded `excluded` gets
+    // last_reached_out_at at the post's own provider instant (normalized - the
+    // stored form every writer shares). Awaited here, after the row exists and
+    // BEFORE the conversation.updated below, so that existing event is the
+    // post-stamp event: W5 adds none of its own. Best-effort: recordStaffOutreach
+    // never throws, so a failed stamp never fails a post that already left.
+    const stampAt = normalizeInstant(posted.dateCreated);
+    if (stampAt !== undefined) {
+      const stamps: StaffOutreachStamp[] = [];
+      for (const { member, contact } of resolved) {
+        if (contact === undefined || excludedKeys.has(groupMemberKey(member.phone))) continue;
+        stamps.push({ contactId: contact.contactId, at: stampAt });
+      }
+      await recordStaffOutreach({ contacts, log }, stamps);
+    } else {
+      log.warn(
+        { conversationId, providerSid: posted.messageSid },
+        'group send: the post instant is unparseable - no staff-outreach stamp',
+      );
+    }
+
+    // (8) Inbox touch + audit trail (ids only, never the body).
+```
+(A contact on two numbers of the group yields two stamps with one
+contactId; `recordStaffOutreach` keeps one per contact - PR5.)
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/groupSend.test.ts test/groupGuardrailWiring.test.ts test/groupSendRoute.test.ts
+```
+Expect all green. Then (bare):
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0.
+
+#### Step 5 - ASCII check
+
+`groupSend.ts` and `groupSend.test.ts` were ASCII before this task:
+```
+tr -d '\11\12\15\40-\176' < W:/tmp/today-checklist/app/src/services/groupSend.ts | wc -c
+tr -d '\11\12\15\40-\176' < W:/tmp/today-checklist/app/test/groupSend.test.ts | wc -c
+```
+Expect `0` twice.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add app/src/services/groupSend.ts app/test/groupSend.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(group-text): a staff post stamps last_reached_out_at for every reached member before its event (today-checklist S3.2, W5)" -m "Every resolved member contact whose slot is not seeded excluded is stamped at posted.dateCreated (normalized), after the row is written and before the existing conversation.updated, which stays the send's only event." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S3.3 - W7: a staff-edited relay intro stamps; no other announcement does
+
+PR20, PR21 (the default intro, a non-intro announcement, the dev intro
+replay), WI4. Spec 7.3 W7.
+
+Files:
+- `app/src/services/relayAnnouncements.ts` (input flag, member loop)
+- `app/src/jobs/relayFanOut.ts` (the relay.intro handler only)
+- Tests: `app/test/relayAnnouncements.test.ts`, `app/test/relayFanOut.test.ts`
+
+#### Step 1 - failing tests
+
+1a. `app/test/relayAnnouncements.test.ts` - append at the end of the file:
+
+```ts
+
+// today-checklist W7 (spec 2026-10-23-today-checklist-design.md 7.3): an
+// announcement whose body STAFF wrote (a relay intro's edited intro_body,
+// flagged staffAuthored by the relay.intro job) stamps last_reached_out_at for
+// each member with a contactId whose leg the provider accepted, then emits ONE
+// conversation.updated from a fresh read after the loop. Every other
+// announcement - and the dev intro replay (persist:false) - never stamps.
+describe('sendRelayAnnouncement - a staff-authored intro stamps last_reached_out_at (today-checklist W7)', () => {
+  const CAROL = '+15550100003';
+  const DAVE = '+15550100004';
+  const legAt = (world: ReturnType<typeof createFakeWorld>, phone: string): string =>
+    world.sentDetails.find((d) => d.params.to === phone)!.providerTs;
+
+  it('stamps each member it reached at that leg\'s providerTs, then ONE conversation.updated from a FRESH read', async () => {
+    const world = createFakeWorld();
+    const conv = await openTransportGroup(world);
+    world.contacts.push({ contactId: 'c-a', type: 'tenant', phone: ALICE }, { contactId: 'c-b', type: 'tenant', phone: BOB });
+    const realSend = world.adapter.sendPreparedMessage.bind(world.adapter);
+    let replied = false;
+    vi.spyOn(world.adapter, 'sendPreparedMessage').mockImplementation(async (prepared) => {
+      if (!replied) {
+        replied = true;
+        // A member replies mid-loop: the table changes, not the snapshot object.
+        const current = world.conversations.get(conv.conversationId)!;
+        world.conversations.set(conv.conversationId, { ...current, unread_count: 2 });
+      }
+      return realSend(prepared);
+    });
+    const freshRead = vi.spyOn(world.conversationsRepo, 'getByIdConsistent');
+
+    await sendRelayAnnouncement(deps(world), {
+      conversationId: conv.conversationId,
+      body: 'Hi both, this is Sam. Meet each other here.',
+      kind: 'relay.intro',
+      staffAuthored: true,
+    });
+
+    expect(world.reachedOutTouches.map((t) => [t.contactId, t.at, t.outcome]).sort()).toEqual(
+      [
+        ['c-a', legAt(world, ALICE), 'written'],
+        ['c-b', legAt(world, BOB), 'written'],
+      ].sort(),
+    );
+    expect(freshRead).toHaveBeenCalledTimes(1);
+    // WI4: the announcement's own two pre-loop events, then ONE post-stamp event.
+    expect(world.emitted.map((e) => e.event)).toEqual([
+      'conversation.updated',
+      'message.persisted',
+      'conversation.updated',
+    ]);
+    expect(world.emitted[2]!.payload).toMatchObject({ conversationId: conv.conversationId, unread_count: 2 });
+    expect(world.emitted.filter((e) => e.event === 'contact.updated')).toHaveLength(0);
+  });
+
+  it('skips a suppressed member, a phone-only member, and a member whose send threw', async () => {
+    const world = createFakeWorld();
+    const conv = await openTransportGroup(world, [
+      { phone: ALICE, contactId: 'c-a', name: 'Alice' },
+      { phone: BOB, contactId: 'c-b', name: 'Bob' },
+      { phone: CAROL, contactId: '', name: 'Carol' },
+      { phone: DAVE, contactId: 'c-d', name: 'Dave' },
+    ]);
+    world.contacts.push(
+      { contactId: 'c-a', type: 'tenant', phone: ALICE },
+      { contactId: 'c-b', type: 'tenant', phone: BOB, sms_opt_out: true },
+      { contactId: 'c-d', type: 'tenant', phone: DAVE },
+    );
+    const realSend = world.adapter.sendPreparedMessage.bind(world.adapter);
+    vi.spyOn(world.adapter, 'sendPreparedMessage').mockImplementation(async (prepared) => {
+      if (prepared.params.to === DAVE) throw Object.assign(new Error('rejected'), { code: 21211 });
+      return realSend(prepared);
+    });
+
+    await sendRelayAnnouncement(deps(world), {
+      conversationId: conv.conversationId,
+      body: 'Hi all, this is Sam.',
+      kind: 'relay.intro',
+      staffAuthored: true,
+    });
+
+    expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, CAROL].sort());
+    expect(world.reachedOutTouches.map((t) => t.contactId)).toEqual(['c-a']);
+  });
+
+  it('(PIN) without staffAuthored - the composed intro, member added, group closed, a tour reminder - nothing is stamped and no extra event', async () => {
+    for (const kind of ['relay.intro', 'relay.member_added', 'group_closed', 'tour.day_before']) {
+      const world = createFakeWorld();
+      const conv = await openTransportGroup(world);
+      world.contacts.push({ contactId: 'c-a', type: 'tenant', phone: ALICE }, { contactId: 'c-b', type: 'tenant', phone: BOB });
+
+      await sendRelayAnnouncement(deps(world), { conversationId: conv.conversationId, body: 'System copy.', kind });
+
+      expect(world.sent, kind).toHaveLength(2);
+      expect(world.reachedOutTouches, kind).toEqual([]);
+      expect(world.emitted.map((e) => e.event), kind).toEqual(['conversation.updated', 'message.persisted']);
+    }
+  });
+
+  it('(PIN) staffAuthored with persist:false (the dev intro replay) stamps nothing', async () => {
+    const world = createFakeWorld();
+    const conv = await openTransportGroup(world);
+    world.contacts.push({ contactId: 'c-a', type: 'tenant', phone: ALICE }, { contactId: 'c-b', type: 'tenant', phone: BOB });
+
+    await sendRelayAnnouncement(deps(world), {
+      conversationId: conv.conversationId,
+      body: 'Hi both, this is Sam.',
+      kind: 'relay.intro',
+      persist: false,
+      staffAuthored: true,
+    });
+
+    expect(world.sent).toHaveLength(2);
+    expect(world.reachedOutTouches).toEqual([]);
+    expect(world.emitted).toEqual([]);
+  });
+});
+```
+
+1b. `app/test/relayFanOut.test.ts` - the W7 cases through the real
+relay.intro / relay.memberAdded jobs, inside the S3.1 describe. Edit:
+
+old:
+```ts
+  // W7 cases (Task S3.3) are inserted above this line.
+});
+```
+new:
+```ts
+  it('W7 an intro whose body staff EDITED stamps every member it reached, then ONE fresh-read conversation.updated', async () => {
+    seedRelay(world, { intro_body: 'Hi all, this is Sam. Meet each other here.' });
+    seedMemberContacts(DEFAULT_ROSTER);
+    const freshRead = vi.spyOn(world.conversationsRepo, 'getByIdConsistent');
+
+    await enqueueImmediate(RELAY_INTRO_JOB, { relayConversationId: 'conv-relay-1' });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(3);
+    expect(stampRows()).toEqual(
+      [
+        ['c-alice', legAt(ALICE), 'written'],
+        ['c-bob', legAt(BOB), 'written'],
+        ['c-carol', legAt(CAROL), 'written'],
+      ].sort(),
+    );
+    expect(freshRead).toHaveBeenCalledTimes(1);
+    // The job now hands its bus to the announcement (PR20): its two pre-loop
+    // events, then the ONE post-stamp event (WI4).
+    expect(world.emitted.map((e) => e.event)).toEqual([
+      'conversation.updated',
+      'message.persisted',
+      'conversation.updated',
+    ]);
+    expect(contactUpdates()).toHaveLength(0);
+  });
+
+  it('W7 the composed DEFAULT intro never stamps', async () => {
+    seedRelay(world);
+    seedMemberContacts(DEFAULT_ROSTER);
+
+    await enqueueImmediate(RELAY_INTRO_JOB, { relayConversationId: 'conv-relay-1' });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(3);
+    expect(world.reachedOutTouches).toEqual([]);
+    // Only the announcement's own pre-loop event - no post-stamp event.
+    expect(conversationUpdates()).toHaveLength(1);
+  });
+
+  it('W7 (PIN) an edited intro replayed with persist:false (POST /__dev/relay/replay-intros) never stamps', async () => {
+    seedRelay(world, { intro_body: 'Hi all, this is Sam. Meet each other here.' });
+    seedMemberContacts(DEFAULT_ROSTER);
+
+    await enqueueImmediate(RELAY_INTRO_JOB, { relayConversationId: 'conv-relay-1', persist: false });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(3);
+    expect(world.messages.filter((m) => m.conversationId === 'conv-relay-1')).toHaveLength(0);
+    expect(world.reachedOutTouches).toEqual([]);
+  });
+
+  it('W7 (PIN) a member-added announcement never stamps', async () => {
+    seedRelay(world);
+    seedMemberContacts(DEFAULT_ROSTER);
+
+    await enqueueImmediate(RELAY_MEMBER_ADDED_JOB, {
+      relayConversationId: 'conv-relay-1',
+      addedMemberKey: 'c-carol',
+    });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(3);
+    expect(world.reachedOutTouches).toEqual([]);
+  });
+});
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/relayAnnouncements.test.ts test/relayFanOut.test.ts
+```
+Expected failures, and why:
+- relayAnnouncements.test.ts `stamps each member it reached ...`:
+  `world.reachedOutTouches` is `[]`; `freshRead` called 0 times; the event
+  list is the two pre-loop events only.
+- relayAnnouncements.test.ts `skips a suppressed member ...`: touches `[]`,
+  expected `['c-a']`.
+- relayFanOut.test.ts `W7 an intro whose body staff EDITED ...`: touches
+  `[]`, and `world.emitted` is `[]` - the job still sends the announcement's
+  events to the `appEvents` singleton, not the injected bus.
+- relayFanOut.test.ts `W7 the composed DEFAULT intro never stamps`:
+  `conversationUpdates()` has length 0, not 1 (the same missing bus
+  pass-through; the stamp half is already green).
+Green already (PIN): the `(PIN)` cases in both files, and every S3.1 case.
+
+#### Step 3 - implementation
+
+3a. `app/src/services/relayAnnouncements.ts` - the input flag (PR20). Edit:
+
+old:
+```ts
+  /** false = legs-only (dev intro replay): send, persist nothing. Default true. */
+  persist?: boolean;
+```
+new:
+```ts
+  /** false = legs-only (dev intro replay): send, persist nothing. Default true. */
+  persist?: boolean;
+  /**
+   * today-checklist W7 (spec 2026-10-23-today-checklist-design.md 7.3): the
+   * body is one STAFF wrote - a relay intro's operator-edited intro_body. Set
+   * ONLY by the relay.intro job's edited-intro branch (jobs/relayFanOut.ts).
+   * When true and the row persists, each member with a contactId whose leg the
+   * provider accepted gets last_reached_out_at at that leg's providerTs, and
+   * ONE conversation.updated follows the loop (stampRelayOutreach). The
+   * composed default intro, member added, group closed, tour reminders and the
+   * dev intro replay (persist:false) never stamp.
+   */
+  staffAuthored?: true;
+```
+
+3b. `relayAnnouncements.ts` - the member loop collects. Edit:
+
+old:
+```ts
+  let sentCount = 0;
+  for (const member of roster) {
+```
+new:
+```ts
+  let sentCount = 0;
+  // today-checklist W7: only a staff-written body that persists stamps.
+  const stampsOutreach = input.staffAuthored === true && persist;
+  const outreach: StaffOutreachStamp[] = [];
+  for (const member of roster) {
+```
+Edit (right after the provider accepted the leg, before any record write
+that could throw into the catch):
+
+old:
+```ts
+      sentCount += 1;
+
+      if (!persist) {
+```
+new:
+```ts
+      sentCount += 1;
+      if (stampsOutreach && typeof member.contactId === 'string' && member.contactId.length > 0) {
+        outreach.push({ contactId: member.contactId, at: result.providerTs });
+      }
+
+      if (!persist) {
+```
+
+3c. `relayAnnouncements.ts` - after the loop. Edit:
+
+old:
+```ts
+  log.info(
+    { conversationId, kind, memberCount: roster.length, sentCount, persisted: persist },
+    'relay announcement sent',
+  );
+```
+new:
+```ts
+  // today-checklist W7: the pre-loop conversation.updated above went out
+  // BEFORE any stamp, so a staff-edited intro takes the same after-loop,
+  // fresh-read event as a team post (W4). Never throws.
+  if (outreach.length > 0) {
+    await stampRelayOutreach(
+      { contacts: deps.contactsRepo, conversations: deps.conversationsRepo, events, log },
+      conversationId,
+      outreach,
+    );
+  }
+
+  log.info(
+    { conversationId, kind, memberCount: roster.length, sentCount, persisted: persist },
+    'relay announcement sent',
+  );
+```
+
+3d. `app/src/jobs/relayFanOut.ts` - the relay.intro handler's bus. Edit:
+
+old:
+```ts
+  defineJobHandler(RELAY_INTRO_JOB, async (rawPayload) => {
+    const payload = parseRelayIntroPayload(rawPayload);
+    adapter ??= createMessagingAdapter({ logger: deps.logger });
+```
+new:
+```ts
+  defineJobHandler(RELAY_INTRO_JOB, async (rawPayload) => {
+    const payload = parseRelayIntroPayload(rawPayload);
+    adapter ??= createMessagingAdapter({ logger: deps.logger });
+    events ??= appEvents;
+```
+
+3e. `relayFanOut.ts` - the edited-intro branch sets the flag (PR20: ONLY
+here). Edit:
+
+old:
+```ts
+    let body: string;
+    if (edited.length > 0) {
+      // PRECEDENCE 1 (spec 9.1), applied FIRST and verbatim: an operator-edited
+      // body wins outright, so the four owner reads below are not even made.
+      body = edited;
+```
+new:
+```ts
+    let body: string;
+    // today-checklist W7: true ONLY on the operator-edited branch - staff wrote
+    // this intro, so it counts as staff outreach. A composed intro never does.
+    let staffAuthored = false;
+    if (edited.length > 0) {
+      // PRECEDENCE 1 (spec 9.1), applied FIRST and verbatim: an operator-edited
+      // body wins outright, so the four owner reads below are not even made.
+      body = edited;
+      staffAuthored = true;
+```
+
+3f. `relayFanOut.ts` - the intro's `sendRelayAnnouncement` call gets the bus
+and the flag. Edit:
+
+old:
+```ts
+        adapter,
+        ...(deps.tokenBucket !== undefined && { tokenBucket: deps.tokenBucket }),
+        ...(deps.logger !== undefined && { logger: deps.logger }),
+      },
+      {
+        conversationId: payload.relayConversationId,
+        body,
+        kind: 'relay.intro',
+        ...(payload.persist === false && { persist: false }),
+      },
+```
+new:
+```ts
+        adapter,
+        events,
+        ...(deps.tokenBucket !== undefined && { tokenBucket: deps.tokenBucket }),
+        ...(deps.logger !== undefined && { logger: deps.logger }),
+      },
+      {
+        conversationId: payload.relayConversationId,
+        body,
+        kind: 'relay.intro',
+        ...(payload.persist === false && { persist: false }),
+        ...(staffAuthored && { staffAuthored: true as const }),
+      },
+```
+The relay.memberAdded call (~1190-1215) is NOT changed (PR20 names only the
+intro).
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/relayAnnouncements.test.ts test/relayFanOut.test.ts test/devRelayReplay.test.ts test/relayIntroBody.test.ts test/relayIntroFallbackJob.test.ts test/tourReminders.test.ts test/relayApi.test.ts
+```
+Expect all green. Then (bare):
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0.
+
+#### Step 5 - ASCII check on added lines
+
+```
+cd W:/tmp/today-checklist; git diff -U0 -- app | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0`.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add app/src/services/relayAnnouncements.ts app/src/jobs/relayFanOut.ts app/test/relayAnnouncements.test.ts app/test/relayFanOut.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(relay): a staff-edited intro stamps last_reached_out_at per member it reached (today-checklist S3.3, W7)" -m "RelayAnnouncementInput.staffAuthored, set only on the relay.intro edited-intro branch; a persisted staff intro stamps each accepted leg's member at its providerTs and emits one fresh-read conversation.updated after the loop. The intro job now passes its bus. Default intro, member added, group closed, tour reminders and persist:false never stamp." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S3.4 - Slice checks, typecheck, the app workspace, S3 report
+
+#### Step 1 - structural checks
+
+```
+git -C W:/tmp/today-checklist grep -n "staffAuthored" -- app/src
+```
+Expect hits ONLY in `app/src/services/relayAnnouncements.ts` (the field, its
+doc, the loop gate) and `app/src/jobs/relayFanOut.ts` (the relay.intro
+handler: the local, its set on the edited branch, the spread). Any other
+writer setting it is a bug (spec 7.2: system copy never counts).
+```
+git -C W:/tmp/today-checklist grep -n "touchLastReachedOut\|recordStaffOutreach\|stampRelayOutreach" -- app/src/jobs/relayRetryLeg.ts app/src/jobs/sendReconcile.ts app/src/jobs/tourReminders.ts app/src/routes/relayGroups.ts app/src/jobs/broadcastFanOut.ts app/src/jobs/retrySend.ts
+```
+Expect NO output (exit 1): the 30003 rung, the reconcile, tour reminders,
+the group close, shares and the machine retry never stamp (spec 7.3
+no-stamp table).
+```
+git -C W:/tmp/today-checklist grep -n "sentAt" -- app/src/jobs/relayRetryLeg.ts
+```
+Expect no hit that reads an outcome's `sentAt` (C2: the rung ignores it).
+
+#### Step 2 - typecheck (bare)
+
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Exit 0.
+
+#### Step 3 - the app workspace, once
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run
+```
+Needs DynamoDB Local. If the environment exports `AWS_ACCESS_KEY_ID`, run
+`env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY npx vitest run`. Expect
+green. If a file is red, follow AGENTS.md re-run-and-compare: re-run that
+FILE alone more than once (`cd W:/tmp/today-checklist/app; npx vitest run test/<file>`).
+A file that stays red and that this slice touched, or that drives a relay
+fan-out, a relay announcement or a group send (for example `relayApi`,
+`placementsRelay`, `relayQueuedMessages`, `tourReminders`, `devRelayReplay`,
+`groupSendRoute`), is this slice's bug: fix it in a follow-up commit with
+explicit paths. A red file with no connection to this slice: do not move
+HEAD or create a worktree - record the file, case and error in the report.
+Any `[dynamoAdmin]` line in the output is a real container fault: capture
+`err.$metadata.httpStatusCode` and `attempts` into the report.
+
+#### Step 4 - ASCII across the slice
+
+```
+cd W:/tmp/today-checklist; git diff -U0 <S3_BASE> -- app | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+(`<S3_BASE>` is the SHA from S3.1 Step 0.) Expect `0`.
+
+#### Step 5 - slice report
+
+Write
+`W:/tmp/today-checklist/docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S3-report.md`
+(ASCII, findings only, code cited by `file:line` against the final tree). It
+must record at least:
+
+- C1: no `worker.ts` / `registerHandlers.ts` edit; the relay jobs default
+  their bus to `appEvents` (the relayRetryLeg pattern) and the worker bridge
+  forwards it (`worker.ts:45-61`); index.ts's in-process path uses the same
+  singleton as the app's SSE bus.
+- C2 and C3: `sentAt?: string` on the flat outcome, set in exactly three
+  return literals of `sendOneRelayLeg`; no other change in that unit.
+- WI4 - event counts per writer, as the tests prove them:
+  - W4 team post: exactly ONE `conversation.updated` per fan-out pass that
+    wrote at least one stamp, zero `contact.updated`, zero when nothing was
+    written or the fresh read failed (WARN instead); the route's own
+    post-time events are unchanged.
+  - W5 group text: ZERO added events; the send's existing
+    `message.persisted` + `conversation.updated` follow the stamps.
+  - W7 staff-edited intro: ONE added `conversation.updated` after the loop,
+    after the announcement's existing pre-loop `conversation.updated` +
+    `message.persisted`.
+- WI5: a 30-member team post with no transient failure takes ONE pass in the
+  test world (the loop has no per-pass member cap; `relayFanOut.ts` loop
+  ~1520-1617) and emits one event; each transient continuation is its own
+  job and emits its own after-loop event (the test proves 2 passes, 2
+  events). Cite the test name.
+- WI6: the re-driven team leg (the exact `enqueueRedrive` payload,
+  `sendReconcile.ts:1710-1722`, pinned by `sendReconcile.test.ts` "15 relay
+  never_sent") stamps once; the 30003 rung (`relayRetryLeg.ts:836` calls
+  `sendOneRelayLeg` directly) does NOT stamp, proved by the relayRetryLeg PIN;
+  the reconcile adoption (`adoptRelay`, `sendReconcile.ts:1022-1062`) does
+  NOT, proved by the sendReconcile PIN.
+- The accepted residue: a record-phase failure whose hand-off fence is lost
+  (`relayFanOut.ts` the `fence_lost` return in the record arm) sent the text
+  but does not stamp.
+- PR21 coverage list: 30003 rung, non-intro announcements, default intro,
+  `adoptRelay`, member inbound relay, suppressed member - each with its test
+  name.
+- Suites that now stamp through the harness without asserting it (team posts
+  with seeded contacts in `relayApi.test.ts`; the edited intro on an owned
+  group in `relayFanOut.test.ts` ~3558) and that they stayed green.
+- The S1 names actually used (S3.1 Step 0) and any mapping made.
+- Any red file from Step 3.
+
+Commit:
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S3-report.md
+git -C W:/tmp/today-checklist commit -m "docs(records): today-checklist S3 slice report - relay and group writers W4, W5, W7 (WI4, WI5, WI6)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### S3 coverage
+
+Rulings:
+- PR17 - `sentAt` on the three accepted arms (S3.1 3i, 3j); the loop
+  collection gated on the team sentinel and a contactId (S3.1 3g); the
+  after-loop `recordStaffOutreach` + one `conversation.updated` from
+  `getByIdConsistent`, skipped with a WARN on a missing or throwing read, no
+  `touchLastActivity` (S3.1 3b, 3h); re-drive and queued flush stamp, 30003
+  rung does not (S3.1 tests).
+- PR18 - `events?: EventBus` on both deps types, defaulted to `appEvents`
+  (S3.1 3d-3f); the worker wiring is the default (C1).
+- PR19 - W5: excluded keys collected in the seeding loop, stamps at the
+  normalized `posted.dateCreated` before the existing emit, no new event
+  (S3.2).
+- PR20 - W7: `staffAuthored` on the input, set only on the edited branch, the
+  intro passes its bus, the member-loop collection with `persist !== false`,
+  the after-loop fresh-read event (S3.3).
+- PR21 - no-stamp tests: 30003 rung (S3.1 1b), non-intro announcements and
+  the default intro (S3.3 1a, 1b), `adoptRelay` (S3.1 1c), member inbound
+  relay and a suppressed member (S3.1 1a).
+- PR5 / PR6 / PR8 - consumed as S1 built them; the relay writers emit no
+  `contact.updated` (asserted in S3.1, S3.3).
+
+Spec:
+- 7.2 - staff relay posts and group texts count per contact member; relay
+  system announcements and machine resends do not (S3.1-S3.3).
+- 7.3 W4, W5, W7 rows; the one-event-per-send rule and the fresh-read payload
+  (S3.1, S3.3); "Writers that do NOT stamp" rows for the relay rung, relay
+  announcements with system copy, and the reconcile adoption (S3.1, S3.3,
+  S3.4 Step 1).
+- 7.3 edge rules - no leg, no stamp; no contactId, no stamp (S3.1, S3.3).
+- 9 - each of W4, W5, W7 moves the field and its send emits exactly one
+  post-stamp event (or none extra, W5); each listed no-stamp writer is
+  pinned.
+
+Watch items: WI4 (S3.1, S3.2, S3.3 tests; S3.4 report), WI5 (S3.1
+30-member test; S3.4 report), WI6 (S3.1 re-drive test and rung PIN; S3.4
+report).
+
+## 8. S4 - Today server: Follow up core, quiet shares, the new groups
+
+Scope: plan section 2 row S4; rulings PR22-PR30, PR24, PR37, PR40 (binding);
+watch items WI1, WI7, WI8. Spec sections 2-6 and 9. Every line number below
+is a hint against main @970a29b9 (S1-S3 do not edit `routes/today.ts`,
+`services/followUps.ts` or the two Today test files; S2 DOES edit
+`routes/api.ts` - PR37 - so every `api.ts` anchor below is text S2 leaves
+alone, and the builder re-reads `api.ts` before each `api.ts` edit). The
+QUOTED text is the anchor.
+
+Notation used ONLY inside "old text" anchors: this plan is ASCII, so where a
+CURRENT file line holds a non-ASCII character the anchor writes it as
+`[U+2014]` (em dash), `[U+2192]` (right arrow) or `[U+2026]` (ellipsis). Copy
+those lines from your own Read of the file into `old_string` (the real
+character, not the bracket notation). Replacement text is always ASCII. A
+CHANGED line counts as an added line for the ASCII check, so a line that
+holds a non-ASCII character is either left untouched or replaced WHOLE by an
+ASCII line. `routes/today.ts` keeps its other non-ASCII lines (the STUCK_WHY
+em dash at ~207 is pinned by a test - never touch it).
+
+S4 assumes these S1 names exactly (plan section 4 PR1, PR3, PR7):
+`RecipientDisplay.last_reached_out_at?: string`, `ContactItem.last_reached_out_at?: string`,
+`getRecipientDisplaysByIds(ids, opts?: { requireComplete?: boolean; consistentRead?: boolean })`,
+the harness `projectRecipient` copying the field, `world.recipientDisplayCalls`
+(see Contradiction C4 for the element shape S4 assumes) and the
+`app/test/followUps.test.ts` `RECIPIENT_ATTRS` entry.
+
+### Contradictions
+
+C1. PR24: "`app/test/todayUnmatchedNonRegression.test.ts` `TODAY_TABLES`
+gains the tables the new reads need". Adding the tables is not enough. That
+test builds the router itself (`todayUnmatchedNonRegression.test.ts:91-102`)
+and passes no units or listing-sends repo, so the router's defaults
+(`createUnitsRepo({ logger })`, no `env`) would target the UNPREFIXED tables
+(`app/src/repos/unitsRepo.ts:1034-1036`, `tableName('units', deps.env)`), not
+the suite's `hc-test-<id>-` tables. A read there either hits another table
+set or throws; a throw makes Quiet shares `unavailable` identically before
+and after the flood, so the "byte-identical" pin would pass vacuously.
+Resolution (S4.6, S4.7): also pass `unitsRepo: createUnitsRepo(repoDeps)`
+and `listingSendsRepo: createListingSendsRepo(repoDeps)` there, and assert
+`quietShares.status === 'ok'` and `toursToBook === 'ok'` before the flood,
+so a mis-wired repo goes red instead of green.
+
+C2. PR25 ("a throw or a missing/deleted unit logs WARN `{ unitId }`"), PR28
+and PR30 ("WARN on throw with counts only") versus the route's own
+best-effort WARNs, which all carry the thrown `err`
+(`app/src/routes/today.ts:365` contact hydration, `:395` placement
+hydration). Resolution: the new throw-path WARNs log `{ err, unitId }` /
+`{ err, section }` like their siblings - an AWS SDK error or
+`IncompleteBatchReadError` carries ids/counts, never a contact's name or
+phone - and every failure test asserts the WARN carries the id/section and
+that NO seeded name appears in any WARN line. The missing/deleted-unit WARN
+(no throw) is exactly `{ unitId }`.
+
+C3. PR40 names the #30 inversions and "every Unreplied assertion", but many
+OTHER existing `todayApi.test.ts` cases observe the unread pass ONLY through
+Unreplied rows of `tenant_1to1` threads: the A9 deleted-skip cases
+(~802-857, ~859-923, ~925-993), the NEW-3 dedupe cases (~708-746,
+~748-800), the byUnread block (~1795-1816 deep unread, ~1861-1885 cap,
+~1887-1927 FILTER-THEN-CAP, ~1959-1990 budget WARN), FIX B (~1182-1212) and
+A2 (~682-702). Under PR26 those threads emit nothing, so each case would go
+red (or, worse, vacuous). Resolution (S4.5): each is re-expressed on
+`unknown_1to1` threads (the only threads the pass reads now) asserting the
+`identify` group; where the triage pass could rescue the live row by itself
+(an unknown needs_review contact), the live row's owner is UNRESOLVED (no
+contact item, PR26 "an unresolved owner keeps today's behavior"), so only
+the unread pass can produce it and the case still proves the pass. A2 and
+FIX B become "emits NO Today row" (Inbox only). Each is named in the report.
+
+C4. PR7 says the harness `getRecipientDisplaysByIds` "records the opts into a
+new `world.recipientDisplayCalls` array" without fixing the element shape
+(S1 is not built yet). S4 assumes ONE entry per call holding the opts
+argument as passed (`{ requireComplete?: boolean; consistentRead?: boolean } | undefined`).
+If S1 lands another shape (for example `{ ids, opts }`), adapt exactly these
+assertions and record it in the S4 report: S4.1 Step 1d (one loop line) and
+S4.7 Step 1 (two lines in "quietShares groups by property ..."). Never weaken
+them to `toBeDefined()`.
+
+C5. PR26 leaves the unread pass's deleted-contact skip first after the type
+filter; `isOneToOneBucket` (`app/src/routes/today.ts:80`, imported from
+`lib/unreadFeed.ts:295`) then has no caller in `today.ts`. It is removed from
+the import (gate 5: `@typescript-eslint/no-unused-vars` is an error,
+`eslint.config.mjs`). `lib/unreadFeed.ts` keeps exporting it (the badge and
+the inbox use it). Not a deviation - recorded so the reviewer does not read
+the dropped import as a lost guard: the type filter is strictly narrower.
+
+No other ruling conflicts with the code. PR22, PR23, PR27, PR28, PR29 and
+PR30 are implementable exactly as written.
+
+### Cross-slice notes (for the planner)
+
+- Wire names S5 mirrors in `dashboard/src/api/types.ts` (all exported from
+  `app/src/routes/today.ts`):
+  - `type TodayGroup = 'needs_you_now' | 'identify' | 'tours_to_book' | 'tours_today' | 'follow_ups' | 'ai_suggestions'`
+    (`'unreplied'` is gone).
+  - `interface TodayItem` gains `at?: string` and `unitLabel?: string`
+    (tour rows only: `tours_today` `at` = scheduledAt, `tours_to_book` `at` =
+    the tour's createdAt; `unitLabel` = `formatAddress(unit.address) || unitId`).
+  - `interface QuietSharePerson { contactId: string; name: string; type: string; role?: string; state: 'replied' | 'no_reply'; quietSince: string }`.
+  - `interface QuietShareProperty { unitId: string; unitLabel: string; people: QuietSharePerson[] }`.
+  - `type TodayQuietShares = { status: 'ok'; properties: QuietShareProperty[]; people: number; truncated: boolean } | { status: 'unavailable' }`.
+  - `interface TodayResponse { items; relayCloseNags; quietShares: TodayQuietShares; toursToBook: 'ok' | 'unavailable'; generatedAt }`.
+    PR31 makes `quietShares?` / `toursToBook?` optional on the dashboard
+    side only.
+- Row copy S5/S7 can assert: identify rows keep `why: 'New unknown contact'`,
+  `refType: 'contact'`, `attention: true`; tours_to_book rows are
+  `{ refType: 'tour', why: <unitLabel>, urgency: 'Requested today' | 'Requested 1 day ago' | 'Requested N days ago', at, unitLabel }`
+  with NO `tag`; tours_today rows keep `why: 'Tour today'`, `tag: 'Tour'`.
+- Response item order (PR30): needs_you_now, identify, tours_to_book,
+  tours_today, follow_ups, ai_suggestions. S5 must not re-sort within a
+  group: identify is oldest contact first (created_at, none last, ties
+  refId), tours_to_book oldest request first (ties tourId), tours_today by
+  time then tenant then tourId.
+- New export `requestedUrgencyOf(createdAt, now)` in `routes/today.ts` (pure,
+  beside `urgencyOf`).
+- New modules: `app/src/services/quietShares.ts` (`buildQuietShares`,
+  `QUIET_REPLIED_MS`, `QUIET_NO_REPLY_MS`); `app/src/services/followUps.ts`
+  gains `collectWaitingFollowUps` and `interface WaitingFollowUp`.
+- `routes/api.ts` (PR37): S4 adds two properties to the `createTodayRouter({`
+  call only (`unitsRepo: units` in S4.3, `listingSendsRepo: listingSends` in
+  S4.7), anchored on the unique comment line
+  `// conversation-fact-extraction (T9): the ai_suggestions group reads pending`.
+  It relies on S2 keeping the `units` (~686) and `listingSends` (~646)
+  constructions above line ~1287 (S2's PR9 move only touches `contacts`).
+- `app/scripts/seed-smoke.mjs:298` is another reader of the group list (a
+  comment only); S4.5 updates the comment. Its assertions (tours_today >= 1,
+  needs_you_now >= 1 from the overdue RTA placement) are unaffected. Not a
+  seed file (WI9 holds).
+- S7 docs: `docs/issues/imported-unknown-threads-surface-as-unknown-on-today.md`
+  - Today no longer shows those rows after S4.5 (the owner rule). The new
+  quiet-shares read-cost issue takes the WI7 counts from the S4 report.
+- e2e (S7): a requested tour shows in Tours to book with `why` = its unit
+  label; an unresolved unit shows its unitId. Tours today rows now carry the
+  unit label (S5 renders it).
+- S4 adds `vi` to the `todayApi.test.ts` vitest import (S4.3) - no other test
+  file in S4 changes its import list beyond what each task names.
+
+---
+
+### Task S4.1 - The Follow up core: `collectWaitingFollowUps` under `buildFollowUps` (PR22, WI1)
+
+Splits `buildFollowUps` into the core (the walk, the per-unit reads, the one
+contacts batch, the waiting filter - returning each row with its recipient
+projection) and the existing projection (sort + byUnit) on top. The Follow up
+tab's output is byte-identical (WI1); the core passes `consistentRead` to the
+contacts batch only when asked.
+
+Files:
+- `app/src/services/followUps.ts`
+- Tests: `app/test/followUps.test.ts`, `app/test/followUpsApi.test.ts`
+
+#### Step 0 - record the slice base and confirm S1 landed
+
+```
+git -C W:/tmp/today-checklist rev-parse HEAD
+git -C W:/tmp/today-checklist grep -n "recipientDisplayCalls\|last_reached_out_at" -- app/test/helpers/twilioWebhookHarness.ts app/src/repos/contactsRepo.ts app/test/followUps.test.ts
+```
+Write the first line's hash down as `S4_BASE` (the slice report and S4.8 use
+it). The grep must show the S1 field in `contactsRepo.ts`, the harness
+`recipientDisplayCalls` declaration, and `last_reached_out_at` in
+`followUps.test.ts` `RECIPIENT_ATTRS`. Read the harness declaration: if an
+element is not the opts argument as passed, follow Contradiction C4.
+
+#### Step 1 - failing tests
+
+1a. `app/test/followUps.test.ts` - the import. Edit:
+
+old:
+```ts
+import { buildFollowUps, FOLLOW_UPS_UNIT_CAP, type FollowUpsDeps } from '../src/services/followUps.js';
+```
+new:
+```ts
+import { buildFollowUps, collectWaitingFollowUps, FOLLOW_UPS_UNIT_CAP, type FollowUpsDeps } from '../src/services/followUps.js';
+```
+
+1b. `app/test/followUps.test.ts` - the batch fake records both options and
+the raw opts (existing assertions read `.ids` / `.requireComplete` or compare
+to `[]`, so they are unaffected). Edit:
+
+old:
+```ts
+    batches: [] as Array<{ ids: string[]; requireComplete: boolean | undefined }>,
+```
+new:
+```ts
+    batches: [] as Array<{
+      ids: string[];
+      requireComplete: boolean | undefined;
+      consistentRead: boolean | undefined;
+      opts: { requireComplete?: boolean; consistentRead?: boolean } | undefined;
+    }>,
+```
+Edit (if S1 already widened the parameter type on this line, apply the push
+change on top of S1's text):
+
+old:
+```ts
+      async getRecipientDisplaysByIds(ids: string[], o?: { requireComplete?: boolean }) {
+        calls.batches.push({ ids: [...ids], requireComplete: o?.requireComplete });
+```
+new:
+```ts
+      async getRecipientDisplaysByIds(ids: string[], o?: { requireComplete?: boolean; consistentRead?: boolean }) {
+        calls.batches.push({
+          ids: [...ids],
+          requireComplete: o?.requireComplete,
+          consistentRead: o?.consistentRead,
+          opts: o === undefined ? undefined : { ...o },
+        });
+```
+
+1c. `app/test/followUps.test.ts` - append at the end of the file:
+```ts
+
+// Today checklist (spec 2026-10-23-today-checklist-design.md 6.1, plan PR22 /
+// WI1): the Follow up CORE returns the waiting rows WITH the recipient
+// projection each was judged on (Today reads its quiet clock off it - one
+// contacts read, not two), and the Follow up tab's list is that core plus the
+// existing sort and byUnit, byte-identical.
+describe('collectWaitingFollowUps - the Follow up core (today-checklist PR22)', () => {
+  it('returns each waiting row with its recipient projection, last_reached_out_at included', async () => {
+    const w = emptyWorld();
+    w.units.push(unit('u1'));
+    const reached = ago(3 * HOUR);
+    w.contacts.push(tenant('c1', { last_reached_out_at: reached }), tenant('c2'));
+    w.sends.push(send('u1', 'c1', ago(2 * DAY)), send('u1', 'c2', ago(2 * HOUR)));
+    const { rows, truncated } = await collectWaitingFollowUps(depsFor(w).deps);
+    expect(truncated).toBe(false);
+    // c2 is still inside the tab's 24h QUIET window: the core applies the
+    // tab's own waiting filter, so Today's candidates are exactly the tab's.
+    expect(rows.map((r) => r.item.contactId)).toEqual(['c1']);
+    expect(rows[0]!.item).toEqual((await buildFollowUps(depsFor(w).deps)).items[0]);
+    expect(rows[0]!.recipient).toMatchObject({ contactId: 'c1', type: 'tenant', last_reached_out_at: reached });
+  });
+
+  it('passes consistentRead to the ONE contacts batch only when asked; requireComplete always; the tab passes exactly { requireComplete: true }', async () => {
+    const w = emptyWorld();
+    w.units.push(unit('u1'));
+    w.contacts.push(tenant('c1'));
+    w.sends.push(send('u1', 'c1', ago(2 * DAY)));
+    const asked = depsFor(w);
+    await collectWaitingFollowUps(asked.deps, { consistentRead: true });
+    expect(asked.calls.batches).toHaveLength(1);
+    expect(asked.calls.batches[0]!.opts).toStrictEqual({ requireComplete: true, consistentRead: true });
+    const plain = depsFor(w);
+    await collectWaitingFollowUps(plain.deps);
+    expect(plain.calls.batches[0]!.opts).toStrictEqual({ requireComplete: true });
+    const tab = depsFor(w);
+    await buildFollowUps(tab.deps);
+    expect(tab.calls.batches).toHaveLength(1);
+    expect(tab.calls.batches[0]!.opts).toStrictEqual({ requireComplete: true });
+  });
+
+  it('carries the walk truncation flag (more than 100 available properties)', async () => {
+    const w = emptyWorld();
+    for (let i = 0; i <= FOLLOW_UPS_UNIT_CAP; i += 1) w.units.push(unit(`u${String(i).padStart(3, '0')}`));
+    const { rows, truncated } = await collectWaitingFollowUps(depsFor(w).deps);
+    expect(truncated).toBe(true);
+    expect(rows).toEqual([]);
+  });
+
+  it('(PIN, WI1) buildFollowUps output is byte-identical whether or not the recipients carry last_reached_out_at', async () => {
+    const w = emptyWorld();
+    w.units.push(unit('u1'), unit('u2'));
+    w.contacts.push(tenant('c1'), tenant('c2', { last_heard_from_at: ago(3 * DAY) }));
+    w.sends.push(send('u1', 'c1', ago(2 * DAY)), send('u2', 'c2', ago(5 * DAY)));
+    const before = JSON.stringify(await buildFollowUps(depsFor(w).deps));
+    // The LATEST signal on each contact, so a reader that used it would move
+    // waitingSince or drop the row - the tab must do neither (spec 6.4).
+    for (const c of w.contacts) c.last_reached_out_at = ago(HOUR);
+    const after = JSON.stringify(await buildFollowUps(depsFor(w).deps));
+    expect(after).toBe(before);
+    expect(JSON.parse(after).items).toHaveLength(2);
+  });
+});
+```
+
+1d. `app/test/followUpsApi.test.ts` - append INSIDE
+`describe('GET /api/broadcasts/follow-ups', () => {`, after its last test
+(the "503 outcome_unavailable when a tours read fails" case). Edit:
+
+old:
+```ts
+    vi.spyOn(world.toursRepo, 'listByUnit').mockRejectedValueOnce(new Error('throttled'));
+    const { app } = makeWebhookHarness({ world });
+    const res = await get(app);
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: 'outcome_unavailable' });
+  });
+});
+```
+new:
+```ts
+    vi.spyOn(world.toursRepo, 'listByUnit').mockRejectedValueOnce(new Error('throttled'));
+    const { app } = makeWebhookHarness({ world });
+    const res = await get(app);
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: 'outcome_unavailable' });
+  });
+
+  // WI1 (today-checklist plan): last_reached_out_at feeds ONLY Today's quiet
+  // clock. The Follow up tab keeps its inbound-only clock and its read (spec
+  // 6.4): a set field changes nothing in the body, and the tab's contacts
+  // batch never asks for a consistent read.
+  it('(PIN, WI1) a set last_reached_out_at changes NOTHING in the body; the tab reads contacts without consistentRead', async () => {
+    const world = createFakeWorld();
+    seed(world);
+    const { app } = makeWebhookHarness({ world });
+    const before = await get(app);
+    expect(before.status).toBe(200);
+    for (const c of world.contacts) c.last_reached_out_at = new Date().toISOString();
+    const after = await get(app);
+    expect(after.status).toBe(200);
+    expect(after.text).toBe(before.text);
+    expect(world.recipientDisplayCalls.length).toBeGreaterThan(0);
+    for (const opts of world.recipientDisplayCalls) expect(opts?.consistentRead).toBeUndefined();
+  });
+});
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/followUps.test.ts test/followUpsApi.test.ts
+```
+Expected failures, and why:
+- followUps.test.ts: the first three new cases fail with
+  `TypeError: collectWaitingFollowUps is not a function` (not exported yet).
+- The `(PIN, WI1)` cases in both files pass already (S1's additive fake
+  changes only) - they are the regression pins WI1 asks for.
+Every pre-existing case stays green (the batch fake change is additive).
+
+#### Step 3 - implementation (all in `app/src/services/followUps.ts`)
+
+3a. Header comment. Edit:
+
+old:
+```ts
+// their oldest row. Logs carry ids/counts only - never names or phones.
+```
+new:
+```ts
+// their oldest row. Logs carry ids/counts only - never names or phones.
+//
+// Today checklist (spec 2026-10-23-today-checklist-design.md 6.1, plan PR22):
+// steps 1-4 are the CORE, collectWaitingFollowUps, which returns each waiting
+// row together with the recipient projection it was judged on. Today's Quiet
+// shares section applies its own quiet rule to the core's rows
+// (services/quietShares.ts) - one contacts read, not two. buildFollowUps is
+// the core plus step 5; its output (the Follow up tab, GET
+// /api/broadcasts/follow-ups) is byte-for-byte what it was before the split.
+```
+
+3b. The core's signature. Edit:
+
+old:
+```ts
+export async function buildFollowUps(deps: FollowUpsDeps): Promise<FollowUpsResponse> {
+  // 1. The available properties: KEPT (non-deleted) units, capped. The walk
+```
+new:
+```ts
+/** One waiting row with the recipient projection it was judged on (spec
+ *  2026-10-23 6.1): Today's quiet rule reads `recipient.last_heard_from_at`
+ *  and `recipient.last_reached_out_at` off it. */
+export interface WaitingFollowUp {
+  item: FollowUpItem;
+  recipient: RecipientDisplay;
+}
+
+/**
+ * The Follow up CORE (spec 2026-10-23 6.1, plan PR22): the available-properties
+ * walk, the per-unit reads, the ONE requireComplete contacts batch and the
+ * waiting filter (steps 1-4 below), returning each waiting row with its
+ * recipient in walk order, UNSORTED, plus the walk's truncation flag. Every
+ * required read failing REJECTS, exactly as before (the tab answers 503; Today
+ * marks its section unavailable).
+ *
+ * `opts.consistentRead` reaches ONLY the contacts batch: Today passes true so a
+ * refetch fired by a staff-outreach stamp's event sees the stamp. The Follow up
+ * tab passes nothing, so its batch is exactly `{ requireComplete: true }` - its
+ * read is unchanged (spec 6.4).
+ */
+export async function collectWaitingFollowUps(
+  deps: FollowUpsDeps,
+  opts: { consistentRead?: boolean } = {},
+): Promise<{ rows: WaitingFollowUp[]; truncated: boolean }> {
+  // 1. The available properties: KEPT (non-deleted) units, capped. The walk
+```
+
+3c. The one contacts batch. Edit:
+
+old:
+```ts
+  const byId = ids.length > 0 ? await deps.contacts.getRecipientDisplaysByIds(ids, { requireComplete: true }) : new Map<string, RecipientDisplay>();
+```
+new:
+```ts
+  const byId =
+    ids.length > 0
+      ? await deps.contacts.getRecipientDisplaysByIds(ids, {
+          requireComplete: true,
+          ...(opts.consistentRead === true && { consistentRead: true }),
+        })
+      : new Map<string, RecipientDisplay>();
+```
+
+3d. Keep rows with their recipient. Edit:
+
+old:
+```ts
+  // 4. Keep the waiting rows.
+  const items: FollowUpItem[] = [];
+```
+new:
+```ts
+  // 4. Keep the waiting rows, each with the recipient it was judged on.
+  const rows: WaitingFollowUp[] = [];
+```
+Edit:
+
+old:
+```ts
+      const role = typeof contact.role === 'string' && contact.role.trim().length > 0 ? contact.role.trim() : undefined;
+      items.push({
+        unitId: unit.unitId,
+```
+new:
+```ts
+      const role = typeof contact.role === 'string' && contact.role.trim().length > 0 ? contact.role.trim() : undefined;
+      // The same literal, key for key, as before the core split (WI1).
+      const item: FollowUpItem = {
+        unitId: unit.unitId,
+```
+
+3e. Close the core; `buildFollowUps` becomes the core plus step 5. Edit:
+
+old:
+```ts
+        waitingSince: waitingSince(row.sentAt, lastHeardFromAt),
+      });
+    }
+  }
+
+  // 5. Longest-waiting first; stable ties by unit then contact.
+  items.sort(
+```
+new:
+```ts
+        waitingSince: waitingSince(row.sentAt, lastHeardFromAt),
+      };
+      rows.push({ item, recipient: contact });
+    }
+  }
+  return { rows, truncated };
+}
+
+/** The Follow up tab's list (spec 5.6): the core's rows, longest-waiting first,
+ *  plus the per-property counts. Byte-identical to the list before the core
+ *  split (plan WI1, pinned in followUps.test.ts and followUpsApi.test.ts). */
+export async function buildFollowUps(deps: FollowUpsDeps): Promise<FollowUpsResponse> {
+  const { rows, truncated } = await collectWaitingFollowUps(deps);
+  const items = rows.map((r) => r.item);
+  // 5. Longest-waiting first; stable ties by unit then contact.
+  items.sort(
+```
+The tail (`const byUnit ...` and `return { items, byUnit, truncated };`) is
+unchanged and now reads the destructured `truncated`.
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/followUps.test.ts test/followUpsApi.test.ts test/listingSendsApi.test.ts
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect all green and exit 0 (`listingSendsApi.test.ts` exercises the
+broadcasts router that mounts the tab).
+
+#### Step 5 - ASCII check on added lines
+
+```
+cd W:/tmp/today-checklist; git diff -U0 | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0`.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+```
+(The `ls` must report "No such file or directory"; in PowerShell use
+`Test-Path` and expect `False`.)
+```
+git -C W:/tmp/today-checklist add app/src/services/followUps.ts app/test/followUps.test.ts app/test/followUpsApi.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(follow-ups): split the Follow up core (collectWaitingFollowUps) under buildFollowUps (today-checklist S4.1)" -m "The core returns each waiting row with the recipient projection it was judged on and passes consistentRead to the one contacts batch only when asked. The Follow up tab output is byte-identical (WI1 pins)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S4.2 - The quiet-shares builder and its wire types (PR23)
+
+A pure builder over the core's rows: the quiet clock, both thresholds, the
+per-row clock, grouping by property, ordering and the distinct-people count
+(spec 6.1-6.3). The wire types live in `routes/today.ts` beside
+`TodayResponse` (PR23); the response field arrives in S4.7.
+
+Files:
+- `app/src/routes/today.ts` (two exported interfaces only)
+- `app/src/services/quietShares.ts` (new)
+- Tests: `app/test/quietShares.test.ts` (new)
+
+#### Step 1 - failing tests
+
+Create `app/test/quietShares.test.ts`:
+```ts
+// Quiet shares builder (spec 2026-10-23-today-checklist-design.md 6, plan
+// PR23): the quiet clock (sentAt, heard if later, reached if later), both
+// thresholds and both boundaries, each row's own clock, grouping by property,
+// ordering, and the distinct-people count. Pure - the rows are
+// WaitingFollowUp values built by hand, shaped as collectWaitingFollowUps
+// returns them.
+import { describe, expect, it } from 'vitest';
+import type { ListingSendOutcome } from '../src/lib/listingSendOutcome.js';
+import type { RecipientDisplay } from '../src/repos/contactsRepo.js';
+import type { WaitingFollowUp } from '../src/services/followUps.js';
+import { buildQuietShares, QUIET_NO_REPLY_MS, QUIET_REPLIED_MS } from '../src/services/quietShares.js';
+
+const NOW = Date.parse('2026-10-24T15:00:00.000Z');
+const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
+const ago = (ms: number): string => new Date(NOW - ms).toISOString();
+
+interface RowSpec {
+  contactId: string;
+  outcome: ListingSendOutcome;
+  sentAt: string;
+  unitId?: string;
+  unitLabel?: string;
+  name?: string;
+  type?: string;
+  role?: string;
+  heard?: string;
+  reached?: string;
+}
+
+/** One core row: the Follow up item plus the recipient it was judged on. */
+function row(o: RowSpec): WaitingFollowUp {
+  const unitId = o.unitId ?? 'u1';
+  const type = o.type ?? 'tenant';
+  return {
+    item: {
+      unitId,
+      unitLabel: o.unitLabel ?? `${unitId} label`,
+      contactId: o.contactId,
+      name: o.name ?? `Name ${o.contactId}`,
+      type,
+      ...(o.role !== undefined && { role: o.role }),
+      sentAt: o.sentAt,
+      ...(o.heard !== undefined && { lastHeardFromAt: o.heard }),
+      outcome: o.outcome,
+      interestedSupported: type === 'tenant',
+      interestedMode: 'form',
+      waitingSince: o.heard ?? o.sentAt,
+    },
+    recipient: {
+      contactId: o.contactId,
+      type: type as RecipientDisplay['type'],
+      ...(o.heard !== undefined && { last_heard_from_at: o.heard }),
+      ...(o.reached !== undefined && { last_reached_out_at: o.reached }),
+    },
+  };
+}
+
+/** [unitId, contactId, quietSince] per listed person, in output order. */
+function listed(out: ReturnType<typeof buildQuietShares>): Array<[string, string, string]> {
+  return out.properties.flatMap((p) =>
+    p.people.map((person): [string, string, string] => [p.unitId, person.contactId, person.quietSince]),
+  );
+}
+
+describe('buildQuietShares (spec 6.1-6.3)', () => {
+  it('the thresholds are fixed durations: 48h after a reply, 120h with no reply', () => {
+    expect(QUIET_REPLIED_MS).toBe(48 * HOUR);
+    expect(QUIET_NO_REPLY_MS).toBe(120 * HOUR);
+  });
+
+  it('no_reply: shown at EXACTLY 120h since the send; hidden 1 ms before', () => {
+    const out = buildQuietShares(
+      [
+        row({ contactId: 'c-at', outcome: 'no_reply', sentAt: ago(120 * HOUR) }),
+        row({ contactId: 'c-before', outcome: 'no_reply', sentAt: ago(120 * HOUR - 1) }),
+      ],
+      NOW,
+    );
+    expect(listed(out)).toEqual([['u1', 'c-at', ago(120 * HOUR)]]);
+    expect(out.people).toBe(1);
+  });
+
+  it('replied: shown at EXACTLY 48h since the reply; hidden 1 ms before', () => {
+    const out = buildQuietShares(
+      [
+        row({ contactId: 'c-at', outcome: 'replied', sentAt: ago(6 * DAY), heard: ago(48 * HOUR) }),
+        row({ contactId: 'c-before', outcome: 'replied', sentAt: ago(6 * DAY), heard: ago(48 * HOUR - 1) }),
+      ],
+      NOW,
+    );
+    expect(listed(out)).toEqual([['u1', 'c-at', ago(48 * HOUR)]]);
+  });
+
+  it('each state uses its own threshold: 72h quiet lists a replied row, not a no_reply one', () => {
+    const out = buildQuietShares(
+      [
+        row({ contactId: 'c-nr', outcome: 'no_reply', sentAt: ago(3 * DAY) }),
+        row({ contactId: 'c-rep', outcome: 'replied', sentAt: ago(6 * DAY), heard: ago(3 * DAY) }),
+      ],
+      NOW,
+    );
+    expect(listed(out).map(([, id]) => id)).toEqual(['c-rep']);
+  });
+
+  it('heard LATER than sent restarts the clock; heard EARLIER than sent is ignored', () => {
+    const out = buildQuietShares(
+      [
+        row({ contactId: 'c-late', outcome: 'replied', sentAt: ago(9 * DAY), heard: ago(1 * DAY) }),
+        row({ contactId: 'c-early', outcome: 'no_reply', sentAt: ago(6 * DAY), heard: ago(8 * DAY) }),
+      ],
+      NOW,
+    );
+    expect(listed(out)).toEqual([['u1', 'c-early', ago(6 * DAY)]]);
+  });
+
+  it('reached LATER than sent restarts the clock without changing the state; reached EARLIER than sent is ignored', () => {
+    const out = buildQuietShares(
+      [
+        row({ contactId: 'c-recent', outcome: 'no_reply', sentAt: ago(10 * DAY), reached: ago(4 * DAY) }),
+        row({ contactId: 'c-old', outcome: 'no_reply', sentAt: ago(10 * DAY), reached: ago(6 * DAY) }),
+        row({ contactId: 'c-before', outcome: 'no_reply', sentAt: ago(6 * DAY), reached: ago(7 * DAY) }),
+        row({ contactId: 'c-rep', outcome: 'replied', sentAt: ago(9 * DAY), heard: ago(8 * DAY), reached: ago(3 * DAY) }),
+      ],
+      NOW,
+    );
+    // c-recent: 4 days since the outreach, under 5. c-old and c-before tie at
+    // 6 days (outreach vs send) - ties by contactId. c-rep: the outreach is
+    // later than the reply, so it is the clock.
+    expect(listed(out)).toEqual([
+      ['u1', 'c-rep', ago(3 * DAY)],
+      ['u1', 'c-before', ago(6 * DAY)],
+      ['u1', 'c-old', ago(6 * DAY)],
+    ]);
+    expect(out.properties[0]!.people.find((p) => p.contactId === 'c-old')!.state).toBe('no_reply');
+  });
+
+  it('an unparseable heard / reached value is ignored; an unparseable sentAt is never listed', () => {
+    const out = buildQuietShares(
+      [
+        row({ contactId: 'c-x', outcome: 'no_reply', sentAt: ago(6 * DAY), heard: 'garbage', reached: 'not-a-date' }),
+        row({ contactId: 'c-bad', outcome: 'no_reply', sentAt: 'garbage' }),
+      ],
+      NOW,
+    );
+    expect(listed(out)).toEqual([['u1', 'c-x', ago(6 * DAY)]]);
+  });
+
+  it('each share keeps its OWN clock: a second share to the same person does not restart the first', () => {
+    const out = buildQuietShares(
+      [
+        row({ contactId: 'c-1', unitId: 'u-first', outcome: 'no_reply', sentAt: ago(6 * DAY) }),
+        row({ contactId: 'c-1', unitId: 'u-second', outcome: 'no_reply', sentAt: ago(1 * DAY) }),
+      ],
+      NOW,
+    );
+    expect(listed(out)).toEqual([['u-first', 'c-1', ago(6 * DAY)]]);
+    expect(out.people).toBe(1);
+  });
+
+  it('inside a property: replied first, then no_reply; within each the longest quiet first; ties by contactId', () => {
+    const out = buildQuietShares(
+      [
+        row({ contactId: 'c-nr-new', outcome: 'no_reply', sentAt: ago(6 * DAY) }),
+        row({ contactId: 'c-rep-new', outcome: 'replied', sentAt: ago(9 * DAY), heard: ago(3 * DAY) }),
+        row({ contactId: 'c-nr-old', outcome: 'no_reply', sentAt: ago(12 * DAY) }),
+        row({ contactId: 'c-rep-old', outcome: 'replied', sentAt: ago(9 * DAY), heard: ago(5 * DAY) }),
+        row({ contactId: 'c-nr-tie-b', outcome: 'no_reply', sentAt: ago(8 * DAY) }),
+        row({ contactId: 'c-nr-tie-a', outcome: 'no_reply', sentAt: ago(8 * DAY) }),
+      ],
+      NOW,
+    );
+    expect(out.properties).toHaveLength(1);
+    expect(out.properties[0]!.people.map((p) => p.contactId)).toEqual([
+      'c-rep-old',
+      'c-rep-new',
+      'c-nr-old',
+      'c-nr-tie-a',
+      'c-nr-tie-b',
+      'c-nr-new',
+    ]);
+  });
+
+  it('properties are ordered by their longest-quiet person (oldest quietSince first, any state); ties by unitId', () => {
+    const out = buildQuietShares(
+      [
+        row({ contactId: 'c-1', unitId: 'u-b', outcome: 'no_reply', sentAt: ago(6 * DAY) }),
+        row({ contactId: 'c-2', unitId: 'u-c', outcome: 'replied', sentAt: ago(13 * DAY), heard: ago(10 * DAY) }),
+        row({ contactId: 'c-3', unitId: 'u-a', outcome: 'no_reply', sentAt: ago(6 * DAY) }),
+        row({ contactId: 'c-4', unitId: 'u-b', outcome: 'no_reply', sentAt: ago(11 * DAY) }),
+        row({ contactId: 'c-5', unitId: 'u-d', outcome: 'no_reply', sentAt: ago(11 * DAY) }),
+      ],
+      NOW,
+    );
+    expect(out.properties.map((p) => p.unitId)).toEqual(['u-b', 'u-d', 'u-c', 'u-a']);
+  });
+
+  it('people counts DISTINCT contacts; a person waiting on two properties has a row under each', () => {
+    const out = buildQuietShares(
+      [
+        row({ contactId: 'c-both', unitId: 'u-a', outcome: 'no_reply', sentAt: ago(7 * DAY) }),
+        row({ contactId: 'c-both', unitId: 'u-b', outcome: 'no_reply', sentAt: ago(6 * DAY) }),
+        row({ contactId: 'c-solo', unitId: 'u-b', outcome: 'no_reply', sentAt: ago(6 * DAY) }),
+      ],
+      NOW,
+    );
+    expect(out.people).toBe(2);
+    expect(listed(out)).toEqual([
+      ['u-a', 'c-both', ago(7 * DAY)],
+      ['u-b', 'c-both', ago(6 * DAY)],
+      ['u-b', 'c-solo', ago(6 * DAY)],
+    ]);
+  });
+
+  it('outcomes other than replied / no_reply are never listed, however quiet', () => {
+    const out = buildQuietShares(
+      (['interested', 'not_interested', 'signed_up'] as const).map((outcome) =>
+        row({ contactId: `c-${outcome}`, outcome, sentAt: ago(13 * DAY) }),
+      ),
+      NOW,
+    );
+    expect(out).toEqual({ properties: [], people: 0 });
+  });
+
+  it('the wire rows: the property keeps the Follow up unitLabel; a person carries name, type, role only when set, state and quietSince', () => {
+    const label = '12 Oak St, Atlanta, GA 30303';
+    const out = buildQuietShares(
+      [
+        row({ contactId: 'c-cw', unitLabel: label, name: 'Casey Worker', type: 'partner', role: 'Caseworker', outcome: 'replied', sentAt: ago(9 * DAY), heard: ago(4 * DAY) }),
+        row({ contactId: 'c-ten', unitLabel: label, name: 'Tia Tenant', outcome: 'no_reply', sentAt: ago(6 * DAY) }),
+      ],
+      NOW,
+    );
+    expect(out).toEqual({
+      people: 2,
+      properties: [
+        {
+          unitId: 'u1',
+          unitLabel: label,
+          people: [
+            { contactId: 'c-cw', name: 'Casey Worker', type: 'partner', role: 'Caseworker', state: 'replied', quietSince: ago(4 * DAY) },
+            { contactId: 'c-ten', name: 'Tia Tenant', type: 'tenant', state: 'no_reply', quietSince: ago(6 * DAY) },
+          ],
+        },
+      ],
+    });
+    expect(out.properties[0]!.people[1]).not.toHaveProperty('role');
+  });
+
+  it('no rows: no properties and zero people', () => {
+    expect(buildQuietShares([], NOW)).toEqual({ properties: [], people: 0 });
+  });
+});
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/quietShares.test.ts
+```
+Expected: the file fails to load - `Failed to load url ../src/services/quietShares.js`
+(the module does not exist). No DynamoDB is needed for this file;
+`ALLOW_SKIP_DYNAMO_TESTS=1` is allowed for this pure red/green step.
+
+#### Step 3 - implementation
+
+3a. `app/src/routes/today.ts` - the wire types, beside `TodayResponse`. Edit:
+
+old:
+```ts
+export interface TodayResponse {
+  items: TodayItem[];
+```
+new:
+```ts
+/**
+ * Quiet shares (spec 2026-10-23-today-checklist-design.md 3, 6): one person
+ * waiting on one property. Built by services/quietShares.ts from the Follow up
+ * core's rows; mirrored in dashboard/src/api/types.ts.
+ */
+export interface QuietSharePerson {
+  contactId: string;
+  /** The Follow up tab's name rule (FollowUpItem.name). */
+  name: string;
+  type: string;
+  /** As on the Follow up tab: the trimmed caseworker role; absent when none. */
+  role?: string;
+  state: 'replied' | 'no_reply';
+  /** ISO - the quiet clock: the latest of sentAt, heard (if later), reached (if later). */
+  quietSince: string;
+}
+
+/** Quiet shares: one property line and the people waiting on it (spec 6.2, 6.3). */
+export interface QuietShareProperty {
+  unitId: string;
+  /** The Follow up tab's formatter: formatAddress(unit.address) || unitId. */
+  unitLabel: string;
+  /** Replied first, then no_reply; within each the oldest quietSince first; ties by contactId. */
+  people: QuietSharePerson[];
+}
+
+export interface TodayResponse {
+  items: TodayItem[];
+```
+
+3b. Create `app/src/services/quietShares.ts`:
+```ts
+// Quiet shares (spec docs/superpowers/specs/2026-10-23-today-checklist-design.md
+// section 6, plan PR23): the Today section listing people a property was sent
+// to who have gone quiet. PURE - routes/today.ts supplies the Follow up core's
+// waiting rows (services/followUps.ts collectWaitingFollowUps) and the clock.
+//
+// The rule (spec 6.1): quietSince is the latest of the share's sentAt, the
+// recipient's last_heard_from_at and its last_reached_out_at - each only when
+// later, and an unparseable value is ignored. A row is shown when
+// now - quietSince >= 48h (outcome replied) or 120h (outcome no_reply): fixed
+// durations, not calendar days, like the tab's 24h and 14-day constants. The
+// state is the outcome; staff outreach restarts the clock but never changes
+// the state.
+//
+// Each row keeps its OWN clock from its own sentAt. Shares never move
+// last_reached_out_at (spec 7.2), so sending someone another property does not
+// restart the properties they were sent before.
+//
+// SUBSET, by construction: every row shown here is also a Follow up tab row -
+// the candidates ARE the tab's waiting rows, both thresholds exceed the tab's
+// 24h, and this clock is never earlier than the tab's waitingSince. Nobody
+// should "fix" Today to show rows the tab does not.
+import type { QuietShareProperty, QuietSharePerson } from '../routes/today.js';
+import type { WaitingFollowUp } from './followUps.js';
+
+/** Replied, then quiet this long (spec 6.1: 2 days, a fixed duration). */
+export const QUIET_REPLIED_MS = 48 * 60 * 60 * 1000;
+/** Never replied in this long (spec 6.1: 5 days, a fixed duration). */
+export const QUIET_NO_REPLY_MS = 120 * 60 * 60 * 1000;
+
+/** Epoch ms of an ISO string; undefined when absent or unparseable. */
+function instantMs(value: unknown): number | undefined {
+  if (typeof value !== 'string' || value.length === 0) return undefined;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+/** Ordinal string order - deterministic, locale-free tie-breaks. */
+function compareIds(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** Inside a property, replied people sort before no_reply ones (spec 6.2). */
+const STATE_RANK: Record<QuietSharePerson['state'], number> = { replied: 0, no_reply: 1 };
+
+interface ListedPerson {
+  person: QuietSharePerson;
+  quietMs: number;
+}
+
+/**
+ * The Quiet shares section from the Follow up core's waiting rows (spec 6):
+ * the properties in order (by their longest-quiet person, oldest first; ties
+ * by unitId), each with its people in order (replied, then no_reply; within
+ * each the oldest quietSince first; ties by contactId), and `people` = the
+ * number of DISTINCT contacts across all properties (the heading count - a
+ * person waiting on two properties counts once and has a row under each).
+ */
+export function buildQuietShares(
+  rows: readonly WaitingFollowUp[],
+  now: number,
+): { properties: QuietShareProperty[]; people: number } {
+  const byUnit = new Map<string, { unitId: string; unitLabel: string; people: ListedPerson[] }>();
+  const distinct = new Set<string>();
+  for (const { item, recipient } of rows) {
+    const state = item.outcome;
+    // The core already keeps only these two; the builder does not rely on it.
+    if (state !== 'replied' && state !== 'no_reply') continue;
+    const sentMs = instantMs(item.sentAt);
+    if (sentMs === undefined) continue;
+    let quietMs = sentMs;
+    for (const later of [instantMs(recipient.last_heard_from_at), instantMs(recipient.last_reached_out_at)]) {
+      if (later !== undefined && later > quietMs) quietMs = later;
+    }
+    const threshold = state === 'replied' ? QUIET_REPLIED_MS : QUIET_NO_REPLY_MS;
+    if (now - quietMs < threshold) continue;
+    let group = byUnit.get(item.unitId);
+    if (group === undefined) {
+      group = { unitId: item.unitId, unitLabel: item.unitLabel, people: [] };
+      byUnit.set(item.unitId, group);
+    }
+    group.people.push({
+      person: {
+        contactId: item.contactId,
+        name: item.name,
+        type: item.type,
+        ...(item.role !== undefined && { role: item.role }),
+        state,
+        quietSince: new Date(quietMs).toISOString(),
+      },
+      quietMs,
+    });
+    distinct.add(item.contactId);
+  }
+
+  const groups = [...byUnit.values()];
+  for (const group of groups) {
+    group.people.sort(
+      (a, b) =>
+        STATE_RANK[a.person.state] - STATE_RANK[b.person.state] ||
+        a.quietMs - b.quietMs ||
+        compareIds(a.person.contactId, b.person.contactId),
+    );
+  }
+  const oldestQuiet = (group: { people: ListedPerson[] }): number =>
+    Math.min(...group.people.map((p) => p.quietMs));
+  groups.sort((a, b) => oldestQuiet(a) - oldestQuiet(b) || compareIds(a.unitId, b.unitId));
+
+  return {
+    properties: groups.map((group) => ({
+      unitId: group.unitId,
+      unitLabel: group.unitLabel,
+      people: group.people.map((p) => p.person),
+    })),
+    people: distinct.size,
+  };
+}
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/quietShares.test.ts test/todayApi.test.ts
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect all green (`todayApi.test.ts` unchanged - the new interfaces are
+additive) and exit 0.
+
+#### Step 5 - ASCII check
+
+```
+cd W:/tmp/today-checklist; git diff -U0 | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+tr -d '\11\12\15\40-\176' < W:/tmp/today-checklist/app/src/services/quietShares.ts | wc -c
+tr -d '\11\12\15\40-\176' < W:/tmp/today-checklist/app/test/quietShares.test.ts | wc -c
+```
+Expect `0` three times.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add app/src/routes/today.ts app/src/services/quietShares.ts app/test/quietShares.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(today): quiet-shares builder and its wire types (today-checklist S4.2)" -m "buildQuietShares applies the spec 6.1 clock (sentAt, heard if later, reached if later) with fixed 48h/120h thresholds to the Follow up core's rows, grouped by property in spec 6.2/6.3 order with a distinct-people count. QuietShareProperty/QuietSharePerson live in routes/today.ts." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S4.3 - Today's units dependency, the unit-label cache, and tours_today `at` / `unitLabel` / time order (PR24 units half, PR25, PR29)
+
+The Today router gains a units repo (wired from `api.ts`), a per-request
+memoized `unitLabelOf`, and the `TodayItem.at` / `unitLabel` fields;
+tours_today rows carry them and sort by time, then tenant, then tourId.
+
+Files:
+- `app/src/routes/today.ts`
+- `app/src/routes/api.ts` (one property in the `createTodayRouter({` call)
+- Tests: `app/test/todayApi.test.ts`
+
+#### Step 1 - failing tests (`app/test/todayApi.test.ts`)
+
+1a. The imports. Edit:
+
+old:
+```ts
+import { beforeEach, describe, expect, it } from 'vitest';
+```
+new:
+```ts
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+```
+Edit:
+
+old:
+```ts
+import type { ContactItem } from '../src/repos/contactsRepo.js';
+```
+new:
+```ts
+import type { ContactItem } from '../src/repos/contactsRepo.js';
+import type { UnitItem } from '../src/repos/unitsRepo.js';
+```
+
+1b. `seedTour` takes a unit and a createdAt. Edit:
+
+old:
+```ts
+  const seedTour = async (t: {
+    tourId: string;
+    tenantId: string;
+    scheduledAt?: string;
+    status?: string;
+  }): Promise<void> => {
+    await world.toursRepo.create({
+      tourId: t.tourId,
+      tenantId: t.tenantId,
+      unitId: 'unit-1',
+      tourType: 'self_guided',
+```
+new:
+```ts
+  const seedTour = async (t: {
+    tourId: string;
+    tenantId: string;
+    scheduledAt?: string;
+    status?: string;
+    /** Default 'unit-1' - a unit no test seeds, so its label is the unitId. */
+    unitId?: string;
+    /** The harness create stamps now when absent (tours_to_book order/age). */
+    createdAt?: string;
+  }): Promise<void> => {
+    await world.toursRepo.create({
+      tourId: t.tourId,
+      tenantId: t.tenantId,
+      unitId: t.unitId ?? 'unit-1',
+      tourType: 'self_guided',
+      ...(t.createdAt !== undefined ? { createdAt: t.createdAt } : {}),
+```
+
+1c. Append a describe INSIDE the top-level `describe('today action-queue API (BE6/C7)', ...)`,
+after the last nested describe. Edit (the file's last lines):
+
+old:
+```ts
+      expect(nag?.memberNames).toEqual(['Nadia Nag', '(555) 010-0012']);
+    });
+  });
+});
+```
+new:
+```ts
+      expect(nag?.memberNames).toEqual(['Nadia Nag', '(555) 010-0012']);
+    });
+  });
+
+  // --- Today checklist (spec 2026-10-23-today-checklist-design.md 2.4, 3;
+  // plan PR25 / PR29): tour rows carry their time and their property --------
+  describe('tour rows carry at and unitLabel (today-checklist)', () => {
+    const OAK = { line1: '12 Oak St', city: 'Atlanta', state: 'GA', zip: '30303' };
+    const OAK_LABEL = '12 Oak St, Atlanta, GA 30303';
+    const seedUnit = (unitId: string, over: Partial<UnitItem> = {}): void => {
+      world.units.set(unitId, { unitId, landlordId: 'c-ll', status: 'available', ...over });
+    };
+    const labelWarns = () =>
+      harness.capture.atLevel(40).filter((l) => String(l['msg'] ?? '').includes('unit label'));
+
+    it('tours_today rows carry at = scheduledAt and the unit label, ordered by time, then tenant, then tourId', async () => {
+      seedUnit('u-oak', { address: OAK });
+      seedTenant('t-amy', 'Amy', 'Able');
+      seedTenant('t-bea', 'Bea', 'Bold');
+      const nine = `${todayYmd()}T09:00:00.000Z`;
+      const three = `${todayYmd()}T15:00:00.000Z`;
+      await seedTour({ tourId: 'tour-3', tenantId: 't-amy', unitId: 'u-oak', scheduledAt: three });
+      await seedTour({ tourId: 'tour-2', tenantId: 't-bea', unitId: 'u-oak', scheduledAt: nine });
+      await seedTour({ tourId: 'tour-5', tenantId: 't-amy', unitId: 'u-oak', scheduledAt: nine });
+      await seedTour({ tourId: 'tour-4', tenantId: 't-amy', unitId: 'u-oak', scheduledAt: nine });
+
+      const tours = (await getItems()).filter((i) => i.group === 'tours_today');
+
+      // The old order was tenant name first (tour-3, tour-4, tour-5, tour-2).
+      expect(tours.map((i) => i.refId)).toEqual(['tour-4', 'tour-5', 'tour-2', 'tour-3']);
+      expect(tours[0]).toEqual({
+        group: 'tours_today',
+        refType: 'tour',
+        refId: 'tour-4',
+        who: 'Amy Able',
+        why: 'Tour today',
+        tag: 'Tour',
+        at: nine,
+        unitLabel: OAK_LABEL,
+      });
+      expect(tours[3]).toMatchObject({ at: three, unitLabel: OAK_LABEL });
+    });
+
+    it('a missing or soft-deleted unit labels the row with its unitId and WARNs once per unit - never a 500', async () => {
+      seedUnit('u-del', { address: OAK, deleted_at: '2026-10-01T00:00:00.000Z' });
+      seedTenant('t-amy', 'Amy', 'Able');
+      await seedTour({ tourId: 'tour-g1', tenantId: 't-amy', unitId: 'u-gone', scheduledAt: todayNoonIso() });
+      await seedTour({ tourId: 'tour-g2', tenantId: 't-amy', unitId: 'u-gone', scheduledAt: todayNoonIso() });
+      await seedTour({ tourId: 'tour-d', tenantId: 't-amy', unitId: 'u-del', scheduledAt: todayNoonIso() });
+
+      const tours = (await getItems()).filter((i) => i.group === 'tours_today');
+
+      expect(tours.map((i) => [i.refId, i.unitLabel])).toEqual([
+        ['tour-d', 'u-del'],
+        ['tour-g1', 'u-gone'],
+        ['tour-g2', 'u-gone'],
+      ]);
+      expect(labelWarns().map((l) => l['unitId']).sort()).toEqual(['u-del', 'u-gone']);
+    });
+
+    it('a unit read that THROWS degrades to the unitId and WARNs with the unitId - the route still answers 200', async () => {
+      seedUnit('u-oak', { address: OAK });
+      seedTenant('t-amy', 'Amy', 'Able');
+      await seedTour({ tourId: 'tour-oak', tenantId: 't-amy', unitId: 'u-oak', scheduledAt: todayNoonIso() });
+      vi.spyOn(world.unitsRepo, 'getById').mockRejectedValue(new Error('throttled'));
+
+      const res = await authedGet('/api/today');
+
+      expect(res.status).toBe(200);
+      const row = (res.body as TodayResponse).items.find((i) => i.refId === 'tour-oak');
+      expect(row?.unitLabel).toBe('u-oak');
+      expect(labelWarns()).toHaveLength(1);
+      expect(labelWarns()[0]).toMatchObject({ unitId: 'u-oak' });
+      expect(JSON.stringify(labelWarns())).not.toContain('Amy');
+    });
+
+    it('labels are memoized per request: one unit read per distinct unit', async () => {
+      seedUnit('u-oak', { address: OAK });
+      seedTenant('t-amy', 'Amy', 'Able');
+      for (const tourId of ['tour-m1', 'tour-m2', 'tour-m3']) {
+        await seedTour({ tourId, tenantId: 't-amy', unitId: 'u-oak', scheduledAt: todayNoonIso() });
+      }
+      const spy = vi.spyOn(world.unitsRepo, 'getById');
+
+      await getItems();
+
+      expect(spy.mock.calls.map((c) => c[0])).toEqual(['u-oak']);
+    });
+  });
+});
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/todayApi.test.ts
+```
+Expected failures, and why (all four new cases):
+- "tours_today rows carry at ...": the order is `['tour-3', 'tour-4', 'tour-5', 'tour-2']`
+  (tenant first) and the row has no `at` / `unitLabel`.
+- "a missing or soft-deleted unit ...": `unitLabel` is undefined and no
+  "unit label" WARN exists.
+- "a unit read that THROWS ...": `unitLabel` undefined, no WARN.
+- "labels are memoized ...": `getById` is never called (`[]`).
+Every other case stays green (`seedTour`'s new options default to the old
+values).
+
+#### Step 3 - implementation
+
+3a. `app/src/routes/today.ts` - imports. Edit:
+
+old:
+```ts
+import {
+  createToursRepo,
+  type ToursRepo,
+} from '../repos/toursRepo.js';
+```
+new:
+```ts
+import {
+  createToursRepo,
+  type ToursRepo,
+} from '../repos/toursRepo.js';
+import {
+  createUnitsRepo,
+  // contactsRepo's own isDeleted is imported above under that name (PR24).
+  isDeleted as isUnitDeleted,
+  type UnitsRepo,
+} from '../repos/unitsRepo.js';
+import { formatAddress } from '../lib/address.js';
+```
+
+3b. `TodayItem` gains the two tour-row fields. Edit:
+
+old:
+```ts
+  urgency?: string;
+  tag?: string;
+  attention?: boolean;
+}
+```
+new:
+```ts
+  urgency?: string;
+  tag?: string;
+  attention?: boolean;
+  /**
+   * Tour rows only (spec 2026-10-23-today-checklist-design.md 3), ISO:
+   * tours_today = the tour's scheduledAt; tours_to_book = its createdAt.
+   */
+  at?: string;
+  /** Tour rows only: the property, formatAddress(unit.address) || unitId. */
+  unitLabel?: string;
+}
+```
+
+3c. The deps. Edit:
+
+old:
+```ts
+  contactsRepo?: ContactsRepo;
+  toursRepo?: ToursRepo;
+  /** Pending AI suggestions (conversation-fact-extraction) -> the ai_suggestions group. */
+```
+new:
+```ts
+  contactsRepo?: ContactsRepo;
+  toursRepo?: ToursRepo;
+  /**
+   * Today checklist (spec 2026-10-23-today-checklist-design.md 3, 6): memoized
+   * point reads label the tour rows (unitLabel), and the Quiet shares core walks
+   * the available properties.
+   */
+  unitsRepo?: UnitsRepo;
+  /** Pending AI suggestions (conversation-fact-extraction) -> the ai_suggestions group. */
+```
+
+3d. The factory default. Edit:
+
+old:
+```ts
+  const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
+  const extraction = deps.extractionRepo ?? createExtractionRepo({ logger: deps.logger });
+```
+new:
+```ts
+  const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
+  const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
+  const extraction = deps.extractionRepo ?? createExtractionRepo({ logger: deps.logger });
+```
+
+3e. The unit-label cache, after the placement cache. Edit:
+
+old:
+```ts
+      placementCache.set(placementId, placement);
+      return placement;
+    };
+```
+new:
+```ts
+      placementCache.set(placementId, placement);
+      return placement;
+    };
+
+    // Unit labels for the tour rows (spec 2026-10-23 3, plan PR25): a
+    // per-request memoized point read, modeled on the placement cache above.
+    // formatAddress(unit.address) || unitId - the Follow up tab's formatter. A
+    // failed LABEL is never a failure (spec 2.5): a throw, a missing unit or a
+    // soft-deleted one logs one WARN with the unitId and the row shows the
+    // unitId. The memo makes that WARN once per unit per request.
+    const unitLabelCache = new Map<string, string>();
+    const unitLabelOf = async (unitId: string): Promise<string> => {
+      const cached = unitLabelCache.get(unitId);
+      if (cached !== undefined) return cached;
+      let label = unitId;
+      try {
+        const unit = await units.getById(unitId);
+        if (unit === undefined || isUnitDeleted(unit)) {
+          log.warn({ unitId }, 'today: unit label lookup found no live unit - showing the unitId');
+        } else {
+          label = formatAddress(unit.address) || unitId;
+        }
+      } catch (err) {
+        log.warn({ err, unitId }, 'today: unit label lookup failed (best-effort) - showing the unitId');
+      }
+      unitLabelCache.set(unitId, label);
+      return label;
+    };
+```
+
+3f. tours_today rows. Edit (the comment line carries an em dash - copy it
+from your Read):
+
+old:
+```ts
+        const who = (await resolveContactLabel(t.tenantId)) ?? t.tenantId;
+        const item: TodayItem = {
+          group: 'tours_today',
+          refType: 'tour',
+          refId: t.tourId,
+          who,
+          why: 'Tour today',
+          tag: 'Tour',
+        };
+        // Tours all share "today" [U+2014] order them by tenant name then refId (stable).
+        toursToday.push({ item, at: now });
+```
+new:
+```ts
+        const who = (await resolveContactLabel(t.tenantId)) ?? t.tenantId;
+        const unitLabel = await unitLabelOf(t.unitId);
+        const scheduledMs = typeof t.scheduledAt === 'string' ? Date.parse(t.scheduledAt) : Number.NaN;
+        const item: TodayItem = {
+          group: 'tours_today',
+          refType: 'tour',
+          refId: t.tourId,
+          who,
+          why: 'Tour today',
+          tag: 'Tour',
+          ...(typeof t.scheduledAt === 'string' && { at: t.scheduledAt }),
+          unitLabel,
+        };
+        // Spec 2026-10-23 2.4 / PR29: by time, then tenant name, then refId
+        // (the sort below). The range read yields dated tours only.
+        toursToday.push({ item, at: Number.isNaN(scheduledMs) ? Number.POSITIVE_INFINITY : scheduledMs });
+```
+
+3g. The tours_today sort. Edit:
+
+old:
+```ts
+    toursToday.sort((a, b) =>
+      a.item.who !== b.item.who
+        ? a.item.who < b.item.who
+          ? -1
+          : 1
+        : a.item.refId < b.item.refId
+          ? -1
+          : a.item.refId > b.item.refId
+            ? 1
+            : 0,
+    );
+```
+new:
+```ts
+    // tours_today: by time, then tenant name, then refId (spec 2026-10-23 2.4).
+    toursToday.sort((a, b) => {
+      if (a.at !== b.at) return a.at - b.at;
+      if (a.item.who !== b.item.who) return a.item.who < b.item.who ? -1 : 1;
+      return a.item.refId < b.item.refId ? -1 : a.item.refId > b.item.refId ? 1 : 0;
+    });
+```
+
+3h. `app/src/routes/api.ts` - Read the `createTodayRouter({` call first (S2
+may have edited the file elsewhere). Edit:
+
+old:
+```ts
+      ...(deps.toursRepo !== undefined && { toursRepo: deps.toursRepo }),
+      // conversation-fact-extraction (T9): the ai_suggestions group reads pending
+```
+new:
+```ts
+      ...(deps.toursRepo !== undefined && { toursRepo: deps.toursRepo }),
+      // Today checklist (spec 2026-10-23 3, 6): the SAME units repo the
+      // sub-routers above share - tour-row labels and the Quiet shares walk.
+      unitsRepo: units,
+      // conversation-fact-extraction (T9): the ai_suggestions group reads pending
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/todayApi.test.ts test/contactSoftDelete.test.ts test/aiRunVerdicts.test.ts
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect all green and exit 0 (the two extra files read GET /api/today through
+the harness).
+
+#### Step 5 - ASCII check on added lines
+
+```
+cd W:/tmp/today-checklist; git diff -U0 | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0`.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add app/src/routes/today.ts app/src/routes/api.ts app/test/todayApi.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(today): unit labels and time order on Tours today (today-checklist S4.3)" -m "The Today router takes the shared units repo; a per-request memoized unitLabelOf labels tour rows (unitId on a throw or a missing/deleted unit, WARN once). TodayItem gains at/unitLabel; tours_today sorts by time, then tenant, then tourId." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S4.4 - The `identify` group: both unknown sources leave Needs you now, oldest contact first (PR27)
+
+The unread unknown rows and the triage-partition rows keep their row shape
+except `group: 'identify'`, and sort by the contact's `created_at` (none or
+unparseable last; ties by refId). The owner rule and the Unreplied removal
+are S4.5 - this task changes WHERE the rows go and their ORDER only.
+
+Files:
+- `app/src/routes/today.ts`
+- Tests: `app/test/todayApi.test.ts`, `app/test/todayUnmatchedNonRegression.test.ts`
+
+#### Step 1 - failing tests
+
+1a. `app/test/todayApi.test.ts` - the untriaged-inbounds case (~317). Edit
+(line 2 of the old text carries an arrow - copy it from your Read):
+
+old:
+```ts
+  it('untriaged inbounds (unknown_1to1 unread + unknown/needs_review contact) land in needs_you_now, linking to the contact page', async () => {
+    // unknown_1to1 conversation with unread [U+2192] needs_you_now linking to the
+    // auto-captured contact (its participant roster), NOT /conversations/:id.
+```
+new:
+```ts
+  it('untriaged inbounds (unknown_1to1 unread + unknown/needs_review contact) land in identify, linking to the contact page', async () => {
+    // unknown_1to1 conversation with unread -> an identify row linking to the
+    // auto-captured contact (its participant roster), NOT /conversations/:id.
+```
+Edit:
+
+old:
+```ts
+    const items = await getItems();
+    const needs = items.filter((i) => i.group === 'needs_you_now');
+    // BOTH untriaged rows link to a contact page (never a dead conversation ref).
+```
+new:
+```ts
+    const items = await getItems();
+    // Today checklist (spec 2026-10-23 5.2): Identify, split from Needs you now.
+    expect(items.filter((i) => i.group === 'needs_you_now')).toEqual([]);
+    const needs = items.filter((i) => i.group === 'identify');
+    // BOTH untriaged rows link to a contact page (never a dead conversation ref).
+```
+
+1b. The D5 describe's helper (~1016). Edit:
+
+old:
+```ts
+        .filter((i) => i.group === 'needs_you_now' && i.why === 'New unknown contact')
+```
+new:
+```ts
+        .filter((i) => i.group === 'identify' && i.why === 'New unknown contact')
+```
+
+1c. The re-typed tenant case (~1152, ~1166). Edit:
+
+old:
+```ts
+      const before = (await getItems()).filter((i) => i.group === 'needs_you_now');
+```
+new:
+```ts
+      const before = (await getItems()).filter((i) => i.group === 'identify');
+```
+Edit:
+
+old:
+```ts
+      const after = (await getItems()).filter((i) => i.group === 'needs_you_now');
+```
+new:
+```ts
+      const after = (await getItems()).filter((i) => i.group === 'identify');
+```
+
+1d. The Inactive caseworker case (~1175). Edit:
+
+old:
+```ts
+      expect(items.filter((i) => i.group === 'needs_you_now')).toEqual([
+        { group: 'needs_you_now', refType: 'contact', refId: 'c-cw-off', who: 'Casey Worker', why: 'New unknown contact', attention: true },
+      ]);
+```
+new:
+```ts
+      expect(items.filter((i) => i.group === 'identify')).toEqual([
+        { group: 'identify', refType: 'contact', refId: 'c-cw-off', who: 'Casey Worker', why: 'New unknown contact', attention: true },
+      ]);
+```
+
+1e. FIX C (~1535). Edit:
+
+old:
+```ts
+  it('an unknown inbound (unknown_1to1 unread + needs_review contact, same phone) yields ONE needs_you_now item linking to the contact', async () => {
+```
+new:
+```ts
+  it('an unknown inbound (unknown_1to1 unread + needs_review contact, same phone) yields ONE identify item linking to the contact', async () => {
+```
+Edit:
+
+old:
+```ts
+    const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
+    const untriaged = needs.filter(
+```
+new:
+```ts
+    const needs = (await getItems()).filter((i) => i.group === 'identify');
+    const untriaged = needs.filter(
+```
+
+1f. The needs_review-only contact (~1574). Edit:
+
+old:
+```ts
+    const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
+    const contact = needs.find((i) => i.refType === 'contact' && i.refId === 'contact-only');
+```
+new:
+```ts
+    const needs = (await getItems()).filter((i) => i.group === 'identify');
+    const contact = needs.find((i) => i.refType === 'contact' && i.refId === 'contact-only');
+```
+
+1g. emittedUnknownPhones (~1952). Edit:
+
+old:
+```ts
+      const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
+
+      const forPerson = needs.filter((i) => i.refId === 'c-unknown-dedupe');
+```
+new:
+```ts
+      const needs = (await getItems()).filter((i) => i.group === 'identify');
+
+      const forPerson = needs.filter((i) => i.refId === 'c-unknown-dedupe');
+```
+
+1h. New cases, after the S4.3 describe. Edit:
+
+old:
+```ts
+      expect(spy.mock.calls.map((c) => c[0])).toEqual(['u-oak']);
+    });
+  });
+```
+new:
+```ts
+      expect(spy.mock.calls.map((c) => c[0])).toEqual(['u-oak']);
+    });
+  });
+
+  // --- Today checklist (spec 2026-10-23 5.2, plan PR27): Identify these
+  // contacts - both unknown sources, oldest contact first --------------------
+  describe('Identify these contacts (today-checklist 5.2)', () => {
+    const unknownContact = (contactId: string, phone: string, createdAt?: string): void => {
+      world.contacts.push({
+        contactId,
+        type: 'unknown',
+        status: 'needs_review',
+        phone,
+        ...(createdAt !== undefined && { created_at: createdAt }),
+      });
+    };
+    const unknownThread = (contactId: string, phone: string, offset: number): void => {
+      seedConversation({
+        conversationId: `conv-${contactId}`,
+        participant_phone: phone,
+        participants: [{ contactId, phone }],
+        status: 'open',
+        last_activity_at: iso(offset),
+        type: 'unknown_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+      } as ConversationItem);
+    };
+
+    it('rows from BOTH sources land in identify, not needs_you_now, with the row shape unchanged', async () => {
+      unknownContact('c-unk-thread', '+15550370001');
+      unknownThread('c-unk-thread', '+15550370001', -30_000);
+      unknownContact('c-unk-triage', '+15550370002');
+
+      const items = await getItems();
+
+      expect(items.filter((i) => i.group === 'needs_you_now')).toEqual([]);
+      expect(items.filter((i) => i.group === 'identify')).toEqual([
+        { group: 'identify', refType: 'contact', refId: 'c-unk-thread', who: '(555) 037-0001', why: 'New unknown contact', attention: true },
+        { group: 'identify', refType: 'contact', refId: 'c-unk-triage', who: '(555) 037-0002', why: 'New unknown contact', attention: true },
+      ]);
+    });
+
+    it('orders oldest contact first by created_at across both sources; none or unparseable sorts last; ties by refId', async () => {
+      // Thread-sourced rows, newest thread activity FIRST - so the activity
+      // order the unread walk yields is NOT the identify order.
+      unknownContact('c-u-new', '+15550370101', '2026-10-20T10:00:00.000Z');
+      unknownThread('c-u-new', '+15550370101', -10_000);
+      unknownContact('c-u-none', '+15550370102');
+      unknownThread('c-u-none', '+15550370102', -20_000);
+      // No contact item at all: an unresolved owner (sorts as no created_at).
+      unknownThread('c-u-unresolved', '+15550370103', -30_000);
+      // Triage-sourced rows (no unread thread).
+      unknownContact('c-t-old', '+15550370104', '2026-10-01T10:00:00.000Z');
+      unknownContact('c-t-mid', '+15550370105', '2026-10-10T10:00:00.000Z');
+      unknownContact('c-t-tie', '+15550370106', '2026-10-10T10:00:00.000Z');
+      unknownContact('c-t-none', '+15550370107');
+      unknownContact('c-t-bad', '+15550370108', 'garbage');
+
+      const ids = (await getItems()).filter((i) => i.group === 'identify').map((i) => i.refId);
+
+      expect(ids).toEqual([
+        'c-t-old',
+        'c-t-mid',
+        'c-t-tie',
+        'c-u-new',
+        'c-t-bad',
+        'c-t-none',
+        'c-u-none',
+        'c-u-unresolved',
+      ]);
+    });
+
+    it('identify follows needs_you_now in the response order', async () => {
+      seedTenant('t-1', 'Keisha', 'Brown');
+      seedPlacement({
+        placementId: 'placement-needs',
+        tenantId: 't-1',
+        stage: 'awaiting_authority_approval',
+        next_deadline_type: 'rta_window',
+        next_deadline_at: iso(-3_600_000),
+      });
+      unknownContact('c-unk', '+15550370201');
+
+      expect((await getItems()).map((i) => [i.group, i.refId])).toEqual([
+        ['needs_you_now', 'placement-needs'],
+        ['identify', 'c-unk'],
+      ]);
+    });
+  });
+```
+
+1i. `app/test/todayUnmatchedNonRegression.test.ts`. Edit:
+
+old:
+```ts
+    // Real Today content, so "identical" is a non-trivial assertion:
+    // an untriaged unknown contact (needs_you_now) + an unread tenant 1:1
+    // thread (unreplied).
+```
+new:
+```ts
+    // Real Today content, so "identical" is a non-trivial assertion:
+    // an untriaged unknown contact (identify) + an unread tenant 1:1
+    // thread (unreplied).
+```
+Edit:
+
+old:
+```ts
+    ).toEqual(['needs_you_now', 'unreplied']);
+```
+new:
+```ts
+    ).toEqual(['identify', 'unreplied']);
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/todayApi.test.ts test/todayUnmatchedNonRegression.test.ts
+```
+Needs DynamoDB Local up for the second file (`npm run db:start` STARTS it;
+never restart it). Expected failures, and why - every one because the unknown
+rows are still `needs_you_now` rows in `at: now` order:
+- todayApi.test.ts: "untriaged inbounds ... land in identify" (needs_you_now
+  holds two rows); the D5 PINs that expect a row (`newUnknownRefIds` filters
+  identify: `['c-unk-nr']`, `['c-team-on']`, `['c-live-nr', 'c-live-team']`
+  come back `[]`); the re-typed tenant case (`before` is `[]`); the Inactive
+  caseworker case; FIX C (`untriaged` has length 0); the needs_review-only
+  contact (`contact` undefined); emittedUnknownPhones (`forPerson` length 0);
+  the three new Identify cases.
+- todayUnmatchedNonRegression.test.ts: groups are `['needs_you_now', 'unreplied']`.
+The D5 cases that expect NO row stay green.
+
+#### Step 3 - implementation (all in `app/src/routes/today.ts`)
+
+3a. The group union. Edit:
+
+old:
+```ts
+export type TodayGroup =
+  | 'needs_you_now'
+  | 'tours_today'
+```
+new:
+```ts
+export type TodayGroup =
+  | 'needs_you_now'
+  | 'identify'
+  | 'tours_today'
+```
+
+3b. The triage-status comment. Edit:
+
+old:
+```ts
+/** The contact triage statuses that make an untriaged inbound (needs_you_now). */
+```
+new:
+```ts
+/** The contact triage statuses that make an untriaged inbound (identify, spec 2026-10-23 5.2). */
+```
+
+3c. The Identify sort key, after `nameFromContact`. Edit:
+
+old:
+```ts
+  const joined = `${first} ${last}`.trim();
+  return joined.length > 0 ? joined : undefined;
+}
+```
+new:
+```ts
+  const joined = `${first} ${last}`.trim();
+  return joined.length > 0 ? joined : undefined;
+}
+
+/**
+ * The Identify sort key (spec 2026-10-23-today-checklist-design.md 5.2, plan
+ * PR27): the contact's created_at as epoch ms, so the oldest contact sorts
+ * first. A contact with no parseable created_at - or an unresolved contact -
+ * sorts LAST (+Infinity); ties break by refId in the shared comparator. Both
+ * reads are capped at 100, so "oldest" is over what was read.
+ */
+function createdAtRank(contact: ContactItem | undefined): number {
+  const raw = contact?.created_at;
+  const ms = typeof raw === 'string' ? Date.parse(raw) : Number.NaN;
+  return Number.isNaN(ms) ? Number.POSITIVE_INFINITY : ms;
+}
+```
+
+3d. The group array. Edit:
+
+old:
+```ts
+    const needsYouNow: Ranked[] = [];
+```
+new:
+```ts
+    const needsYouNow: Ranked[] = [];
+    /** Identify these contacts (spec 2026-10-23 5.2): both unknown sources. */
+    const identify: Ranked[] = [];
+```
+
+3e. The dedupe comment (~693). Edit:
+
+old:
+```ts
+      // ruling above: an unknown thread emits into needs_you_now and a known
+```
+new:
+```ts
+      // ruling above: an unknown thread emits into identify and a known
+```
+
+3f. The emit loop's head and unknown branch (~812-842). Edit (three comment
+lines carry an arrow or an em dash - copy them from your Read; the last old
+line is the `} else if (` that opens the Unreplied branch, which this task
+leaves alone):
+
+old:
+```ts
+      for (const conv of unreadOneToOne) {
+        const whoContactId = oneToOneContactId(conv);
+        const who = whoOfConversation(
+          conv,
+          whoContactId !== undefined ? await getContact(whoContactId) : undefined,
+        );
+        if (conv.type === 'unknown_1to1') {
+          // Untriaged inbound [U+2192] link to the unknown CONTACT's page (the
+          // auto-captured needs_review contact), NOT /conversations/:id [U+2014] the
+          // dashboard has no conversation route, so that was a DEAD link. When the
+          // roster isn't linked yet (auto-capture race), DEFER to the contacts
+          // triage pass below (it emits the proper contact row) rather than
+          // emitting a dead conversation ref [U+2014] so we never produce a nowhere-link.
+          // The deleted-contact test has already run, ahead of the cap.
+          const contactId = oneToOneContactId(conv);
+          if (contactId !== undefined) {
+            if (typeof conv.participant_phone === 'string') {
+              emittedUnknownPhones.add(conv.participant_phone);
+            }
+            needsYouNow.push({
+              item: {
+                group: 'needs_you_now',
+                refType: 'contact',
+                refId: contactId,
+                who,
+                why: 'New unknown contact',
+                attention: true,
+              },
+              at: now,
+            });
+          }
+        } else if (
+```
+new:
+```ts
+      for (const conv of unreadOneToOne) {
+        const whoContactId = oneToOneContactId(conv);
+        // Memoized: the collect loop's deleted-contact test already read it.
+        const whoContact = whoContactId !== undefined ? await getContact(whoContactId) : undefined;
+        const who = whoOfConversation(conv, whoContact);
+        if (conv.type === 'unknown_1to1') {
+          // Untriaged inbound -> an Identify row (spec 2026-10-23 5.2) linking to
+          // the unknown CONTACT's page (the auto-captured needs_review contact),
+          // NOT /conversations/:id - the dashboard has no conversation route, so
+          // that was a DEAD link. When the roster isn't linked yet (auto-capture
+          // race), DEFER to the contacts triage pass below (it emits the proper
+          // contact row) rather than emitting a dead conversation ref - so we
+          // never produce a nowhere-link. The deleted-contact test has already
+          // run, ahead of the cap.
+          if (whoContactId !== undefined) {
+            if (typeof conv.participant_phone === 'string') {
+              emittedUnknownPhones.add(conv.participant_phone);
+            }
+            identify.push({
+              item: {
+                group: 'identify',
+                refType: 'contact',
+                refId: whoContactId,
+                who,
+                why: 'New unknown contact',
+                attention: true,
+              },
+              // Oldest contact first (spec 5.2); an unresolved owner sorts last.
+              at: createdAtRank(whoContact),
+            });
+          }
+        } else if (
+```
+
+3g. The triage pass header (~879-881; two lines carry an arrow / em dash -
+copy them from your Read). Edit:
+
+old:
+```ts
+    // --- contacts: untriaged (unknown / needs_review) [U+2192] needs_you_now ---------
+    // The (type=unknown, status=needs_review) byTypeStatus partition IS the human
+    // triage queue [U+2014] one bounded Query, never a Scan.
+```
+new:
+```ts
+    // --- contacts: untriaged (unknown / needs_review) -> identify --------------
+    // The (type=unknown, status=needs_review) byTypeStatus partition IS the human
+    // triage queue - one bounded Query, never a Scan. Its rows are Identify rows
+    // (spec 2026-10-23 5.2), sorted together with the unread pass's rows.
+```
+
+3h. The triage push. Edit:
+
+old:
+```ts
+        const who =
+          nameFromContact(contact) ?? formatPhoneForDisplay(contact.phone) ?? contact.contactId;
+        needsYouNow.push({
+          item: {
+            group: 'needs_you_now',
+            refType: 'contact',
+            refId: contact.contactId,
+            who,
+            why: 'New unknown contact',
+            attention: true,
+          },
+          at: now,
+        });
+```
+new:
+```ts
+        const who =
+          nameFromContact(contact) ?? formatPhoneForDisplay(contact.phone) ?? contact.contactId;
+        identify.push({
+          item: {
+            group: 'identify',
+            refType: 'contact',
+            refId: contact.contactId,
+            who,
+            why: 'New unknown contact',
+            attention: true,
+          },
+          // Oldest contact first (spec 5.2); no created_at sorts last.
+          at: createdAtRank(contact),
+        });
+```
+
+3i. Sort, response order, log. Edit:
+
+old:
+```ts
+    needsYouNow.sort(byUrgency);
+```
+new:
+```ts
+    needsYouNow.sort(byUrgency);
+    // identify: the contact's created_at ascending (createdAtRank), ties by refId.
+    identify.sort(byUrgency);
+```
+Edit:
+
+old:
+```ts
+    // Group order matches the spec's reading order: Needs-you-now, Tours-today,
+    // Unreplied, Follow-ups, AI-suggestions.
+    const items: TodayItem[] = [
+      ...needsYouNow.map((r) => r.item),
+      ...toursToday.map((r) => r.item),
+```
+new:
+```ts
+    // Group order: Needs-you-now, Identify (spec 2026-10-23 2), Tours-today,
+    // Unreplied, Follow-ups, AI-suggestions.
+    const items: TodayItem[] = [
+      ...needsYouNow.map((r) => r.item),
+      ...identify.map((r) => r.item),
+      ...toursToday.map((r) => r.item),
+```
+Edit:
+
+old:
+```ts
+        needs_you_now: needsYouNow.length,
+        tours_today: toursToday.length,
+```
+new:
+```ts
+        needs_you_now: needsYouNow.length,
+        identify: identify.length,
+        tours_today: toursToday.length,
+```
+
+3j. `unreadRowKeyOf` (~1146, ~1155). Edit:
+
+old:
+```ts
+ * `unknown_1to1` goes to needs_you_now, every other 1:1-bucket type to
+```
+new:
+```ts
+ * `unknown_1to1` goes to identify, every other 1:1-bucket type to
+```
+Edit:
+
+old:
+```ts
+  const group = conv.type === 'unknown_1to1' ? 'needs_you_now' : 'unreplied';
+```
+new:
+```ts
+  const group = conv.type === 'unknown_1to1' ? 'identify' : 'unreplied';
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/todayApi.test.ts test/todayUnmatchedNonRegression.test.ts test/contactSoftDelete.test.ts
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect all green and exit 0.
+
+#### Step 5 - ASCII check on added lines
+
+```
+cd W:/tmp/today-checklist; git diff -U0 | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0`.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add app/src/routes/today.ts app/test/todayApi.test.ts app/test/todayUnmatchedNonRegression.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(today): the identify group - unknown contacts leave Needs you now, oldest first (today-checklist S4.4)" -m "The unread unknown_1to1 rows and the (unknown, needs_review) triage rows keep their shape with group identify, sorted by the contact created_at (none last, ties by refId), right after needs_you_now." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S4.5 - The unread pass: type filter first, the owner rule, Unreplied removed (PR26, PR40)
+
+The collect loop's FIRST test becomes the `unknown_1to1` type filter (before
+the deleted-contact skip, so a known thread costs no contact read, and before
+the cap, so it spends no cap slot); the owner rule replaces the #30 Inactive
+skip; the Unreplied group, its array, its emit branch, its row key arm, its
+log count and every comment naming it as a Today section go. The PR40
+inversions and the re-expression of every unread-pass case that rode an
+Unreplied row (Contradiction C3) land here.
+
+Files:
+- `app/src/routes/today.ts`
+- `app/scripts/seed-smoke.mjs` (one comment line)
+- Tests: `app/test/todayApi.test.ts`, `app/test/todayUnmatchedNonRegression.test.ts`
+
+#### Step 1 - failing tests (`app/test/todayApi.test.ts` unless named)
+
+1a. The fixture comment and a shared unknown-thread helper. Edit:
+
+old:
+```ts
+    // FLAG IFF COUNT>0, derived centrally (helpers/unreadIndexFake.ts): Today's
+    // unread sections become index-fed, and the sparse byUnread index keys on
+    // `unread_flag` - an unread fixture with no flag would make `unreplied` and
+    // the untriaged-inbound `needs_you_now` rows silently EMPTY. An explicit
+    // `unread_flag` on the fixture still wins.
+    const item: ConversationItem = { ...unreadFlagFor(conv), ...conv };
+    world.conversations.set(item.conversationId, item);
+    return item;
+  };
+```
+new:
+```ts
+    // FLAG IFF COUNT>0, derived centrally (helpers/unreadIndexFake.ts): Today's
+    // unread pass is index-fed, and the sparse byUnread index keys on
+    // `unread_flag` - an unread fixture with no flag would make the Identify
+    // rows from unread unknown threads silently EMPTY. An explicit
+    // `unread_flag` on the fixture still wins.
+    const item: ConversationItem = { ...unreadFlagFor(conv), ...conv };
+    world.conversations.set(item.conversationId, item);
+    return item;
+  };
+  // Today checklist (spec 2026-10-23 4, plan PR26): the unread pass reads ONLY
+  // unknown_1to1 threads, so every unread-pass fixture is one. With no contact
+  // item for `contactId` the owner is UNRESOLVED and keeps its row (spec 5.2) -
+  // the vehicle for cases where the triage pass must not be able to rescue the
+  // live row by itself.
+  const seedUnknownThread = (o: {
+    conversationId: string;
+    contactId: string;
+    phone: string;
+    offset: number;
+    displayName?: string;
+  }): ConversationItem =>
+    seedConversation({
+      conversationId: o.conversationId,
+      participant_phone: o.phone,
+      ...(o.displayName !== undefined && { participant_display_name: o.displayName }),
+      participants: [{ contactId: o.contactId, phone: o.phone }],
+      status: 'open',
+      last_activity_at: iso(o.offset),
+      type: 'unknown_1to1',
+      ai_mode: 'auto',
+      created_at: iso(-900_000),
+      unread_count: 1,
+    } as ConversationItem);
+```
+
+1b. The groups case (~252). Edit:
+
+old:
+```ts
+  it('groups items into all four groups with refType/refId and populated who/why', async () => {
+```
+new:
+```ts
+  it('groups items into needs_you_now / tours_today / follow_ups with refType/refId and populated who/why; a known contact\'s unread thread is on none of them', async () => {
+```
+Edit:
+
+old:
+```ts
+    // unreplied: an open tenant_1to1 conversation with unread.
+```
+new:
+```ts
+    // A KNOWN contact's unread tenant_1to1 thread: Inbox only since the Today
+    // checklist (spec 2026-10-23 4) - it is no Today row.
+```
+Edit:
+
+old:
+```ts
+    const unrep = byGroup('unreplied');
+    expect(unrep).toHaveLength(1);
+    // Links to the participant's CONTACT page, not /conversations/:id.
+    expect(unrep[0]).toMatchObject({
+      refType: 'contact',
+      refId: 'ct-pat',
+      who: 'Pat Nguyen',
+      why: 'Unreplied',
+    });
+```
+new:
+```ts
+    expect(items.some((i) => i.refId === 'ct-pat' || i.refId === 'conv-unreplied')).toBe(false);
+    expect(items.map((i) => i.group)).toEqual(['needs_you_now', 'tours_today', 'follow_ups']);
+```
+
+1c. A2 (~681-702), re-pointed. Edit:
+
+old:
+```ts
+  // --- A2: partner_1to1 joins the Unreplied gate (parity with tenant/landlord) ---
+  it('a partner_1to1 conversation with unread surfaces in unreplied (A2 parity)', async () => {
+```
+new:
+```ts
+  // --- A2, re-pointed by the Today checklist (spec 2026-10-23 4) --------------
+  // partner_1to1 joined the Unreplied gate in A2. Unreplied is gone: a known
+  // contact's unread thread - tenant, landlord or partner - feeds only the
+  // Inbox (and its badge) and emits NO Today row.
+  it('a partner_1to1 conversation with unread emits NO Today row (Inbox only)', async () => {
+```
+Edit:
+
+old:
+```ts
+    const items = await getItems();
+    const unrep = items.filter((i) => i.group === 'unreplied');
+    expect(unrep.map((i) => i.refId)).toContain('conv-partner');
+    expect(unrep.find((i) => i.refId === 'conv-partner')).toMatchObject({
+      who: 'Case Worker',
+      why: 'Unreplied',
+    });
+  });
+```
+new:
+```ts
+    const items = await getItems();
+    expect(items.some((i) => i.refId === 'conv-partner')).toBe(false);
+    expect(items).toEqual([]);
+  });
+```
+
+1d. NEW-3, one contact with two threads (~704-746) - re-expressed on an
+unknown contact's two unknown_1to1 threads. Edit (replace the comment block
+and the whole test):
+
+old:
+```ts
+  // --- ADVERSARIAL NEW-3: one contact, several unread threads, ONE row ---------
+  // contactThreads.ts models exactly one conversation PER PARTICIPANT KEY, so a
+  // person with a phone thread and an email thread reaches the unread pass
+  // TWICE. Both emitted an `unreplied` row with the same refType/refId.
+  it('a contact with an unread PHONE thread AND an unread EMAIL thread yields exactly ONE unreplied row', async () => {
+    seedTenant('c-dupe', 'Dee', 'Dupe');
+    seedConversation({
+      conversationId: 'conv-dupe-phone',
+      participant_phone: '+15550108888',
+      participant_display_name: 'Dee Dupe',
+      status: 'open',
+      last_activity_at: iso(-50_000),
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      created_at: iso(-200_000),
+      unread_count: 1,
+      participants: [{ contactId: 'c-dupe', phone: '+15550108888' }],
+    } as ConversationItem);
+    seedConversation({
+      conversationId: 'conv-dupe-email',
+      participant_email: 'dee@example.test',
+      status: 'open',
+      last_activity_at: iso(-60_000),
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      created_at: iso(-200_000),
+      unread_count: 1,
+      participants: [{ contactId: 'c-dupe', phone: '+15550108888' }],
+    } as ConversationItem);
+
+    const items = await getItems();
+    const unrep = items.filter((i) => i.group === 'unreplied');
+
+    expect(unrep.filter((i) => i.refId === 'c-dupe')).toHaveLength(1);
+    // The actual breakage: Today.tsx renders key={`${refType}:${refId}`} inside
+    // ONE <ul> per group, so two rows for one contact are duplicate React keys.
+    const keys = unrep.map((i) => `${i.refType}:${i.refId}`);
+    expect(new Set(keys).size).toBe(keys.length);
+    // Newest-activity-first, so the PHONE thread is the representative - which
+    // is also why the surviving row carries a name rather than the email
+    // thread's blank `who`.
+    expect(unrep.find((i) => i.refId === 'c-dupe')?.who).toBe('Dee Dupe');
+  });
+```
+new:
+```ts
+  // --- ADVERSARIAL NEW-3: one contact, several unread threads, ONE row ---------
+  // contactThreads.ts models exactly one conversation PER PARTICIPANT KEY, so a
+  // person with a phone thread and an email thread reaches the unread pass
+  // TWICE. Both emitted a row with the same refType/refId. (Re-expressed by the
+  // Today checklist on an UNKNOWN contact's two threads - the only threads the
+  // unread pass reads now - so the row is an identify row.)
+  it('an unknown contact with an unread PHONE thread AND an unread EMAIL thread yields exactly ONE identify row', async () => {
+    // No name on the contact, so `who` shows which thread represented the pair.
+    world.contacts.push({ contactId: 'c-dupe', type: 'unknown', status: 'needs_review', phone: '+15550108888' });
+    seedConversation({
+      conversationId: 'conv-dupe-phone',
+      participant_phone: '+15550108888',
+      participant_display_name: 'Dee Dupe',
+      status: 'open',
+      last_activity_at: iso(-50_000),
+      type: 'unknown_1to1',
+      ai_mode: 'auto',
+      created_at: iso(-200_000),
+      unread_count: 1,
+      participants: [{ contactId: 'c-dupe', phone: '+15550108888' }],
+    } as ConversationItem);
+    seedConversation({
+      conversationId: 'conv-dupe-email',
+      participant_email: 'dee@example.test',
+      status: 'open',
+      last_activity_at: iso(-60_000),
+      type: 'unknown_1to1',
+      ai_mode: 'auto',
+      created_at: iso(-200_000),
+      unread_count: 1,
+      participants: [{ contactId: 'c-dupe', phone: '+15550108888' }],
+    } as ConversationItem);
+
+    const ident = (await getItems()).filter((i) => i.group === 'identify');
+
+    expect(ident.filter((i) => i.refId === 'c-dupe')).toHaveLength(1);
+    // The actual breakage: Today.tsx renders key={`${refType}:${refId}`} inside
+    // ONE <ul> per group, so two rows for one contact are duplicate React keys.
+    const keys = ident.map((i) => `${i.refType}:${i.refId}`);
+    expect(new Set(keys).size).toBe(keys.length);
+    // Newest-activity-first, so the PHONE thread is the representative - which
+    // is also why the surviving row carries a name rather than the email
+    // thread's blank `who`.
+    expect(ident.find((i) => i.refId === 'c-dupe')?.who).toBe('Dee Dupe');
+  });
+```
+
+1e. NEW-3 cap slot (~748-800). Edit (replace the whole test):
+
+old:
+```ts
+    for (let i = 0; i < 99; i += 1) {
+      const id = `c-bulk-${String(i).padStart(3, '0')}`;
+      const phone = `+1555020${String(i).padStart(4, '0')}`;
+      seedTenant(id, 'Bulk', id);
+      seedConversation({
+        conversationId: `conv-bulk-${String(i).padStart(3, '0')}`,
+        participant_phone: phone,
+        participant_display_name: `Bulk ${id}`,
+        status: 'open',
+        // Older than the duplicate pair below, so the pair is scanned first and
+        // the starved contact is one of these.
+        last_activity_at: iso(-200_000 - i * 1_000),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+        participants: [{ contactId: id, phone }],
+      } as ConversationItem);
+    }
+    seedTenant('c-twin', 'Twin', 'Threads');
+    for (const [suffix, offset] of [
+      ['phone', -10_000],
+      ['email', -20_000],
+    ] as const) {
+      seedConversation({
+        conversationId: `conv-twin-${suffix}`,
+        participant_phone: '+15550209999',
+        participant_display_name: 'Twin Threads',
+        status: 'open',
+        last_activity_at: iso(offset),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+        participants: [{ contactId: 'c-twin', phone: '+15550209999' }],
+      } as ConversationItem);
+    }
+
+    const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
+    const ids = unrep.map((i) => i.refId);
+```
+new:
+```ts
+    // Unresolved owners (no contact items, spec 5.2): the triage pass adds
+    // nothing, so every row below is the unread pass's own.
+    for (let i = 0; i < 99; i += 1) {
+      const id = `c-bulk-${String(i).padStart(3, '0')}`;
+      seedUnknownThread({
+        conversationId: `conv-bulk-${String(i).padStart(3, '0')}`,
+        contactId: id,
+        phone: `+1555020${String(i).padStart(4, '0')}`,
+        displayName: `Bulk ${id}`,
+        // Older than the duplicate pair below, so the pair is scanned first and
+        // the starved contact is one of these.
+        offset: -200_000 - i * 1_000,
+      });
+    }
+    for (const [suffix, offset] of [
+      ['phone', -10_000],
+      ['email', -20_000],
+    ] as const) {
+      seedUnknownThread({
+        conversationId: `conv-twin-${suffix}`,
+        contactId: 'c-twin',
+        phone: '+15550209999',
+        displayName: 'Twin Threads',
+        offset,
+      });
+    }
+
+    const ident = (await getItems()).filter((i) => i.group === 'identify');
+    const ids = ident.map((i) => i.refId);
+```
+
+1f. A9, a deleted contact does not consume a cap slot (~802-857). Edit:
+
+old:
+```ts
+    // indefinitely until someone reads them), where the newest 100 OPEN rows
+    // held only a small fraction. A hundred of them at the head of the index
+    // rendered Unreplied EMPTY, with warnIfCapped reporting "capped" rather
+    // than "filtered to nothing".
+    for (let i = 0; i < 100; i += 1) {
+      const id = `c-gone-${String(i).padStart(3, '0')}`;
+      const phone = `+1555030${String(i).padStart(4, '0')}`;
+      world.contacts.push({
+        contactId: id,
+        type: 'tenant',
+        status: 'active',
+        firstName: 'Gone',
+        lastName: id,
+        deleted_at: iso(-500_000),
+      });
+      seedConversation({
+        conversationId: `conv-gone-${String(i).padStart(3, '0')}`,
+        participant_phone: phone,
+        participant_display_name: `Gone ${id}`,
+        status: 'open',
+        // NEWEST, so they are scanned first and would fill the cap.
+        last_activity_at: iso(-1_000 - i),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+        participants: [{ contactId: id, phone }],
+      } as ConversationItem);
+    }
+    seedTenant('c-behind', 'Behind', 'Wall');
+    seedConversation({
+      conversationId: 'conv-behind',
+      participant_phone: '+15550309999',
+      participant_display_name: 'Behind Wall',
+      status: 'open',
+      last_activity_at: iso(-400_000),
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      created_at: iso(-900_000),
+      unread_count: 1,
+      participants: [{ contactId: 'c-behind', phone: '+15550309999' }],
+    } as ConversationItem);
+
+    const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
+    const ids = unrep.map((i) => i.refId);
+```
+new:
+```ts
+    // indefinitely until someone reads them), where the newest 100 OPEN rows
+    // held only a small fraction. A hundred of them at the head of the index
+    // rendered the unread-fed block EMPTY, with warnIfCapped reporting
+    // "capped" rather than "filtered to nothing". (Re-expressed by the Today
+    // checklist on unknown_1to1 threads; the live owner is UNRESOLVED so only
+    // the unread pass - never the triage pass - can deliver its row.)
+    for (let i = 0; i < 100; i += 1) {
+      const id = `c-gone-${String(i).padStart(3, '0')}`;
+      const phone = `+1555030${String(i).padStart(4, '0')}`;
+      world.contacts.push({ contactId: id, type: 'unknown', status: 'needs_review', phone, deleted_at: iso(-500_000) });
+      // NEWEST, so they are scanned first and would fill the cap.
+      seedUnknownThread({
+        conversationId: `conv-gone-${String(i).padStart(3, '0')}`,
+        contactId: id,
+        phone,
+        displayName: `Gone ${id}`,
+        offset: -1_000 - i,
+      });
+    }
+    seedUnknownThread({
+      conversationId: 'conv-behind',
+      contactId: 'c-behind',
+      phone: '+15550309999',
+      displayName: 'Behind Wall',
+      offset: -400_000,
+    });
+
+    const ident = (await getItems()).filter((i) => i.group === 'identify');
+    const ids = ident.map((i) => i.refId);
+```
+
+1g. A9 r3, 250 deleted ahead of 5 live (~859-923). Edit:
+
+old:
+```ts
+    for (let i = 0; i < 250; i += 1) {
+      const id = `c-deep-${String(i).padStart(3, '0')}`;
+      const phone = `+1555032${String(i).padStart(4, '0')}`;
+      world.contacts.push({
+        contactId: id,
+        type: 'tenant',
+        status: 'active',
+        firstName: 'Deep',
+        lastName: id,
+        deleted_at: iso(-500_000),
+      });
+      seedConversation({
+        conversationId: `conv-deep-${String(i).padStart(3, '0')}`,
+        participant_phone: phone,
+        participant_display_name: `Deep ${id}`,
+        status: 'open',
+        last_activity_at: iso(-1_000 - i),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+        participants: [{ contactId: id, phone }],
+      } as ConversationItem);
+    }
+    for (let i = 0; i < 5; i += 1) {
+      const id = `c-alive-${i}`;
+      const phone = `+1555033${String(i).padStart(4, '0')}`;
+      seedTenant(id, 'Alive', String(i));
+      seedConversation({
+        conversationId: `conv-alive-${i}`,
+        participant_phone: phone,
+        participant_display_name: `Alive ${i}`,
+        status: 'open',
+        last_activity_at: iso(-400_000 - i),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+        participants: [{ contactId: id, phone }],
+      } as ConversationItem);
+    }
+
+    const ids = (await getItems()).filter((i) => i.group === 'unreplied').map((i) => i.refId);
+```
+new:
+```ts
+    // (Re-expressed by the Today checklist on unknown_1to1 threads; the live
+    // owners are UNRESOLVED so only the unread pass can deliver their rows.)
+    for (let i = 0; i < 250; i += 1) {
+      const id = `c-deep-${String(i).padStart(3, '0')}`;
+      const phone = `+1555032${String(i).padStart(4, '0')}`;
+      world.contacts.push({ contactId: id, type: 'unknown', status: 'needs_review', phone, deleted_at: iso(-500_000) });
+      seedUnknownThread({
+        conversationId: `conv-deep-${String(i).padStart(3, '0')}`,
+        contactId: id,
+        phone,
+        displayName: `Deep ${id}`,
+        offset: -1_000 - i,
+      });
+    }
+    for (let i = 0; i < 5; i += 1) {
+      seedUnknownThread({
+        conversationId: `conv-alive-${i}`,
+        contactId: `c-alive-${i}`,
+        phone: `+1555033${String(i).padStart(4, '0')}`,
+        displayName: `Alive ${i}`,
+        offset: -400_000 - i,
+      });
+    }
+
+    const ids = (await getItems()).filter((i) => i.group === 'identify').map((i) => i.refId);
+```
+
+1h. A9 r2, 101 deleted ahead of 1 live (~925-993). Edit:
+
+old:
+```ts
+    for (let i = 0; i < 101; i += 1) {
+      const id = `c-wall-${String(i).padStart(3, '0')}`;
+      const phone = `+1555031${String(i).padStart(4, '0')}`;
+      world.contacts.push({
+        contactId: id,
+        type: 'tenant',
+        status: 'active',
+        firstName: 'Wall',
+        lastName: id,
+        deleted_at: iso(-500_000),
+      });
+      seedConversation({
+        conversationId: `conv-wall-${String(i).padStart(3, '0')}`,
+        participant_phone: phone,
+        participant_display_name: `Wall ${id}`,
+        status: 'open',
+        last_activity_at: iso(-1_000 - i),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+        participants: [{ contactId: id, phone }],
+      } as ConversationItem);
+    }
+    seedTenant('c-past-bound', 'Past', 'Bound');
+    seedConversation({
+      conversationId: 'conv-past-bound',
+      participant_phone: '+15550319999',
+      participant_display_name: 'Past Bound',
+      status: 'open',
+      last_activity_at: iso(-400_000),
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      created_at: iso(-900_000),
+      unread_count: 1,
+      participants: [{ contactId: 'c-past-bound', phone: '+15550319999' }],
+    } as ConversationItem);
+
+    const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
+```
+new:
+```ts
+    // (Re-expressed by the Today checklist on unknown_1to1 threads; the live
+    // owner is UNRESOLVED so only the unread pass can deliver its row.)
+    for (let i = 0; i < 101; i += 1) {
+      const id = `c-wall-${String(i).padStart(3, '0')}`;
+      const phone = `+1555031${String(i).padStart(4, '0')}`;
+      world.contacts.push({ contactId: id, type: 'unknown', status: 'needs_review', phone, deleted_at: iso(-500_000) });
+      seedUnknownThread({
+        conversationId: `conv-wall-${String(i).padStart(3, '0')}`,
+        contactId: id,
+        phone,
+        displayName: `Wall ${id}`,
+        offset: -1_000 - i,
+      });
+    }
+    seedUnknownThread({
+      conversationId: 'conv-past-bound',
+      contactId: 'c-past-bound',
+      phone: '+15550319999',
+      displayName: 'Past Bound',
+      offset: -400_000,
+    });
+
+    const unrep = (await getItems()).filter((i) => i.group === 'identify');
+```
+(The variable keeps its name; the assertions below it are unchanged.)
+
+1i. The D5 describe header (~995-1000). Edit:
+
+old:
+```ts
+  // --- unknown-inactive D5 (AR8): skip an Inactive contact's unknown_1to1 thread
+  // Cameron 2026-10-23: Needs you now shows unread texts from an unknown contact
+  // that needs review; an Inactive one "just shows in the inbox". The skip is
+  // "skip Inactive", not "keep only needs_review" (team_member threads are
+  // unknown_1to1 too), it is limited to unknown_1to1 (an Inactive tenant stays
+  // in Unreplied, #31's section), and it runs ahead of the cap.
+```
+new:
+```ts
+  // --- unknown-inactive D5 (AR8), as narrowed by the Today checklist ---------
+  // (spec 2026-10-23 5.2, plan PR26): an unknown_1to1 thread emits an Identify
+  // row only when its owner is a type-unknown contact that is not Inactive. An
+  // Inactive unknown "just shows in the inbox" (Cameron 2026-10-23); a team
+  // member's, tenant's or caseworker's thread - Active or not - emits NO Today
+  // row (PR40 inverts the #30 pins that kept them); the owner test runs ahead
+  // of the cap.
+```
+
+1j. PR40 inversion: the Active team member (~1037-1043). Edit:
+
+old:
+```ts
+    it('PIN: an unread unknown_1to1 thread from an ACTIVE team member is still in needs_you_now (unchanged)', async () => {
+      world.contacts.push({ contactId: 'c-team-on', type: 'team_member', status: 'active', firstName: 'Tea', lastName: 'Mate', phone: '+15550360003' });
+      unknownThread('conv-team-on', 'c-team-on', '+15550360003', -30_000);
+
+      const items = await getItems();
+      expect(newUnknownRefIds(items)).toEqual(['c-team-on']);
+    });
+```
+new:
+```ts
+    // INVERTED by the Today checklist (spec 2026-10-23 5.2, plan PR40): this
+    // pinned the #30 rule that an Active team member's unknown_1to1 thread
+    // kept its row. Identify lists only type-unknown contacts, so the thread
+    // emits NO Today row; it stays in the Inbox.
+    it('an unread unknown_1to1 thread from an ACTIVE team member emits NO Today row (Inbox only)', async () => {
+      world.contacts.push({ contactId: 'c-team-on', type: 'team_member', status: 'active', firstName: 'Tea', lastName: 'Mate', phone: '+15550360003' });
+      unknownThread('conv-team-on', 'c-team-on', '+15550360003', -30_000);
+
+      const items = await getItems();
+      expect(newUnknownRefIds(items)).toEqual([]);
+      expect(items.map((i) => i.refId)).not.toContain('c-team-on');
+    });
+```
+
+1k. The OR-6 comment (~1045-1049). Edit:
+
+old:
+```ts
+    // OR-6 (build worklist): the skip keys on the THREAD type plus the
+    // contact's status, and an Inactive team member's unknown_1to1 thread
+    // leaves Needs you now too (spec D5 "skip Inactive", Goal 4: Inactive means
+    // the same thing for every type). Since FW2-1 the owner's type must also
+    // be unknown or team_member (the cases at the end of this block).
+```
+new:
+```ts
+    // OR-6 (build worklist): an Inactive team member's unknown_1to1 thread
+    // emits no row (spec D5 "skip Inactive", Goal 4: Inactive means the same
+    // thing for every type). Still true under the Today checklist's owner
+    // rule (spec 2026-10-23 5.2), which drops a team member's thread whatever
+    // its status.
+```
+
+1l. The Inactive tenant's typed thread (~1058-1075), re-pointed. Edit:
+
+old:
+```ts
+    it('PIN: an INACTIVE TENANT\'s unread thread is still in unreplied (the skip is unknown_1to1 only)', async () => {
+```
+new:
+```ts
+    // Re-pointed by the Today checklist (spec 2026-10-23 4): Unreplied is gone,
+    // so a tenant's typed thread - Inactive or not - is Inbox only.
+    it('an INACTIVE TENANT\'s unread tenant_1to1 thread emits NO Today row (the Inbox has it)', async () => {
+```
+Edit:
+
+old:
+```ts
+      const items = await getItems();
+      expect(items.filter((i) => i.group === 'unreplied').map((i) => i.refId)).toEqual(['c-ten-off']);
+    });
+```
+new:
+```ts
+      const items = await getItems();
+      expect(items).toEqual([]);
+    });
+```
+
+1m. The cap case inside D5 (~1077-1110) - PR40 inversion of its team-member
+row (~1089-1110). Edit (replace the whole test):
+
+old:
+```ts
+    it('RED: more than TODAY_UNREAD_CAP Inactive unknown threads ahead of live work do not hide it (the skip runs BEFORE the cap)', async () => {
+      // 101 Inactive unknown threads, all NEWER than the live rows, so without
+      // a collect-loop skip they spend all 100 slots. Behind them: an Active
+      // team member's unknown_1to1 thread and a tenant's thread - neither has a
+      // second source, so the cap hides them - plus a Needs review unknown
+      // (PIN only: the contacts-triage pass would rescue it by itself).
+      for (let i = 0; i < 101; i += 1) {
+        const id = `c-off-${String(i).padStart(3, '0')}`;
+        const phone = `+1555034${String(i).padStart(4, '0')}`;
+        world.contacts.push({ contactId: id, type: 'unknown', status: 'inactive', phone });
+        unknownThread(`conv-off-${String(i).padStart(3, '0')}`, id, phone, -1_000 - i);
+      }
+      world.contacts.push({ contactId: 'c-live-team', type: 'team_member', status: 'active', firstName: 'Live', lastName: 'Team', phone: '+15550359001' });
+      unknownThread('conv-live-team', 'c-live-team', '+15550359001', -400_000);
+      world.contacts.push({ contactId: 'c-live-nr', type: 'unknown', status: 'needs_review', phone: '+15550359002' });
+      unknownThread('conv-live-nr', 'c-live-nr', '+15550359002', -400_001);
+      seedTenant('c-live-ten', 'Live', 'Tenant');
+      seedConversation({
+        conversationId: 'conv-live-ten',
+        participant_phone: '+15550359003',
+        participant_display_name: 'Live Tenant',
+        participants: [{ contactId: 'c-live-ten', phone: '+15550359003' }],
+        status: 'open',
+        last_activity_at: iso(-400_002),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+      } as ConversationItem);
+
+      const items = await getItems();
+      expect(newUnknownRefIds(items)).toEqual(['c-live-nr', 'c-live-team']);
+      expect(items.filter((i) => i.group === 'unreplied').map((i) => i.refId)).toEqual(['c-live-ten']);
+    });
+```
+new:
+```ts
+    it('RED: more than TODAY_UNREAD_CAP Inactive unknown threads ahead of live work do not hide it (the owner test runs BEFORE the cap)', async () => {
+      // 101 Inactive unknown threads, all NEWER than the live rows, so without
+      // a collect-loop owner test they spend all 100 slots. Behind them: an
+      // unknown_1to1 thread whose owner cannot be resolved (no contact item) -
+      // it has no second source, so the cap would hide it - and a Needs review
+      // unknown (PIN only: the contacts-triage pass would rescue it by itself).
+      // INVERTED (plan PR40): the Active team member's thread and the tenant's
+      // thread behind them were the no-second-source rows under #30; neither is
+      // a Today row any more.
+      for (let i = 0; i < 101; i += 1) {
+        const id = `c-off-${String(i).padStart(3, '0')}`;
+        const phone = `+1555034${String(i).padStart(4, '0')}`;
+        world.contacts.push({ contactId: id, type: 'unknown', status: 'inactive', phone });
+        unknownThread(`conv-off-${String(i).padStart(3, '0')}`, id, phone, -1_000 - i);
+      }
+      unknownThread('conv-live-unres', 'c-live-unres', '+15550359004', -400_000);
+      world.contacts.push({ contactId: 'c-live-team', type: 'team_member', status: 'active', firstName: 'Live', lastName: 'Team', phone: '+15550359001' });
+      unknownThread('conv-live-team', 'c-live-team', '+15550359001', -400_001);
+      world.contacts.push({ contactId: 'c-live-nr', type: 'unknown', status: 'needs_review', phone: '+15550359002' });
+      unknownThread('conv-live-nr', 'c-live-nr', '+15550359002', -400_002);
+      seedTenant('c-live-ten', 'Live', 'Tenant');
+      seedConversation({
+        conversationId: 'conv-live-ten',
+        participant_phone: '+15550359003',
+        participant_display_name: 'Live Tenant',
+        participants: [{ contactId: 'c-live-ten', phone: '+15550359003' }],
+        status: 'open',
+        last_activity_at: iso(-400_003),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+      } as ConversationItem);
+
+      const items = await getItems();
+      expect(newUnknownRefIds(items)).toEqual(['c-live-nr', 'c-live-unres']);
+      const refIds = items.map((i) => i.refId);
+      expect(refIds).not.toContain('c-live-team');
+      expect(refIds).not.toContain('c-live-ten');
+    });
+```
+
+1n. FW2-1 comment and the re-typed tenant case (~1112-1168) - PR40 inversion.
+Edit:
+
+old:
+```ts
+    // FW2-1 (code review R2-1): the skip also keys on the OWNER's type - only
+    // an `unknown` or `team_member` owner, the types whose own threads are
+    // unknown_1to1. The contacts PATCH re-types only the primary phone's and
+    // the email threads (routes/contacts.ts, the linked-thread gather), so a
+    // tenant's or caseworker's SECOND number can keep an unknown_1to1 thread.
+    // Before this branch its unread text showed on Today as a "New unknown
+    // contact" row; an Inactive tenant's or caseworker's unread text is not
+    // hidden (spec D4).
+```
+new:
+```ts
+    // FW2-1 (code review R2-1), INVERTED by the Today checklist (spec
+    // 2026-10-23 5.2, plan PR40). The contacts PATCH re-types only the primary
+    // phone's and the email threads (routes/contacts.ts, the linked-thread
+    // gather), so a tenant's or caseworker's SECOND number can keep an
+    // unknown_1to1 thread. #30 kept that thread's "New unknown contact" row;
+    // Identify now lists only type-unknown owners, so it emits NO Today row,
+    // Active or Inactive - the Inbox still shows the unread text.
+```
+Edit:
+
+old:
+```ts
+    it('RED: an INACTIVE TENANT\'s unread unknown_1to1 thread (a second number triage never re-typed) is emitted exactly as before', async () => {
+```
+new:
+```ts
+    it('a re-typed TENANT\'s unread unknown_1to1 thread (a second number triage never re-typed) emits NO Today row, before or after Inactive', async () => {
+```
+Edit (the `before` lines, as S4.4 left them):
+
+old:
+```ts
+      const before = (await getItems()).filter((i) => i.group === 'identify');
+      expect(before).toEqual([
+        expect.objectContaining({ refType: 'contact', refId: 'c-two', why: 'New unknown contact', attention: true }),
+      ]);
+```
+new:
+```ts
+      const before = (await getItems()).filter((i) => i.refId === 'c-two');
+      expect(before).toEqual([]);
+```
+Edit:
+
+old:
+```ts
+      // The status write alone changes nothing on Today for this thread.
+      const after = (await getItems()).filter((i) => i.group === 'identify');
+      expect(after).toEqual(before);
+```
+new:
+```ts
+      // The status write changes nothing on Today for this thread either.
+      const after = (await getItems()).filter((i) => i.refId === 'c-two');
+      expect(after).toEqual([]);
+```
+
+1o. PR40 inversion: the Inactive caseworker (~1170-1178, as S4.4 left it).
+Edit:
+
+old:
+```ts
+    it('RED: an INACTIVE CASEWORKER\'s unread unknown_1to1 thread is still in needs_you_now, the row unchanged', async () => {
+      world.contacts.push({ contactId: 'c-cw-off', type: 'partner', status: 'inactive', firstName: 'Casey', lastName: 'Worker', phone: '+15550360201' });
+      unknownThread('conv-cw-off', 'c-cw-off', '+15550360202', -30_000);
+
+      const items = await getItems();
+      expect(items.filter((i) => i.group === 'identify')).toEqual([
+        { group: 'identify', refType: 'contact', refId: 'c-cw-off', who: 'Casey Worker', why: 'New unknown contact', attention: true },
+      ]);
+    });
+```
+new:
+```ts
+    // INVERTED by the Today checklist (spec 2026-10-23 5.2, plan PR40): a
+    // caseworker's leftover unknown_1to1 thread emits NO Today row.
+    it('an INACTIVE CASEWORKER\'s unread unknown_1to1 thread emits NO Today row (Identify is type-unknown owners only)', async () => {
+      world.contacts.push({ contactId: 'c-cw-off', type: 'partner', status: 'inactive', firstName: 'Casey', lastName: 'Worker', phone: '+15550360201' });
+      unknownThread('conv-cw-off', 'c-cw-off', '+15550360202', -30_000);
+
+      const items = await getItems();
+      expect(items).toEqual([]);
+    });
+```
+
+1p. FIX B (~1181-1212), re-pointed. Edit:
+
+old:
+```ts
+  // --- FIX B: relay_group threads never surface in unreplied --------------------
+  it('a relay_group conversation with unread does NOT appear in unreplied (a tenant_1to1 still does)', async () => {
+```
+new:
+```ts
+  // --- FIX B: relay_group threads never surface on Today ----------------------
+  // (Re-pointed by the Today checklist, spec 2026-10-23 4: the tenant_1to1
+  // control is Inbox only now too, so the page is empty.)
+  it('a relay_group conversation with unread emits NO Today row (nor does a known tenant_1to1 - Inbox only)', async () => {
+```
+Edit:
+
+old:
+```ts
+    const items = await getItems();
+    const unrep = items.filter((i) => i.group === 'unreplied');
+    const ids = unrep.map((i) => i.refId);
+    expect(ids).toContain('conv-tenant');
+    expect(ids).not.toContain('conv-relay');
+    // And the relay group is nowhere else either (not an unreplied or needs_you_now row).
+    expect(items.some((i) => i.refId === 'conv-relay')).toBe(false);
+  });
+```
+new:
+```ts
+    const items = await getItems();
+    expect(items.some((i) => i.refId === 'conv-relay')).toBe(false);
+    expect(items.some((i) => i.refId === 'conv-tenant')).toBe(false);
+    expect(items).toEqual([]);
+  });
+```
+
+1q. The byUnread block: deep unread (~1795-1816). Edit:
+
+old:
+```ts
+      seedConversation({
+        conversationId: 'conv-deep-unread',
+        participant_phone: '+15550209999',
+        participant_display_name: 'Deep Unread',
+        status: 'open',
+        last_activity_at: iso(-500_000), // oldest of them all -> ~131st
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 2,
+      });
+
+      const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
+
+      expect(unrep.map((i) => i.refId)).toEqual(['conv-deep-unread']);
+      expect(unrep[0]).toMatchObject({ who: 'Deep Unread', why: 'Unreplied' });
+    });
+```
+new:
+```ts
+      // The target is an unknown thread (the only kind the pass reads now) with
+      // an unresolved owner, so only the unread pass can deliver it.
+      seedUnknownThread({
+        conversationId: 'conv-deep-unread',
+        contactId: 'c-deep-unread',
+        phone: '+15550209999',
+        displayName: 'Deep Unread',
+        offset: -500_000, // oldest of them all -> ~131st
+      });
+
+      const ident = (await getItems()).filter((i) => i.group === 'identify');
+
+      expect(ident.map((i) => i.refId)).toEqual(['c-deep-unread']);
+      expect(ident[0]).toMatchObject({ who: 'Deep Unread', why: 'New unknown contact' });
+    });
+```
+
+1r. The byUnread cap (~1861-1885). Edit:
+
+old:
+```ts
+    it('caps at 100 kept conversations and WARNS with the unread threshold, not the group-fetch one', async () => {
+      for (let n = 0; n < 150; n += 1) {
+        seedConversation({
+          conversationId: `conv-many-${String(n).padStart(4, '0')}`,
+          participant_phone: `+1555022${String(n).padStart(4, '0')}`,
+          status: 'open',
+          last_activity_at: iso(-1_000 - n * 1_000),
+          type: 'tenant_1to1',
+          ai_mode: 'auto',
+          created_at: iso(-900_000),
+          unread_count: 1,
+        });
+      }
+
+      const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
+```
+new:
+```ts
+    it('caps at 100 kept conversations and WARNS with the unread threshold, not the group-fetch one', async () => {
+      for (let n = 0; n < 150; n += 1) {
+        // Unresolved owners: the triage pass adds nothing to the count.
+        seedUnknownThread({
+          conversationId: `conv-many-${String(n).padStart(4, '0')}`,
+          contactId: `c-many-${String(n).padStart(4, '0')}`,
+          phone: `+1555022${String(n).padStart(4, '0')}`,
+          offset: -1_000 - n * 1_000,
+        });
+      }
+
+      const unrep = (await getItems()).filter((i) => i.group === 'identify');
+```
+
+1s. FILTER-THEN-CAP (~1887-1927). Edit:
+
+old:
+```ts
+    it('FILTER-THEN-CAP: a burst of unread group threads cannot starve the 1:1 sections', async () => {
+```
+new:
+```ts
+    it('FILTER-THEN-CAP: a burst of unread group threads cannot starve the Identify rows', async () => {
+```
+Edit:
+
+old:
+```ts
+      for (const n of [1, 2, 3]) {
+        seedConversation({
+          conversationId: `conv-oneone-${n}`,
+          participant_phone: `+1555024000${n}`,
+          participant_display_name: `Solo ${n}`,
+          status: 'open',
+          last_activity_at: iso(-500_000 - n * 1_000),
+          type: 'tenant_1to1',
+          ai_mode: 'auto',
+          created_at: iso(-900_000),
+          unread_count: 1,
+        });
+      }
+
+      const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
+
+      expect(unrep.map((i) => i.refId).sort()).toEqual([
+        'conv-oneone-1',
+        'conv-oneone-2',
+        'conv-oneone-3',
+      ]);
+    });
+```
+new:
+```ts
+      for (const n of [1, 2, 3]) {
+        seedUnknownThread({
+          conversationId: `conv-oneone-${n}`,
+          contactId: `c-solo-${n}`,
+          phone: `+1555024000${n}`,
+          displayName: `Solo ${n}`,
+          offset: -500_000 - n * 1_000,
+        });
+      }
+
+      const ident = (await getItems()).filter((i) => i.group === 'identify');
+
+      expect(ident.map((i) => i.refId).sort()).toEqual(['c-solo-1', 'c-solo-2', 'c-solo-3']);
+    });
+```
+
+1t. The budget WARN (~1959-1990). Edit:
+
+old:
+```ts
+      for (let n = 0; n < 5; n += 1) {
+        seedConversation({
+          conversationId: `conv-budget-${n}`,
+          participant_phone: `+1555026000${n}`,
+          status: 'open',
+          last_activity_at: iso(-1_000 - n * 1_000),
+          type: 'tenant_1to1',
+          ai_mode: 'auto',
+          created_at: iso(-900_000),
+          unread_count: 1,
+        });
+      }
+```
+new:
+```ts
+      for (let n = 0; n < 5; n += 1) {
+        seedUnknownThread({
+          conversationId: `conv-budget-${n}`,
+          contactId: `c-budget-${n}`,
+          phone: `+1555026000${n}`,
+          offset: -1_000 - n * 1_000,
+        });
+      }
+```
+Edit:
+
+old:
+```ts
+      const unrep = (res.body as TodayResponse).items.filter((i) => i.group === 'unreplied');
+      expect(unrep).toHaveLength(2);
+```
+new:
+```ts
+      const ident = (res.body as TodayResponse).items.filter((i) => i.group === 'identify');
+      expect(ident).toHaveLength(2);
+```
+
+1u. Participant names (~1993-2047) - moved to the Identify vehicle (PR40).
+Edit (replace from the describe line through the "adds NO contact reads"
+test; the relay close-nag test after it is unchanged):
+
+old:
+```ts
+  describe('participant names resolve on read (M1)', () => {
+    const seedUnreadTenantThread = (name: string | undefined, contactId = 't-renamed') =>
+      seedConversation({
+        conversationId: 'conv-renamed',
+        participant_phone: '+15550107777',
+        participants: [{ contactId, phone: '+15550107777' }],
+        status: 'open',
+        last_activity_at: iso(-30_000),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-60_000),
+        unread_count: 1,
+        ...(name !== undefined && { participant_display_name: name }),
+      });
+
+    it('RED: a stale participant_display_name loses to the contact name', async () => {
+      seedTenant('t-renamed', 'Renata', 'New');
+      seedUnreadTenantThread('Old Name');
+      const row = (await getItems()).find((i) => i.refId === 't-renamed');
+      expect(row?.who).toBe('Renata New');
+    });
+
+    it('RED: no stored name plus a named contact shows the contact', async () => {
+      seedTenant('t-renamed', 'Renata', 'New');
+      seedUnreadTenantThread(undefined);
+      const row = (await getItems()).find((i) => i.refId === 't-renamed');
+      expect(row?.who).toBe('Renata New');
+    });
+
+    it('PIN: an unreadable contact keeps the stored name', async () => {
+      seedUnreadTenantThread('Stored Name');
+      const real = world.contactsRepo.getById.bind(world.contactsRepo);
+      world.contactsRepo.getById = async (id) => {
+        if (id === 't-renamed') throw new Error('ProvisionedThroughputExceededException');
+        return real(id);
+      };
+      const row = (await getItems()).find((i) => i.refId === 't-renamed');
+      expect(row?.who).toBe('Stored Name');
+    });
+
+    it('PIN: an unlinked thread (no contactId) still renders the formatted phone', async () => {
+      seedUnreadTenantThread(undefined, '');
+      const row = (await getItems()).find((i) => i.who === '(555) 010-7777');
+      expect(row).toBeDefined();
+    });
+
+    it('PIN: resolving names adds NO contact reads - the deleted-check already memoized them', async () => {
+      seedTenant('t-renamed', 'Renata', 'New');
+      seedUnreadTenantThread('Old Name');
+      const real = world.contactsRepo.getById.bind(world.contactsRepo);
+      const reads: string[] = [];
+      world.contactsRepo.getById = async (id) => { reads.push(id); return real(id); };
+      await getItems();
+      expect(reads.filter((id) => id === 't-renamed')).toHaveLength(1);
+    });
+```
+new:
+```ts
+  // Moved by the Today checklist (spec 2026-10-23 4, plan PR40): these cases
+  // rode an Unreplied row, which is gone. whoOfConversation still names every
+  // Identify row from an unread unknown thread, so the same rules are pinned
+  // through that vehicle; the owner is an unknown contact (the only owner type
+  // Identify keeps) on the thread's phone, so the triage pass de-dupes it.
+  describe('participant names resolve on read (M1)', () => {
+    const seedUnreadUnknownThread = (name: string | undefined, contactId = 'c-renamed') =>
+      seedConversation({
+        conversationId: 'conv-renamed',
+        participant_phone: '+15550107777',
+        participants: [{ contactId, phone: '+15550107777' }],
+        status: 'open',
+        last_activity_at: iso(-30_000),
+        type: 'unknown_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-60_000),
+        unread_count: 1,
+        ...(name !== undefined && { participant_display_name: name }),
+      });
+    const seedRenamedUnknown = (): void => {
+      world.contacts.push({
+        contactId: 'c-renamed',
+        type: 'unknown',
+        status: 'needs_review',
+        firstName: 'Renata',
+        lastName: 'New',
+        phone: '+15550107777',
+      });
+    };
+
+    it('RED: a stale participant_display_name loses to the contact name', async () => {
+      seedRenamedUnknown();
+      seedUnreadUnknownThread('Old Name');
+      const row = (await getItems()).find((i) => i.refId === 'c-renamed');
+      expect(row).toMatchObject({ group: 'identify', who: 'Renata New' });
+    });
+
+    it('RED: no stored name plus a named contact shows the contact', async () => {
+      seedRenamedUnknown();
+      seedUnreadUnknownThread(undefined);
+      const row = (await getItems()).find((i) => i.refId === 'c-renamed');
+      expect(row).toMatchObject({ group: 'identify', who: 'Renata New' });
+    });
+
+    it('PIN: an unreadable contact keeps the stored name', async () => {
+      seedUnreadUnknownThread('Stored Name');
+      const real = world.contactsRepo.getById.bind(world.contactsRepo);
+      world.contactsRepo.getById = async (id) => {
+        if (id === 'c-renamed') throw new Error('ProvisionedThroughputExceededException');
+        return real(id);
+      };
+      const row = (await getItems()).find((i) => i.refId === 'c-renamed');
+      expect(row).toMatchObject({ group: 'identify', who: 'Stored Name' });
+    });
+
+    it('PIN: an unlinked thread (no contactId) defers to the triage row, which renders the formatted phone', async () => {
+      seedUnreadUnknownThread(undefined, '');
+      world.contacts.push({ contactId: 'c-unlinked', type: 'unknown', status: 'needs_review', phone: '+15550107777' });
+      const items = await getItems();
+      expect(items.filter((i) => i.who === '(555) 010-7777')).toEqual([
+        expect.objectContaining({ group: 'identify', refType: 'contact', refId: 'c-unlinked' }),
+      ]);
+      expect(items.some((i) => i.refId === 'conv-renamed')).toBe(false);
+    });
+
+    it('PIN: resolving names adds NO contact reads - the deleted-check already memoized them', async () => {
+      seedRenamedUnknown();
+      seedUnreadUnknownThread('Old Name');
+      const real = world.contactsRepo.getById.bind(world.contactsRepo);
+      const reads: string[] = [];
+      world.contactsRepo.getById = async (id) => { reads.push(id); return real(id); };
+      await getItems();
+      // The deleted check, the owner test, the name and the created_at sort
+      // key all read ONE memoized contact.
+      expect(reads.filter((id) => id === 'c-renamed')).toHaveLength(1);
+    });
+```
+
+1v. New cases, after the S4.4 Identify describe. Edit:
+
+old:
+```ts
+      expect((await getItems()).map((i) => [i.group, i.refId])).toEqual([
+        ['needs_you_now', 'placement-needs'],
+        ['identify', 'c-unk'],
+      ]);
+    });
+  });
+```
+new:
+```ts
+      expect((await getItems()).map((i) => [i.group, i.refId])).toEqual([
+        ['needs_you_now', 'placement-needs'],
+        ['identify', 'c-unk'],
+      ]);
+    });
+  });
+
+  // --- Today checklist (spec 2026-10-23 4, 5.2; plan PR26): the unread pass
+  // reads ONLY unknown_1to1 threads, and only a type-unknown owner emits -----
+  describe('the unread pass: type filter first, then the owner rule (today-checklist PR26)', () => {
+    it('the type filter runs FIRST: 150 known unread threads ahead cost no contact read and no cap slot', async () => {
+      const KNOWN_TYPES = ['tenant_1to1', 'landlord_1to1', 'partner_1to1'] as const;
+      for (let i = 0; i < 150; i += 1) {
+        const id = `c-known-${String(i).padStart(3, '0')}`;
+        const phone = `+1555050${String(i).padStart(4, '0')}`;
+        seedTenant(id, 'Known', id);
+        seedConversation({
+          conversationId: `conv-known-${String(i).padStart(3, '0')}`,
+          participant_phone: phone,
+          participants: [{ contactId: id, phone }],
+          status: 'open',
+          // NEWEST, so a pass that filtered after the cap would fill it with these.
+          last_activity_at: iso(-1_000 - i),
+          type: KNOWN_TYPES[i % 3]!,
+          ai_mode: 'auto',
+          created_at: iso(-900_000),
+          unread_count: 1,
+        } as ConversationItem);
+      }
+      for (let i = 0; i < 100; i += 1) {
+        seedUnknownThread({
+          conversationId: `conv-new-${String(i).padStart(3, '0')}`,
+          contactId: `c-new-${String(i).padStart(3, '0')}`,
+          phone: `+1555051${String(i).padStart(4, '0')}`,
+          offset: -200_000 - i,
+        });
+      }
+      const real = world.contactsRepo.getById.bind(world.contactsRepo);
+      const reads: string[] = [];
+      world.contactsRepo.getById = async (id) => { reads.push(id); return real(id); };
+
+      const items = await getItems();
+
+      const ids = items.filter((i) => i.group === 'identify').map((i) => i.refId);
+      // Every unknown row fits: the 150 known threads spent no cap slot ...
+      expect(ids).toHaveLength(100);
+      expect(ids).toContain('c-new-099');
+      // ... and no contact read: the type test runs before the deleted check.
+      expect(reads.filter((id) => id.startsWith('c-known-'))).toEqual([]);
+      expect(items.some((i) => i.refId.startsWith('c-known-'))).toBe(false);
+    });
+
+    for (const [type, status] of [
+      ['tenant', 'searching'],
+      ['landlord', 'active'],
+      ['partner', 'active'],
+      ['team_member', 'active'],
+    ] as const) {
+      it(`an unknown_1to1 thread owned by an Active ${type} emits NO Today row (it stays in the Inbox)`, async () => {
+        world.contacts.push({ contactId: 'c-owner', type, status, firstName: 'Own', lastName: 'Er', phone: '+15550380001' });
+        seedUnknownThread({ conversationId: 'conv-owner', contactId: 'c-owner', phone: '+15550380001', offset: -30_000 });
+
+        expect(await getItems()).toEqual([]);
+      });
+    }
+
+    it('a type-unknown owner emits unless Inactive; a status-less unknown owner emits', async () => {
+      world.contacts.push({ contactId: 'c-unk-nr', type: 'unknown', status: 'needs_review', phone: '+15550380011' });
+      seedUnknownThread({ conversationId: 'conv-unk-nr', contactId: 'c-unk-nr', phone: '+15550380011', offset: -10_000 });
+      world.contacts.push({ contactId: 'c-unk-bare', type: 'unknown', phone: '+15550380012' });
+      seedUnknownThread({ conversationId: 'conv-unk-bare', contactId: 'c-unk-bare', phone: '+15550380012', offset: -20_000 });
+      world.contacts.push({ contactId: 'c-unk-off', type: 'unknown', status: 'inactive', phone: '+15550380013' });
+      seedUnknownThread({ conversationId: 'conv-unk-off', contactId: 'c-unk-off', phone: '+15550380013', offset: -30_000 });
+
+      const ids = (await getItems()).filter((i) => i.group === 'identify').map((i) => i.refId);
+
+      expect(ids).toEqual(['c-unk-bare', 'c-unk-nr']);
+    });
+
+    it('(PIN) an unresolved owner keeps today\'s behavior: a linked roster emits its row; an unlinked one defers to the triage pass', async () => {
+      seedUnknownThread({
+        conversationId: 'conv-unres',
+        contactId: 'c-unres',
+        phone: '+15550380101',
+        displayName: 'Una Resolved',
+        offset: -30_000,
+      });
+      seedConversation({
+        conversationId: 'conv-unlinked',
+        participant_phone: '+15550380102',
+        status: 'open',
+        last_activity_at: iso(-40_000),
+        type: 'unknown_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+      } as ConversationItem);
+      world.contacts.push({ contactId: 'c-unlinked', type: 'unknown', status: 'needs_review', phone: '+15550380102' });
+
+      const ident = (await getItems()).filter((i) => i.group === 'identify');
+
+      expect(ident.map((i) => [i.refType, i.refId, i.who])).toEqual([
+        ['contact', 'c-unlinked', '(555) 038-0102'],
+        ['contact', 'c-unres', 'Una Resolved'],
+      ]);
+    });
+
+    it('Unreplied is gone: no item carries the group, whatever is unread', async () => {
+      seedTenant('c-ten', 'Tia', 'Tenant');
+      seedConversation({
+        conversationId: 'conv-ten',
+        participant_phone: '+15550380201',
+        participants: [{ contactId: 'c-ten', phone: '+15550380201' }],
+        status: 'open',
+        last_activity_at: iso(-30_000),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 3,
+      } as ConversationItem);
+      world.contacts.push({ contactId: 'c-unk', type: 'unknown', status: 'needs_review', phone: '+15550380202' });
+
+      const groups = (await getItems()).map((i) => i.group as string);
+
+      expect(groups).toEqual(['identify']);
+      expect(groups).not.toContain('unreplied');
+    });
+  });
+```
+
+1w. `app/test/todayUnmatchedNonRegression.test.ts`. Edit:
+
+old:
+```ts
+    // Real Today content, so "identical" is a non-trivial assertion:
+    // an untriaged unknown contact (identify) + an unread tenant 1:1
+    // thread (unreplied).
+```
+new:
+```ts
+    // Real Today content, so "identical" is a non-trivial assertion: an
+    // untriaged unknown contact (identify). The unread tenant 1:1 thread is a
+    // known contact's - Inbox only since the Today checklist (spec 2026-10-23
+    // 4) - and pins that it reaches no section.
+```
+Edit:
+
+old:
+```ts
+    ).toEqual(['identify', 'unreplied']);
+```
+new:
+```ts
+    ).toEqual(['identify']);
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/todayApi.test.ts test/todayUnmatchedNonRegression.test.ts
+```
+Expected failures, and why (the S4.4 code still feeds Unreplied and keeps
+the #30 skip only):
+- The groups case: `ct-pat` has an unreplied row; groups include `unreplied`.
+- A2 (partner), FIX B (`conv-tenant`), the Inactive tenant case: an
+  unreplied row exists.
+- The PR40 inversions: the Active team member (`c-team-on` row), the D5 cap
+  case (`newUnknownRefIds` returns `['c-live-nr', 'c-live-team', 'c-live-unres']`),
+  the re-typed tenant (`before` holds the `c-two` row), the Inactive
+  caseworker (`c-cw-off` row).
+- The new describe: "the type filter runs FIRST" (`isOneToOneBucket` keeps
+  the 150 newer known threads, which fill the cap: `ids` is `[]` and every
+  `c-known-*` id was read), the four Active-owner cases (each emits an
+  identify row), "Unreplied is gone" (`['identify', 'unreplied']`).
+- todayUnmatchedNonRegression.test.ts: `['identify', 'unreplied']`.
+The re-expressed unread-pass cases (NEW-3, A9 x3, deep unread, cap,
+FILTER-THEN-CAP, budget, participant names) and the unresolved-owner PIN are
+already green: they observe identify rows, which S4.4 emits. They are the
+pins that keep the pass honest once Unreplied is gone.
+
+#### Step 3 - implementation
+
+3a. `app/src/routes/today.ts` - the union. Edit:
+
+old:
+```ts
+  | 'identify'
+  | 'tours_today'
+  | 'unreplied'
+  | 'follow_ups'
+```
+new:
+```ts
+  | 'identify'
+  | 'tours_today'
+  | 'follow_ups'
+```
+
+3b. The unused import (Contradiction C5). Edit:
+
+old:
+```ts
+import {
+  isOneToOneBucket,
+  iterateUnreadConversations,
+```
+new:
+```ts
+import {
+  iterateUnreadConversations,
+```
+
+3c. The cap's doc. Edit:
+
+old:
+```ts
+/**
+ * How many 1:1-bucket unread conversations the byUnread pass KEEPS
+ * (inbox-unread-index spec 4.6). Same numeric bound Today always had, applied
+ * AFTER the 1:1 filter rather than before it - so a burst of unread group/relay
+ * threads can no longer starve the unreplied and untriaged-inbound sections.
+ */
+```
+new:
+```ts
+/**
+ * How many unknown_1to1 unread conversations the byUnread pass KEEPS
+ * (inbox-unread-index spec 4.6; today-checklist spec 4). Same numeric bound
+ * Today always had, applied AFTER the type filter and the owner test rather
+ * than before them - so a burst of unread known, group or relay threads can no
+ * longer starve the Identify rows this pass fills.
+ */
+```
+
+3d. The arrays. Edit:
+
+old:
+```ts
+    const toursToday: Ranked[] = [];
+    const unreplied: Ranked[] = [];
+    const followUps: Ranked[] = [];
+```
+new:
+```ts
+    const toursToday: Ranked[] = [];
+    const followUps: Ranked[] = [];
+```
+
+3e. FILTER-THEN-CAP comment. Edit:
+
+old:
+```ts
+    // FILTER-THEN-CAP, explicitly: keep only 1:1-bucket rows and stop after
+    // TODAY_UNREAD_CAP KEPT ones. Capping the raw stream first would let a burst
+    // of unread group_text / relay_group threads - which Today never shows -
+    // consume every slot and starve the sections this pass exists to fill.
+```
+new:
+```ts
+    // FILTER-THEN-CAP, explicitly: keep only unknown_1to1 rows whose owner
+    // passes the Identify test and stop after TODAY_UNREAD_CAP KEPT ones.
+    // Capping the raw stream first would let a burst of unread known,
+    // group_text or relay_group threads - which Today never shows - consume
+    // every slot and starve the Identify rows this pass exists to fill.
+```
+
+3f. The dedupe comment (as S4.4 left it). Edit:
+
+old:
+```ts
+      // would want. Keyed PER DESTINATION GROUP, matching the per-group dedupe
+      // ruling above: an unknown thread emits into identify and a known
+      // 1:1 into unreplied, and Today renders those as separate <ul>s with
+      // independent keyspaces, so one contact legitimately appearing in both is
+      // not a duplicate.
+```
+new:
+```ts
+      // would want. Every kept thread emits into Identify (the type filter
+      // below), so the key is the row identity within that one group.
+```
+
+3g. The collect loop's first test. Edit:
+
+old:
+```ts
+        if (!isOneToOneBucket(conv)) continue;
+```
+new:
+```ts
+        // TYPE FILTER FIRST (spec 2026-10-23-today-checklist-design.md 4, plan
+        // PR26). Unreplied is gone: a known contact's unread thread feeds only
+        // the Inbox (and its badge), so this walk exists only to find Identify
+        // rows and keeps ONLY unknown_1to1 threads. The test runs before the
+        // deleted-contact skip, so a known thread costs no contact read, and
+        // before the cap, so known threads cannot spend TODAY_UNREAD_CAP slots.
+        // It also drops relay_group / group_text and a legacy row with no
+        // `type` - none of which ever emitted a row.
+        if (conv.type !== 'unknown_1to1') continue;
+```
+
+3h. Three comment lines inside the deleted-contact skip. Edit:
+
+old:
+```ts
+        // rendered Unreplied and the untriaged block EMPTY, with warnIfCapped
+        // announcing "capped" rather than "filtered to nothing".
+```
+new:
+```ts
+        // rendered the unread-fed block EMPTY, with warnIfCapped announcing
+        // "capped" rather than "filtered to nothing".
+```
+Edit:
+
+old:
+```ts
+        // ahead of the cap this runs over every 1:1 item walked rather than the
+```
+new:
+```ts
+        // ahead of the cap this runs over every unknown_1to1 item walked rather than the
+```
+Edit:
+
+old:
+```ts
+        // which at 250 deleted ahead of 5 live rendered a FULL Unreplied block
+        // of deleted contacts and ZERO live work: the board inverted. There is
+        // no partial-knowledge state that is honest, so the rule is applied to
+        // every walked 1:1 item. COST: one memoized `getById` per DISTINCT
+```
+new:
+```ts
+        // which at 250 deleted ahead of 5 live rendered a FULL block of
+        // deleted contacts and ZERO live work: the board inverted. There is
+        // no partial-knowledge state that is honest, so the rule is applied to
+        // every walked unknown_1to1 item. COST: one memoized `getById` per DISTINCT
+```
+
+3i. The owner rule REPLACES the #30 skip (~748-781). Edit:
+
+old:
+```ts
+        // INACTIVE CONTACTS' UNKNOWN THREADS, ALSO BEFORE THE CAP
+        // (unknown-inactive spec D5, plan ruling AR8). Cameron 2026-10-23:
+        // Needs you now shows unread texts from an unknown contact that needs
+        // review; "If it doesn't need review, meaning we've marked it as
+        // inactive, it wouldn't show there ... It just shows in the inbox."
+        // It sits HERE, beside the deleted-contact skip and ahead of the cap,
+        // for the A9 reason above: Inactive threads that stay unread would
+        // otherwise spend the TODAY_UNREAD_CAP slots and empty Needs you now
+        // AND Unreplied. The rule is "skip Inactive", NOT "keep only
+        // needs_review": team_member threads are `unknown_1to1` too and an
+        // Active team member keeps today's row. It is limited to an
+        // `unknown_1to1` thread whose OWNER is an `unknown` or `team_member`
+        // contact - the types whose own threads are unknown_1to1 (code review
+        // R2-1, fix wave 2). Any other owner keeps today's row. A typed
+        // contact can hold an unknown_1to1 thread: the importer mints EVERY
+        // imported one-to-one thread unknown_1to1, whatever the contact's
+        // type (lib/import/apply.ts upsertConversation;
+        // docs/issues/imported-unknown-threads-surface-as-unknown-on-today.md),
+        // and a tenant's or caseworker's SECOND number can keep one (the
+        // contacts PATCH re-types only the primary phone's and the email
+        // threads, routes/contacts.ts). An Inactive tenant's or caseworker's
+        // unread text is not hidden - its typed threads feed Unreplied
+        // (tracker #31 owns that section). A thread whose contact
+        // cannot be resolved keeps today's behavior. NO EXTRA READ:
+        // `getContact` is memoized and isDeletedContact just read this id.
+        if (conv.type === 'unknown_1to1' && ownerId !== undefined) {
+          const owner = await getContact(ownerId);
+          if (
+            owner?.status === 'inactive' &&
+            (owner.type === 'unknown' || owner.type === 'team_member')
+          ) {
+            continue;
+          }
+        }
+```
+new:
+```ts
+        // THE OWNER TEST, ALSO BEFORE THE CAP (spec 2026-10-23 5.2, plan PR26;
+        // it replaces - and contains - the unknown-inactive D5 / AR8 Inactive
+        // skip). Identify lists contacts we do not yet know, type `unknown`, so
+        // an unknown_1to1 thread is kept only when its OWNER is an unknown
+        // contact that is not Inactive. A thread owned by a team member,
+        // tenant, caseworker or any other type emits NO Today row and stays in
+        // the Inbox: the importer mints EVERY imported one-to-one thread
+        // unknown_1to1, whatever the contact's type (lib/import/apply.ts
+        // upsertConversation;
+        // docs/issues/imported-unknown-threads-surface-as-unknown-on-today.md),
+        // a tenant's or caseworker's SECOND number can keep one (the contacts
+        // PATCH re-types only the primary phone's and the email threads,
+        // routes/contacts.ts), and a team member's own threads are
+        // unknown_1to1. An Inactive unknown contact "just shows in the inbox"
+        // (Cameron, 2026-10-23). It sits ahead of the cap for the A9 reason
+        // above: rows that will not emit must not spend TODAY_UNREAD_CAP slots.
+        // A thread whose owner cannot be resolved (no contact item, or a failed
+        // read - getContact degrades to undefined) keeps today's behavior: a
+        // row when the roster is linked, else deferred to the triage pass
+        // below. NO EXTRA READ: getContact is memoized and isDeletedContact
+        // just read this id.
+        if (ownerId !== undefined) {
+          const owner = await getContact(ownerId);
+          if (owner !== undefined && !(owner.type === 'unknown' && owner.status !== 'inactive')) {
+            continue;
+          }
+        }
+```
+
+3j. The emit loop: the Unreplied branch goes (old text = the S4.4 head plus
+the untouched Unreplied branch; two comment lines in the branch carry an em
+dash / arrow - copy them from your Read). Edit:
+
+old:
+```ts
+      for (const conv of unreadOneToOne) {
+        const whoContactId = oneToOneContactId(conv);
+        // Memoized: the collect loop's deleted-contact test already read it.
+        const whoContact = whoContactId !== undefined ? await getContact(whoContactId) : undefined;
+        const who = whoOfConversation(conv, whoContact);
+        if (conv.type === 'unknown_1to1') {
+          // Untriaged inbound -> an Identify row (spec 2026-10-23 5.2) linking to
+          // the unknown CONTACT's page (the auto-captured needs_review contact),
+          // NOT /conversations/:id - the dashboard has no conversation route, so
+          // that was a DEAD link. When the roster isn't linked yet (auto-capture
+          // race), DEFER to the contacts triage pass below (it emits the proper
+          // contact row) rather than emitting a dead conversation ref - so we
+          // never produce a nowhere-link. The deleted-contact test has already
+          // run, ahead of the cap.
+          if (whoContactId !== undefined) {
+            if (typeof conv.participant_phone === 'string') {
+              emittedUnknownPhones.add(conv.participant_phone);
+            }
+            identify.push({
+              item: {
+                group: 'identify',
+                refType: 'contact',
+                refId: whoContactId,
+                who,
+                why: 'New unknown contact',
+                attention: true,
+              },
+              // Oldest contact first (spec 5.2); an unresolved owner sorts last.
+              at: createdAtRank(whoContact),
+            });
+          }
+        } else if (
+          // A POSITIVE allowlist: every multi-party type falls out deliberately.
+          // relay_group and group_text are already gone (isOneToOneBucket drops
+          // both above); this list is the second, type-level guard, and it is
+          // also what makes a legacy row with NO `type` emit nothing - the same
+          // thing it emitted before this pass was index-fed.
+          conv.type === 'tenant_1to1' ||
+          conv.type === 'landlord_1to1' ||
+          conv.type === 'partner_1to1'
+        ) {
+          // Unreplied is anchored to a 1:1 tenant/landlord/partner thread only. A
+          // relay_group's participant_phone is the synthetic POOL number (no
+          // display name) [U+2014] surfacing it as an Unreplied row whose `who` is an
+          // internal pool number violates "anchored to a placement/contact". Skip it
+          // (and anything that isn't a known 1:1 type). Link to the contact page;
+          // fall back to the conversation ref only if the roster isn't linked yet.
+          // A deleted contact's thread is off the boards (an unlinked thread -
+          // contactId undefined - has no contact to be deleted, so it stays);
+          // both rules are applied in the collect loop above, ahead of the cap.
+          const contactId = oneToOneContactId(conv);
+          unreplied.push({
+            item: {
+              group: 'unreplied',
+              refType: contactId !== undefined ? 'contact' : 'conversation',
+              refId: contactId ?? conv.conversationId,
+              who,
+              why: 'Unreplied',
+            },
+            // Sort unreplied by most-recent activity first (soonest = most recent
+            // [U+2192] use the negated activity time so newer sorts earlier).
+            at: -Date.parse(conv.last_activity_at),
+          });
+        }
+      }
+```
+new:
+```ts
+      for (const conv of unreadOneToOne) {
+        // Every kept thread is unknown_1to1 (the type filter above). Untriaged
+        // inbound -> an Identify row (spec 2026-10-23 5.2) linking to the
+        // unknown CONTACT's page, NOT /conversations/:id - the dashboard has no
+        // conversation route, so that was a DEAD link. When the roster isn't
+        // linked yet (auto-capture race), DEFER to the contacts triage pass
+        // below (it emits the proper contact row) rather than emitting a dead
+        // conversation ref - so we never produce a nowhere-link. The type
+        // filter, the deleted-contact test and the owner test have already run,
+        // ahead of the cap.
+        const contactId = oneToOneContactId(conv);
+        if (contactId === undefined) continue;
+        // Memoized: the collect loop already read this contact.
+        const owner = await getContact(contactId);
+        if (typeof conv.participant_phone === 'string') {
+          emittedUnknownPhones.add(conv.participant_phone);
+        }
+        identify.push({
+          item: {
+            group: 'identify',
+            refType: 'contact',
+            refId: contactId,
+            who: whoOfConversation(conv, owner),
+            why: 'New unknown contact',
+            attention: true,
+          },
+          // Oldest contact first (spec 5.2); an unresolved owner sorts last.
+          at: createdAtRank(owner),
+        });
+      }
+```
+
+3k. Sort, order, log. Edit:
+
+old:
+```ts
+    unreplied.sort(byUrgency);
+    followUps.sort(byUrgency);
+```
+new:
+```ts
+    followUps.sort(byUrgency);
+```
+Edit:
+
+old:
+```ts
+    // Group order: Needs-you-now, Identify (spec 2026-10-23 2), Tours-today,
+    // Unreplied, Follow-ups, AI-suggestions.
+    const items: TodayItem[] = [
+      ...needsYouNow.map((r) => r.item),
+      ...identify.map((r) => r.item),
+      ...toursToday.map((r) => r.item),
+      ...unreplied.map((r) => r.item),
+      ...followUps.map((r) => r.item),
+```
+new:
+```ts
+    // Group order: Needs-you-now, Identify, Tours-today, Follow-ups,
+    // AI-suggestions (spec 2026-10-23 2: Unreplied is gone).
+    const items: TodayItem[] = [
+      ...needsYouNow.map((r) => r.item),
+      ...identify.map((r) => r.item),
+      ...toursToday.map((r) => r.item),
+      ...followUps.map((r) => r.item),
+```
+Edit:
+
+old:
+```ts
+        tours_today: toursToday.length,
+        unreplied: unreplied.length,
+```
+new:
+```ts
+        tours_today: toursToday.length,
+```
+
+3l. `whoOfConversation`'s doc. Edit:
+
+old:
+```ts
+ *  neither -> ''). Uses this file's own nameFromContact so Unreplied and the
+ *  placement/tour rows share one join rule. */
+```
+new:
+```ts
+ *  neither -> ''). Uses this file's own nameFromContact so the Identify rows
+ *  and the placement/tour rows share one join rule. */
+```
+
+3m. `unreadRowKeyOf` (as S4.4 left it). Edit:
+
+old:
+```ts
+/**
+ * The Today row IDENTITY a 1:1 unread thread would emit: the destination group
+ * plus the `${refType}:${refId}` pair Today.tsx uses as its React key.
+ *
+ * Deliberately mirrors the two emit branches of the unread pass - an
+ * `unknown_1to1` goes to identify, every other 1:1-bucket type to
+ * unreplied, and both prefer the contact ref over the conversation ref. Two
+ * threads of the SAME person therefore collide here, which is the point.
+ *
+ * An unlinked thread (no contactId yet - the auto-capture race) falls back to
+ * its own conversationId, which is unique, so it never suppresses anything; the
+ * unknown branch drops it at emit time anyway.
+ */
+function unreadRowKeyOf(conv: ConversationItem): string {
+  const group = conv.type === 'unknown_1to1' ? 'identify' : 'unreplied';
+  const contactId = oneToOneContactId(conv);
+  return contactId !== undefined
+    ? `${group}:contact:${contactId}`
+    : `${group}:conversation:${conv.conversationId}`;
+}
+```
+new:
+```ts
+/**
+ * The Today row IDENTITY an unread unknown_1to1 thread would emit: the
+ * `${refType}:${refId}` pair Today.tsx uses as its React key, within the one
+ * group the unread pass feeds (identify - spec 2026-10-23 4). Two threads of
+ * the SAME person therefore collide here, which is the point.
+ *
+ * An unlinked thread (no contactId yet - the auto-capture race) falls back to
+ * its own conversationId, which is unique, so it never suppresses anything; the
+ * emit loop defers it to the triage pass anyway.
+ */
+function unreadRowKeyOf(conv: ConversationItem): string {
+  const contactId = oneToOneContactId(conv);
+  return contactId !== undefined
+    ? `identify:contact:${contactId}`
+    : `identify:conversation:${conv.conversationId}`;
+}
+```
+
+3n. `app/scripts/seed-smoke.mjs` - the comment that lists the groups (the
+only other app reader of the group list; its assertions are unaffected).
+Edit:
+
+old:
+```js
+  // items[].group is one of: needs_you_now | tours_today | unreplied | follow_ups
+```
+new:
+```js
+  // items[].group is one of: needs_you_now | identify | tours_to_book |
+  // tours_today | follow_ups | ai_suggestions (Unreplied was removed, spec
+  // docs/superpowers/specs/2026-10-23-today-checklist-design.md).
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/todayApi.test.ts test/todayUnmatchedNonRegression.test.ts test/contactSoftDelete.test.ts test/aiRunVerdicts.test.ts
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect all green and exit 0. Then the sweep:
+```
+git -C W:/tmp/today-checklist grep -n -i "unreplied\|isOneToOneBucket" -- app/src/routes/today.ts
+```
+Expect NO output (exit 1).
+
+#### Step 5 - ASCII check on added lines
+
+```
+cd W:/tmp/today-checklist; git diff -U0 | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0`.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add app/src/routes/today.ts app/scripts/seed-smoke.mjs app/test/todayApi.test.ts app/test/todayUnmatchedNonRegression.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(today): Unreplied removed; the unread pass reads unknown_1to1 threads of unknown owners only (today-checklist S4.5)" -m "The type filter runs first (no contact read, no cap slot for a known thread); the owner rule replaces the #30 Inactive skip. PR40 inversions: Active team member, re-typed tenant, Inactive caseworker, the D5 cap case. Every unread-pass case that rode an Unreplied row is re-expressed on unknown_1to1 threads." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S4.6 - Tours to book: every requested tour, oldest first, in its own try/catch (PR28)
+
+A new `tours_to_book` group from `tours.listByStatus('requested')`: deleted
+tenants skipped, `why` = the unit label, `urgency` = the request age in whole
+days, `at` = createdAt, ordered oldest first (ties by tourId). Any throw makes
+only this section unavailable (`toursToBook: 'unavailable'`), WARN without
+names, the route still 200.
+
+Files:
+- `app/src/routes/today.ts`
+- Tests: `app/test/todayApi.test.ts`, `app/test/todayUnmatchedNonRegression.test.ts`
+
+#### Step 1 - failing tests
+
+1a. `app/test/todayApi.test.ts` - the route import. Edit:
+
+old:
+```ts
+import {
+  urgencyOf,
+  type RelayCloseNagItem,
+```
+new:
+```ts
+import {
+  requestedUrgencyOf,
+  urgencyOf,
+  type RelayCloseNagItem,
+```
+
+1b. The empty envelope (~149). Edit:
+
+old:
+```ts
+    const body = res.body as TodayResponse;
+    expect(body.items).toEqual([]);
+    expect(body.relayCloseNags).toEqual([]);
+```
+new:
+```ts
+    const body = res.body as TodayResponse;
+    expect(body.items).toEqual([]);
+    expect(body.relayCloseNags).toEqual([]);
+    expect(body.toursToBook).toBe('ok');
+```
+
+1c. The envelope keys (~1764). Edit:
+
+old:
+```ts
+  it('the envelope is { items, relayCloseNags, generatedAt } with an ISO generatedAt when items exist', async () => {
+```
+new:
+```ts
+  it('the envelope is { items, relayCloseNags, toursToBook, generatedAt } with an ISO generatedAt when items exist', async () => {
+```
+Edit:
+
+old:
+```ts
+    expect(Object.keys(body).sort()).toEqual(['generatedAt', 'items', 'relayCloseNags']);
+```
+new:
+```ts
+    expect(Object.keys(body).sort()).toEqual(['generatedAt', 'items', 'relayCloseNags', 'toursToBook']);
+```
+
+1d. The tours_today fallback case's comment (~437) is now wrong about
+requested tours. Edit:
+
+old:
+```ts
+    // Time-less (requested) tours belong to the /tours "Needs booking" queue, never Today.
+```
+new:
+```ts
+    // Time-less (requested) tours are never Tours today; they are Tours to book
+    // (spec 2026-10-23 5.4), a separate group.
+```
+
+1e. New cases, after the S4.5 describe. Edit:
+
+old:
+```ts
+      expect(groups).toEqual(['identify']);
+      expect(groups).not.toContain('unreplied');
+    });
+  });
+```
+new:
+```ts
+      expect(groups).toEqual(['identify']);
+      expect(groups).not.toContain('unreplied');
+    });
+  });
+
+  // --- Today checklist (spec 2026-10-23 5.4, plan PR28): Tours to book -------
+  describe('Tours to book (today-checklist 5.4)', () => {
+    const DAY_MS = 86_400_000;
+    const OAK_LABEL = '12 Oak St, Atlanta, GA 30303';
+    const seedOak = (): void => {
+      world.units.set('u-oak', {
+        unitId: 'u-oak',
+        landlordId: 'c-ll',
+        status: 'available',
+        address: { line1: '12 Oak St', city: 'Atlanta', state: 'GA', zip: '30303' },
+      });
+    };
+
+    it('lists every REQUESTED tour, oldest request first (ties by tourId), with at = createdAt, the unit label and the request age', async () => {
+      seedOak();
+      seedTenant('t-amy', 'Amy', 'Able');
+      seedTenant('t-bea', 'Bea', 'Bold');
+      seedTenant('t-cal', 'Cal', 'Cole');
+      const now = Date.now();
+      const oldest = new Date(now - 9 * DAY_MS - 3_600_000).toISOString();
+      const yesterday = new Date(now - DAY_MS - 3_600_000).toISOString();
+      const fresh = new Date(now - 3_600_000).toISOString();
+      await seedTour({ tourId: 'tour-b', tenantId: 't-bea', unitId: 'u-oak', createdAt: yesterday });
+      await seedTour({ tourId: 'tour-c', tenantId: 't-cal', unitId: 'u-gone', createdAt: fresh });
+      await seedTour({ tourId: 'tour-a2', tenantId: 't-amy', unitId: 'u-oak', createdAt: oldest });
+      await seedTour({ tourId: 'tour-a1', tenantId: 't-amy', unitId: 'u-oak', createdAt: oldest });
+      // Not requested: a scheduled tour and a canceled request never appear.
+      await seedTour({ tourId: 'tour-sched', tenantId: 't-amy', unitId: 'u-oak', scheduledAt: tomorrowNoonIso() });
+      await seedTour({ tourId: 'tour-cxl', tenantId: 't-amy', unitId: 'u-oak', status: 'canceled', createdAt: oldest });
+
+      const rows = (await getItems()).filter((i) => i.group === 'tours_to_book');
+
+      const oak = { why: OAK_LABEL, unitLabel: OAK_LABEL };
+      expect(rows).toEqual([
+        { group: 'tours_to_book', refType: 'tour', refId: 'tour-a1', who: 'Amy Able', ...oak, urgency: 'Requested 9 days ago', at: oldest },
+        { group: 'tours_to_book', refType: 'tour', refId: 'tour-a2', who: 'Amy Able', ...oak, urgency: 'Requested 9 days ago', at: oldest },
+        { group: 'tours_to_book', refType: 'tour', refId: 'tour-b', who: 'Bea Bold', ...oak, urgency: 'Requested 1 day ago', at: yesterday },
+        // A unit with no item: the label degrades to the unitId (spec 2.5) -
+        // the section stays available.
+        { group: 'tours_to_book', refType: 'tour', refId: 'tour-c', who: 'Cal Cole', why: 'u-gone', unitLabel: 'u-gone', urgency: 'Requested today', at: fresh },
+      ]);
+      for (const row of rows) expect(row).not.toHaveProperty('tag');
+    });
+
+    it('skips a deleted tenant; a tenant with no contact item keeps the row with the id as who', async () => {
+      world.contacts.push({ contactId: 't-del', type: 'tenant', status: 'searching', firstName: 'Del', lastName: 'Eted', deleted_at: iso(-1_000) });
+      await seedTour({ tourId: 'tour-del', tenantId: 't-del' });
+      await seedTour({ tourId: 'tour-ghost', tenantId: 't-ghost' });
+
+      const rows = (await getItems()).filter((i) => i.group === 'tours_to_book');
+
+      expect(rows.map((r) => [r.refId, r.who])).toEqual([['tour-ghost', 't-ghost']]);
+    });
+
+    it('requestedUrgencyOf (pure): whole fixed 24h days - today, 1 day ago, N days ago', () => {
+      const now = Date.parse('2026-10-24T12:00:00.000Z');
+      const minus = (ms: number): string => new Date(now - ms).toISOString();
+      expect(requestedUrgencyOf(minus(0), now)).toBe('Requested today');
+      expect(requestedUrgencyOf(minus(DAY_MS - 1), now)).toBe('Requested today');
+      expect(requestedUrgencyOf(minus(DAY_MS), now)).toBe('Requested 1 day ago');
+      expect(requestedUrgencyOf(minus(2 * DAY_MS - 1), now)).toBe('Requested 1 day ago');
+      expect(requestedUrgencyOf(minus(2 * DAY_MS), now)).toBe('Requested 2 days ago');
+      expect(requestedUrgencyOf(minus(64 * DAY_MS), now)).toBe('Requested 64 days ago');
+      // Not calendar days: 23h ago, across a midnight, is still today.
+      expect(requestedUrgencyOf('2026-10-23T13:00:00.000Z', now)).toBe('Requested today');
+      // Defensive: an unparseable or future createdAt reads as today.
+      expect(requestedUrgencyOf('garbage', now)).toBe('Requested today');
+      expect(requestedUrgencyOf('2026-10-25T12:00:00.000Z', now)).toBe('Requested today');
+    });
+
+    it('a failed tours read makes ONLY Tours to book unavailable: 200, no rows, a WARN without names; the rest intact', async () => {
+      seedTenant('t-amy', 'Amy', 'Able');
+      await seedTour({ tourId: 'tour-req', tenantId: 't-amy' });
+      await seedTour({ tourId: 'tour-now', tenantId: 't-amy', scheduledAt: todayNoonIso() });
+      world.contacts.push({ contactId: 'c-unk', type: 'unknown', status: 'needs_review', phone: '+15550390001' });
+      vi.spyOn(world.toursRepo, 'listByStatus').mockRejectedValue(new Error('throttled'));
+
+      const res = await authedGet('/api/today');
+
+      expect(res.status).toBe(200);
+      const body = res.body as TodayResponse;
+      expect(body.toursToBook).toBe('unavailable');
+      expect(body.items.map((i) => [i.group, i.refId])).toEqual([
+        ['identify', 'c-unk'],
+        ['tours_today', 'tour-now'],
+      ]);
+      const warns = harness.capture.atLevel(40).filter((l) => l['section'] === 'tours_to_book');
+      expect(warns).toHaveLength(1);
+      expect(JSON.stringify(harness.capture.atLevel(40))).not.toContain('Amy');
+    });
+
+    it('items come in checklist order: needs_you_now, identify, tours_to_book, tours_today, follow_ups, ai_suggestions', async () => {
+      seedTenant('t-1', 'Keisha', 'Brown');
+      seedPlacement({
+        placementId: 'placement-needs',
+        tenantId: 't-1',
+        stage: 'awaiting_authority_approval',
+        next_deadline_type: 'rta_window',
+        next_deadline_at: iso(-3_600_000),
+      });
+      world.contacts.push({ contactId: 'c-unk', type: 'unknown', status: 'needs_review', phone: '+15550390101' });
+      seedTenant('t-2', 'Maria', 'Lopez');
+      await seedTour({ tourId: 'tour-req', tenantId: 't-2' });
+      await seedTour({ tourId: 'tour-today', tenantId: 't-2', scheduledAt: todayNoonIso() });
+      seedTenant('t-3', 'Sam', 'Lee');
+      seedPlacement({
+        placementId: 'placement-follow',
+        tenantId: 't-3',
+        stage: 'awaiting_approval',
+        next_deadline_type: 'follow_up',
+        next_deadline_at: iso(-60_000),
+      });
+      seedTenant('t-sug', 'Sug', 'Gest');
+      await world.extractionRepo.putSuggestion({
+        ownerContactId: 't-sug',
+        target: 'voucherSize',
+        suggestedValue: '3',
+        conversationId: 'conv-a',
+      });
+
+      const groups = (await getItems()).map((i) => i.group);
+      expect(groups).toEqual(['needs_you_now', 'identify', 'tours_to_book', 'tours_today', 'follow_ups', 'ai_suggestions']);
+    });
+  });
+```
+
+1f. `app/test/todayUnmatchedNonRegression.test.ts` - a requested tour, over the
+REAL units repo on the suite's prefix (Contradiction C1). Edit:
+
+old:
+```ts
+import { createToursRepo } from '../src/repos/toursRepo.js';
+```
+new:
+```ts
+import { createToursRepo } from '../src/repos/toursRepo.js';
+import { createUnitsRepo } from '../src/repos/unitsRepo.js';
+```
+Edit:
+
+old:
+```ts
+  'tours',
+  'ai_extraction',
+  'unmatched_email',
+] as const;
+```
+new:
+```ts
+  'tours',
+  'units',
+  'ai_extraction',
+  'unmatched_email',
+] as const;
+```
+Edit:
+
+old:
+```ts
+  const conversations = createConversationsRepo(repoDeps);
+  const contacts = createContactsRepo(repoDeps);
+  const unmatched = createUnmatchedEmailRepo(repoDeps);
+```
+new:
+```ts
+  const conversations = createConversationsRepo(repoDeps);
+  const contacts = createContactsRepo(repoDeps);
+  const tours = createToursRepo(repoDeps);
+  const unmatched = createUnmatchedEmailRepo(repoDeps);
+```
+Edit:
+
+old:
+```ts
+      toursRepo: createToursRepo(repoDeps),
+      extractionRepo: createExtractionRepo(repoDeps),
+```
+new:
+```ts
+      toursRepo: tours,
+      // Today checklist: the tour-row labels read units. Injected on the
+      // suite's prefix - the router's default would read the UNPREFIXED table.
+      unitsRepo: createUnitsRepo(repoDeps),
+      extractionRepo: createExtractionRepo(repoDeps),
+```
+Edit:
+
+old:
+```ts
+    await conversations.touchLastActivity(
+      conv.conversationId,
+      'hi, checking in',
+      new Date().toISOString(),
+    );
+  }, 120_000);
+```
+new:
+```ts
+    await conversations.touchLastActivity(
+      conv.conversationId,
+      'hi, checking in',
+      new Date().toISOString(),
+    );
+    // A requested tour (Tours to book). Its unit has no item, so its label is
+    // the unitId - a failed label is never a failure (spec 2026-10-23 2.5).
+    const tenant = await contacts.create({
+      type: 'tenant',
+      status: 'searching',
+      firstName: 'Tina',
+      phone: '+15550003333',
+    });
+    await tours.create({ tenantId: tenant.contactId, unitId: 'unit-nonregression', tourType: 'self_guided' });
+  }, 120_000);
+```
+Edit:
+
+old:
+```ts
+    ).toEqual(['identify']);
+```
+new:
+```ts
+    ).toEqual(['identify', 'tours_to_book']);
+    expect(before.body.toursToBook).toBe('ok');
+```
+Edit:
+
+old:
+```ts
+    expect(after.body.relayCloseNags).toEqual(before.body.relayCloseNags);
+```
+new:
+```ts
+    expect(after.body.relayCloseNags).toEqual(before.body.relayCloseNags);
+    expect(after.body.toursToBook).toBe(before.body.toursToBook);
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/todayApi.test.ts test/todayUnmatchedNonRegression.test.ts
+```
+Expected failures, and why:
+- todayApi.test.ts: `TypeError: requestedUrgencyOf is not a function` (the
+  pure case); the empty envelope (`toursToBook` undefined); the envelope keys
+  (no `toursToBook`); "lists every REQUESTED tour" (no tours_to_book rows);
+  "skips a deleted tenant" (`[]`); "a failed tours read" (`toursToBook`
+  undefined, no WARN); "checklist order" (no tours_to_book).
+- todayUnmatchedNonRegression.test.ts: groups are `['identify']`;
+  `toursToBook` undefined.
+
+#### Step 3 - implementation (all in `app/src/routes/today.ts`)
+
+3a. The union. Edit:
+
+old:
+```ts
+  | 'identify'
+  | 'tours_today'
+```
+new:
+```ts
+  | 'identify'
+  | 'tours_to_book'
+  | 'tours_today'
+```
+
+3b. The response flag. Edit:
+
+old:
+```ts
+  relayCloseNags: RelayCloseNagItem[];
+  generatedAt: string;
+}
+```
+new:
+```ts
+  relayCloseNags: RelayCloseNagItem[];
+  /**
+   * Tours to book (spec 2026-10-23 3, 5.4): whether the tours_to_book group was
+   * computed. 'unavailable' when its read threw - the dashboard shows the
+   * section's error and never claims "All caught up".
+   */
+  toursToBook: 'ok' | 'unavailable';
+  generatedAt: string;
+}
+```
+
+3c. The request age, after `urgencyOf`. Edit:
+
+old:
+```ts
+  const days = Math.ceil(ms / 86_400_000);
+  return `${days}d left`;
+}
+```
+new:
+```ts
+  const days = Math.ceil(ms / 86_400_000);
+  return `${days}d left`;
+}
+
+/**
+ * Tours to book (spec 2026-10-23-today-checklist-design.md 5.4, plan PR28): how
+ * long a requested tour has waited, in WHOLE fixed 24h days (floor), like the
+ * route's other fixed durations - not calendar days. Deterministic for a fixed
+ * `now`. An unparseable or future createdAt reads as today.
+ */
+export function requestedUrgencyOf(createdAt: string, now: number): string {
+  const at = Date.parse(createdAt);
+  const days = Number.isNaN(at) ? 0 : Math.max(0, Math.floor((now - at) / 86_400_000));
+  if (days === 0) return 'Requested today';
+  if (days === 1) return 'Requested 1 day ago';
+  return `Requested ${days} days ago`;
+}
+```
+
+3d. The `Ranked` key's doc now covers every group. Edit:
+
+old:
+```ts
+  /** Sort key: smaller = more urgent (epoch ms of the deadline, or now for attention-only). */
+```
+new:
+```ts
+  /**
+   * Sort key, ascending; ties by refId. needs_you_now / follow_ups: the
+   * deadline instant (now for attention-only). identify: the contact's
+   * created_at (none last). tours_today: scheduledAt. tours_to_book: createdAt.
+   */
+```
+
+3e. The section, after the tours_today block. Edit:
+
+old:
+```ts
+    // (follow_ups is assembled above: due `follow_up` deadlines from the byDueAt
+    // query + DERIVED stuck rows from the byStage scan.)
+```
+new:
+```ts
+    // --- tours_to_book: every REQUESTED tour (spec 2026-10-23 5.4, PR28) -----
+    // The Tours page's Needs booking list, read server-side: one byStatus
+    // Query, paged to completion by the repo. No age limit and no tenant-status
+    // filter - an unbooked request needs a decision (book it or cancel it),
+    // however old. Deleted tenants are skipped (the Today rule). Its OWN
+    // try/catch (spec 2.5): any throw makes only this section unavailable, the
+    // WARN carries the section and the error, never a name, and the route still
+    // answers 200. A failed unit LABEL is not a failure - unitLabelOf degrades
+    // to the unitId - and getContact never throws.
+    const toursToBookRows: Ranked[] = [];
+    let toursToBookStatus: TodayResponse['toursToBook'] = 'ok';
+    try {
+      const requested = await tours.listByStatus('requested');
+      for (const t of requested) {
+        if (t.status !== 'requested') continue; // the index is the truth; defense in depth
+        if (await isDeletedContact(t.tenantId)) continue; // deleted tenant -> off the boards
+        const who = (await resolveContactLabel(t.tenantId)) ?? t.tenantId;
+        const unitLabel = await unitLabelOf(t.unitId);
+        const createdMs = Date.parse(t.createdAt);
+        toursToBookRows.push({
+          item: {
+            group: 'tours_to_book',
+            refType: 'tour',
+            refId: t.tourId,
+            who,
+            why: unitLabel,
+            urgency: requestedUrgencyOf(t.createdAt, now),
+            at: t.createdAt,
+            unitLabel,
+          },
+          // Oldest request first; an unparseable createdAt sorts last.
+          at: Number.isNaN(createdMs) ? Number.POSITIVE_INFINITY : createdMs,
+        });
+      }
+    } catch (err) {
+      // No partial section: a throw part-way leaves no rows behind.
+      toursToBookStatus = 'unavailable';
+      toursToBookRows.length = 0;
+      log.warn({ err, section: 'tours_to_book' }, 'today: tours to book could not be read - section unavailable');
+    }
+
+    // (follow_ups is assembled above: due `follow_up` deadlines from the byDueAt
+    // query + DERIVED stuck rows from the byStage scan.)
+```
+
+3f. Sort, order, log, body. Edit:
+
+old:
+```ts
+    // identify: the contact's created_at ascending (createdAtRank), ties by refId.
+    identify.sort(byUrgency);
+```
+new:
+```ts
+    // identify: the contact's created_at ascending (createdAtRank), ties by refId.
+    identify.sort(byUrgency);
+    // tours_to_book: oldest request first (createdAt), ties by refId (tourId).
+    toursToBookRows.sort(byUrgency);
+```
+Edit:
+
+old:
+```ts
+    // Group order: Needs-you-now, Identify, Tours-today, Follow-ups,
+    // AI-suggestions (spec 2026-10-23 2: Unreplied is gone).
+    const items: TodayItem[] = [
+      ...needsYouNow.map((r) => r.item),
+      ...identify.map((r) => r.item),
+      ...toursToday.map((r) => r.item),
+```
+new:
+```ts
+    // Group order (spec 2026-10-23 2, plan PR30): needs_you_now, identify,
+    // tours_to_book, tours_today, follow_ups, ai_suggestions. The dashboard
+    // renders tours_today and ai_suggestions under "At a glance".
+    const items: TodayItem[] = [
+      ...needsYouNow.map((r) => r.item),
+      ...identify.map((r) => r.item),
+      ...toursToBookRows.map((r) => r.item),
+      ...toursToday.map((r) => r.item),
+```
+Edit:
+
+old:
+```ts
+        identify: identify.length,
+        tours_today: toursToday.length,
+```
+new:
+```ts
+        identify: identify.length,
+        tours_to_book: toursToBookRows.length,
+        tours_to_book_status: toursToBookStatus,
+        tours_today: toursToday.length,
+```
+Edit:
+
+old:
+```ts
+    const body: TodayResponse = { items, relayCloseNags, generatedAt: nowIso };
+```
+new:
+```ts
+    const body: TodayResponse = { items, relayCloseNags, toursToBook: toursToBookStatus, generatedAt: nowIso };
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/todayApi.test.ts test/todayUnmatchedNonRegression.test.ts test/contactSoftDelete.test.ts test/aiRunVerdicts.test.ts
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect all green and exit 0.
+
+#### Step 5 - ASCII check on added lines
+
+```
+cd W:/tmp/today-checklist; git diff -U0 | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0`.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add app/src/routes/today.ts app/test/todayApi.test.ts app/test/todayUnmatchedNonRegression.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(today): Tours to book - every requested tour, oldest first (today-checklist S4.6)" -m "tours_to_book rows from tours.listByStatus('requested'): deleted tenants skipped, why = the unit label, urgency = the request age in whole days, at = createdAt. Its own try/catch: a throw sets toursToBook unavailable and the route stays 200." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S4.7 - Quiet shares in the route, failure isolation, the header (PR24 listing-sends half, PR30, WI7, WI8)
+
+`GET /api/today` gains `quietShares`: the Follow up core with a CONSISTENT
+contacts batch, then `buildQuietShares`, in its own try/catch. The router
+takes the listing-sends repo from `api.ts`. The header comment cites the new
+spec as superseding the grouping rules. WI7's read budget is pinned by a test.
+
+Files:
+- `app/src/routes/today.ts`
+- `app/src/routes/api.ts` (one property in the `createTodayRouter({` call)
+- Tests: `app/test/todayApi.test.ts`, `app/test/todayUnmatchedNonRegression.test.ts`
+
+#### Step 1 - failing tests
+
+1a. `app/test/todayApi.test.ts` - imports. Edit:
+
+old:
+```ts
+import type { PlacementDeadlineType, PlacementItem } from '../src/repos/placementsRepo.js';
+import type { ContactItem } from '../src/repos/contactsRepo.js';
+import type { UnitItem } from '../src/repos/unitsRepo.js';
+```
+new:
+```ts
+import { TERMINAL_STAGES, type PlacementDeadlineType, type PlacementItem } from '../src/repos/placementsRepo.js';
+import { IncompleteBatchReadError, type ContactItem } from '../src/repos/contactsRepo.js';
+import type { UnitItem } from '../src/repos/unitsRepo.js';
+import type { ListingSendItem } from '../src/repos/listingSendsRepo.js';
+import { PLACEMENT_STAGES } from '../src/lib/statusModel.js';
+```
+
+1b. The file header (~5-10; two lines carry an arrow - copy them from your
+Read). Edit:
+
+old:
+```ts
+// Coverage: the four groups (needs_you_now / tours_today / unreplied /
+// follow_ups), urgency thresholds + most-urgent-first ordering, attention [U+2192]
+// needs_you_now with attention:true, de-dupe across groups (a placement both
+// attention AND due appears once), the UTC "today" date basis for tours_today,
+// who/why hydration (incl. a missing contact degrading to the id, not a 500),
+// a deterministic total order (same seed [U+2192] same order), and the empty envelope.
+```
+new:
+```ts
+// Coverage: the groups (needs_you_now / identify / tours_to_book / tours_today /
+// follow_ups / ai_suggestions - spec 2026-10-23-today-checklist-design.md; the
+// Unreplied group is gone), quiet shares and the section-failure posture,
+// urgency thresholds + most-urgent-first ordering, attention -> needs_you_now
+// with attention:true, de-dupe across groups (a placement both attention AND
+// due appears once), the UTC "today" date basis for tours_today, who/why
+// hydration (incl. a missing contact degrading to the id, not a 500), a
+// deterministic total order (same seed -> same order), and the empty envelope.
+```
+
+1c. The empty envelope. Edit:
+
+old:
+```ts
+    expect(body.relayCloseNags).toEqual([]);
+    expect(body.toursToBook).toBe('ok');
+```
+new:
+```ts
+    expect(body.relayCloseNags).toEqual([]);
+    expect(body.toursToBook).toBe('ok');
+    expect(body.quietShares).toEqual({ status: 'ok', properties: [], people: 0, truncated: false });
+```
+
+1d. The envelope keys. Edit:
+
+old:
+```ts
+  it('the envelope is { items, relayCloseNags, toursToBook, generatedAt } with an ISO generatedAt when items exist', async () => {
+```
+new:
+```ts
+  it('the envelope is { items, relayCloseNags, quietShares, toursToBook, generatedAt } with an ISO generatedAt when items exist', async () => {
+```
+Edit:
+
+old:
+```ts
+    expect(Object.keys(body).sort()).toEqual(['generatedAt', 'items', 'relayCloseNags', 'toursToBook']);
+```
+new:
+```ts
+    expect(Object.keys(body).sort()).toEqual(['generatedAt', 'items', 'quietShares', 'relayCloseNags', 'toursToBook']);
+```
+
+1e. New cases, after the S4.6 describe. Edit:
+
+old:
+```ts
+      const groups = (await getItems()).map((i) => i.group);
+      expect(groups).toEqual(['needs_you_now', 'identify', 'tours_to_book', 'tours_today', 'follow_ups', 'ai_suggestions']);
+    });
+  });
+```
+new:
+```ts
+      const groups = (await getItems()).map((i) => i.group);
+      expect(groups).toEqual(['needs_you_now', 'identify', 'tours_to_book', 'tours_today', 'follow_ups', 'ai_suggestions']);
+    });
+  });
+
+  // --- Today checklist (spec 2026-10-23 6, 2.5; plan PR30): Quiet shares ----
+  describe('Quiet shares on Today (today-checklist 6)', () => {
+    const DAY_MS = 86_400_000;
+    const HOUR_MS = 3_600_000;
+    const OAK = { line1: '12 Oak St', city: 'Atlanta', state: 'GA', zip: '30303' };
+    const ago = (ms: number): string => new Date(Date.now() - ms).toISOString();
+    const seedUnit = (unitId: string, over: Partial<UnitItem> = {}): void => {
+      world.units.set(unitId, { unitId, landlordId: 'c-ll', status: 'available', ...over });
+    };
+    // Eligible by default (a phone, a live status); first name "Quinn" so a
+    // WARN that leaked a name would be caught.
+    const seedRecipient = (contactId: string, phone: string, over: Record<string, unknown> = {}): ContactItem => {
+      const contact = { contactId, type: 'tenant', status: 'searching', firstName: 'Quinn', lastName: contactId, phone, ...over } as ContactItem;
+      world.contacts.push(contact);
+      return contact;
+    };
+    const seedSend = (unitId: string, contactId: string, sentAt: string, over: Partial<ListingSendItem> = {}): void => {
+      world.listingSends.push({ unitId, contactId, sentAt, via: 'individual', counted: true, created_at: sentAt, updated_at: sentAt, ...over });
+    };
+    const contactOf = (contactId: string): ContactItem => world.contacts.find((c) => c.contactId === contactId)!;
+    const getBody = async (): Promise<TodayResponse> => {
+      const res = await authedGet('/api/today');
+      expect(res.status).toBe(200);
+      return res.body as TodayResponse;
+    };
+    const EMPTY = { status: 'ok', properties: [], people: 0, truncated: false };
+
+    it('quietShares groups by property in spec order; the contacts batch is read CONSISTENTLY', async () => {
+      seedUnit('u-a', { address: OAK });
+      seedUnit('u-b');
+      const c1Sent = ago(6 * DAY_MS);
+      const c2Heard = ago(3 * DAY_MS);
+      const c4Sent = ago(7 * DAY_MS);
+      seedRecipient('c-1', '+15550600001');
+      seedSend('u-a', 'c-1', c1Sent);
+      seedRecipient('c-2', '+15550600002', { last_heard_from_at: c2Heard });
+      seedSend('u-a', 'c-2', ago(5 * DAY_MS));
+      // Waiting on the Follow up tab (2 days, over its 24h) but not quiet here.
+      seedRecipient('c-3', '+15550600003');
+      seedSend('u-b', 'c-3', ago(2 * DAY_MS));
+      seedRecipient('c-4', '+15550600004', { type: 'partner', status: 'active', role: 'Caseworker' });
+      seedSend('u-b', 'c-4', c4Sent);
+
+      const body = await getBody();
+
+      expect(body.quietShares).toEqual({
+        status: 'ok',
+        truncated: false,
+        people: 3,
+        properties: [
+          {
+            unitId: 'u-b',
+            unitLabel: 'u-b',
+            people: [{ contactId: 'c-4', name: 'Quinn c-4', type: 'partner', role: 'Caseworker', state: 'no_reply', quietSince: c4Sent }],
+          },
+          {
+            unitId: 'u-a',
+            unitLabel: '12 Oak St, Atlanta, GA 30303',
+            people: [
+              { contactId: 'c-2', name: 'Quinn c-2', type: 'tenant', state: 'replied', quietSince: c2Heard },
+              { contactId: 'c-1', name: 'Quinn c-1', type: 'tenant', state: 'no_reply', quietSince: c1Sent },
+            ],
+          },
+        ],
+      });
+      // Spec 6.1 / PR30: a refetch fired by a stamp's event must see the
+      // stamp - the ONE contacts batch is consistent (Contradiction C4 names
+      // the element shape assumed here).
+      expect(world.recipientDisplayCalls).toHaveLength(1);
+      expect(world.recipientDisplayCalls[0]).toMatchObject({ requireComplete: true, consistentRead: true });
+    });
+
+    it('staff outreach restarts the clock: last_reached_out_at later than the send holds the person back until the quiet resumes', async () => {
+      seedUnit('u-a');
+      seedRecipient('c-1', '+15550610001', { last_reached_out_at: ago(4 * DAY_MS) });
+      seedSend('u-a', 'c-1', ago(10 * DAY_MS));
+      expect((await getBody()).quietShares).toEqual(EMPTY);
+
+      // Quiet continues past 5 days since that outreach (a fixture stands in
+      // for the clock): the person is back, with the outreach as the clock and
+      // the state still no_reply.
+      const reached = ago(6 * DAY_MS);
+      contactOf('c-1').last_reached_out_at = reached;
+      expect((await getBody()).quietShares).toEqual({
+        status: 'ok',
+        truncated: false,
+        people: 1,
+        properties: [
+          { unitId: 'u-a', unitLabel: 'u-a', people: [{ contactId: 'c-1', name: 'Quinn c-1', type: 'tenant', state: 'no_reply', quietSince: reached }] },
+        ],
+      });
+    });
+
+    it('a second share does not restart the first: each property keeps its own clock; the person counts once', async () => {
+      seedUnit('u-a');
+      seedUnit('u-b');
+      seedRecipient('c-1', '+15550620001');
+      seedSend('u-a', 'c-1', ago(6 * DAY_MS));
+      seedSend('u-b', 'c-1', ago(1 * DAY_MS + HOUR_MS));
+
+      const quiet = (await getBody()).quietShares;
+
+      expect(quiet).toMatchObject({ status: 'ok', people: 1 });
+      expect(quiet.status === 'ok' && quiet.properties.map((p) => p.unitId)).toEqual(['u-a']);
+    });
+
+    const dropOffs: Array<[string, () => void | Promise<void>]> = [
+      ['they reply (last_heard_from_at moves)', () => { contactOf('c-1').last_heard_from_at = ago(HOUR_MS); }],
+      ['staff reach out (last_reached_out_at moves)', () => { contactOf('c-1').last_reached_out_at = ago(HOUR_MS); }],
+      ['a tour is created for them on that property', async () => {
+        await world.toursRepo.create({ tenantId: 'c-1', unitId: 'u-a', tourType: 'self_guided' });
+      }],
+      ['staff mark them Not interested', () => { world.listingSends[0]!.declined = { at: ago(HOUR_MS), by: 'staff' }; }],
+      ['the send passes 14 days old', () => { world.listingSends[0]!.sentAt = ago(15 * DAY_MS); }],
+      ['they opt out', () => { contactOf('c-1').sms_opt_out = true; }],
+      ['they are marked Inactive', () => { contactOf('c-1').status = 'inactive'; }],
+      ['they are deleted', () => { contactOf('c-1').deleted_at = ago(HOUR_MS); }],
+      ['the property stops being available', () => { world.units.get('u-a')!.status = 'on_hold'; }],
+    ];
+    for (const [label, change] of dropOffs) {
+      it(`a quiet person drops off when ${label}`, async () => {
+        seedUnit('u-a');
+        seedRecipient('c-1', '+15550630001');
+        seedSend('u-a', 'c-1', ago(6 * DAY_MS));
+        expect((await getBody()).quietShares).toMatchObject({ status: 'ok', people: 1 });
+
+        await change();
+
+        expect((await getBody()).quietShares).toEqual(EMPTY);
+      });
+    }
+
+    it('more than 100 available properties sets truncated (the Follow up flag)', async () => {
+      for (let i = 0; i <= 100; i += 1) seedUnit(`u-${String(i).padStart(3, '0')}`);
+      expect((await getBody()).quietShares).toEqual({ ...EMPTY, truncated: true });
+    });
+
+    // Spec 2.5: ANY throw in the quiet-shares computation makes ONLY that
+    // section unavailable; the route answers 200 and the WARN names no one.
+    const seedWholePage = async (): Promise<void> => {
+      seedUnit('u-a');
+      seedRecipient('c-1', '+15550650001');
+      seedSend('u-a', 'c-1', ago(6 * DAY_MS));
+      seedTenant('t-req', 'Rita', 'Request');
+      await seedTour({ tourId: 'tour-req', tenantId: 't-req', unitId: 'u-a' });
+      world.contacts.push({ contactId: 'c-unk', type: 'unknown', status: 'needs_review', phone: '+15550650002' });
+    };
+    const quietFailures: Array<[string, () => void]> = [
+      ['the units walk', () => { vi.spyOn(world.unitsRepo, 'listByStatus').mockRejectedValue(new Error('throttled')); }],
+      ['a listing-sends read', () => { vi.spyOn(world.listingSendsRepo, 'listByUnit').mockRejectedValue(new Error('throttled')); }],
+      ['a per-unit tours read', () => { vi.spyOn(world.toursRepo, 'listByUnit').mockRejectedValue(new Error('throttled')); }],
+      ['the contacts batch', () => {
+        vi.spyOn(world.contactsRepo, 'getRecipientDisplaysByIds').mockRejectedValue(new IncompleteBatchReadError(1, 1));
+      }],
+    ];
+    for (const [label, breakIt] of quietFailures) {
+      it(`a throw from ${label} makes ONLY Quiet shares unavailable: 200, the rest intact, a WARN without names`, async () => {
+        await seedWholePage();
+        breakIt();
+
+        const body = await getBody();
+
+        expect(body.quietShares).toEqual({ status: 'unavailable' });
+        expect(body.toursToBook).toBe('ok');
+        expect(body.items.map((i) => [i.group, i.refId])).toEqual([
+          ['identify', 'c-unk'],
+          ['tours_to_book', 'tour-req'],
+        ]);
+        expect(harness.capture.atLevel(40).filter((l) => l['section'] === 'quiet_shares')).toHaveLength(1);
+        const warns = JSON.stringify(harness.capture.atLevel(40));
+        expect(warns).not.toContain('Quinn');
+        expect(warns).not.toContain('Rita');
+      });
+    }
+
+    it('a throw from the tours read makes ONLY Tours to book unavailable; Quiet shares is still computed', async () => {
+      await seedWholePage();
+      vi.spyOn(world.toursRepo, 'listByStatus').mockRejectedValue(new Error('throttled'));
+
+      const body = await getBody();
+
+      expect(body.toursToBook).toBe('unavailable');
+      expect(body.quietShares).toMatchObject({ status: 'ok', people: 1 });
+      expect(body.items.map((i) => [i.group, i.refId])).toEqual([['identify', 'c-unk']]);
+    });
+
+    // WI7 (plan section 3): the read budget of ONE Today load in the harness,
+    // recorded for the spec 6.5 cost note and the S7 docs/issues entry.
+    it('WI7: the read budget of one Today load (three properties, two with recent shares, one requested and one today tour)', async () => {
+      seedUnit('u-1');
+      seedUnit('u-2');
+      seedUnit('u-3');
+      seedRecipient('c-1', '+15550640001');
+      seedSend('u-1', 'c-1', ago(6 * DAY_MS));
+      seedRecipient('c-2', '+15550640002');
+      seedSend('u-2', 'c-2', ago(6 * DAY_MS));
+      seedTenant('t-3', 'Tess', 'Tour');
+      await seedTour({ tourId: 'tour-req', tenantId: 't-3', unitId: 'u-1' });
+      await seedTour({ tourId: 'tour-now', tenantId: 't-3', unitId: 'u-1', scheduledAt: todayNoonIso() });
+      const spies = {
+        // Reads Today made before this mission.
+        deadlinesDue: vi.spyOn(world.placementDeadlinesRepo, 'listDue'),
+        placementsByStage: vi.spyOn(world.placementsRepo, 'listByStage'),
+        toursByRange: vi.spyOn(world.toursRepo, 'listByScheduledRange'),
+        relayOptOut: vi.spyOn(world.conversationsRepo, 'listRelayOptOutAttention'),
+        unreadPages: vi.spyOn(world.conversationsRepo, 'queryUnreadPage'),
+        triagePages: vi.spyOn(world.contactsRepo, 'listByType'),
+        aiPending: vi.spyOn(world.extractionRepo, 'listPending'),
+        relayGroups: vi.spyOn(world.conversationsRepo, 'listRelayGroups'),
+        // New with the Today checklist (S4).
+        toursRequested: vi.spyOn(world.toursRepo, 'listByStatus'),
+        unitLabels: vi.spyOn(world.unitsRepo, 'getById'),
+        unitsWalk: vi.spyOn(world.unitsRepo, 'listByStatus'),
+        sendsByUnit: vi.spyOn(world.listingSendsRepo, 'listByUnit'),
+        toursByUnit: vi.spyOn(world.toursRepo, 'listByUnit'),
+        recipientBatch: vi.spyOn(world.contactsRepo, 'getRecipientDisplaysByIds'),
+      };
+
+      await getBody();
+
+      const counts = Object.fromEntries(Object.entries(spies).map(([name, spy]) => [name, spy.mock.calls.length]));
+      expect(counts).toEqual({
+        deadlinesDue: 1,
+        placementsByStage: PLACEMENT_STAGES.filter((s) => !TERMINAL_STAGES.has(s)).length,
+        toursByRange: 1,
+        relayOptOut: 1,
+        unreadPages: 1,
+        triagePages: 1,
+        aiPending: 1,
+        relayGroups: 1,
+        toursRequested: 1,
+        // Both tours sit on u-1: one memoized label read.
+        unitLabels: 1,
+        unitsWalk: 1,
+        // Every kept available property is read; only those with a recent
+        // share pay the tours read.
+        sendsByUnit: 3,
+        toursByUnit: 2,
+        recipientBatch: 1,
+      });
+    });
+  });
+```
+
+1f. `app/test/todayUnmatchedNonRegression.test.ts`. Edit (header lines 3-4):
+
+old:
+```ts
+// inputs. today.ts aggregates over conversations / contacts / placements /
+// placementDeadlines / tours / ai_extraction - it has NO unmatched-email dep,
+```
+new:
+```ts
+// inputs. today.ts aggregates over conversations / contacts / placements /
+// placementDeadlines / tours / units / listing_sends / ai_extraction - it has
+// NO unmatched-email dep,
+```
+Edit:
+
+old:
+```ts
+import { createUnitsRepo } from '../src/repos/unitsRepo.js';
+```
+new:
+```ts
+import { createUnitsRepo } from '../src/repos/unitsRepo.js';
+import { createListingSendsRepo } from '../src/repos/listingSendsRepo.js';
+```
+Edit:
+
+old:
+```ts
+  'units',
+  'ai_extraction',
+```
+new:
+```ts
+  'units',
+  'listing_sends',
+  'ai_extraction',
+```
+Edit:
+
+old:
+```ts
+      unitsRepo: createUnitsRepo(repoDeps),
+      extractionRepo: createExtractionRepo(repoDeps),
+```
+new:
+```ts
+      unitsRepo: createUnitsRepo(repoDeps),
+      // Quiet shares: the Follow up core walks units and listing sends.
+      listingSendsRepo: createListingSendsRepo(repoDeps),
+      extractionRepo: createExtractionRepo(repoDeps),
+```
+Edit:
+
+old:
+```ts
+    expect(before.body.toursToBook).toBe('ok');
+```
+new:
+```ts
+    expect(before.body.toursToBook).toBe('ok');
+    // 'ok' (not 'unavailable') proves the core's reads hit THIS prefix's tables.
+    expect(before.body.quietShares).toEqual({ status: 'ok', properties: [], people: 0, truncated: false });
+```
+Edit:
+
+old:
+```ts
+    expect(after.body.toursToBook).toBe(before.body.toursToBook);
+```
+new:
+```ts
+    expect(after.body.toursToBook).toBe(before.body.toursToBook);
+    expect(after.body.quietShares).toEqual(before.body.quietShares);
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/todayApi.test.ts test/todayUnmatchedNonRegression.test.ts
+```
+Expected failures, and why: `quietShares` is absent from the response, so
+the empty envelope, the envelope keys, every "Quiet shares on Today" case
+(the drop-off cases fail on their FIRST expectation, `people: 1`; the four
+failure cases on `{ status: 'unavailable' }`; the tours-read case on
+`status: 'ok'`) and the non-regression file fail. WI7 fails on
+`unitsWalk: 0`, `sendsByUnit: 0`, `toursByUnit: 0`, `recipientBatch: 0`.
+
+WI7 note: the eight pre-existing counts are the harness's real cost of one
+load. If one of THEM differs from the expectation above, read that code path,
+confirm the observed value is that load's real count, set the expectation to
+it and record both numbers in the report. Never change one of the six S4
+counts to make the test pass - those are this task's behavior.
+
+#### Step 3 - implementation
+
+3a. `app/src/routes/today.ts` - imports. Edit:
+
+old:
+```ts
+import { formatAddress } from '../lib/address.js';
+```
+new:
+```ts
+import { formatAddress } from '../lib/address.js';
+import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingSendsRepo.js';
+import { collectWaitingFollowUps } from '../services/followUps.js';
+import { buildQuietShares } from '../services/quietShares.js';
+```
+
+3b. The section's wire type. Edit:
+
+old:
+```ts
+export interface TodayResponse {
+  items: TodayItem[];
+```
+new:
+```ts
+/** Quiet shares as the response carries it (spec 2026-10-23 3, 2.5). */
+export type TodayQuietShares =
+  | {
+      status: 'ok';
+      properties: QuietShareProperty[];
+      /** DISTINCT contacts across every property (the heading count). */
+      people: number;
+      /** The Follow up core's flag: more than 100 available properties exist. */
+      truncated: boolean;
+    }
+  | { status: 'unavailable' };
+
+export interface TodayResponse {
+  items: TodayItem[];
+```
+Edit:
+
+old:
+```ts
+  relayCloseNags: RelayCloseNagItem[];
+  /**
+   * Tours to book (spec 2026-10-23 3, 5.4): whether the tours_to_book group was
+```
+new:
+```ts
+  relayCloseNags: RelayCloseNagItem[];
+  /** Quiet shares (spec 2026-10-23 6); 'unavailable' when its computation threw. */
+  quietShares: TodayQuietShares;
+  /**
+   * Tours to book (spec 2026-10-23 3, 5.4): whether the tours_to_book group was
+```
+
+3c. The dep. Edit:
+
+old:
+```ts
+  unitsRepo?: UnitsRepo;
+  /** Pending AI suggestions (conversation-fact-extraction) -> the ai_suggestions group. */
+```
+new:
+```ts
+  unitsRepo?: UnitsRepo;
+  /** Today checklist (spec 6): the listing-send record the Quiet shares core reads. */
+  listingSendsRepo?: ListingSendsRepo;
+  /** Pending AI suggestions (conversation-fact-extraction) -> the ai_suggestions group. */
+```
+Edit:
+
+old:
+```ts
+  const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
+```
+new:
+```ts
+  const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
+  const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
+```
+
+3d. The section, before the ordering block. Edit:
+
+old:
+```ts
+    // --- Deterministic total order, most-urgent first ------------------------
+```
+new:
+```ts
+    // --- quiet shares (spec 2026-10-23 6, plan PR30) -------------------------
+    // The Follow up tab's waiting rows - collectWaitingFollowUps, the SAME core
+    // GET /api/broadcasts/follow-ups projects - with the quiet rule on top
+    // (services/quietShares.ts). The ONE contacts batch is CONSISTENT here
+    // (spec 6.1): a refetch fired by a staff-outreach stamp's contact.updated
+    // must see the stamp. The units walk and the listing-sends / tours reads
+    // are not (plan WI8): a property's own state can lag by index replication.
+    // Its OWN try/catch (spec 2.5): a throw in the walk, a per-unit read or the
+    // contacts batch makes only this section unavailable; the WARN carries the
+    // section and the error, never a name; the route still answers 200.
+    // COST (spec 6.5, plan WI7): the units byStatus walk (capped at 100
+    // properties), a listing-sends Query per property, a tours Query per
+    // property with a share in the last 14 days (10-way concurrency), one
+    // contacts BatchGet - every load, no cache (a docs/issues entry tracks it).
+    let quietShares: TodayQuietShares;
+    try {
+      const waiting = await collectWaitingFollowUps(
+        { units, listingSends, tours, contacts, log, now },
+        { consistentRead: true },
+      );
+      const built = buildQuietShares(waiting.rows, now);
+      quietShares = {
+        status: 'ok',
+        properties: built.properties,
+        people: built.people,
+        truncated: waiting.truncated,
+      };
+    } catch (err) {
+      quietShares = { status: 'unavailable' };
+      log.warn({ err, section: 'quiet_shares' }, 'today: quiet shares could not be read - section unavailable');
+    }
+
+    // --- Deterministic total order, most-urgent first ------------------------
+```
+
+3e. Log and body. Edit:
+
+old:
+```ts
+        relay_close_nags: relayCloseNags.length,
+      },
+      'today queue assembled',
+```
+new:
+```ts
+        relay_close_nags: relayCloseNags.length,
+        quiet_shares_status: quietShares.status,
+        quiet_share_properties: quietShares.status === 'ok' ? quietShares.properties.length : 0,
+        quiet_share_people: quietShares.status === 'ok' ? quietShares.people : 0,
+      },
+      'today queue assembled',
+```
+Edit:
+
+old:
+```ts
+    const body: TodayResponse = { items, relayCloseNags, toursToBook: toursToBookStatus, generatedAt: nowIso };
+```
+new:
+```ts
+    const body: TodayResponse = {
+      items,
+      relayCloseNags,
+      quietShares,
+      toursToBook: toursToBookStatus,
+      generatedAt: nowIso,
+    };
+```
+
+3f. The header comment cites the new spec (PR30). Two edits; the old lines
+carry em dashes and arrows - copy them from your Read. Edit:
+
+old:
+```ts
+// The frontend (B1) imports the C7 wire shapes AND ships a client-side FALLBACK
+// that assembles the SAME shape from /api/placements + /api/conversations [U+2014] so the
+// grouping/ordering rules here MUST match the spec the fallback follows
+// (documentation: docs/superpowers/specs/2026-06-16-new-dashboard-design.md [U+2192]
+// "Today action queue", and the contract in
+// docs/superpowers/plans/2026-06-16-new-dashboard-build.md [U+2192] C7).
+```
+new:
+```ts
+// The frontend (B1) imports the C7 wire shapes AND ships a client-side FALLBACK
+// (dashboard/src/routes/today/buildToday.ts, run only when this route 404s)
+// that assembles the same item shape from /api/placements + /api/conversations.
+// The grouping/ordering rules here follow
+// docs/superpowers/specs/2026-10-23-today-checklist-design.md (tracker #31),
+// which SUPERSEDES the "Today action queue" grouping rules of
+// docs/superpowers/specs/2026-06-16-new-dashboard-design.md; the C7 contract is
+// docs/superpowers/plans/2026-06-16-new-dashboard-build.md (C7). The fallback
+// assembles no tours_to_book and no quiet shares (spec 3.1).
+```
+Edit:
+
+old:
+```ts
+// Every repo read is a bounded GSI Query (never a Scan): placementDeadlines
+// listDue (one byDueAt query for ALL due deadlines), placements listByStage (per
+// non-terminal stage [U+2014] attention + derived-stuck), tours listByScheduledRange,
+// listRelayOptOutAttention over the sparse byRelayOptOut index (the relay
+// opt-out attention items - 2026-08-18, it used to walk the open partition),
+// queryUnreadPage over the sparse byUnread index (the unread sections -
+// inbox-unread-index), listByType (the unknown/needs_review triage partition),
+// and listRelayGroups('open') (byRelayStatus - the D5 relay close-nags). Each
+// fetch is capped and a log.warn fires if a cap is hit (no silent truncation).
+```
+new:
+```ts
+// Every list read is a bounded Query (never a Scan): placementDeadlines
+// listDue (one byDueAt query for ALL due deadlines), placements listByStage (per
+// non-terminal stage - attention + derived-stuck), tours listByScheduledRange,
+// tours listByStatus('requested') (Tours to book), listRelayOptOutAttention
+// over the sparse byRelayOptOut index (the relay opt-out attention items -
+// 2026-08-18, it used to walk the open partition), queryUnreadPage over the
+// sparse byUnread index (the Identify rows from unread unknown_1to1 threads -
+// inbox-unread-index), listByType (the unknown/needs_review triage partition),
+// listRelayGroups('open') (byRelayStatus - the D5 relay close-nags), and the
+// Follow up core for Quiet shares (services/followUps.ts: the units byStatus
+// walk, per-property listing-sends and tours Queries, one contacts BatchGet).
+// Unit labels are memoized point reads. Capped reads log.warn when a cap is
+// hit (no silent truncation).
+```
+
+3g. `app/src/routes/api.ts` - Read the `createTodayRouter({` call first.
+Edit:
+
+old:
+```ts
+      unitsRepo: units,
+      // conversation-fact-extraction (T9): the ai_suggestions group reads pending
+```
+new:
+```ts
+      unitsRepo: units,
+      // ... and the listing-send record the Quiet shares core reads (spec 6).
+      listingSendsRepo: listingSends,
+      // conversation-fact-extraction (T9): the ai_suggestions group reads pending
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/todayApi.test.ts test/todayUnmatchedNonRegression.test.ts test/quietShares.test.ts test/followUps.test.ts test/followUpsApi.test.ts test/contactSoftDelete.test.ts test/aiRunVerdicts.test.ts
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect all green and exit 0. Copy the final WI7 expectation (the `counts`
+object as committed) into your notes for the S4 report.
+
+#### Step 5 - ASCII check on added lines
+
+```
+cd W:/tmp/today-checklist; git diff -U0 | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0`.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add app/src/routes/today.ts app/src/routes/api.ts app/test/todayApi.test.ts app/test/todayUnmatchedNonRegression.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(today): Quiet shares on GET /api/today (today-checklist S4.7)" -m "The Follow up core with a consistent contacts batch, then buildQuietShares, in its own try/catch: any throw sets quietShares unavailable, WARN without names, route 200. The router takes the shared listing-sends repo; the header cites the 2026-10-23 spec as superseding the grouping rules. WI7 read budget pinned." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S4.8 - Slice checks, the S4 report, commit
+
+#### Step 1 - sweeps
+
+```
+git -C W:/tmp/today-checklist grep -n -i "unreplied" -- app/src app/scripts
+```
+Expect exactly ONE hit: the `app/scripts/seed-smoke.mjs` comment
+"(Unreplied was removed, spec ...)". Any other hit in `app/src` is a missed
+reader: remove it as in S4.5 Step 3, re-run its tests, commit it with
+explicit paths, and record it.
+```
+git -C W:/tmp/today-checklist grep -n "'unreplied'" -- app
+```
+Expect exactly ONE hit, in `app/test/todayApi.test.ts` (`not.toContain('unreplied')`
+in "Unreplied is gone"). Comments in that file that mention Unreplied as
+history are expected; read each `-i` hit in `app/test/` and confirm none
+asserts an Unreplied row.
+```
+git -C W:/tmp/today-checklist grep -n "isOneToOneBucket" -- app/src/routes/today.ts
+```
+Expect NO output.
+
+#### Step 2 - typecheck (bare)
+
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Exit 0.
+
+#### Step 3 - the app workspace, once
+
+```
+cd W:/tmp/today-checklist/app; npx vitest run
+```
+Needs DynamoDB Local (if the environment exports `AWS_ACCESS_KEY_ID`, prefix
+`env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY`). Expect green. If any
+file is red, follow AGENTS.md re-run-and-compare: re-run that FILE alone more
+than once (`cd W:/tmp/today-checklist/app; npx vitest run test/<file>`). A
+file that stays red and that this slice touched, or that exercises GET
+/api/today, GET /api/broadcasts/follow-ups or the Follow up core, is this
+slice's bug: fix it in a follow-up commit with explicit paths. A file that
+stays red with no connection to this slice: do NOT create another worktree or
+move HEAD - record the file, the failing case and the error in the report for
+the planner. Any `[dynamoAdmin]` line in the output is a real container
+fault: capture `err.$metadata.httpStatusCode` and `attempts` into the report.
+
+#### Step 4 - ASCII across the slice, and the pinned em dash survived
+
+```
+cd W:/tmp/today-checklist; git diff -U0 <S4_BASE> -- app | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+grep -c "$(printf 'Stuck \342\200\224 needs a check')" W:/tmp/today-checklist/app/src/routes/today.ts
+grep -c "$(printf 'Stuck \342\200\224 needs a check')" W:/tmp/today-checklist/app/test/todayApi.test.ts
+```
+(`<S4_BASE>` is the hash from S4.1 Step 0; run in Git Bash.) Expect `0`, then
+`1`, then `1`.
+
+#### Step 5 - slice report
+
+Write `W:/tmp/today-checklist/docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S4-report.md`
+(ASCII, findings only, code cited by `file:line`). It must record at least:
+- `S4_BASE` and the commit range.
+- Contradictions C1-C5 and how each landed (C4: the observed
+  `world.recipientDisplayCalls` element shape, and whether any assertion was
+  adapted).
+- Every PR40 inversion, by its new test title and `file:line`:
+  the Active team member (was "PIN: ... is still in needs_you_now
+  (unchanged)", ~1037), the D5 cap case's team member / tenant rows
+  (~1077-1110), the re-typed tenant (was "RED: an INACTIVE TENANT's unread
+  unknown_1to1 thread ... is emitted exactly as before", ~1123-1168), the
+  Inactive caseworker (~1170-1178).
+- Every other Unreplied case removed or re-pointed (C3), by title: the groups
+  case, A2 partner, NEW-3 x2, A9 x3, FIX B, the Inactive tenant's
+  tenant_1to1 case, deep unread, the byUnread cap, FILTER-THEN-CAP, the budget
+  WARN, and the participant-names block (moved to the Identify vehicle; say
+  which vehicle and why it is not tours_to_book).
+- The other app reader of the group list: `app/scripts/seed-smoke.mjs:298`
+  (comment updated; its assertions unaffected), plus any extra hit from Step
+  1.
+- WI1: `followUps.test.ts` and `followUpsApi.test.ts` green with only S1's
+  additive fake changes plus S4.1's batch-recording widening; the two `(PIN,
+  WI1)` case titles; the Follow up route still sends exactly
+  `{ requireComplete: true }`.
+- WI7: the committed `counts` object from the S4.7 WI7 test, with the formula
+  per load: 1 units walk page per 100 available properties; 1 listing-sends
+  Query per kept property; 1 tours Query per property with a share in the
+  last 14 days; 1 contacts BatchGet (DynamoDB pages it per 100 keys); 1
+  requested-tours Query (paged); 1 unit GetItem per distinct tour unit.
+  State any pre-existing count that differed from the plan's expectation.
+- WI8: Today's contacts batch is consistent (`collectWaitingFollowUps(..., { consistentRead: true })`,
+  pinned by "quietShares groups by property ...", `todayApi.test.ts:<line>`);
+  the units byStatus walk, the listing-sends and tours Queries and the
+  requested-tours Query are eventually consistent; DynamoDB Local is always
+  consistent, so no test can observe the difference - recorded only.
+- Any red file from Step 3 and its adjudication.
+- Untrimmed input paths: none new (Today takes no new input).
+
+Commit:
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S4-report.md
+git -C W:/tmp/today-checklist commit -m "docs(records): today-checklist S4 slice report" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### S4 coverage
+
+Spec sections and rulings covered:
+
+| Spec / ruling | What | Task |
+|---|---|---|
+| 6.1 mechanism, PR22, WI1 | Follow up core `collectWaitingFollowUps` (rows + recipient, `consistentRead` pass-through), `buildFollowUps` byte-identical, route-level regression with `last_reached_out_at` set | S4.1 |
+| 6.1, 6.2 order, 6.3 order, 3 (`people`), PR23 | `buildQuietShares`: both thresholds, both boundaries (exactly 48h / 120h and 1 ms before), heard later, reached later, reached EARLIER ignored, unparseable values, per-row clock, in-property and property order, distinct people, a person on two properties, non-waiting outcomes excluded; wire types | S4.2 |
+| 3 (`TodayItem.at` / `unitLabel`, units dep), 2.4, PR24 (units), PR25, PR29 | unit-label cache (memo, missing / deleted / throwing unit -> unitId + one WARN), tours_today `at` / `unitLabel`, time-then-tenant-then-tourId order, `api.ts` wiring | S4.3 |
+| 5.2 (group + order), PR27 | `identify` from both sources, row shape unchanged, created_at order (none / unparseable last, ties refId), position after needs_you_now | S4.4 |
+| 4, 5.2 (owner rule), PR26, PR40 | type filter FIRST (no contact read, no cap slot for known threads), owner rule replacing the #30 skip, unresolved owner unchanged, Unreplied removed everywhere (union, array, branch, row key, log, comments), every inversion and re-expression, `seed-smoke.mjs` comment | S4.5 |
+| 5.4, 2.5 (Tours to book), 3 (`toursToBook`), PR28 | requested tours, deleted-tenant skip, urgency copy and pure boundaries, order, `at` / `unitLabel`, no `tag`, failure isolation, full group order | S4.6 |
+| 6 (in the route), 2.5 (Quiet shares), 3 (`quietShares`), 6.5, PR24 (listing sends), PR30, WI7, WI8 | quiet shares in the route with a consistent batch, each drop-off, staff outreach restarting the clock, second share not restarting the first, truncated, failure isolation from the units walk / listing sends / per-unit tours / contacts batch (and tours.listByStatus the other way), WARN without names, header comment, read budget | S4.7 |
+| 9 (server tests), PR24 (`TODAY_TABLES`), C1 | `todayApi.test.ts` and `todayUnmatchedNonRegression.test.ts` updated deliberately; the non-regression test injects the units and listing-sends repos and asserts both sections `ok` | S4.4-S4.7 |
+
+Not in S4 (by the work map): the dashboard (S5), the writers that move
+`last_reached_out_at` (S2, S3), the docs/issues entries and the e2e specs
+(S7).
+
+## 9. S5 - Dashboard Today: sections, option C, At a glance
+
+Scope: plan section 2 row S5; rulings PR31-PR36 (binding), watch items WI10
+and WI11. Spec 2 (the page, 2.1-2.5), 3 and 3.1 (the wire mirror and the
+fallback), 5.3 (past tours order and labeling), 6.2-6.3 (quiet shares rows
+and option C), 9 (dashboard tests). Depends on S4's wire (spec 3) only
+through the types S5.4 mirrors; no S5 test talks to the server. Every line
+number below is a hint against main @970a29b9; the QUOTED text is the anchor.
+Live browser QA and every e2e spec belong to S7, not this slice.
+
+Notation used ONLY inside "old text" anchors: this plan is ASCII, so where a
+CURRENT file line holds a non-ASCII character the anchor writes it as
+`[U+2014]` (em dash), `[U+2192]` (right arrow) or `[U+00A7]` (section sign).
+Copy that line from your own Read of the file into `old_string` (the real
+character, not the bracket notation). Replacement text is always ASCII. A
+changed line that held a non-ASCII character is replaced WHOLE by an ASCII
+line; never edit a substring of such a line, and never re-indent one (a
+re-indented line is an ADDED line and fails the ASCII check).
+
+Test code in this slice never writes a six-character `\u` escape (the
+Edit/Write tools decode them). Where an existing line holds one (the
+`[\u202f\u00a0]` regexes in `tourTime.ts` / `tourTime.test.ts`), this slice
+never uses that line as an anchor.
+
+Dashboard tests run from `W:/tmp/today-checklist/dashboard` with
+`npx vitest run src/<path>`. No DynamoDB is needed. `test/setup.ts` pins
+`Date` to `2026-07-01T12:00:00Z` (timers stay real); every date below is
+built against that clock.
+
+### Contradictions
+
+C1. PR35 says "In-range uses the SAME predicate `selectPastTours`
+(`useTours.ts` ~200-212) uses - export it". `selectPastTours` holds no range
+predicate: it filters status, today's still-scheduled rows and decided
+toured rows (`dashboard/src/routes/tours/useTours.ts:202-205`); "in range"
+is decided by WHICH READ returned the row (`usePastTours` concatenates
+`selectPastTours(rows)` and `selectOffRangeTours(toured)`,
+`useTours.ts:324`), and the split rule itself lives in `selectOffRangeTours`
+step 1 (`useTours.ts:243`: `isUndated(t) || scheduledAt > to`). Resolution
+(S5.2): export that step-1 test as `isOffRangePastTour(t, now)`, make
+`selectOffRangeTours` call it (one rule, its pins unchanged), and have Today
+partition the loader's rows with it. Edge, accepted: Today evaluates it at
+label time, not load time; across a local midnight a future-dated off-range
+row can read as in-range and sort LAST among the in-range rows. No in-range
+row can ever read as off-range (its date is <= the earlier day's end).
+
+C2. Spec 2.1 "The heading carries the section's count" REVERSES commit
+`2f0db66f` (2026-08-03, "remove the remaining heading count chips ...
+completing the no-bare-counts ruling"; ruling text in
+`docs/superpowers/specs/2026-08-03-listing-card-actions-design.md:20-21`,
+"the counts add nothing"), and `Today.test.tsx:167-168` pins "the headings
+are bare labels". Resolution: follow spec 2.1 (Cameron approved it
+2026-10-24; the approved mockup `project/Main.dc.html` draws a count chip on
+every heading - with a 5-row limit the count is the only place the full
+number shows). The `.count` style that commit removed is re-added
+(S5.1); the bare-label pins are inverted deliberately (S5.6). Recorded in
+the S5 report so nobody re-applies the 08-03 ruling to Today.
+
+C3. PR33: the shared component "renders heading `<h2>`" and "both At a
+glance parts use it". Spec 2.4 heads the lower section "At a glance", so an
+`<h2>` "Tours today" beside an `<h2>` "At a glance" flattens the outline,
+and spec 2.4 makes the AI part a button, not a heading. Resolution:
+`TodaySection` takes `level` (default 2); "At a glance" is the `<h2>`,
+"Tours today" an `<h3>` inside it; the AI part is the disclosure button
+whose opened list is the shared `LimitedList` (the 5-row limit and Show
+all), with no heading. Every checklist section keeps its `<h2>` (spec 2).
+`getByRole('heading', { name: /Tours today/ })` still finds it at any level.
+
+C4. PR32 lists `quietShares` and `toursToBookStatus` on `useToday`. S5.4
+also exposes `generatedAt` (the server's, already on the wire,
+`app/src/routes/today.ts:1111`): Quiet shares counts "N days" from it, so
+render stays pure (the React Compiler lint forbids `Date.now()` in render)
+and N is measured from the same instant the server applied the 48h/120h rule
+at, so it can never read below the threshold. A fallback load sets it to its
+own `now`. Additive; flagged for the planner (see the S4 note below).
+
+C5. Spec 2.1 keeps the Past tours link "See all N on the Past tab" / "Open
+the Past tab". Its rule today is "See all N" when the Past tab holds more
+than the section LISTS (`Today.tsx:245`, `past.total > past.rows.length`).
+Under 5.3 the section labels every row, so that is now true only when Today
+skipped a deleted tenant's tours; with 23 rows the footer reads "Show all
+23" + "Open the Past tab". Resolution: keep the rule (it names what the
+click lands on without repeating the button's number). S7's
+`today-past-tours` spec asserts it this way (PR39 says "the Past-tab
+link"). If the planner wants "See all N" whenever the Past tab holds more
+than 5, it is one line in `PastToursSection`.
+
+C6. The approved mockup's copy differs from the spec in three places: the
+AI line reads "AI suggestions - 22 contacts have details the AI heard..."
+(spec 2.4: "AI suggestions for N contacts"); "At a glance" carries a "- for
+reference, not part of the checklist" suffix (spec 2.4: headed "At a
+glance"); the quiet-shares help line ends "either way restarts the clock"
+(spec 2.2 adds "sending another property does not"). The spec is later and
+exact; S5 uses the spec's copy everywhere. The mockup's LAYOUT (count chip,
+plain-text request age, dashed divider, compact time-first tour rows,
+property line with a Show/Hide word) is followed.
+
+C7. Plan WI10 cites "(S5, PR30)" for `TODAY_PAST_TOURS_CAP`; the ruling is
+PR35 (PR30 is quiet shares in the route). Typo only.
+
+No other ruling conflicts with the tree. `buildToday.ts` keeps its fallback
+copy `'New inbound [U+2014] untriaged'` (`buildToday.ts:297`, PR36 "copy and
+rule unchanged"); it is not re-indented, so it is never an added line.
+
+### Cross-slice notes (for the planner)
+
+For S4 (what the dashboard assumes about the wire):
+- `generatedAt` must be the SAME instant `buildQuietShares` was called with
+  (`now`): the dashboard's "N days" counts from it (C4).
+- A missing `quietShares` or `toursToBook` reads as UNAVAILABLE (PR31): the
+  section shows "We couldn't load ..." and "All caught up" is withheld. An
+  older server therefore never shows a false "done".
+- Tours to book rows: the dashboard renders `who`, `why` (expected to be the
+  unit label), `urgency` (plain text, not the red chip) and links
+  `/tours/<refId>` with the Today back pointer (`refType: 'tour'`). It shows
+  no `tag`.
+- tours_today rows: the compact row reads `at` (local time via
+  `timeLabel`), `who` and `unitLabel`; with either missing (the fallback) it
+  degrades to the name alone.
+- Quiet shares: the dashboard re-sorts NOTHING (properties and people render
+  in the order received). A person is tagged "Caseworker" when
+  `isCaseworkerContact({ type, role })` holds
+  (`dashboard/src/routes/contact/caseworkerRole.ts:42`), so the server should
+  send `type` and the trimmed `role` exactly as the Follow up tab does
+  (`app/src/services/followUps.ts:184-191`).
+
+For S7 (accessible names the e2e specs and the perf terminal select on):
+- Section headings carry the count: `<h2>` names are
+  "Needs you now 3", "Identify these contacts 8", "Past tours needing an
+  outcome 23", "Tours to book 9", "Quiet shares 21", "Relay groups to close
+  1", "Placements 3", plus "At a glance" (no count) and the `<h3>` "Tours
+  today 2". Playwright's default substring match still finds
+  `{ name: 'Tours to book' }`; `exact: true` does NOT. A section that failed
+  to load has the bare heading ("Tours to book") and no count.
+- Lists are named by the bare heading text, exactly: 'Needs you now',
+  'Identify these contacts', 'Past tours needing an outcome', 'Tours to
+  book', 'Quiet shares', 'Relay groups to close', 'Placements', 'Tours
+  today', and 'AI suggestions' - the last is NOT in the accessibility tree
+  until the button "AI suggestions for N contacts" ("for 1 contact") is
+  clicked (`aria-expanded`). No AI line at all when there are none (PR39
+  `caseworkers` ~551: assert the button's count is 0).
+- Show all: a button under the list, "Show all N" (Quiet shares: "Show all
+  N properties"), then "Show fewer"; `aria-expanded`, `aria-controls` = the
+  list's id. Scope it to its section: two sections can both offer "Show all
+  6".
+- Quiet shares: each property line is a button named
+  "<unitLabel>, <summary>" (e.g. "12 Oak St, 2 people: 1 replied, then
+  quiet - 1 never replied") with `aria-expanded`; its people list is named
+  "People waiting on <unitLabel>"; a person row is a link named
+  "<name>, <quiet text>" or "<name>, Caseworker, <quiet text>" (quiet text
+  exactly "Replied, then quiet N days" / "No reply in N days"; "1 day"
+  singular) to `/contacts/<contactId>`; visible tags "Replied" / "No reply
+  yet". `truncated` shows the text "Showing the first 100 properties". The
+  first property is open on first arrival; a live refetch keeps the
+  viewer's choices.
+- Tours today rows are links named "Tour for <who> at <unitLabel>, <time>"
+  (e.g. "Tour for Dana Ruiz at 1458 Maple Ridge Dr SW, 10:00 AM").
+- Failure copy: an unavailable section shows a `role="alert"` paragraph
+  "We couldn't load tours to book." / "We couldn't load quiet shares."; the
+  fallback shows ONE plain paragraph (no role) "Some sections can't load
+  right now." and never "All caught up". The page subtitle is "Clear every
+  section above the line and today's checklist is done. New messages are in
+  the Inbox."
+- `e2e/performance/routes.ts` `TODAY_TERMINAL`: the AI list cannot be a
+  terminal (absent until opened); use the eight lists above minus 'AI
+  suggestions', "All caught up", the queue error alert, and the fallback
+  line.
+- `e2e/support/selectors.md` rows to update: line 18 (the h1/"Tours today"
+  ambiguity still holds - "Tours today N" is now an `<h3>` and still
+  substring-matches "Today"; `expectTodayReady` stays) and line 65 (the AI
+  list is behind the collapsed line).
+- `today-past-tours`: rows are OLDEST first; 5 shown + "Show all N" when
+  more; the link reads "Open the Past tab" unless Today skipped a deleted
+  tenant's tours (C5).
+
+Intermediate states (each commit compiles and its suites are green):
+S5.3 lands before the page rewrite, so between S5.3 and S5.6 the old
+`Today.tsx` lists EVERY past-tour row (no cap, old order of sections). The
+`'unreplied'` group stays in `TodayGroup` (no producer) from S5.4 until
+S5.6 removes it with its last reader.
+
+---
+
+### Task S5.1 - The shared section frame: `TodaySection` and `LimitedList`
+
+PR33, spec 2 and 2.1: a heading with its count as its own element, an
+optional help line, and a list named by the heading text that shows 5 rows
+with "Show all N" / "Show fewer". Nothing uses it yet (S5.5, S5.6 do).
+
+Files:
+- `dashboard/src/routes/today/TodaySection.tsx` (new)
+- `dashboard/src/routes/today/TodaySection.test.tsx` (new)
+- `dashboard/src/routes/today/Today.module.css` (`.groupHeading`; new
+  `.count`, `.help`, `.listFooter`, `.showAll`)
+
+#### Step 1 - failing tests
+
+Create `dashboard/src/routes/today/TodaySection.test.tsx`:
+```tsx
+// TodaySection / LimitedList - the frame every Today section shares (spec
+// 2026-10-23-today-checklist-design 2.1; plan PR33): the heading carries the
+// count as its own element, the list is named by the heading text alone, and
+// the list shows 5 rows with "Show all N" / "Show fewer".
+import { render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { describe, expect, it } from 'vitest';
+import { LimitedList, TODAY_SECTION_LIMIT, TodaySection } from './TodaySection.js';
+
+const LABEL = 'Tours to book';
+
+function rows(n: number): string[] {
+  return Array.from({ length: n }, (_, i) => `Row ${i + 1}`);
+}
+
+function Section(props: {
+  n: number;
+  noun?: string;
+  footer?: React.ReactNode;
+  help?: string;
+  level?: 2 | 3;
+}): React.JSX.Element {
+  return (
+    <TodaySection label={LABEL} count={props.n} help={props.help} level={props.level}>
+      <LimitedList
+        label={LABEL}
+        items={rows(props.n)}
+        itemKey={(r) => r}
+        renderItem={(r) => <li>{r}</li>}
+        noun={props.noun}
+        footer={props.footer}
+      />
+    </TodaySection>
+  );
+}
+
+describe('TodaySection', () => {
+  it('the heading carries the count as its own element; the list is named by the heading text alone', () => {
+    render(<Section n={3} />);
+    const heading = screen.getByRole('heading', { level: 2, name: 'Tours to book 3' });
+    expect(within(heading).getByText('3')).toBeInTheDocument();
+    expect(screen.getByRole('list', { name: LABEL })).toBeInTheDocument();
+  });
+
+  it('no count element when the section has no count (a section that failed to load)', () => {
+    render(
+      <TodaySection label={LABEL}>
+        <p>We couldn&apos;t load tours to book.</p>
+      </TodaySection>,
+    );
+    expect(screen.getByRole('heading', { level: 2, name: LABEL })).toBeInTheDocument();
+  });
+
+  it('renders the help line under the heading only when given', () => {
+    const { unmount } = render(<Section n={1} help="Oldest first." />);
+    expect(screen.getByText('Oldest first.')).toBeInTheDocument();
+    unmount();
+    render(<Section n={1} />);
+    expect(document.querySelector('p')).toBeNull();
+  });
+
+  it('is an h3 for a part of At a glance', () => {
+    render(<Section n={2} level={3} />);
+    expect(screen.getByRole('heading', { level: 3, name: 'Tours to book 2' })).toBeInTheDocument();
+  });
+});
+
+describe('LimitedList', () => {
+  it('the limit is five rows (spec 2.1)', () => {
+    expect(TODAY_SECTION_LIMIT).toBe(5);
+  });
+
+  it('shows the first 5 rows and "Show all N"; it expands in place, then "Show fewer" folds it back', async () => {
+    const user = userEvent.setup();
+    render(<Section n={7} />);
+    const list = screen.getByRole('list', { name: LABEL });
+    expect(within(list).getAllByRole('listitem').map((li) => li.textContent)).toEqual(rows(5));
+    const toggle = screen.getByRole('button', { name: 'Show all 7' });
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(toggle).toHaveAttribute('aria-controls', list.id);
+    await user.click(toggle);
+    expect(within(list).getAllByRole('listitem')).toHaveLength(7);
+    expect(toggle).toHaveAccessibleName('Show fewer');
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await user.click(toggle);
+    expect(within(list).getAllByRole('listitem')).toHaveLength(5);
+    expect(toggle).toHaveAccessibleName('Show all 7');
+  });
+
+  it('no button at exactly five rows', () => {
+    render(<Section n={5} />);
+    expect(within(screen.getByRole('list', { name: LABEL })).getAllByRole('listitem')).toHaveLength(5);
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  });
+
+  it('names what it counts when given a noun', () => {
+    render(<Section n={6} noun="properties" />);
+    expect(screen.getByRole('button', { name: 'Show all 6 properties' })).toBeInTheDocument();
+  });
+
+  it('renders the footer beside the button, and on its own when nothing overflows', () => {
+    const { unmount } = render(<Section n={6} footer={<a href="/tours/past">Open the Past tab</a>} />);
+    const button = screen.getByRole('button', { name: 'Show all 6' });
+    const link = screen.getByRole('link', { name: 'Open the Past tab' });
+    expect(button.parentElement).toBe(link.parentElement);
+    unmount();
+    render(<Section n={2} footer={<a href="/tours/past">Open the Past tab</a>} />);
+    expect(screen.getByRole('link', { name: 'Open the Past tab' })).toBeInTheDocument();
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  });
+});
+```
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/dashboard; npx vitest run src/routes/today/TodaySection.test.tsx
+```
+Expected: the file fails to load - `Failed to resolve import
+"./TodaySection.js"` (the module does not exist yet). Zero tests run.
+
+#### Step 3 - implementation
+
+3a. Create `dashboard/src/routes/today/TodaySection.tsx`:
+```tsx
+// TodaySection - the section frame every Today section shares (spec
+// 2026-10-23-today-checklist-design 2, 2.1; plan PR33).
+//
+// TodaySection: a <section> whose heading carries the section's count as its
+// OWN element (so the list's name can stay the bare heading text), plus an
+// optional help line for the VA (spec 2.2).
+//
+// LimitedList: the section's list, named by the heading text WITHOUT the
+// count - getByRole('list', { name: 'Tours to book' }) - showing its first
+// TODAY_SECTION_LIMIT rows. Past the limit a "Show all N" button under it
+// expands the list in place and then reads "Show fewer" (aria-expanded,
+// aria-controls = the list). Expansion is per-viewer page state only: lost
+// on reload, never stored. Every checklist section, Tours today, the opened
+// AI suggestions line and the Quiet shares property lines use it.
+import { Fragment, useId, useState } from 'react';
+import styles from './Today.module.css';
+
+/** Rows a section shows before its "Show all N" button (spec 2.1). */
+export const TODAY_SECTION_LIMIT = 5;
+
+export interface TodaySectionProps {
+  /** The heading text WITHOUT the count - also its list's accessible name. */
+  label: string;
+  /** The section's count, beside the heading text as its own element.
+   *  Omitted on a section that failed to load (it has nothing to count). */
+  count?: number;
+  /** The VA help line under the heading (spec 2.2). */
+  help?: string;
+  /** 2 for a checklist section (the default); 3 for a part of At a glance. */
+  level?: 2 | 3;
+  children: React.ReactNode;
+}
+
+export function TodaySection({ label, count, help, level = 2, children }: TodaySectionProps): React.JSX.Element {
+  const Heading = level === 3 ? 'h3' : 'h2';
+  return (
+    <section className={styles.group}>
+      <Heading className={styles.groupHeading}>
+        {label}
+        {count !== undefined ? (
+          <>
+            {' '}
+            <span className={styles.count}>{count}</span>
+          </>
+        ) : null}
+      </Heading>
+      {help !== undefined ? <p className={styles.help}>{help}</p> : null}
+      {children}
+    </section>
+  );
+}
+
+export interface LimitedListProps<T> {
+  /** The list's accessible name: the section's heading text, no count. */
+  label: string;
+  items: readonly T[];
+  itemKey: (item: T) => string;
+  /** Renders ONE row, as an <li>. */
+  renderItem: (item: T) => React.ReactNode;
+  /** Names what is counted: "properties" -> "Show all 7 properties". */
+  noun?: string;
+  /** Rendered beside the Show all button (the Past tab link). */
+  footer?: React.ReactNode;
+}
+
+export function LimitedList<T>({
+  label,
+  items,
+  itemKey,
+  renderItem,
+  noun,
+  footer,
+}: LimitedListProps<T>): React.JSX.Element {
+  const listId = useId();
+  const [expanded, setExpanded] = useState(false);
+  const overflows = items.length > TODAY_SECTION_LIMIT;
+  const shown = overflows && !expanded ? items.slice(0, TODAY_SECTION_LIMIT) : items;
+  const showAll = noun !== undefined ? `Show all ${items.length} ${noun}` : `Show all ${items.length}`;
+  return (
+    <>
+      <ul id={listId} className={styles.rows} aria-label={label}>
+        {shown.map((item) => (
+          <Fragment key={itemKey(item)}>{renderItem(item)}</Fragment>
+        ))}
+      </ul>
+      {overflows || footer !== undefined ? (
+        <div className={styles.listFooter}>
+          {overflows ? (
+            <button
+              type="button"
+              className={styles.showAll}
+              aria-expanded={expanded}
+              aria-controls={listId}
+              onClick={() => setExpanded((open) => !open)}
+            >
+              {expanded ? 'Show fewer' : showAll}
+            </button>
+          ) : null}
+          {footer}
+        </div>
+      ) : null}
+    </>
+  );
+}
+```
+
+3b. `dashboard/src/routes/today/Today.module.css` - the heading is block,
+not flex (its count is separated by a real space). Edit:
+
+old:
+```css
+.groupHeading {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0 0 var(--sp-2);
+```
+new:
+```css
+.groupHeading {
+  /* Block, not flex: the space between the heading text and its count
+   * (TodaySection) is a real text node, and a flex container drops a
+   * whitespace-only child from layout (and can drop it from the heading's
+   * accessible name, which then reads "Tours to book9"). */
+  margin: 0 0 var(--sp-2);
+```
+
+3c. Same file - append the new blocks after `.sectionError`. Edit:
+
+old:
+```css
+/* The past-tours section's own load failure (the rest of Today still shows). */
+.sectionError {
+  margin: 0;
+  color: var(--c-danger);
+  font-size: var(--fs-sm);
+}
+```
+new:
+```css
+/* The past-tours section's own load failure (the rest of Today still shows). */
+.sectionError {
+  margin: 0;
+  color: var(--c-danger);
+  font-size: var(--fs-sm);
+}
+
+/* --- Shared section frame (TodaySection, spec 2026-10-23 2.1) ------------- */
+
+/* A section's count, beside its heading text. Spec 2026-10-23 2.1 brings the
+ * count back (the 5-row limit hides the rest); its own element, so the list's
+ * accessible name stays the bare heading text. */
+.count {
+  display: inline-block;
+  min-width: 1.25rem;
+  padding: 0 var(--sp-2);
+  border-radius: var(--radius-pill);
+  background: var(--c-brand-soft);
+  color: var(--c-brand);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  letter-spacing: 0;
+  text-align: center;
+  text-transform: none;
+}
+
+/* The VA help line under a checklist heading (spec 2.2). */
+.help {
+  margin: calc(-1 * var(--sp-1)) 0 var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+/* Under a list: the Show all / Show fewer button and, beside it, the Past
+ * tours section's link to the Past tab. */
+.listFooter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.showAll {
+  min-height: 2.25rem;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  color: var(--c-brand);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+}
+
+.showAll:hover {
+  border-color: var(--c-border-strong);
+}
+
+.showAll:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/dashboard; npx vitest run src/routes/today
+```
+Expect all green (the new file, and every existing Today suite unchanged -
+no existing heading has a count yet). Then the compile check (bare):
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0.
+
+#### Step 5 - ASCII check
+
+```
+cd W:/tmp/today-checklist; tr -d '\11\12\15\40-\176' < dashboard/src/routes/today/TodaySection.tsx | wc -c; tr -d '\11\12\15\40-\176' < dashboard/src/routes/today/TodaySection.test.tsx | wc -c; git diff -U0 -- dashboard/src/routes/today/Today.module.css | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0` three times.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+test ! -e "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD" && echo no-merge-in-progress
+git -C W:/tmp/today-checklist add dashboard/src/routes/today/TodaySection.tsx dashboard/src/routes/today/TodaySection.test.tsx dashboard/src/routes/today/Today.module.css
+git -C W:/tmp/today-checklist commit -m "feat(dashboard): Today section frame - heading count, help line, 5-row list with Show all (today-checklist S5.1)" -m "TodaySection and LimitedList (plan PR33, spec 2.1). Not used by the page yet." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S5.2 - The Past tab's range split, exported; a plain-space time label
+
+C1 resolution and the Tours today time (spec 2.4). `isOffRangePastTour`
+becomes the one rule both `selectOffRangeTours` and Today use; `timeLabel`
+is `formatTime` with the `whenLabel` space rule.
+
+Files:
+- `dashboard/src/routes/tours/useTours.ts`
+- `dashboard/src/routes/tours/useTours.test.ts`
+- `dashboard/src/routes/tours/tourTime.ts`
+- `dashboard/src/routes/tours/tourTime.test.ts`
+
+#### Step 1 - failing tests
+
+1a. `dashboard/src/routes/tours/useTours.test.ts` - import list. Edit:
+
+old:
+```ts
+import {
+  pastState,
+  pastToursDateRange,
+```
+new:
+```ts
+import {
+  isOffRangePastTour,
+  pastState,
+  pastToursDateRange,
+```
+
+1b. Same file - insert a describe before the cap describe. Edit:
+
+old:
+```ts
+// Today lists the Past tab's rows as they are, no-shows included (spec 9.4) -
+// useTodayPastTours.test.tsx pins that end to end. What is left here is the cap.
+```
+new:
+```ts
+// The Past list's two parts (spec 4.2a): Today orders them differently (spec
+// 2026-10-23-today-checklist-design 5.3) through this one exported rule.
+describe('isOffRangePastTour (the split selectOffRangeTours keeps)', () => {
+  /** A fixed "now": 2026-09-26 15:30 local. */
+  const NOW = new Date(2026, 8, 26, 15, 30, 0, 0);
+  const base = { tourId: 't', tenantId: 'c', unitId: 'u', tourType: 'self_guided', status: 'toured' } as const;
+
+  it('an undated tour is off-range (no scheduledAt, or an empty one)', () => {
+    expect(isOffRangePastTour({ ...base } as Tour, NOW)).toBe(true);
+    expect(isOffRangePastTour({ ...base, scheduledAt: '' } as Tour, NOW)).toBe(true);
+  });
+
+  it('a tour dated after the end of today is off-range', () => {
+    expect(isOffRangePastTour({ ...base, scheduledAt: new Date(2026, 8, 27, 9, 0).toISOString() } as Tour, NOW)).toBe(true);
+  });
+
+  it('a tour dated today - even later today - or earlier is in range', () => {
+    expect(isOffRangePastTour({ ...base, scheduledAt: new Date(2026, 8, 26, 17, 0).toISOString() } as Tour, NOW)).toBe(false);
+    expect(isOffRangePastTour({ ...base, scheduledAt: new Date(2026, 8, 23, 14, 0).toISOString() } as Tour, NOW)).toBe(false);
+  });
+});
+
+// Today lists the Past tab's rows as they are, no-shows included (spec 9.4) -
+// useTodayPastTours.test.tsx pins that end to end. What is left here is the cap.
+```
+(The comment pair is re-emitted unchanged; S5.3 replaces it.)
+
+1c. `dashboard/src/routes/tours/tourTime.test.ts` - import list. Edit:
+
+old:
+```ts
+  pastTourTimeWarning,
+  tourTimeWarning,
+  whenLabel,
+} from './tourTime.js';
+```
+new:
+```ts
+  pastTourTimeWarning,
+  timeLabel,
+  tourTimeWarning,
+  whenLabel,
+} from './tourTime.js';
+```
+
+1d. Same file - insert a describe BEFORE the whenLabel describe (never
+anchor on the lines holding `\u` escapes). Edit:
+
+old:
+```ts
+// The row display shared by the Tours page and Today's past-tours rows.
+```
+new:
+```ts
+// Today's At a glance Tours today rows (spec 2026-10-23-today-checklist 2.4).
+describe('timeLabel', () => {
+  it('is the time alone, with plain spaces only (the whenLabel rule)', () => {
+    // A plain-space expected value: on an ICU 72+ host formatTime emits a
+    // narrow no-break space before PM, which this must have replaced.
+    expect(timeLabel(new Date(2026, 8, 24, 14, 30).toISOString())).toBe('2:30 PM');
+  });
+
+  it('an absent or unparseable value is empty', () => {
+    expect(timeLabel(undefined)).toBe('');
+    expect(timeLabel('not-a-date')).toBe('');
+  });
+});
+
+// The row display shared by the Tours page and Today's past-tours rows.
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/dashboard; npx vitest run src/routes/tours/useTours.test.ts src/routes/tours/tourTime.test.ts
+```
+Expected failures, and why:
+- useTours.test.ts: the three `isOffRangePastTour` cases -
+  `TypeError: isOffRangePastTour is not a function` (not exported yet).
+- tourTime.test.ts: the two `timeLabel` cases - `TypeError: timeLabel is
+  not a function`.
+Every other case stays green.
+
+#### Step 3 - implementation
+
+3a. `dashboard/src/routes/tours/useTours.ts` - after `isUndated`. Edit:
+
+old:
+```ts
+function isUndated(t: Tour): boolean {
+  return typeof t.scheduledAt !== 'string' || t.scheduledAt.length === 0;
+}
+```
+new:
+```ts
+function isUndated(t: Tour): boolean {
+  return typeof t.scheduledAt !== 'string' || t.scheduledAt.length === 0;
+}
+
+/** True for a Past row the RANGE read cannot reach (spec 4.2a): undated, or
+ *  dated after the Past window's end (`pastToursDateRange(now).to`). Only the
+ *  status=toured read returns such rows, and selectPastTours' rows (the range
+ *  read's) are never such rows, so this splits the Past list into its two
+ *  parts. selectOffRangeTours keeps exactly these; Today orders the two parts
+ *  differently (spec 2026-10-23-today-checklist-design 5.3) without
+ *  re-deriving the rule. */
+export function isOffRangePastTour(t: Tour, now: Date = new Date()): boolean {
+  return isUndated(t) || (t.scheduledAt as string) > pastToursDateRange(now).to;
+}
+```
+
+3b. Same file - `selectOffRangeTours` step 1 calls it. Edit:
+
+old:
+```ts
+export function selectOffRangeTours(tours: Tour[], now: Date = new Date()): Tour[] {
+  const { from, to } = pastToursDateRange(now);
+  const touched = (t: Tour): string => t.updatedAt ?? t.createdAt ?? '';
+  return tours
+    .filter((t) => t.status === 'toured' && (isUndated(t) || (t.scheduledAt as string) > to))
+```
+new:
+```ts
+export function selectOffRangeTours(tours: Tour[], now: Date = new Date()): Tour[] {
+  const { from } = pastToursDateRange(now);
+  const touched = (t: Tour): string => t.updatedAt ?? t.createdAt ?? '';
+  return tours
+    .filter((t) => t.status === 'toured' && isOffRangePastTour(t, now))
+```
+
+3c. `dashboard/src/routes/tours/tourTime.ts` - append after `whenLabel`.
+Edit:
+
+old:
+```ts
+  return [formatDate(iso), formatTime(iso)]
+    .filter((s) => s.length > 0)
+    .join(', ')
+    .replace(NBSP_LIKE, ' ');
+}
+```
+new:
+```ts
+  return [formatDate(iso), formatTime(iso)]
+    .filter((s) => s.length > 0)
+    .join(', ')
+    .replace(NBSP_LIKE, ' ');
+}
+
+/** Just the time ("2:30 PM"), with plain spaces only (the whenLabel rule) -
+ *  the Today page's At a glance Tours today rows. '' when absent or
+ *  unparseable. */
+export function timeLabel(iso: string | undefined): string {
+  return formatTime(iso).replace(NBSP_LIKE, ' ');
+}
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/dashboard; npx vitest run src/routes/tours/useTours.test.ts src/routes/tours/tourTime.test.ts src/routes/tours/ToursPage.test.tsx src/routes/today
+```
+Expect all green - in particular every `selectOffRangeTours (spec 4.2a)`
+case is unchanged (3b is behavior-preserving). Then:
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0.
+
+#### Step 5 - ASCII check
+
+All four files carry pre-existing non-ASCII; added lines only:
+```
+cd W:/tmp/today-checklist; git diff -U0 -- dashboard/src/routes/tours | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0`.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+test ! -e "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD" && echo no-merge-in-progress
+git -C W:/tmp/today-checklist add dashboard/src/routes/tours/useTours.ts dashboard/src/routes/tours/useTours.test.ts dashboard/src/routes/tours/tourTime.ts dashboard/src/routes/tours/tourTime.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(dashboard): export the Past tab's range split; timeLabel for Today's tour rows (today-checklist S5.2)" -m "isOffRangePastTour is selectOffRangeTours' step-1 rule, now shared (plan PR35, C1). timeLabel = formatTime with plain spaces." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S5.3 - Past tours on Today: every row labeled, oldest first; the cap retired (WI10)
+
+PR35, spec 5.3. `useTodayPastTours` labels EVERY Past row (deleted tenants
+skipped), orders in-range rows by `scheduledAt` ascending (ties by tourId),
+then the off-range rows in the loader's order. `TODAY_PAST_TOURS_CAP` has
+no reader left, so it goes with its pin (WI10); the 5-row limit is
+`TODAY_SECTION_LIMIT` (S5.1). The "most recent first" and "at most five"
+cases are re-written deliberately.
+
+Files:
+- `dashboard/src/routes/today/useTodayPastTours.ts` (whole-file replace)
+- `dashboard/src/routes/today/useTodayPastTours.test.tsx`
+- `dashboard/src/routes/tours/useTours.ts` (cap removed)
+- `dashboard/src/routes/tours/useTours.test.ts` (cap pin removed)
+
+#### Step 1 - failing tests
+
+All edits in `dashboard/src/routes/today/useTodayPastTours.test.tsx`.
+
+1a. The header comment. Edit:
+
+old:
+```ts
+// useTodayPastTours - the Today page's past-tours section (Sam's item 18).
+// The fetch and the selection are the Past tab's own (usePastTours), so these
+// tests drive the api barrel's getTours and pin what Today adds: every Past
+// row, no-shows included (a no-show now closes on its own two weeks after its
+// last mark), a cap of five with the full count, the Past order, point-read
+// names, a soft-deleted tenant skipped (the walk continues past it), a failed
+// lookup kept under its id, a first-load failure isolated to the section, and
+// a tour.updated event reloading the rows.
+```
+new:
+```ts
+// useTodayPastTours - the Today page's past-tours section (Sam's item 18;
+// spec 2026-10-23-today-checklist-design 5.3). The fetch and the selection are
+// the Past tab's own (usePastTours), so these tests drive the api barrel's
+// getTours and pin what Today adds: every Past row, no-shows included (a
+// no-show closes on its own two weeks after its last mark), EVERY row labeled
+// (no cap - the page shows 5 with Show all) with the Past tab's count, Today's
+// order (in-range rows oldest first, then the off-range rows in the loader's
+// order), point-read names, a soft-deleted tenant skipped, a failed lookup
+// kept under its id, a first-load failure isolated to the section, and a
+// tour.updated event reloading the rows.
+```
+
+1b. `serveTours` serves the status=toured read too. Edit:
+
+old:
+```ts
+/** The range read returns `range`; the status=toured read returns nothing. */
+function serveTours(range: Tour[]): void {
+  getTours.mockImplementation((params: { status?: string }) =>
+    Promise.resolve(params.status === 'toured' ? [] : range),
+  );
+}
+```
+new:
+```ts
+/** The range read returns `range`; the status=toured read returns `toured`
+ *  (nothing by default). */
+function serveTours(range: Tour[], toured: Tour[] = []): void {
+  getTours.mockImplementation((params: { status?: string }) =>
+    Promise.resolve(params.status === 'toured' ? toured : range),
+  );
+}
+```
+
+1c. RE-WRITTEN deliberately (was "most recent first"; spec 5.3 reverses the
+Sep 29 ruling). Edit:
+
+old:
+```ts
+  it('lists the Past rows - no-shows included - most recent first, with names and addresses', async () => {
+    serveTours([
+      tour('old', 5),
+      tour('ns', 2, { status: 'no_show' }),
+      tour('new', 1, { status: 'scheduled' }),
+    ]);
+    const { result } = renderHook(() => useTodayPastTours());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    // The no-show sits in its date order: Today lists the Past tab's rows as
+    // they are (spec 9.4).
+    expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['new', 'ns', 'old']);
+    // The "See all N" count is the Past tab's, which is all three here.
+    expect(result.current.total).toBe(3);
+    expect(result.current.rows[0]).toMatchObject({ tenant: 'Name c-new Tenant', property: 'u-new Main St' });
+    // The no-show is a listed row, so its tenant and property are looked up too.
+    expect(result.current.rows[1]).toMatchObject({ tenant: 'Name c-ns Tenant', property: 'u-ns Main St' });
+    expect(getContact).toHaveBeenCalledWith('c-ns', expect.anything());
+  });
+
+  it('shows at most five rows and reports the Past tab count for "See all N"', async () => {
+    serveTours(Array.from({ length: 7 }, (_, i) => tour(`t${i}`, i + 1)));
+    const { result } = renderHook(() => useTodayPastTours());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['t0', 't1', 't2', 't3', 't4']);
+    expect(result.current.total).toBe(7);
+    // Five tenants and five properties, not seven.
+    expect(getContact).toHaveBeenCalledTimes(5);
+    expect(getUnit).toHaveBeenCalledTimes(5);
+  });
+
+  it('skips a soft-deleted tenant and keeps walking to fill the section', async () => {
+    serveTours(Array.from({ length: 7 }, (_, i) => tour(`t${i}`, i + 1)));
+    getContact.mockImplementation((id: string) =>
+      Promise.resolve(contactFor(id, id === 'c-t1' ? { deleted_at: '2026-09-01T00:00:00Z' } : {})),
+    );
+    const { result } = renderHook(() => useTodayPastTours());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['t0', 't2', 't3', 't4', 't5']);
+    // The count is the Past tab's (it lists the deleted tenant's tour).
+    expect(result.current.total).toBe(7);
+  });
+```
+new:
+```ts
+  it('lists the Past rows - no-shows included - OLDEST first, with names and addresses', async () => {
+    serveTours([
+      tour('new', 1, { status: 'scheduled' }),
+      tour('ns', 2, { status: 'no_show' }),
+      tour('old', 5),
+    ]);
+    const { result } = renderHook(() => useTodayPastTours());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    // Spec 2026-10-23 5.3 reverses the Sep 29 "most recent first" ruling: the
+    // oldest tour leads, so it does not wait for the two-week auto-close. The
+    // no-show sits in its date order (Today lists the Past tab's rows, 9.4).
+    expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['old', 'ns', 'new']);
+    // The "See all N" count is the Past tab's, which is all three here.
+    expect(result.current.total).toBe(3);
+    expect(result.current.rows[0]).toMatchObject({ tenant: 'Name c-old Tenant', property: 'u-old Main St' });
+    // The no-show is a listed row, so its tenant and property are looked up too.
+    expect(result.current.rows[1]).toMatchObject({ tenant: 'Name c-ns Tenant', property: 'u-ns Main St' });
+    expect(getContact).toHaveBeenCalledWith('c-ns', expect.anything());
+  });
+
+  it('labels EVERY Past row (no cap) and reports the Past tab count', async () => {
+    // RE-WRITTEN (was "shows at most five rows"): spec 5.3 - the heading count
+    // and "Show all N" are the rows Today qualifies, so every row is labeled;
+    // the page shows 5 of them (TodaySection).
+    serveTours(Array.from({ length: 7 }, (_, i) => tour(`t${i}`, i + 1)));
+    const { result } = renderHook(() => useTodayPastTours());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    // t6 is seven days old, t0 one day old: oldest first.
+    expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['t6', 't5', 't4', 't3', 't2', 't1', 't0']);
+    expect(result.current.total).toBe(7);
+    // Seven tenants and seven properties, in one round trip.
+    expect(getContact).toHaveBeenCalledTimes(7);
+    expect(getUnit).toHaveBeenCalledTimes(7);
+  });
+
+  it('skips a soft-deleted tenant', async () => {
+    serveTours(Array.from({ length: 7 }, (_, i) => tour(`t${i}`, i + 1)));
+    getContact.mockImplementation((id: string) =>
+      Promise.resolve(contactFor(id, id === 'c-t1' ? { deleted_at: '2026-09-01T00:00:00Z' } : {})),
+    );
+    const { result } = renderHook(() => useTodayPastTours());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['t6', 't5', 't4', 't3', 't2', 't0']);
+    // The count is the Past tab's (it lists the deleted tenant's tour).
+    expect(result.current.total).toBe(7);
+  });
+
+  it('orders in-range rows oldest first (ties by tourId), then the off-range rows in the loader order', async () => {
+    serveTours(
+      [tour('a', 1), tour('c', 3), tour('b', 3)],
+      [
+        // Off-range (spec 4.2a): undated toured tours. The loader lists them
+        // most recently touched first; Today keeps that order, LAST.
+        tour('u-old', 0, { scheduledAt: undefined, updatedAt: daysAgo(4) }),
+        tour('u-new', 0, { scheduledAt: undefined, updatedAt: daysAgo(1) }),
+      ],
+    );
+    const { result } = renderHook(() => useTodayPastTours());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['b', 'c', 'a', 'u-new', 'u-old']);
+    expect(result.current.total).toBe(5);
+  });
+```
+
+1d. The reload case's expected order (`describe('useTodayPastTours -
+round-2 review fixes')`). Edit:
+
+old:
+```ts
+    await waitFor(() => expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['c', 'a', 'b']));
+    // Addresses: only c's is new. Tenants: all three re-read (delete state).
+```
+new:
+```ts
+    // Today's order: oldest first (b is three days old, c one).
+    await waitFor(() => expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['b', 'a', 'c']));
+    // Addresses: only c's is new. Tenants: all three re-read (delete state).
+```
+
+1e. `dashboard/src/routes/tours/useTours.test.ts` - the cap pin goes
+(WI10). Edit:
+
+old:
+```ts
+  selectOffRangeTours,
+  TODAY_PAST_TOURS_CAP,
+  useClosedTours,
+```
+new:
+```ts
+  selectOffRangeTours,
+  useClosedTours,
+```
+and Edit:
+
+old:
+```ts
+// Today lists the Past tab's rows as they are, no-shows included (spec 9.4) -
+// useTodayPastTours.test.tsx pins that end to end. What is left here is the cap.
+describe('TODAY_PAST_TOURS_CAP (the Today page, Sam item 18)', () => {
+  it('caps Today at five rows', () => {
+    expect(TODAY_PAST_TOURS_CAP).toBe(5);
+  });
+});
+```
+new:
+```ts
+// Today lists the Past tab's rows, no-shows included (spec 9.4), every one of
+// them labeled and in Today's own order (spec 2026-10-23-today-checklist 5.3);
+// useTodayPastTours.test.tsx pins that end to end. TODAY_PAST_TOURS_CAP is
+// gone (plan WI10): the Today section shows 5 rows with Show all
+// (TODAY_SECTION_LIMIT, pinned in today/TodaySection.test.tsx).
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/dashboard; npx vitest run src/routes/today/useTodayPastTours.test.tsx src/routes/tours/useTours.test.ts
+```
+Expected failures, and why:
+- `lists the Past rows ... OLDEST first ...`: rows are
+  `['new', 'ns', 'old']` (the Past tab's most-recent-first order).
+- `labels EVERY Past row (no cap) ...`: 5 rows `['t0'..'t4']`, getContact
+  called 5 times (the cap).
+- `skips a soft-deleted tenant`: `['t0', 't2', 't3', 't4', 't5']`.
+- `orders in-range rows oldest first ...`: `['a', 'b', 'c', 'u-new',
+  'u-old']`.
+- `a live reload reuses the addresses ...`: rows stay `['c', 'a', 'b']`, so
+  the `waitFor` times out.
+useTours.test.ts stays green (removing a pin is not a RED; the import line
+still resolves because the cap still exists until Step 3).
+
+#### Step 3 - implementation
+
+3a. Replace `dashboard/src/routes/today/useTodayPastTours.ts` WHOLE (Read
+it first; the Write tool refuses an unread file). The file is ASCII today
+and stays ASCII:
+```ts
+// useTodayPastTours - the Today page's "Past tours needing an outcome" section
+// (Sam's item 18, Cameron 2026-09-30; ordered and labeled per spec
+// 2026-10-23-today-checklist-design 5.3). It REUSES the Tours page's Past tab:
+// the same loader (usePastTours - the same two reads over the same window) and
+// the Past tab's selected rows, no-shows included - a no-show closes on its
+// own two weeks after its last mark (tour spec 9.4). Nothing here decides
+// which tour is "past"; change the Past tab's rule and Today follows.
+//
+// What it adds for the home page:
+// - Names for EVERY Past row, so the heading count and "Show all N" are the
+//   rows Today actually qualifies (spec 5.3; the page shows the first 5). The
+//   Past tab loads every contact and property to label its rows - too heavy
+//   for the landing page - so this point-reads only the listed tenants and
+//   properties, all at once (one round trip).
+// - Soft-deleted tenants are skipped, as on every other Today row (the server
+//   queue's rule). A failed lookup is NOT a deletion: the row stays, labeled
+//   by id (the Past tab's fallback).
+// - Today's order (spec 5.3): the range read's rows OLDEST scheduledAt first
+//   (ties by tourId), so the oldest tours do not wait for the two-week
+//   auto-close; then the off-range rows (undated, or dated after today) in
+//   the loader's own order, last. The split is the Past tab's own rule
+//   (isOffRangePastTour). The Past tab's order is unchanged.
+// - Live refresh: a tour.updated event (a status or outcome PATCH, a
+//   conversion, the auto-close sweep, a reopen, a create) reloads the rows,
+//   debounced; addresses already looked up are reused (tenants are re-read,
+//   for their delete state), and a failed reload keeps the rows and says so
+//   (reloadFailed).
+// - Failure isolation: a failed load is this section's error, never the page's.
+import { useEffect, useRef, useState } from 'react';
+import {
+  getContact,
+  getUnit,
+  useEventStream,
+  type Contact,
+  type Tour,
+  type UnitItem,
+} from '../../api/index.js';
+import { contactDisplayName, formatAddress } from '../contact/format.js';
+import { isOffRangePastTour, usePastTours } from '../tours/useTours.js';
+
+export interface TodayPastTourRow {
+  tour: Tour;
+  /** The tenant's display name; the tenantId when the lookup failed. */
+  tenant: string;
+  /** The property's address; the unitId when the lookup failed. */
+  property: string;
+}
+
+export interface TodayPastToursState {
+  /** 'idle' until the first rows are ready, names included (the section stays
+   *  hidden meanwhile); 'error' only when the first load failed - a failed
+   *  reload keeps the rows on screen. */
+  status: 'idle' | 'ready' | 'error';
+  /** Every Past row whose tenant is not soft-deleted, labeled, in Today's
+   *  order (orderForToday). The page shows the first 5 with Show all. */
+  rows: TodayPastTourRow[];
+  /** How many rows the Past tab lists - the "See all N on the Past tab" count,
+   *  so the link names what the click lands on. It includes what Today leaves
+   *  out (a deleted tenant's tours), so it can exceed rows.length. */
+  total: number;
+  /** The last live reload failed; the rows on screen may be stale (the Past
+   *  tab's reloadFailed, passed through). Never true unless status is ready. */
+  reloadFailed: boolean;
+}
+
+/** Debounce window (ms) for tour.updated reloads - coalesces a burst (a bulk
+ *  Mark toured in another tab) into one reload. */
+const RELOAD_DEBOUNCE_MS = 300;
+
+function isDeletedContact(c: Contact): boolean {
+  return typeof c.deleted_at === 'string' && c.deleted_at.length > 0;
+}
+
+/** Successful PROPERTY lookups, kept for the hook's lifetime so a live reload
+ *  re-reads no property it already named (a failed lookup is never stored: it
+ *  retries on the next reload). Tenants are deliberately NOT kept: on Today a
+ *  tenant's soft-delete decides whether the row shows at all, so every pass
+ *  re-reads the listed tenants and a delete made in another tab takes effect on
+ *  the next reload rather than the next mount (review R3-2). */
+interface LabelCache {
+  units: Map<string, UnitItem>;
+}
+
+/** One lookup per id per pass, answered from `cache` when it can be. */
+function cachedLookup<T>(
+  cache: Map<string, T>,
+  fetchOne: (id: string, signal: AbortSignal) => Promise<T>,
+  signal: AbortSignal,
+): (id: string) => Promise<T | undefined> {
+  const inPass = new Map<string, Promise<T | undefined>>();
+  return (id) => {
+    const hit = cache.get(id);
+    if (hit !== undefined) return Promise.resolve(hit);
+    let p = inPass.get(id);
+    if (p === undefined) {
+      p = fetchOne(id, signal).then(
+        (value) => {
+          cache.set(id, value);
+          return value;
+        },
+        () => undefined,
+      );
+      inPass.set(id, p);
+    }
+    return p;
+  };
+}
+
+/** Label every Past row whose tenant is not soft-deleted, keeping the given
+ *  order. Every tenant and property read starts at once (the property reads
+ *  beside the tenant reads, so labeling costs one round trip; a deleted
+ *  tenant's property read is wasted, rarely). Every lookup is best-effort: a
+ *  failure resolves to undefined, so this never rejects (an aborted pass
+ *  resolves to [] and is discarded by the caller). */
+async function labelRows(tours: Tour[], signal: AbortSignal, cache: LabelCache): Promise<TodayPastTourRow[]> {
+  // A fresh map per pass: tenants are only de-duplicated within this pass.
+  const contactOf = cachedLookup(new Map<string, Contact>(), getContact, signal);
+  const unitOf = cachedLookup(cache.units, getUnit, signal);
+
+  const unitsPending = Promise.all(tours.map((t) => unitOf(t.unitId)));
+  const contacts = await Promise.all(tours.map((t) => contactOf(t.tenantId)));
+  const units = await unitsPending;
+  if (signal.aborted) return [];
+
+  const rows: TodayPastTourRow[] = [];
+  tours.forEach((tour, i) => {
+    const contact = contacts[i];
+    if (contact !== undefined && isDeletedContact(contact)) return;
+    const unit = units[i];
+    rows.push({
+      tour,
+      tenant:
+        contact !== undefined
+          ? contactDisplayName(contact.firstName, contact.lastName, contact.phone)
+          : tour.tenantId,
+      property: unit !== undefined ? formatAddress(unit.address) || tour.unitId : tour.unitId,
+    });
+  });
+  return rows;
+}
+
+/** Today's order for the labeled Past rows (spec 5.3): the in-range rows (the
+ *  range read's) by OLDEST scheduledAt first, ties by tourId; then the
+ *  off-range rows (isOffRangePastTour - the Past tab's own split) in the order
+ *  given, last. Pure; never mutates its input. */
+export function orderForToday(rows: readonly TodayPastTourRow[], now: Date = new Date()): TodayPastTourRow[] {
+  const inRange = rows.filter((r) => !isOffRangePastTour(r.tour, now));
+  const offRange = rows.filter((r) => isOffRangePastTour(r.tour, now));
+  inRange.sort((a, b) => {
+    const aAt = a.tour.scheduledAt ?? '';
+    const bAt = b.tour.scheduledAt ?? '';
+    if (aAt !== bAt) return aAt < bAt ? -1 : 1;
+    return a.tour.tourId < b.tour.tourId ? -1 : a.tour.tourId > b.tour.tourId ? 1 : 0;
+  });
+  return [...inRange, ...offRange];
+}
+
+export function useTodayPastTours(): TodayPastToursState {
+  const { status: pastStatus, past, reload, reloadFailed } = usePastTours(true);
+  // Today lists the Past rows themselves (no-shows included, spec 9.4). `past`
+  // is a new array on every load, so the labeling effect re-runs per load and
+  // never on an unrelated render.
+  const pastCount = past.length;
+  const [labeled, setLabeled] = useState<{ rows: TodayPastTourRow[]; total: number } | null>(null);
+  const cacheRef = useRef<LabelCache>({ units: new Map() });
+
+  useEffect(() => {
+    if (pastStatus !== 'ready') return;
+    const controller = new AbortController();
+    // The state write is in the async callback, never synchronous in the
+    // effect (react-hooks/set-state-in-effect). A reload keeps the previous
+    // rows on screen until this lands.
+    void labelRows(past, controller.signal, cacheRef.current).then((rows) => {
+      if (controller.signal.aborted) return;
+      setLabeled({ rows: orderForToday(rows, new Date()), total: pastCount });
+    });
+    return () => controller.abort();
+  }, [pastStatus, past, pastCount]);
+
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(
+    () => () => {
+      if (debounceRef.current !== undefined) clearTimeout(debounceRef.current);
+    },
+    [],
+  );
+  useEventStream({
+    onTourUpdated: () => {
+      if (debounceRef.current !== undefined) clearTimeout(debounceRef.current);
+      debounceRef.current = setTimeout(() => {
+        debounceRef.current = undefined;
+        reload();
+      }, RELOAD_DEBOUNCE_MS);
+    },
+  });
+
+  if (pastStatus === 'error') return { status: 'error', rows: [], total: 0, reloadFailed: false };
+  if (labeled === null) return { status: 'idle', rows: [], total: 0, reloadFailed: false };
+  return { status: 'ready', rows: labeled.rows, total: labeled.total, reloadFailed };
+}
+```
+
+3b. `dashboard/src/routes/tours/useTours.ts` - the cap has no reader left
+(WI10). Edit (delete the block):
+
+old:
+```ts
+/** How many past tours the Today page lists before it points at the Past tab.
+ *  Today lists the Past tab's own rows as they are (Cameron 2026-09-30, Sam's
+ *  item 18), in the Past tab's order, no-shows included: a no-show now closes
+ *  on its own two weeks after its last mark, so it no longer sits on the home
+ *  page for the whole window (spec 9.4). Never re-deriving the rows keeps one
+ *  rule - change the Past tab and Today follows. */
+export const TODAY_PAST_TOURS_CAP = 5;
+
+```
+new: (nothing - the next line `/** The plain-words state chip for a Past
+row (spec 4.3). Any other status` follows `selectOffRangeTours`' closing
+brace and its blank line.)
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/dashboard; npx vitest run src/routes/today src/routes/tours
+```
+Expect all green. `Today.test.tsx` is unchanged and still green: it mocks
+the hook. (Until S5.6 the old page lists every labeled row - see the
+intermediate-states note.) Then:
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0 (no reader of `TODAY_PAST_TOURS_CAP` remains).
+```
+cd W:/tmp/today-checklist; git grep -n TODAY_PAST_TOURS_CAP -- dashboard
+```
+Expect exactly one hit: the `useTours.test.ts` comment that records its
+removal. Record the WI10 result for the report.
+
+#### Step 5 - ASCII check
+
+```
+cd W:/tmp/today-checklist; tr -d '\11\12\15\40-\176' < dashboard/src/routes/today/useTodayPastTours.ts | wc -c; tr -d '\11\12\15\40-\176' < dashboard/src/routes/today/useTodayPastTours.test.tsx | wc -c; git diff -U0 -- dashboard/src/routes/tours | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0` three times (both today files were ASCII and stay ASCII).
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+test ! -e "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD" && echo no-merge-in-progress
+git -C W:/tmp/today-checklist add dashboard/src/routes/today/useTodayPastTours.ts dashboard/src/routes/today/useTodayPastTours.test.tsx dashboard/src/routes/tours/useTours.ts dashboard/src/routes/tours/useTours.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(dashboard): Today past tours - label every row, oldest first, off-range last; retire TODAY_PAST_TOURS_CAP (today-checklist S5.3)" -m "Spec 5.3, plan PR35, WI10. The most-recent-first and at-most-five cases are re-written deliberately." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S5.4 - The wire mirror, `useToday` statuses, and the fallback (WI11)
+
+PR31, PR32, PR36; spec 3, 3.1. The dashboard types gain the new groups and
+fields; `useToday` exposes `quietShares`, `toursToBookStatus` and
+`generatedAt` (C4), reading a missing field as unavailable; a fallback load
+sets both unavailable. `buildToday` emits `identify` rows and no
+`unreplied` rows. `'unreplied'` stays in the union (no producer) until
+S5.6.
+
+Files:
+- `dashboard/src/api/types.ts`
+- `dashboard/src/routes/today/useToday.ts`
+- `dashboard/src/routes/today/useToday.test.tsx`
+- `dashboard/src/routes/today/buildToday.ts`
+- `dashboard/src/routes/today/buildToday.test.ts`
+
+#### Step 1 - failing tests
+
+1a. `dashboard/src/routes/today/useToday.test.tsx` - the probe shows the new
+fields (printing `missing` when the hook does not set one, so every new
+case is a real RED). Edit:
+
+old:
+```tsx
+function Probe(): React.JSX.Element {
+  const { status, items, source } = useToday();
+  return (
+    <div>
+      <span data-testid="status">{status}</span>
+      <span data-testid="source">{source}</span>
+      <span data-testid="count">{items.length}</span>
+      <span data-testid="first">{items[0]?.who ?? ''}</span>
+    </div>
+  );
+}
+```
+new:
+```tsx
+function Probe(): React.JSX.Element {
+  const { status, items, source, quietShares, toursToBookStatus, generatedAt } = useToday();
+  return (
+    <div>
+      <span data-testid="status">{status}</span>
+      <span data-testid="source">{source}</span>
+      <span data-testid="count">{items.length}</span>
+      <span data-testid="first">{items[0]?.who ?? ''}</span>
+      <span data-testid="quiet">
+        {quietShares === undefined
+          ? 'missing'
+          : quietShares.status === 'ok'
+            ? `ok:${quietShares.people}:${quietShares.properties.length}:${String(quietShares.truncated)}`
+            : 'unavailable'}
+      </span>
+      <span data-testid="ttb">{toursToBookStatus ?? 'missing'}</span>
+      <span data-testid="generated">{generatedAt ?? 'missing'}</span>
+    </div>
+  );
+}
+```
+
+1b. Same file - append at the end:
+```tsx
+
+// Spec 2026-10-23-today-checklist-design 2.5 / 3.1, plan PR31-PR32: the two
+// sections the server may fail to compute, and the fallback that never has
+// them. generatedAt is the Quiet shares clock (plan S5 C4).
+describe('useToday - Quiet shares and Tours to book statuses', () => {
+  const QUIET: NonNullable<TodayResponse['quietShares']> = {
+    status: 'ok',
+    properties: [
+      {
+        unitId: 'u1',
+        unitLabel: '12 Oak St',
+        people: [
+          { contactId: 'c1', name: 'Dana Ruiz', type: 'tenant', state: 'no_reply', quietSince: '2026-06-10T12:00:00Z' },
+        ],
+      },
+    ],
+    people: 1,
+    truncated: false,
+  };
+
+  it('passes the server quiet shares, the Tours to book status and generatedAt through', async () => {
+    getToday.mockResolvedValue({ ...TODAY, quietShares: QUIET, toursToBook: 'ok' });
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    expect(screen.getByTestId('quiet').textContent).toBe('ok:1:1:false');
+    expect(screen.getByTestId('ttb').textContent).toBe('ok');
+    expect(screen.getByTestId('generated').textContent).toBe('2026-06-16T12:00:00Z');
+  });
+
+  it('keeps a section the server could not compute unavailable', async () => {
+    getToday.mockResolvedValue({ ...TODAY, quietShares: { status: 'unavailable' }, toursToBook: 'unavailable' });
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    expect(screen.getByTestId('quiet').textContent).toBe('unavailable');
+    expect(screen.getByTestId('ttb').textContent).toBe('unavailable');
+  });
+
+  it('reads a field an older server omits as unavailable, never as an empty section', async () => {
+    getToday.mockResolvedValue(TODAY); // no quietShares, no toursToBook
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    expect(screen.getByTestId('quiet').textContent).toBe('unavailable');
+    expect(screen.getByTestId('ttb').textContent).toBe('unavailable');
+  });
+
+  it('a fallback load has both sections unavailable (it computes neither)', async () => {
+    getToday.mockRejectedValue(new ApiError(404, 'not_found', 'no'));
+    getAllPlacements.mockResolvedValue([]);
+    getAllConversations.mockResolvedValue(CONVERSATIONS);
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    expect(screen.getByTestId('source')).toHaveTextContent('fallback');
+    expect(screen.getByTestId('quiet').textContent).toBe('unavailable');
+    expect(screen.getByTestId('ttb').textContent).toBe('unavailable');
+    expect(screen.getByTestId('generated').textContent).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+});
+```
+
+1c. `dashboard/src/routes/today/buildToday.test.ts` - the unknown rows move
+to `identify`. Edit (title):
+
+old:
+```ts
+  it('treats an untriaged unknown_1to1 as needs_you_now, linking to the contact page', () => {
+```
+new:
+```ts
+  it('puts an unknown_1to1 in identify (spec 2026-10-23 3.1), linking to the contact page', () => {
+```
+Edit with `replace_all: true` (it occurs twice, in this case and the next
+"falls back to the Unknown list" case - both move):
+
+old:
+```ts
+    const unk = items.find((i) => i.group === 'needs_you_now');
+```
+new:
+```ts
+    const unk = items.find((i) => i.group === 'identify');
+```
+Edit (the first case's end):
+
+old:
+```ts
+    expect(unk?.why).toMatch(/untriaged/i);
+  });
+```
+new:
+```ts
+    expect(unk?.why).toMatch(/untriaged/i);
+    // It left Needs you now for Identify these contacts.
+    expect(items.filter((i) => i.group === 'needs_you_now')).toEqual([]);
+  });
+```
+
+1d. Same file - the two Unreplied cases are INVERTED (Unreplied is gone,
+spec 4). Edit - replace both whole (line ~218 holds a right arrow; copy it
+from your Read):
+
+old:
+```ts
+  it('puts an unread triaged 1:1 in unreplied, linking to the contact page', () => {
+    const items = buildTodayFromSources(
+      [],
+      [
+        convOf({
+          conversationId: 'unrep',
+          type: 'landlord_1to1',
+          participant_phone: '+14042220190',
+          participants: [{ contactId: 'L1', phone: '+14042220190' }],
+          unread_count: 2,
+          participant_display_name: 'James Porter',
+          preview: 'Is the 2BR still open?',
+        }),
+      ],
+      NOW,
+    );
+    const u = items.find((i) => i.group === 'unreplied');
+    expect(u?.refType).toBe('contact');
+    expect(u?.refId).toBe('L1'); // [U+2192] /contacts/L1
+    expect(u?.who).toBe('James Porter');
+    expect(u?.why).toBe('Is the 2BR still open?');
+    expect(u?.tag).toBe('Contact - Landlord');
+  });
+
+  it('routes an unread partner_1to1 to the contact page, not the dead conversation link (n8)', () => {
+    const items = buildTodayFromSources(
+      [],
+      [
+        convOf({
+          conversationId: 'unrep-p',
+          type: 'partner_1to1',
+          participant_phone: '+14042220191',
+          participants: [{ contactId: 'P1', phone: '+14042220191' }],
+          unread_count: 1,
+          participant_display_name: 'Nadia Partner',
+          preview: 'Referral packet attached',
+        }),
+      ],
+      NOW,
+    );
+    const u = items.find((i) => i.group === 'unreplied');
+    // partner_1to1 is a 1:1 -> refType 'contact' (/contacts/P1), NOT the dead
+    // /conversations/:id 404 fallback a missing ONE_TO_ONE entry would produce.
+    expect(u?.refType).toBe('contact');
+    expect(u?.refId).toBe('P1');
+    expect(u?.tag).toBe('Contact - Partner');
+  });
+```
+new:
+```ts
+  // Spec 2026-10-23 4: Unreplied is gone - a known contact's unread thread is
+  // an Inbox row only. INVERTS the former "puts an unread triaged 1:1 in
+  // unreplied" and "routes an unread partner_1to1 ... (n8)" cases.
+  for (const type of ['tenant_1to1', 'landlord_1to1', 'partner_1to1', 'relay_group'] as const) {
+    it(`emits no row for an unread ${type} thread (the Inbox carries it)`, () => {
+      const items = buildTodayFromSources(
+        [],
+        [
+          convOf({
+            conversationId: `unread-${type}`,
+            type,
+            participant_phone: '+14042220190',
+            participants: [{ contactId: 'L1', phone: '+14042220190' }],
+            unread_count: 2,
+            participant_display_name: 'James Porter',
+            preview: 'Is the 2BR still open?',
+          }),
+        ],
+        NOW,
+      );
+      expect(items).toEqual([]);
+    });
+  }
+```
+
+1e. Same file - the canonical order is the server's (PR30). Edit:
+
+old:
+```ts
+      [convOf({ conversationId: 'unrep', unread_count: 1, preview: 'hi', participant_display_name: 'X' })],
+      NOW,
+      [tourOf({ tourId: 'tour', scheduledAt: at(2 * HOUR) })],
+    );
+    expect(items.map((i) => i.group)).toEqual([
+      'needs_you_now',
+      'tours_today',
+      'unreplied',
+      'follow_ups',
+    ]);
+```
+new:
+```ts
+      [
+        convOf({ conversationId: 'unrep', unread_count: 1, preview: 'hi', participant_display_name: 'X' }),
+        convOf({ conversationId: 'unk', type: 'unknown_1to1', unread_count: 1, participant_display_name: 'Y' }),
+      ],
+      NOW,
+      [tourOf({ tourId: 'tour', scheduledAt: at(2 * HOUR) })],
+    );
+    // The server's order (plan PR30); the unread tenant thread is no row.
+    expect(items.map((i) => i.group)).toEqual([
+      'needs_you_now',
+      'identify',
+      'tours_today',
+      'follow_ups',
+    ]);
+```
+
+1f. Same file - the group-text describe. Edit (comment):
+
+old:
+```ts
+    // exclusion, so no later rule (ONE_TO_ONE, participantContactId) can readmit
+```
+new:
+```ts
+    // exclusion, so no later rule (participantContactId) can readmit
+```
+Edit:
+
+old:
+```ts
+  it('still surfaces the 1:1 threads beside it', () => {
+    const items = buildTodayFromSources(
+      [],
+      [
+        convOf({ conversationId: 'gt-1', type: 'group_text', unread_count: 9 }),
+        convOf({ conversationId: 'c-1', type: 'tenant_1to1', unread_count: 1, preview: 'hi' }),
+      ],
+      NOW,
+    );
+    expect(items.map((i) => i.refId)).toEqual(['unknown?phone=%2B14040100007']);
+  });
+```
+new:
+```ts
+  it('still surfaces the unknown 1:1 thread beside it', () => {
+    // Was a tenant_1to1 Unreplied row; Unreplied is gone (spec 2026-10-23 4),
+    // so the 1:1 that still surfaces beside a group text is an unknown one.
+    const items = buildTodayFromSources(
+      [],
+      [
+        convOf({ conversationId: 'gt-1', type: 'group_text', unread_count: 9 }),
+        convOf({ conversationId: 'c-1', type: 'unknown_1to1', unread_count: 1, preview: 'hi' }),
+      ],
+      NOW,
+    );
+    expect(items.map((i) => [i.group, i.refId])).toEqual([['identify', 'unknown?phone=%2B14040100007']]);
+  });
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/dashboard; npx vitest run src/routes/today/useToday.test.tsx src/routes/today/buildToday.test.ts
+```
+Expected failures, and why:
+- useToday.test.tsx, the four new cases: `quiet`, `ttb` and `generated`
+  read `missing` (the hook sets none of them). The eight existing cases stay
+  green (the probe's extra spans do not touch them).
+- buildToday.test.ts: `puts an unknown_1to1 in identify ...` and `falls
+  back to the Unknown list ...` - `unk` is undefined (the rows are still
+  `needs_you_now`); the four `emits no row for an unread ...` cases - an
+  `unreplied` row is emitted; `returns groups in canonical order ...` -
+  `unreplied` present, `identify` absent; `still surfaces the unknown 1:1
+  thread beside it` - the row's group is `needs_you_now`.
+
+#### Step 3 - implementation
+
+3a. `dashboard/src/api/types.ts` - the group union and the tour-row fields
+(spec 3). Edit:
+
+old:
+```ts
+export type TodayGroup =
+  | 'needs_you_now'
+  | 'tours_today'
+  | 'unreplied'
+  | 'follow_ups'
+  | 'ai_suggestions';
+export interface TodayItem {
+  group: TodayGroup;
+  refType: 'placement' | 'contact' | 'conversation' | 'tour';
+  refId: string;
+  who: string; // display name / phone
+  why: string; // "RTA window closing"
+  urgency?: string; // "2h left"
+  tag?: string; // "Placement - Touring"
+  attention?: boolean;
+}
+```
+new:
+```ts
+/** Spec 2026-10-23-today-checklist-design 3 (mirrors app/src/routes/today.ts):
+ *  `identify` (split from needs_you_now) and `tours_to_book` are new.
+ *  `unreplied` has no producer left; plan task S5.6 removes it from this
+ *  union together with its last reader (Today.tsx). */
+export type TodayGroup =
+  | 'needs_you_now'
+  | 'identify'
+  | 'tours_to_book'
+  | 'tours_today'
+  | 'follow_ups'
+  | 'ai_suggestions'
+  | 'unreplied';
+export interface TodayItem {
+  group: TodayGroup;
+  refType: 'placement' | 'contact' | 'conversation' | 'tour';
+  refId: string;
+  who: string; // display name / phone
+  why: string; // "RTA window closing"
+  urgency?: string; // "2h left"
+  tag?: string; // "Placement - Touring"
+  attention?: boolean;
+  /** ISO, tour rows only. tours_today: the tour's scheduledAt (the At a glance
+   *  row's local time). tours_to_book: the tour's createdAt. */
+  at?: string;
+  /** Tour rows only: the property, formatAddress(unit.address) || unitId (the
+   *  server formatter; a failed unit lookup degrades to the unitId). */
+  unitLabel?: string;
+}
+```
+
+3b. Same file - the quiet shares wire and the two new response fields.
+Edit:
+
+old:
+```ts
+export interface TodayResponse {
+  items: TodayItem[];
+  /** Open relay groups whose 28-day close-nag is due (D5) - a SEPARATE list, not
+   *  part of `items`. Absent on an older backend, so the client defaults to []. */
+  relayCloseNags?: RelayCloseNag[];
+  generatedAt: string;
+}
+```
+new:
+```ts
+/** One person waiting on one property in Today's Quiet shares (spec
+ *  2026-10-23-today-checklist-design 3, 6.2). */
+export interface QuietSharePerson {
+  contactId: string;
+  /** The Follow up tab's name rule. */
+  name: string;
+  type: string;
+  /** As on the Follow up tab (a caseworker's role tag reads it). */
+  role?: string;
+  state: 'replied' | 'no_reply';
+  /** ISO - the quiet clock (spec 6.1). */
+  quietSince: string;
+}
+/** One property line in Quiet shares (spec 6.3), people in the server's order. */
+export interface QuietShareProperty {
+  unitId: string;
+  /** The Follow up tab's formatter. */
+  unitLabel: string;
+  people: QuietSharePerson[];
+}
+/** Today's Quiet shares (spec 3). `people` = DISTINCT contacts across every
+ *  property (the heading count); `truncated` = more than 100 available
+ *  properties exist ("Showing the first 100 properties"). */
+export type TodayQuietShares =
+  | { status: 'ok'; properties: QuietShareProperty[]; people: number; truncated: boolean }
+  | { status: 'unavailable' };
+export interface TodayResponse {
+  items: TodayItem[];
+  /** Open relay groups whose 28-day close-nag is due (D5) - a SEPARATE list, not
+   *  part of `items`. Absent on an older backend, so the client defaults to []. */
+  relayCloseNags?: RelayCloseNag[];
+  /** Spec 3. OPTIONAL here (plan PR31): an older backend omits it, and
+   *  useToday reads a missing value as unavailable. */
+  quietShares?: TodayQuietShares;
+  /** Whether the server computed the tours_to_book group (spec 3). Optional
+   *  and read like quietShares. */
+  toursToBook?: 'ok' | 'unavailable';
+  generatedAt: string;
+}
+```
+
+3c. `dashboard/src/routes/today/useToday.ts` - imports. Edit:
+
+old:
+```ts
+  type RelayCloseNag,
+  type TodayItem,
+} from '../../api/index.js';
+```
+new:
+```ts
+  type RelayCloseNag,
+  type TodayItem,
+  type TodayQuietShares,
+} from '../../api/index.js';
+```
+Edit:
+
+old:
+```ts
+export type TodaySource = 'server' | 'fallback';
+```
+new:
+```ts
+export type TodaySource = 'server' | 'fallback';
+/** Today's Quiet shares as the page reads them (spec 2026-10-23 3, 6). */
+export type QuietSharesState = TodayQuietShares;
+```
+Edit (TodayState):
+
+old:
+```ts
+  relayCloseNags: RelayCloseNag[];
+  /** Optimistically drop a nag row once its Close / Keep-open action succeeds (the
+```
+new:
+```ts
+  relayCloseNags: RelayCloseNag[];
+  /** Quiet shares (spec 2026-10-23 6). 'unavailable' when the server says so,
+   *  when an older server omits the field (plan PR31), and always on the
+   *  fallback (spec 3.1). */
+  quietShares: QuietSharesState;
+  /** Whether Tours to book was computed: 'unavailable' on a server failure,
+   *  a missing field, and always on the fallback. */
+  toursToBookStatus: 'ok' | 'unavailable';
+  /** The server's generatedAt (the fallback's own now): the clock Quiet
+   *  shares counts "N days" from (plan S5 C4). */
+  generatedAt: string;
+  /** Optimistically drop a nag row once its Close / Keep-open action succeeds (the
+```
+Edit (loadToday's signature):
+
+old:
+```ts
+async function loadToday(
+  signal: AbortSignal,
+): Promise<{ items: TodayItem[]; source: TodaySource; relayCloseNags: RelayCloseNag[] }> {
+```
+new:
+```ts
+/** What one load produces (status and dismissNag are the hook's own). */
+type TodayLoad = Omit<TodayState, 'status' | 'dismissNag'>;
+
+/** The Quiet shares of a load that has none to show: an older server that
+ *  omits the field, and every fallback load (spec 3.1, plan PR31/PR32). */
+const QUIET_SHARES_UNAVAILABLE: QuietSharesState = { status: 'unavailable' };
+
+async function loadToday(signal: AbortSignal): Promise<TodayLoad> {
+```
+Edit (the server return):
+
+old:
+```ts
+    return { items: res.items, source: 'server', relayCloseNags: res.relayCloseNags ?? [] };
+```
+new:
+```ts
+    return {
+      items: res.items,
+      source: 'server',
+      relayCloseNags: res.relayCloseNags ?? [],
+      // A missing field (an older server) is UNAVAILABLE, never an empty
+      // section that could let the page claim "All caught up" (plan PR31).
+      quietShares: res.quietShares?.status === 'ok' ? res.quietShares : QUIET_SHARES_UNAVAILABLE,
+      toursToBookStatus: res.toursToBook === 'ok' ? 'ok' : 'unavailable',
+      generatedAt: res.generatedAt,
+    };
+```
+Edit (the fallback return):
+
+old:
+```ts
+    // The fallback can't derive the close nags (no close_nag_next_at on the
+    // /api/placements or /api/conversations payloads) - leave it empty.
+    return { items, source: 'fallback', relayCloseNags: [] };
+```
+new:
+```ts
+    // The fallback can't derive the close nags (no close_nag_next_at on the
+    // /api/placements or /api/conversations payloads) - leave it empty. It
+    // assembles no Tours to book and no Quiet shares either (spec 3.1), so both
+    // are UNAVAILABLE - which is what keeps a fallback load from ever reading
+    // "All caught up" (plan WI11).
+    return {
+      items,
+      source: 'fallback',
+      relayCloseNags: [],
+      quietShares: QUIET_SHARES_UNAVAILABLE,
+      toursToBookStatus: 'unavailable',
+      generatedAt: now.toISOString(),
+    };
+```
+Edit (initial state):
+
+old:
+```ts
+  const [state, setState] = useState<TodayData>({
+    status: 'loading',
+    items: [],
+    source: 'server',
+    relayCloseNags: [],
+  });
+```
+new:
+```ts
+  const [state, setState] = useState<TodayData>({
+    status: 'loading',
+    items: [],
+    source: 'server',
+    relayCloseNags: [],
+    quietShares: QUIET_SHARES_UNAVAILABLE,
+    toursToBookStatus: 'unavailable',
+    generatedAt: '',
+  });
+```
+Edit (fetchNow):
+
+old:
+```ts
+      const { items, source, relayCloseNags } = await loadToday(controller.signal);
+      if (controller.signal.aborted) return;
+      setState((prev) => ({ ...prev, status: 'ready', items, source, relayCloseNags }));
+```
+new:
+```ts
+      const load = await loadToday(controller.signal);
+      if (controller.signal.aborted) return;
+      setState((prev) => ({ ...prev, ...load, status: 'ready' }));
+```
+Edit (two subscription comments; no subscription changes, PR32):
+
+old:
+```ts
+    // conversation-fact-extraction: a new/accepted/dismissed suggestion changes the
+    // "AI suggestions to review" group count.
+    onSuggestionUpdated: scheduleRefetch,
+```
+new:
+```ts
+    // conversation-fact-extraction: a new/accepted/dismissed suggestion changes the
+    // At a glance "AI suggestions for N contacts" line.
+    onSuggestionUpdated: scheduleRefetch,
+```
+Edit:
+
+old:
+```ts
+    // show in both sections at once.
+    onTourUpdated: scheduleRefetch,
+    // unknown-inactive (spec D2, AR3): a contact marked Inactive or re-typed
+    // leaves (or joins) Needs you now. A header status change writes no
+    // thread, so contact.updated is the only signal for it.
+    onContactUpdated: scheduleRefetch,
+```
+new:
+```ts
+    // show in both sections at once. A tour CREATE emits it too (spec
+    // 2026-10-23 8): a new request joins Tours to book and its person leaves
+    // Quiet shares.
+    onTourUpdated: scheduleRefetch,
+    // unknown-inactive (spec D2, AR3): a contact marked Inactive or re-typed
+    // leaves (or joins) Identify these contacts. A header status change writes
+    // no thread, so contact.updated is the only signal for it. A staff send
+    // that stamps last_reached_out_at emits it as well (spec 2026-10-23 7.3),
+    // restarting that person's Quiet shares clock.
+    onContactUpdated: scheduleRefetch,
+```
+
+3d. `dashboard/src/routes/today/buildToday.ts` - the header's grouping
+block (four lines hold non-ASCII; replace the block whole). Edit:
+
+old:
+```ts
+// Grouping (from the build plan [U+00A7]B1):
+//   needs_you_now [U+2014] a placement with a pending business-clock deadline (any type
+//     except follow_up, which is a follow-up) OR an `attention` flag,
+//     PLUS untriaged inbounds (unknown_1to1 conversations). Ordered most-urgent
+//     first (overdue/soonest deadline, then attention rows, then untriaged).
+//   tours_today  [U+2014] a placement whose tour_date is today (local).
+//   unreplied    [U+2014] a conversation with unread_count > 0 (excluding the untriaged
+//     unknowns, which surface in needs_you_now).
+//   follow_ups   [U+2014] a placement whose next_deadline_type is follow_up.
+```
+new:
+```ts
+// Grouping (from the build plan section B1, as amended by spec
+// 2026-10-23-today-checklist-design 3.1):
+//   needs_you_now - a placement with a pending business-clock deadline (any type
+//     except follow_up, which is a follow-up) OR an `attention` flag. Ordered
+//     most-urgent first (overdue/soonest deadline, then attention rows).
+//   identify     - every unknown_1to1 conversation (the fallback's own rule and
+//     copy, unchanged), in the same section the server's identify rows use.
+//   tours_today  - a Tour entity scheduled on the operator's local day.
+//   follow_ups   - a placement whose next_deadline_type is follow_up.
+// There is no unread-thread group (spec 4: known contacts' unread threads live
+// in the Inbox only). The fallback assembles no tours_to_book and no quiet
+// shares; useToday marks both UNAVAILABLE for a fallback load.
+```
+
+3e. Same file - imports. Edit:
+
+old:
+```ts
+  type ConversationSummary,
+  type ConversationType,
+  type Tour,
+```
+new:
+```ts
+  type ConversationSummary,
+  type Tour,
+```
+
+3f. Same file - GROUP_ORDER (the server's order, PR30). Edit:
+
+old:
+```ts
+const GROUP_ORDER: Record<TodayItem['group'], number> = {
+  needs_you_now: 0,
+  tours_today: 1,
+  unreplied: 2,
+  follow_ups: 3,
+  // The client fallback never assembles this group (it comes only from the server
+  // /api/today), but the record must stay exhaustive over TodayGroup.
+  ai_suggestions: 4,
+};
+```
+new:
+```ts
+// The server's response order (plan PR30). The client fallback never
+// assembles tours_to_book or ai_suggestions (they come only from GET
+// /api/today), but the record must stay exhaustive over TodayGroup.
+const GROUP_ORDER: Record<TodayItem['group'], number> = {
+  needs_you_now: 0,
+  identify: 1,
+  tours_to_book: 2,
+  tours_today: 3,
+  follow_ups: 4,
+  ai_suggestions: 5,
+  // No producer is left (spec 2026-10-23 4). Plan task S5.6 deletes this key
+  // with the group itself, once Today.tsx no longer reads it.
+  unreplied: 6,
+};
+```
+
+3g. Same file - delete `CONTACT_TYPE_LABELS` (its only reader was the
+unread branch removed in 3k). Edit:
+
+old:
+```ts
+const CONTACT_TYPE_LABELS: Record<ConversationType, string> = {
+  tenant_1to1: 'Tenant',
+  landlord_1to1: 'Landlord',
+  partner_1to1: 'Partner',
+  unknown_1to1: 'Unknown',
+  relay_group: 'Relay group',
+  // UNREACHABLE label, kept so the Record stays total: group threads are dropped
+  // at Today's intake filter (see buildToday's conversation loop), so no Today
+  // row is ever tagged with it.
+  group_text: 'Group text',
+};
+
+const HOUR_MS = 3_600_000;
+```
+new:
+```ts
+const HOUR_MS = 3_600_000;
+```
+
+3h. Same file - delete `ONE_TO_ONE` (same reason; its first line holds an
+em dash - copy it from your Read). Edit:
+
+old:
+```ts
+/** 1:1 conversation types (one external contact) [U+2014] these route to the contact
+ *  page. relay_group has no single contact, so it keeps a conversation ref.
+ *  group_text is deliberately NOT here and never reaches this Set: Today drops
+ *  it at intake. Note this is a plain Set, so widening ConversationType does NOT
+ *  produce a compile error here - the intake filter is the real guard.
+ *  partner_1to1 is a 1:1 too (n8): omitting it dropped an unread partner thread
+ *  onto the dead /conversations/:id 404 fallback instead of /contacts/:id. */
+const ONE_TO_ONE: ReadonlySet<ConversationType> = new Set<ConversationType>([
+  'tenant_1to1',
+  'landlord_1to1',
+  'partner_1to1',
+  'unknown_1to1',
+]);
+
+```
+new: (nothing - the `/** YYYY-MM-DD in LOCAL time ...` docblock follows
+the `contactRefId` function directly after one blank line.)
+
+3i. Same file - the unread accumulator. Edit:
+
+old:
+```ts
+  const followUps: TodayItem[] = [];
+  const unreplied: TodayItem[] = [];
+```
+new:
+```ts
+  const followUps: TodayItem[] = [];
+```
+
+3j. Same file - the intake comment drops its ONE_TO_ONE clause. Edit:
+
+old:
+```ts
+    // so no later rule can readmit them: `participantContactId` below falls back
+    // to participants[0] and would name a random member, and `ONE_TO_ONE` is a
+    // plain Set that adding a type to the union does not force anyone to update.
+```
+new:
+```ts
+    // so no later rule can readmit them: `participantContactId` below falls back
+    // to participants[0] and would name a random member.
+```
+
+3k. Same file - the unknown branch moves to `identify` (only its comment
+lines and the `group:` line change; the `why:` line with its em dash is NOT
+touched or re-indented). Edit (the first comment line holds an em dash):
+
+old:
+```ts
+    if (conv.type === 'unknown_1to1') {
+      // Untriaged inbound [U+2014] needs triage (surfaces in needs_you_now, not
+      // unreplied). Links to the unknown CONTACT's page (the inbound created an
+      // unknown contact record), NOT /conversations/:id (an unrouted placeholder).
+      needs.push({
+        item: {
+          group: 'needs_you_now',
+          refType: 'contact',
+```
+new:
+```ts
+    if (conv.type === 'unknown_1to1') {
+      // Identify these contacts (spec 2026-10-23 3.1): the fallback's own rule
+      // (every unknown_1to1 thread) and copy, in the server's section. Links to
+      // the unknown CONTACT's page (the inbound created an unknown contact
+      // record), NOT /conversations/:id (an unrouted placeholder). It rides the
+      // `needs` array with a null sort key; the final GROUP_ORDER sort lifts it
+      // into its own group, keeping its order.
+      needs.push({
+        item: {
+          group: 'identify',
+          refType: 'contact',
+```
+Edit (the unread branch goes):
+
+old:
+```ts
+        sortAt: null,
+      });
+      continue;
+    }
+    if (conv.unread_count > 0) {
+      // A 1:1 thread opens its contact page; a relay group has no single contact,
+      // so it keeps a conversation ref (a separate, future concern).
+      const is1to1 = ONE_TO_ONE.has(conv.type);
+      unreplied.push({
+        group: 'unreplied',
+        refType: is1to1 ? 'contact' : 'conversation',
+        refId: is1to1 ? contactRefId(conv) : conv.conversationId,
+        who: conversationWho(conv),
+        why: conv.preview ?? 'Unread message',
+        tag: `Contact - ${CONTACT_TYPE_LABELS[conv.type] ?? conv.type}`,
+      });
+    }
+  }
+```
+new:
+```ts
+        sortAt: null,
+      });
+    }
+    // Every other thread, read or unread, is NOT a Today row: known contacts'
+    // unread threads live in the Inbox and its badge (spec 2026-10-23 4).
+  }
+```
+Edit (assembly):
+
+old:
+```ts
+    ...tours,
+    ...unreplied,
+    ...followUps,
+```
+new:
+```ts
+    ...tours,
+    ...followUps,
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/dashboard; npx vitest run src/routes/today
+```
+Expect all green (`Today.test.tsx` still mocks the hook and still uses
+`'unreplied'` fixtures - legal, the union keeps it until S5.6). Then:
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0. If it names `ConversationType` as unused or missing,
+re-check 3e/3g/3h (no other reader exists in `buildToday.ts`).
+
+WI11 record (for the report): `buildTodayFromSources` runs ONLY when
+`getToday` throws `ApiError` with status 404
+(`dashboard/src/routes/today/useToday.ts`, the `if (!(err instanceof
+ApiError) || err.status !== 404) throw err;` line in `loadToday`); every
+other failure is the page's error state. A fallback load is
+`source: 'fallback'` with both statuses unavailable (3c), and S5.6's page
+withholds "All caught up" on either - the test `a fallback load has both
+sections unavailable` and S5.6's `the fallback shows one line ...` pin it.
+
+#### Step 5 - ASCII check
+
+`types.ts`, `useToday.ts`, `buildToday.ts`, `buildToday.test.ts` carry
+pre-existing non-ASCII; `useToday.test.tsx` is ASCII:
+```
+cd W:/tmp/today-checklist; git diff -U0 -- dashboard/src/api/types.ts dashboard/src/routes/today | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c; tr -d '\11\12\15\40-\176' < dashboard/src/routes/today/useToday.test.tsx | wc -c
+```
+Expect `0` twice. A non-zero first count most likely means a re-indented
+em-dash line in `buildToday.ts` (3k) - restore that line byte-for-byte.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+test ! -e "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD" && echo no-merge-in-progress
+git -C W:/tmp/today-checklist add dashboard/src/api/types.ts dashboard/src/routes/today/useToday.ts dashboard/src/routes/today/useToday.test.tsx dashboard/src/routes/today/buildToday.ts dashboard/src/routes/today/buildToday.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(dashboard): Today wire mirror, useToday section statuses, fallback emits identify and no unreplied (today-checklist S5.4)" -m "Plan PR31, PR32, PR36, WI11: a missing or fallback quietShares/toursToBook reads unavailable; generatedAt is exposed as the quiet clock. Unreplied fallback cases inverted deliberately." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S5.5 - Quiet shares, option C
+
+PR34, spec 6.2, 6.3. One expandable line per property; the first open on
+first arrival; choices kept by unitId across refetches; a later property
+folded; "Show all N properties"; person rows linking to the contact page.
+
+Files:
+- `dashboard/src/routes/today/QuietShares.tsx` (new)
+- `dashboard/src/routes/today/QuietShares.test.tsx` (new)
+- `dashboard/src/routes/today/Today.module.css` (quiet classes)
+
+#### Step 1 - failing tests
+
+Create `dashboard/src/routes/today/QuietShares.test.tsx`:
+```tsx
+// QuietShares - Today's Quiet shares, option C (spec
+// 2026-10-23-today-checklist-design 6.2, 6.3; plan PR34). Rendered directly;
+// Today.test.tsx covers its place on the page. The clock is the `now` prop -
+// the server's generatedAt.
+import { render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router-dom';
+import { describe, expect, it } from 'vitest';
+import type { QuietSharePerson, QuietShareProperty } from '../../api/index.js';
+import { propertySummary, QuietSharesSection, quietText } from './QuietShares.js';
+import type { QuietSharesState } from './useToday.js';
+
+const NOW = '2026-07-01T12:00:00.000Z';
+const DAY_MS = 86_400_000;
+
+function daysBefore(n: number, extraMs = 0): string {
+  return new Date(Date.parse(NOW) - n * DAY_MS - extraMs).toISOString();
+}
+
+function person(contactId: string, over: Partial<QuietSharePerson> = {}): QuietSharePerson {
+  return {
+    contactId,
+    name: `Name ${contactId}`,
+    type: 'tenant',
+    state: 'no_reply',
+    quietSince: daysBefore(6),
+    ...over,
+  };
+}
+
+function property(unitId: string, people: QuietSharePerson[]): QuietShareProperty {
+  return { unitId, unitLabel: `${unitId} Main St`, people };
+}
+
+function ok(properties: QuietShareProperty[], extra: { people?: number; truncated?: boolean } = {}): QuietSharesState {
+  return {
+    status: 'ok',
+    properties,
+    people: extra.people ?? properties.reduce((n, p) => n + p.people.length, 0),
+    truncated: extra.truncated ?? false,
+  };
+}
+
+function ui(quiet: QuietSharesState): React.JSX.Element {
+  return (
+    <MemoryRouter>
+      <QuietSharesSection quiet={quiet} now={NOW} />
+    </MemoryRouter>
+  );
+}
+
+/** A property line: a button named "<unitLabel>, <summary>". */
+function lineFor(unitId: string): HTMLElement {
+  return screen.getByRole('button', { name: new RegExp(`^${unitId} Main St, `) });
+}
+
+describe('propertySummary (spec 6.3)', () => {
+  it('counts the people, then the replied part and the never-replied part', () => {
+    const people = [
+      ...['a', 'b'].map((id) => person(id, { state: 'replied' })),
+      ...['c', 'd', 'e', 'f', 'g'].map((id) => person(id)),
+    ];
+    expect(propertySummary(people)).toBe('7 people: 2 replied, then quiet - 5 never replied');
+  });
+
+  it('leaves a zero part out', () => {
+    expect(propertySummary(['a', 'b', 'c'].map((id) => person(id)))).toBe('3 people: 3 never replied');
+    expect(propertySummary(['a', 'b'].map((id) => person(id, { state: 'replied' })))).toBe('2 people: 2 replied, then quiet');
+  });
+
+  it('one person reads "1 person"', () => {
+    expect(propertySummary([person('a')])).toBe('1 person: 1 never replied');
+    expect(propertySummary([person('a', { state: 'replied' })])).toBe('1 person: 1 replied, then quiet');
+  });
+});
+
+describe('quietText (spec 6.2)', () => {
+  it('replied: "Replied, then quiet N days"; no_reply: "No reply in N days"', () => {
+    expect(quietText(person('a', { state: 'replied', quietSince: daysBefore(3) }), NOW)).toBe('Replied, then quiet 3 days');
+    expect(quietText(person('a', { quietSince: daysBefore(6) }), NOW)).toBe('No reply in 6 days');
+  });
+
+  it('N is whole days since quietSince, rounded down', () => {
+    expect(quietText(person('a', { quietSince: daysBefore(5, 23 * 3_600_000) }), NOW)).toBe('No reply in 5 days');
+  });
+
+  it('one day reads "1 day"', () => {
+    expect(quietText(person('a', { quietSince: daysBefore(1) }), NOW)).toBe('No reply in 1 day');
+  });
+});
+
+describe('QuietSharesSection (option C)', () => {
+  it('the heading counts people, the help line shows, and the property lines keep the order given', () => {
+    // The server counts DISTINCT contacts: b waits on both properties.
+    render(ui(ok([property('u2', [person('a'), person('b')]), property('u1', [person('b')])], { people: 2 })));
+    expect(screen.getByRole('heading', { level: 2, name: 'Quiet shares 2' })).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'Properties sent in the last 14 days. Replied and then went quiet for 2+ days, or never replied in 5+ days. A message or call from either side restarts the clock; sending another property does not.',
+      ),
+    ).toBeInTheDocument();
+    const list = screen.getByRole('list', { name: 'Quiet shares' });
+    expect(within(list).getAllByRole('button', { name: /Main St, / }).map((b) => b.getAttribute('aria-label'))).toEqual([
+      'u2 Main St, 2 people: 2 never replied',
+      'u1 Main St, 1 person: 1 never replied',
+    ]);
+  });
+
+  it('opens the first property on first arrival and folds the rest', () => {
+    render(ui(ok([property('u1', [person('a')]), property('u2', [person('b')])])));
+    expect(lineFor('u1')).toHaveAttribute('aria-expanded', 'true');
+    expect(lineFor('u2')).toHaveAttribute('aria-expanded', 'false');
+    const people = screen.getByRole('list', { name: 'People waiting on u1 Main St' });
+    expect(lineFor('u1')).toHaveAttribute('aria-controls', people.id);
+    expect(screen.queryByRole('list', { name: 'People waiting on u2 Main St' })).not.toBeInTheDocument();
+  });
+
+  it('a person row shows the name, the quiet text and the state tag, in the order given, and opens the contact page', () => {
+    render(
+      ui(
+        ok([
+          property('u1', [
+            person('marcus', { name: 'Marcus Lee', state: 'replied', quietSince: daysBefore(3) }),
+            person('dana', { name: 'Dana Ruiz', quietSince: daysBefore(6) }),
+          ]),
+        ]),
+      ),
+    );
+    const people = screen.getByRole('list', { name: 'People waiting on u1 Main St' });
+    expect(within(people).getAllByRole('link').map((a) => a.getAttribute('aria-label'))).toEqual([
+      'Marcus Lee, Replied, then quiet 3 days',
+      'Dana Ruiz, No reply in 6 days',
+    ]);
+    const marcus = within(people).getByRole('link', { name: 'Marcus Lee, Replied, then quiet 3 days' });
+    expect(marcus).toHaveAttribute('href', '/contacts/marcus');
+    expect(within(marcus).getByText('Replied')).toBeInTheDocument();
+    expect(within(marcus).getByText('Replied, then quiet 3 days')).toBeInTheDocument();
+    const dana = within(people).getByRole('link', { name: 'Dana Ruiz, No reply in 6 days' });
+    expect(dana).toHaveAttribute('href', '/contacts/dana');
+    expect(within(dana).getByText('No reply yet')).toBeInTheDocument();
+    // No Interested / Not interested on Today (spec 6.2).
+    expect(screen.queryByRole('button', { name: /interested/i })).not.toBeInTheDocument();
+  });
+
+  it('a caseworker carries a role tag; another partner does not', () => {
+    render(
+      ui(
+        ok([
+          property('u1', [
+            person('cw', { name: 'Ana Case', type: 'partner', role: 'Caseworker' }),
+            person('pd', { name: 'Paul Dir', type: 'partner', role: 'Program director' }),
+          ]),
+        ]),
+      ),
+    );
+    const cw = screen.getByRole('link', { name: 'Ana Case, Caseworker, No reply in 6 days' });
+    expect(within(cw).getByText('Caseworker')).toBeInTheDocument();
+    const pd = screen.getByRole('link', { name: 'Paul Dir, No reply in 6 days' });
+    expect(within(pd).queryByText('Caseworker')).not.toBeInTheDocument();
+  });
+
+  it("keeps the viewer's choices by unitId across a live refetch; a property that appears later starts folded", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(ui(ok([property('u1', [person('a')]), property('u2', [person('b')])])));
+    await user.click(lineFor('u1')); // fold the seeded one
+    await user.click(lineFor('u2')); // open the second
+    // A refetch: a new property arrives FIRST and the order shifts. Nothing is
+    // re-seeded - the first line now is u3, and it starts folded.
+    rerender(ui(ok([property('u3', [person('c')]), property('u2', [person('b')]), property('u1', [person('a')])])));
+    expect(lineFor('u3')).toHaveAttribute('aria-expanded', 'false');
+    expect(lineFor('u2')).toHaveAttribute('aria-expanded', 'true');
+    expect(lineFor('u1')).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('seeds on the first load that HAS properties (an empty first load seeds nothing)', () => {
+    const { rerender } = render(ui(ok([])));
+    expect(screen.queryByRole('heading', { name: /Quiet shares/ })).not.toBeInTheDocument();
+    rerender(ui(ok([property('u1', [person('a')]), property('u2', [person('b')])])));
+    expect(lineFor('u1')).toHaveAttribute('aria-expanded', 'true');
+    expect(lineFor('u2')).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('an open property shows ALL its people (the limit counts property lines)', () => {
+    render(ui(ok([property('u1', Array.from({ length: 7 }, (_, i) => person(`p${i}`)))])));
+    expect(within(screen.getByRole('list', { name: 'People waiting on u1 Main St' })).getAllByRole('link')).toHaveLength(7);
+    expect(screen.queryByRole('button', { name: /^Show all/ })).not.toBeInTheDocument();
+  });
+
+  it('more than 5 properties: "Show all N properties" expands in place', async () => {
+    const user = userEvent.setup();
+    render(ui(ok(Array.from({ length: 7 }, (_, i) => property(`u${i}`, [person(`p${i}`)])))));
+    const list = screen.getByRole('list', { name: 'Quiet shares' });
+    expect(within(list).getAllByRole('button', { name: /Main St, / })).toHaveLength(5);
+    const toggle = screen.getByRole('button', { name: 'Show all 7 properties' });
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await user.click(toggle);
+    expect(within(list).getAllByRole('button', { name: /Main St, / })).toHaveLength(7);
+    expect(toggle).toHaveAccessibleName('Show fewer');
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('a truncated read says "Showing the first 100 properties"', () => {
+    const { unmount } = render(ui(ok([property('u1', [person('a')])], { truncated: true })));
+    expect(screen.getByText('Showing the first 100 properties')).toBeInTheDocument();
+    unmount();
+    render(ui(ok([property('u1', [person('a')])])));
+    expect(screen.queryByText('Showing the first 100 properties')).not.toBeInTheDocument();
+  });
+
+  it('unavailable: the bare heading and "We couldn\'t load quiet shares." in its place', () => {
+    render(ui({ status: 'unavailable' }));
+    expect(screen.getByRole('heading', { level: 2, name: 'Quiet shares' })).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent("We couldn't load quiet shares.");
+  });
+
+  it('an empty section is not rendered', () => {
+    const { container } = render(ui(ok([])));
+    expect(container.querySelector('section')).toBeNull();
+  });
+});
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/dashboard; npx vitest run src/routes/today/QuietShares.test.tsx
+```
+Expected: the file fails to load - `Failed to resolve import
+"./QuietShares.js"`. Zero tests run.
+
+#### Step 3 - implementation
+
+3a. Create `dashboard/src/routes/today/QuietShares.tsx`:
+```tsx
+// QuietShares - Today's "Quiet shares" section, option C (spec
+// 2026-10-23-today-checklist-design 6.2, 6.3; Sam picked it 2026-10-23): one
+// expandable line per property - the address and a summary such as "7 people:
+// 2 replied, then quiet - 5 never replied" - with its people inside. The
+// server orders everything (properties by their longest-quiet person; people
+// replied first, then by longest quiet); this renders it in the order given.
+//
+// Opening: the first time properties arrive, the first one is open and the
+// rest folded. After that the viewer's choices are kept by unitId across live
+// refetches, and a property that appears later starts folded. Page state
+// only. The 5-line limit counts PROPERTY lines ("Show all N properties"); an
+// open property shows all its people. The heading count is the server's
+// `people` (distinct contacts).
+//
+// No Interested / Not interested here (spec 6.2): a person row opens the
+// contact page, where the decision is made with the conversation in view.
+import { useId, useState } from 'react';
+import { Link } from 'react-router-dom';
+import type { QuietSharePerson, QuietShareProperty } from '../../api/index.js';
+import { isCaseworkerContact } from '../contact/caseworkerRole.js';
+import { LimitedList, TodaySection } from './TodaySection.js';
+import type { QuietSharesState } from './useToday.js';
+import styles from './Today.module.css';
+
+export const QUIET_SHARES_LABEL = 'Quiet shares';
+
+/** The VA help line (spec 2.2), exact. */
+export const QUIET_SHARES_HELP =
+  'Properties sent in the last 14 days. Replied and then went quiet for 2+ days, or never replied in 5+ days. ' +
+  'A message or call from either side restarts the clock; sending another property does not.';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const NO_PROPERTIES: readonly QuietShareProperty[] = [];
+
+/** A property line's summary (spec 6.3): "7 people: 2 replied, then quiet - 5
+ *  never replied". A zero part is left out; one person reads "1 person". */
+export function propertySummary(people: readonly QuietSharePerson[]): string {
+  const replied = people.filter((p) => p.state === 'replied').length;
+  const neverReplied = people.filter((p) => p.state === 'no_reply').length;
+  const parts: string[] = [];
+  if (replied > 0) parts.push(`${replied} replied, then quiet`);
+  if (neverReplied > 0) parts.push(`${neverReplied} never replied`);
+  const head = people.length === 1 ? '1 person' : `${people.length} people`;
+  return `${head}: ${parts.join(' - ')}`;
+}
+
+/** Whole days from quietSince to `nowIso`, rounded down (spec 6.2); never
+ *  negative; 0 when either instant is unparseable. */
+export function quietDays(quietSince: string, nowIso: string): number {
+  const since = Date.parse(quietSince);
+  const now = Date.parse(nowIso);
+  if (Number.isNaN(since) || Number.isNaN(now)) return 0;
+  return Math.max(0, Math.floor((now - since) / DAY_MS));
+}
+
+/** "Replied, then quiet N days" / "No reply in N days" (spec 6.2). "1 day"
+ *  in the singular, as the Follow up tab's chips read. */
+export function quietText(person: QuietSharePerson, nowIso: string): string {
+  const n = quietDays(person.quietSince, nowIso);
+  const days = n === 1 ? '1 day' : `${n} days`;
+  return person.state === 'replied' ? `Replied, then quiet ${days}` : `No reply in ${days}`;
+}
+
+function PersonRow({ person, now }: { person: QuietSharePerson; now: string }): React.JSX.Element {
+  // "A role tag for a caseworker" (spec 6.2): a partner whose role is the
+  // caseworker role - the dashboard's one rule for it.
+  const caseworker = isCaseworkerContact(person);
+  const text = quietText(person, now);
+  const replied = person.state === 'replied';
+  return (
+    <li className={styles.rowItem}>
+      <Link
+        to={`/contacts/${encodeURIComponent(person.contactId)}`}
+        className={styles.row}
+        aria-label={[person.name, ...(caseworker ? ['Caseworker'] : []), text].join(', ')}
+      >
+        <span className={styles.main}>
+          <span className={styles.who}>{person.name}</span>
+          {caseworker ? <span className={styles.roleTag}>Caseworker</span> : null}
+          <span className={styles.why}>{text}</span>
+        </span>
+        <span className={styles.meta}>
+          <span className={`${styles.tag} ${replied ? styles.tagReplied : ''}`}>
+            {replied ? 'Replied' : 'No reply yet'}
+          </span>
+        </span>
+      </Link>
+    </li>
+  );
+}
+
+function PropertyLine({
+  property,
+  open,
+  onToggle,
+  now,
+}: {
+  property: QuietShareProperty;
+  open: boolean;
+  onToggle: () => void;
+  now: string;
+}): React.JSX.Element {
+  const peopleId = useId();
+  const summary = propertySummary(property.people);
+  return (
+    <li className={styles.rowItem}>
+      <button
+        type="button"
+        className={styles.propLine}
+        aria-expanded={open}
+        aria-controls={open ? peopleId : undefined}
+        aria-label={`${property.unitLabel}, ${summary}`}
+        onClick={onToggle}
+      >
+        <span className={styles.propAddr}>{property.unitLabel}</span>
+        <span className={styles.propSummary}>{summary}</span>
+        <span className={styles.propChevron} aria-hidden="true">
+          {open ? 'Hide' : 'Show'}
+        </span>
+      </button>
+      {open ? (
+        <ul
+          id={peopleId}
+          className={`${styles.rows} ${styles.propPeople}`}
+          aria-label={`People waiting on ${property.unitLabel}`}
+        >
+          {property.people.map((p) => (
+            <PersonRow key={p.contactId} person={p} now={now} />
+          ))}
+        </ul>
+      ) : null}
+    </li>
+  );
+}
+
+export interface QuietSharesSectionProps {
+  quiet: QuietSharesState;
+  /** The clock for "N days": the server's generatedAt - the instant the
+   *  server applied the 2- and 5-day rule at, so N never reads below it - and
+   *  a value, not Date.now(), so render stays pure. */
+  now: string;
+}
+
+export function QuietSharesSection({ quiet, now }: QuietSharesSectionProps): React.JSX.Element | null {
+  const properties = quiet.status === 'ok' ? quiet.properties : NO_PROPERTIES;
+  // unitId -> open, for this mount (page state only, spec 6.3).
+  const [openByUnit, setOpenByUnit] = useState<ReadonlyMap<string, boolean>>(() => new Map());
+  const [seeded, setSeeded] = useState(false);
+  const first = properties[0];
+  if (!seeded && first !== undefined) {
+    // Seed ONCE, the first time properties arrive: the first property open,
+    // the rest folded. A conditional state update during render (react.dev,
+    // useState "storing information from previous renders"): React re-renders
+    // before committing, so nothing flashes folded.
+    setSeeded(true);
+    setOpenByUnit(new Map([[first.unitId, true]]));
+  }
+
+  if (quiet.status === 'unavailable') {
+    return (
+      <TodaySection label={QUIET_SHARES_LABEL}>
+        <p className={styles.sectionError} role="alert">
+          {"We couldn't load quiet shares."}
+        </p>
+      </TodaySection>
+    );
+  }
+  if (properties.length === 0) return null;
+
+  const toggle = (unitId: string): void => {
+    setOpenByUnit((prev) => {
+      const next = new Map(prev);
+      next.set(unitId, prev.get(unitId) !== true);
+      return next;
+    });
+  };
+
+  return (
+    <TodaySection label={QUIET_SHARES_LABEL} count={quiet.people} help={QUIET_SHARES_HELP}>
+      <LimitedList
+        label={QUIET_SHARES_LABEL}
+        items={properties}
+        itemKey={(p) => p.unitId}
+        noun="properties"
+        renderItem={(p) => (
+          <PropertyLine
+            property={p}
+            open={openByUnit.get(p.unitId) === true}
+            onToggle={() => toggle(p.unitId)}
+            now={now}
+          />
+        )}
+      />
+      {quiet.truncated ? <p className={styles.note}>Showing the first 100 properties</p> : null}
+    </TodaySection>
+  );
+}
+```
+
+3b. `dashboard/src/routes/today/Today.module.css` - append at the END of
+the file (after `.emptyBody`). Edit:
+
+old:
+```css
+.emptyBody {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+```
+new:
+```css
+.emptyBody {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+/* --- Quiet shares, option C (spec 2026-10-23 6.3) -------------------------- */
+
+/* One expandable line per property: the address, the summary, Show / Hide. */
+.propLine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.propLine:hover {
+  border-color: var(--c-border-strong);
+}
+
+.propLine:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
+.propAddr {
+  flex: 1 1 16rem;
+  min-width: 0;
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+
+.propSummary {
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+
+.propChevron {
+  flex: 0 0 auto;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+}
+
+/* An open property's people, indented under its line. */
+.propPeople {
+  margin: var(--sp-2) 0 0 var(--sp-5);
+  padding-left: var(--sp-3);
+  border-left: 2px solid var(--c-border);
+}
+
+/* A caseworker's role tag beside the name (spec 6.2). */
+.roleTag {
+  flex: 0 0 auto;
+  padding: 0 var(--sp-2);
+  border-radius: var(--radius-pill);
+  background: var(--c-evt-purple-bg);
+  color: var(--c-evt-purple-text);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+/* The "Replied" state tag reads apart from "No reply yet". */
+.tagReplied {
+  background: var(--c-brand-soft);
+  border-color: transparent;
+  color: var(--c-brand);
+}
+
+/* A muted note under a section ("Showing the first 100 properties"). */
+.note {
+  margin: var(--sp-2) 0 0;
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/dashboard; npx vitest run src/routes/today
+```
+Expect all green. Then:
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0.
+
+#### Step 5 - ASCII check
+
+```
+cd W:/tmp/today-checklist; tr -d '\11\12\15\40-\176' < dashboard/src/routes/today/QuietShares.tsx | wc -c; tr -d '\11\12\15\40-\176' < dashboard/src/routes/today/QuietShares.test.tsx | wc -c; git diff -U0 -- dashboard/src/routes/today/Today.module.css | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0` three times.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+test ! -e "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD" && echo no-merge-in-progress
+git -C W:/tmp/today-checklist add dashboard/src/routes/today/QuietShares.tsx dashboard/src/routes/today/QuietShares.test.tsx dashboard/src/routes/today/Today.module.css
+git -C W:/tmp/today-checklist commit -m "feat(dashboard): Today Quiet shares, option C - property lines, first open, choices kept by unitId (today-checklist S5.5)" -m "Spec 6.2, 6.3, plan PR34. Not on the page yet (S5.6)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S5.6 - The Today page: checklist order, help lines, At a glance, All caught up
+
+Spec 2 (all of 2.1-2.5), PR33, PR36's last step. Rewrites `Today.tsx` and
+`Today.test.tsx` whole, removes `'unreplied'` from the union and
+`GROUP_ORDER`, and re-points the one `types.ts` comment that names the old
+AI heading.
+
+Files:
+- `dashboard/src/routes/today/Today.tsx` (whole-file replace)
+- `dashboard/src/routes/today/Today.test.tsx` (whole-file replace)
+- `dashboard/src/routes/today/Today.module.css` (notice and At a glance)
+- `dashboard/src/api/types.ts` (`'unreplied'` out of `TodayGroup`; the
+  ~2180 comment)
+- `dashboard/src/routes/today/buildToday.ts` (the `unreplied` key out of
+  `GROUP_ORDER`)
+
+#### Step 1 - failing tests
+
+Replace `dashboard/src/routes/today/Today.test.tsx` WHOLE (Read it first;
+the Write tool refuses an unread file). Every case, and what happened to
+it:
+
+| Case (old title) | Fate |
+|---|---|
+| shows a Today heading and a spinner while loading | unchanged |
+| shows an inline error message on error | unchanged |
+| shows a friendly empty state when there is nothing to do | unchanged |
+| renders only the non-empty groups, with rows, urgency, tag, and links | RE-WRITTEN: headings carry counts ("Needs you now 2", C2); the Unreplied row becomes an `identify` row; `source` 'fallback' -> 'server' (the fallback now shows its notice); the untriaged needs-you-now fixture (em dash copy) becomes an ASCII relay opt-out row; asserts no Unreplied / Follow-ups heading |
+| renders the AI suggestions group with its label | RE-WRITTEN: one collapsed line "AI suggestions for 2 contacts", list absent until opened; + a new singular case |
+| exposes each group as a list of rows | RE-WRITTEN: Tours today compact rows under At a glance (time, tenant, property) |
+| renders a nag with its pool number, copy, and an Open deep-link | CHANGED: heading "Relay groups to close 1" |
+| Close wires ... / Keep open wires ... / a nag with a tag ... | unchanged |
+| sits after Follow-ups due and before AI suggestions to review | RE-WRITTEN: sits after Identify and before Tours to book |
+| renders each row ... / Needs outcome ... / undated ... / no-show ... | unchanged |
+| links "See all N on the Past tab" when it shows only some of them | unchanged (PIN: total > labeled rows) |
+| links "Open the Past tab" when every one is shown | unchanged |
+| past tours alone are not "all caught up" | CHANGED: heading name with count |
+| "all caught up" waits while the section is still loading ... | unchanged |
+| no spinner while the section loads when the queue already has rows | CHANGED: the fixture row is `needs_you_now` (was `unreplied`) |
+| a "Tours today" row also carries the back pointer to Today | unchanged (PIN; the compact row keeps it) |
+| links the Past tab count when ... (a deleted tenant's tour) | unchanged |
+| no section at all when nothing qualifies | CHANGED: fixture `needs_you_now` (was `unreplied`) |
+| a failed section load says so in the section ... | CHANGED: fixture `identify` (was `unreplied`) |
+| round-2: reloadFailed / no refresh note / close-nag Open back pointer | unchanged |
+| AI suggestions render at once while the past-tours section is still loading | RE-WRITTEN: the AI line (a button) renders at once; no spinner; no All caught up |
+| NEW | the layout order; the subtitle; the help lines; 5 rows + Show all / Show fewer; the relay 5-row limit; a Tours to book row; Quiet shares on the page; All caught up ignores At a glance; no At a glance when empty; Tours to book unavailable; Quiet shares unavailable; the fallback's one line; the fallback's Identify rows; past tours 5 rows + Show all beside the Past tab link |
+
+New content of `dashboard/src/routes/today/Today.test.tsx`:
+```tsx
+import { render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { QuietSharePerson, QuietShareProperty, RelayCloseNag, TodayItem, Tour } from '../../api/index.js';
+import type { QuietSharesState } from './useToday.js';
+import type { TodayPastTourRow, TodayPastToursState } from './useTodayPastTours.js';
+
+// Drive the page entirely through a mocked useToday so the render test is
+// independent of fetching/SSE (those are covered in useToday.test.tsx). The
+// hook always sets quietShares / toursToBookStatus / generatedAt; a case that
+// leaves them out gets the page's defaults (an empty, available Quiet shares
+// and Tours to book), as relayCloseNags already does.
+let state: {
+  status: string;
+  items: TodayItem[];
+  source: string;
+  relayCloseNags?: RelayCloseNag[];
+  dismissNag?: (id: string) => void;
+  quietShares?: QuietSharesState;
+  toursToBookStatus?: 'ok' | 'unavailable';
+  generatedAt?: string;
+} = {
+  status: 'loading',
+  items: [],
+  source: 'server',
+};
+vi.mock('./useToday.js', () => ({ useToday: () => state }));
+
+// The past-tours section's hook, mocked the same way (its fetching is covered in
+// useTodayPastTours.test.tsx). Default: settled, nothing to list, and the last
+// reload did not fail (reloadFailed defaults to false unless a test sets it).
+let past: Omit<TodayPastToursState, 'reloadFailed'> & { reloadFailed?: boolean } = {
+  status: 'ready',
+  rows: [],
+  total: 0,
+};
+vi.mock('./useTodayPastTours.js', () => ({
+  useTodayPastTours: (): TodayPastToursState => ({ reloadFailed: false, ...past }),
+}));
+
+// The nag card drives the two relay endpoints directly; mock them, keep the rest.
+const closeConversation = vi.fn();
+const deferCloseNag = vi.fn();
+vi.mock('../../api/index.js', async () => {
+  const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
+  return {
+    ...actual,
+    closeConversation: (...a: unknown[]) => closeConversation(...a),
+    deferCloseNag: (...a: unknown[]) => deferCloseNag(...a),
+  };
+});
+
+import { Today } from './Today.js';
+
+function renderToday(): void {
+  render(
+    <MemoryRouter>
+      <Routes>
+        <Route path="/" element={<Today />} />
+        <Route path="/tours/:tourId" element={<TourPageProbe />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+}
+
+/** The tour route's stand-in: shows the query string and the router state the
+ *  row link carried, so a test can read both after a click. */
+function TourPageProbe(): React.JSX.Element {
+  const location = useLocation();
+  return (
+    <div>
+      TOUR PAGE <span data-testid="search">{location.search}</span>
+      <span data-testid="state">{JSON.stringify(location.state)}</span>
+    </div>
+  );
+}
+
+function pastRow(tourId: string, over: Partial<Tour> = {}, labels: Partial<TodayPastTourRow> = {}): TodayPastTourRow {
+  return {
+    tour: {
+      tourId,
+      tenantId: 'c1',
+      unitId: 'u1',
+      scheduledAt: new Date(2026, 8, 24, 14, 30).toISOString(),
+      tourType: 'self_guided',
+      status: 'toured',
+      ...over,
+    } as Tour,
+    tenant: 'Tasha Nguyen',
+    property: '88 Sycamore St',
+    ...labels,
+  };
+}
+
+function makeNag(over: Partial<RelayCloseNag> = {}): RelayCloseNag {
+  return {
+    conversationId: 'g1',
+    poolNumber: '+15550190001',
+    memberNames: ['Ann', 'Marcus'],
+    ownerType: 'tour',
+    ownerId: 'tour-1',
+    nagDueAt: '2026-07-01T00:00:00Z',
+    ...over,
+  };
+}
+
+/** test/setup.ts pins the clock to this instant; Quiet shares counts its days
+ *  from the server's generatedAt. */
+const GENERATED_AT = '2026-07-01T12:00:00.000Z';
+const DAY_MS = 86_400_000;
+
+function daysBefore(n: number): string {
+  return new Date(Date.parse(GENERATED_AT) - n * DAY_MS).toISOString();
+}
+
+function quietPerson(contactId: string, over: Partial<QuietSharePerson> = {}): QuietSharePerson {
+  return { contactId, name: `Name ${contactId}`, type: 'tenant', state: 'no_reply', quietSince: daysBefore(6), ...over };
+}
+
+function quietOk(properties: QuietShareProperty[], people: number): QuietSharesState {
+  return { status: 'ok', properties, people, truncated: false };
+}
+
+function item(group: TodayItem['group'], refId: string, over: Partial<TodayItem> = {}): TodayItem {
+  return { group, refType: 'placement', refId, who: `Who ${refId}`, why: `Why ${refId}`, ...over };
+}
+
+/** The <section> a heading heads. */
+function sectionOf(headingName: string): HTMLElement {
+  const section = screen.getByRole('heading', { name: headingName }).closest('section');
+  if (section === null) throw new Error(`no section for ${headingName}`);
+  return section;
+}
+
+beforeEach(() => {
+  state = { status: 'loading', items: [], source: 'server' };
+  past = { status: 'ready', rows: [], total: 0 };
+  closeConversation.mockReset().mockResolvedValue({});
+  deferCloseNag.mockReset().mockResolvedValue({});
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe('Today', () => {
+  it('shows a Today heading and a spinner while loading', () => {
+    state = { status: 'loading', items: [], source: 'server' };
+    renderToday();
+    expect(screen.getByRole('heading', { level: 1, name: 'Today' })).toBeInTheDocument();
+    expect(screen.getByRole('status')).toBeInTheDocument();
+  });
+
+  it('shows an inline error message on error', () => {
+    state = { status: 'error', items: [], source: 'server' };
+    renderToday();
+    expect(screen.getByText(/couldn.t load|something went wrong|try again/i)).toBeInTheDocument();
+  });
+
+  it('shows a friendly empty state when there is nothing to do', () => {
+    state = { status: 'ready', items: [], source: 'server' };
+    renderToday();
+    expect(screen.getByText(/all caught up/i)).toBeInTheDocument();
+  });
+
+  it('renders only the non-empty checklist sections, with rows, urgency, tag, and links', () => {
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [
+        {
+          group: 'needs_you_now',
+          refType: 'placement',
+          refId: 'k1',
+          who: 'Tasha Williams',
+          why: 'RTA window closing',
+          urgency: '2h left',
+          tag: 'Placement - Touring',
+        },
+        {
+          group: 'needs_you_now',
+          refType: 'conversation',
+          refId: 'cv1',
+          who: '(404) 010-0007',
+          why: 'Opted out of the relay group',
+          tag: 'Relay group',
+          attention: true,
+        },
+        {
+          group: 'identify',
+          refType: 'contact',
+          refId: 'ct1',
+          who: 'James Porter',
+          why: 'New unknown contact',
+          tag: 'Contact - Unknown',
+        },
+      ],
+    };
+    renderToday();
+
+    // Each heading carries its section's count as its own element (spec
+    // 2026-10-23 2.1 - this reverses the 2026-08-03 bare-label headings).
+    expect(screen.getByRole('heading', { name: 'Needs you now 2' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Identify these contacts 1' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /Tours today/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /Placements/ })).not.toBeInTheDocument();
+    // Unreplied is gone (spec 4), and so is the old Follow-ups heading.
+    expect(screen.queryByRole('heading', { name: /Unreplied|Follow-ups/ })).not.toBeInTheDocument();
+
+    // A placement row links to /placements/:id and shows who / why / urgency / tag.
+    const placementLink = screen.getByRole('link', { name: /Tasha Williams/ });
+    expect(placementLink).toHaveAttribute('href', '/placements/k1');
+    expect(within(placementLink).getByText('RTA window closing')).toBeInTheDocument();
+    expect(within(placementLink).getByText('2h left')).toBeInTheDocument();
+    expect(within(placementLink).getByText('Placement - Touring')).toBeInTheDocument();
+
+    // refType drives the link target: conversation -> /conversations/:id.
+    expect(screen.getByRole('link', { name: /\(404\) 010-0007/ })).toHaveAttribute(
+      'href',
+      '/conversations/cv1',
+    );
+    // contact -> /contacts/:id.
+    expect(screen.getByRole('link', { name: /James Porter/ })).toHaveAttribute(
+      'href',
+      '/contacts/ct1',
+    );
+  });
+
+  it('shows the AI suggestions as one collapsed line whose list is absent until opened', async () => {
+    const user = userEvent.setup();
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [
+        { group: 'ai_suggestions', refType: 'contact', refId: 'k1', who: 'Tasha Williams', why: '2 suggestion(s)' },
+        { group: 'ai_suggestions', refType: 'contact', refId: 'k2', who: 'Ann Lee', why: '1 suggestion(s)' },
+      ],
+    };
+    renderToday();
+    const line = screen.getByRole('button', { name: 'AI suggestions for 2 contacts' });
+    expect(line).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('list', { name: 'AI suggestions' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Tasha Williams/ })).not.toBeInTheDocument();
+    await user.click(line);
+    expect(line).toHaveAttribute('aria-expanded', 'true');
+    const list = screen.getByRole('list', { name: 'AI suggestions' });
+    expect(document.getElementById(line.getAttribute('aria-controls') ?? '')).toContainElement(list);
+    const link = within(list).getByRole('link', { name: /Tasha Williams/ });
+    expect(link).toHaveAttribute('href', '/contacts/k1');
+    expect(within(link).getByText('2 suggestion(s)')).toBeInTheDocument();
+  });
+
+  it('names one AI suggestion contact in the singular', () => {
+    state = { status: 'ready', source: 'server', items: [item('ai_suggestions', 'k1', { refType: 'contact' })] };
+    renderToday();
+    expect(screen.getByRole('button', { name: 'AI suggestions for 1 contact' })).toBeInTheDocument();
+  });
+
+  it('lists Tours today under At a glance as compact rows: local time, tenant, property', () => {
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [
+        {
+          group: 'tours_today',
+          refType: 'tour',
+          refId: 'tt1',
+          who: 'Dana Ruiz',
+          why: 'Tour today',
+          tag: 'Tour',
+          at: new Date(2026, 6, 1, 10, 0).toISOString(),
+          unitLabel: '1458 Maple Ridge Dr SW',
+        },
+        {
+          group: 'tours_today',
+          refType: 'tour',
+          refId: 'tt2',
+          who: 'Tony Banks',
+          why: 'Tour today',
+          tag: 'Tour',
+          at: new Date(2026, 6, 1, 14, 30).toISOString(),
+          unitLabel: '910 Peachtree Pl NE',
+        },
+      ],
+    };
+    renderToday();
+    const glance = sectionOf('At a glance');
+    expect(within(glance).getByRole('heading', { level: 3, name: 'Tours today 2' })).toBeInTheDocument();
+    const list = within(glance).getByRole('list', { name: 'Tours today' });
+    expect(within(list).getAllByRole('listitem')).toHaveLength(2);
+    const first = within(list).getByRole('link', { name: 'Tour for Dana Ruiz at 1458 Maple Ridge Dr SW, 10:00 AM' });
+    expect(first).toHaveAttribute('href', '/tours/tt1');
+    expect(within(first).getByText('10:00 AM')).toBeInTheDocument();
+    expect(within(first).getByText('Dana Ruiz')).toBeInTheDocument();
+    expect(within(first).getByText('1458 Maple Ridge Dr SW')).toBeInTheDocument();
+    // Compact: no "Tour today" reason and no tag chip.
+    expect(within(first).queryByText('Tour today')).not.toBeInTheDocument();
+    expect(within(first).queryByText('Tour')).not.toBeInTheDocument();
+  });
+});
+
+describe('Today - the checklist layout (spec 2026-10-23 2)', () => {
+  function fullPage(): void {
+    state = {
+      status: 'ready',
+      source: 'server',
+      generatedAt: GENERATED_AT,
+      items: [
+        item('needs_you_now', 'n1'),
+        item('identify', 'i1', { refType: 'contact' }),
+        item('tours_to_book', 'b1', { refType: 'tour', urgency: 'Requested 3 days ago' }),
+        item('follow_ups', 'f1'),
+        item('tours_today', 't1', { refType: 'tour' }),
+        item('ai_suggestions', 'a1', { refType: 'contact' }),
+      ],
+      relayCloseNags: [makeNag()],
+      dismissNag: vi.fn(),
+      quietShares: quietOk([{ unitId: 'u1', unitLabel: '12 Oak St', people: [quietPerson('q1')] }], 1),
+      toursToBookStatus: 'ok',
+    };
+    past = { status: 'ready', rows: [pastRow('p1')], total: 1 };
+  }
+
+  it('orders the checklist sections, then At a glance below the divider', () => {
+    fullPage();
+    renderToday();
+    expect(screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual([
+      'Needs you now 1',
+      'Identify these contacts 1',
+      'Past tours needing an outcome 1',
+      'Tours to book 1',
+      'Quiet shares 1',
+      'Relay groups to close 1',
+      'Placements 1',
+      'At a glance',
+    ]);
+    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Tours today 1']);
+    expect(screen.getByRole('button', { name: 'AI suggestions for 1 contact' })).toBeInTheDocument();
+    expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
+  });
+
+  it('reads the checklist subtitle', () => {
+    state = { status: 'ready', source: 'server', items: [] };
+    renderToday();
+    expect(
+      screen.getByText("Clear every section above the line and today's checklist is done. New messages are in the Inbox."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/What needs you, across every placement and contact/)).not.toBeInTheDocument();
+  });
+
+  it('shows the VA help lines on Identify, Tours to book and Quiet shares only', () => {
+    fullPage();
+    renderToday();
+    expect(
+      within(sectionOf('Identify these contacts 1')).getByText(
+        "We don't know yet who these are. Call each one; after about a week with no contact, mark them Inactive.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(sectionOf('Tours to book 1')).getByText('Said yes to a property; the tour has no date yet. Oldest first.'),
+    ).toBeInTheDocument();
+    expect(
+      within(sectionOf('Quiet shares 1')).getByText(
+        'Properties sent in the last 14 days. Replied and then went quiet for 2+ days, or never replied in 5+ days. A message or call from either side restarts the clock; sending another property does not.',
+      ),
+    ).toBeInTheDocument();
+    for (const heading of ['Needs you now 1', 'Past tours needing an outcome 1', 'Relay groups to close 1', 'Placements 1']) {
+      // No paragraph at all in these sections: their rows already say why (spec 2.2).
+      expect(sectionOf(heading).querySelectorAll('p')).toHaveLength(0);
+    }
+  });
+
+  it('shows the first 5 rows of a section; Show all N expands it in place and Show fewer folds it', async () => {
+    const user = userEvent.setup();
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: Array.from({ length: 7 }, (_, i) => item('needs_you_now', `n${i}`)),
+    };
+    renderToday();
+    const list = screen.getByRole('list', { name: 'Needs you now' });
+    expect(within(list).getAllByRole('listitem')).toHaveLength(5);
+    // The heading counts every row, not just the five shown.
+    expect(screen.getByRole('heading', { name: 'Needs you now 7' })).toBeInTheDocument();
+    const toggle = screen.getByRole('button', { name: 'Show all 7' });
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await user.click(toggle);
+    expect(within(list).getAllByRole('listitem')).toHaveLength(7);
+    expect(toggle).toHaveAccessibleName('Show fewer');
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await user.click(toggle);
+    expect(within(list).getAllByRole('listitem')).toHaveLength(5);
+  });
+
+  it('Relay groups to close takes the same 5-row limit (spec 5.5)', () => {
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [],
+      relayCloseNags: Array.from({ length: 6 }, (_, i) => makeNag({ conversationId: `g${i}` })),
+      dismissNag: vi.fn(),
+    };
+    renderToday();
+    expect(within(screen.getByRole('list', { name: 'Relay groups to close' })).getAllByRole('listitem')).toHaveLength(5);
+    expect(within(sectionOf('Relay groups to close 6')).getByRole('button', { name: 'Show all 6' })).toBeInTheDocument();
+  });
+
+  it('a Tours to book row names the tenant, the property and the request age, and opens the tour with the back pointer', async () => {
+    const user = userEvent.setup();
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [
+        {
+          group: 'tours_to_book',
+          refType: 'tour',
+          refId: 'tb1',
+          who: 'Nia Porter',
+          why: '1458 Maple Ridge Dr SW',
+          urgency: 'Requested 3 days ago',
+          at: daysBefore(3),
+          unitLabel: '1458 Maple Ridge Dr SW',
+        },
+      ],
+    };
+    renderToday();
+    const link = within(screen.getByRole('list', { name: 'Tours to book' })).getByRole('link', { name: /Nia Porter/ });
+    expect(link).toHaveAttribute('href', '/tours/tb1');
+    expect(within(link).getByText('1458 Maple Ridge Dr SW')).toBeInTheDocument();
+    expect(within(link).getByText('Requested 3 days ago')).toBeInTheDocument();
+    await user.click(link);
+    expect(await screen.findByText(/TOUR PAGE/)).toBeInTheDocument();
+    expect(screen.getByTestId('state')).toHaveTextContent('{"back":"/"}');
+  });
+
+  it('Quiet shares on the page: the heading counts people, the first property is open, a person row opens the contact page', () => {
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [],
+      generatedAt: GENERATED_AT,
+      quietShares: quietOk(
+        [
+          {
+            unitId: 'u1',
+            unitLabel: '12 Oak St',
+            people: [
+              quietPerson('q-marcus', { name: 'Marcus Lee', state: 'replied', quietSince: daysBefore(3) }),
+              quietPerson('q-dana', { name: 'Dana Ruiz' }),
+            ],
+          },
+          { unitId: 'u2', unitLabel: '9 Elm Ave', people: [quietPerson('q-kim', { name: 'Kim Tran', quietSince: daysBefore(5) })] },
+        ],
+        3,
+      ),
+    };
+    renderToday();
+    expect(screen.getByRole('heading', { name: 'Quiet shares 3' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: '12 Oak St, 2 people: 1 replied, then quiet - 1 never replied' }),
+    ).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('button', { name: '9 Elm Ave, 1 person: 1 never replied' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    );
+    const people = screen.getByRole('list', { name: 'People waiting on 12 Oak St' });
+    expect(within(people).getByRole('link', { name: 'Marcus Lee, Replied, then quiet 3 days' })).toHaveAttribute(
+      'href',
+      '/contacts/q-marcus',
+    );
+    expect(within(people).getByRole('link', { name: 'Dana Ruiz, No reply in 6 days' })).toHaveAttribute(
+      'href',
+      '/contacts/q-dana',
+    );
+    expect(screen.queryByRole('list', { name: 'People waiting on 9 Elm Ave' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
+  });
+});
+
+describe('Today - All caught up (spec 2026-10-23 2.3, 2.5)', () => {
+  it('ignores At a glance, which still renders below it', () => {
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [item('tours_today', 't1', { refType: 'tour' }), item('ai_suggestions', 'a1', { refType: 'contact' })],
+    };
+    renderToday();
+    expect(screen.getByText('All caught up')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'At a glance' })).toBeInTheDocument();
+    expect(screen.getByRole('list', { name: 'Tours today' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'AI suggestions for 1 contact' })).toBeInTheDocument();
+  });
+
+  it('no At a glance section when both of its parts are empty', () => {
+    state = { status: 'ready', source: 'server', items: [] };
+    renderToday();
+    expect(screen.getByText('All caught up')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'At a glance' })).not.toBeInTheDocument();
+  });
+
+  it('a Tours to book the server could not compute says so in place and withholds All caught up', () => {
+    state = { status: 'ready', source: 'server', items: [], toursToBookStatus: 'unavailable' };
+    renderToday();
+    expect(within(sectionOf('Tours to book')).getByRole('alert')).toHaveTextContent("We couldn't load tours to book.");
+    expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
+  });
+
+  it('Quiet shares the server could not compute say so in place and withhold All caught up', () => {
+    state = { status: 'ready', source: 'server', items: [], quietShares: { status: 'unavailable' } };
+    renderToday();
+    expect(within(sectionOf('Quiet shares')).getByRole('alert')).toHaveTextContent("We couldn't load quiet shares.");
+    expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
+  });
+
+  it('the fallback shows one line instead of an error per section, and never All caught up', () => {
+    state = {
+      status: 'ready',
+      source: 'fallback',
+      items: [],
+      quietShares: { status: 'unavailable' },
+      toursToBookStatus: 'unavailable',
+    };
+    renderToday();
+    expect(screen.getByText("Some sections can't load right now.")).toBeInTheDocument();
+    expect(screen.queryByText(/We couldn.t load/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /Tours to book|Quiet shares/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
+    // Not a blank page either: no spinner left spinning.
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('the fallback still renders its Identify rows', () => {
+    state = {
+      status: 'ready',
+      source: 'fallback',
+      items: [
+        item('identify', 'unknown?phone=%2B14040100007', {
+          refType: 'contact',
+          who: '(404) 010-0007',
+          tag: 'Contact - Unknown',
+          attention: true,
+        }),
+      ],
+      quietShares: { status: 'unavailable' },
+      toursToBookStatus: 'unavailable',
+    };
+    renderToday();
+    expect(screen.getByRole('heading', { name: 'Identify these contacts 1' })).toBeInTheDocument();
+    expect(screen.getByText("Some sections can't load right now.")).toBeInTheDocument();
+  });
+});
+
+describe('Today - relay close-nag card (D5)', () => {
+  it('renders a nag with its pool number, copy, and an Open deep-link', () => {
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [],
+      relayCloseNags: [makeNag()],
+      dismissNag: vi.fn(),
+    };
+    renderToday();
+    // Its own section (not "all caught up", even though items is empty). The
+    // heading carries its count (spec 2026-10-23 2.1).
+    expect(screen.getByRole('heading', { name: 'Relay groups to close 1' })).toBeInTheDocument();
+    expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
+    // Pool number is display DATA (formatted), plus the close-it copy with members.
+    expect(screen.getByText('(555) 019-0001')).toBeInTheDocument();
+    expect(
+      screen.getByText(/Relay group for Ann & Marcus is still open - close it\?/i),
+    ).toBeInTheDocument();
+    // Open deep-links the owning tour.
+    expect(screen.getByRole('link', { name: 'Open' })).toHaveAttribute('href', '/tours/tour-1');
+  });
+
+  it('Close wires closeConversation(true) and removes the row', async () => {
+    const user = userEvent.setup();
+    const dismissNag = vi.fn();
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [],
+      relayCloseNags: [makeNag()],
+      dismissNag,
+    };
+    renderToday();
+    await user.click(screen.getByRole('button', { name: 'Close' }));
+    expect(closeConversation).toHaveBeenCalledWith('g1', true);
+    await waitFor(() => expect(dismissNag).toHaveBeenCalledWith('g1'));
+    expect(deferCloseNag).not.toHaveBeenCalled();
+  });
+
+  it('Keep open wires the 28-day defer and removes the row', async () => {
+    const user = userEvent.setup();
+    const dismissNag = vi.fn();
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [],
+      relayCloseNags: [makeNag()],
+      dismissNag,
+    };
+    renderToday();
+    await user.click(screen.getByRole('button', { name: 'Keep open' }));
+    expect(deferCloseNag).toHaveBeenCalledWith('g1');
+    await waitFor(() => expect(dismissNag).toHaveBeenCalledWith('g1'));
+    expect(closeConversation).not.toHaveBeenCalled();
+  });
+
+  it('a nag with a tag names the tag instead of the members', () => {
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [],
+      relayCloseNags: [makeNag({ tag: 'Maple St tour', ownerType: null, ownerId: undefined })],
+      dismissNag: vi.fn(),
+    };
+    renderToday();
+    expect(
+      screen.getByText(/Relay group for Maple St tour is still open - close it\?/i),
+    ).toBeInTheDocument();
+    // No owner -> Open falls back to the conversation.
+    expect(screen.getByRole('link', { name: 'Open' })).toHaveAttribute('href', '/conversations/g1');
+  });
+});
+
+describe('Today - past tours needing an outcome (Sam item 18)', () => {
+  const HEADING = 'Past tours needing an outcome';
+
+  it('sits after Identify these contacts and before Tours to book (spec 2026-10-23 2)', () => {
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [item('identify', 'k1', { refType: 'contact' }), item('tours_to_book', 'k2', { refType: 'tour' })],
+    };
+    past = { status: 'ready', rows: [pastRow('t1')], total: 1 };
+    renderToday();
+    const headings = screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent);
+    expect(headings).toEqual(['Identify these contacts 1', `${HEADING} 1`, 'Tours to book 1']);
+  });
+
+  it('renders each row with tenant, property, date and the Past state, as one link', () => {
+    state = { status: 'ready', source: 'server', items: [] };
+    past = {
+      status: 'ready',
+      rows: [pastRow('t1', { status: 'scheduled' }), pastRow('t2', { outcome: 'move_forward', moveForward: true, convertible: true })],
+      total: 2,
+    };
+    renderToday();
+    const list = screen.getByRole('list', { name: HEADING });
+    expect(within(list).getAllByRole('listitem')).toHaveLength(2);
+    const notMarked = within(list).getByRole('link', {
+      name: 'Tour for Tasha Nguyen at 88 Sycamore St on Sep 24, 2026, 2:30 PM, Not marked',
+    });
+    expect(notMarked).toHaveAttribute('href', '/tours/t1');
+    expect(within(notMarked).getByText('Tasha Nguyen')).toBeInTheDocument();
+    expect(within(notMarked).getByText('88 Sycamore St')).toBeInTheDocument();
+    expect(within(notMarked).getByText('Sep 24, 2026, 2:30 PM')).toBeInTheDocument();
+    expect(within(notMarked).getByText('Not marked')).toBeInTheDocument();
+    // A Needs placement row opens the plain tour page (Start placement lives there).
+    expect(within(list).getByRole('link', { name: /, Needs placement$/ })).toHaveAttribute('href', '/tours/t2');
+  });
+
+  it('a Needs outcome row opens the tour with Record outcome up, and carries the back pointer to Today', async () => {
+    const user = userEvent.setup();
+    state = { status: 'ready', source: 'server', items: [] };
+    past = { status: 'ready', rows: [pastRow('t1')], total: 1 };
+    renderToday();
+    const link = screen.getByRole('link', { name: /, Needs outcome$/ });
+    expect(link).toHaveAttribute('href', '/tours/t1?outcome=1');
+    await user.click(link);
+    expect(await screen.findByText(/TOUR PAGE/)).toBeInTheDocument();
+    expect(screen.getByTestId('search')).toHaveTextContent('?outcome=1');
+    expect(screen.getByTestId('state')).toHaveTextContent('{"back":"/"}');
+  });
+
+  it('an undated row reads Undated, never a dangling "on"', () => {
+    state = { status: 'ready', source: 'server', items: [] };
+    past = { status: 'ready', rows: [pastRow('t1', { scheduledAt: undefined })], total: 1 };
+    renderToday();
+    const link = screen.getByRole('link', { name: 'Tour for Tasha Nguyen at 88 Sycamore St, undated, Needs outcome' });
+    expect(within(link).getByText('Undated')).toBeInTheDocument();
+  });
+
+  it('a no-show row reads "No show" and opens the plain tour page (no ?outcome=1), back to Today', async () => {
+    // Today lists the Past tab's no-shows (spec 9.4): the row's next step
+    // (Reschedule, the no-show check-in) lives on the tour page itself.
+    const user = userEvent.setup();
+    state = { status: 'ready', source: 'server', items: [] };
+    past = { status: 'ready', rows: [pastRow('t3', { status: 'no_show' })], total: 1 };
+    renderToday();
+    const link = screen.getByRole('link', {
+      name: 'Tour for Tasha Nguyen at 88 Sycamore St on Sep 24, 2026, 2:30 PM, No show',
+    });
+    expect(link).toHaveAttribute('href', '/tours/t3');
+    expect(within(link).getByText('No show')).toBeInTheDocument();
+    await user.click(link);
+    expect(await screen.findByText(/TOUR PAGE/)).toBeInTheDocument();
+    // No query string at all: Record outcome is not this row's next step.
+    expect(screen.getByTestId('search').textContent).toBe('');
+    expect(screen.getByTestId('state')).toHaveTextContent('{"back":"/"}');
+  });
+
+  it('links "See all N on the Past tab" when it shows only some of them', () => {
+    state = { status: 'ready', source: 'server', items: [] };
+    past = { status: 'ready', rows: ['a', 'b', 'c', 'd', 'e'].map((id) => pastRow(id)), total: 12 };
+    renderToday();
+    expect(within(screen.getByRole('list', { name: HEADING })).getAllByRole('listitem')).toHaveLength(5);
+    expect(screen.getByRole('link', { name: 'See all 12 on the Past tab' })).toHaveAttribute('href', '/tours/past');
+  });
+
+  it('links "Open the Past tab" when every one is shown', () => {
+    state = { status: 'ready', source: 'server', items: [] };
+    past = { status: 'ready', rows: [pastRow('a')], total: 1 };
+    renderToday();
+    expect(screen.getByRole('link', { name: 'Open the Past tab' })).toHaveAttribute('href', '/tours/past');
+    expect(screen.queryByRole('link', { name: /^See all/ })).not.toBeInTheDocument();
+  });
+
+  it('shows 5 rows with "Show all N" beside the Past tab link (spec 2.1)', async () => {
+    const user = userEvent.setup();
+    state = { status: 'ready', source: 'server', items: [] };
+    past = { status: 'ready', rows: ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((id) => pastRow(id)), total: 7 };
+    renderToday();
+    const list = screen.getByRole('list', { name: HEADING });
+    expect(within(list).getAllByRole('listitem')).toHaveLength(5);
+    const section = sectionOf(`${HEADING} 7`);
+    const toggle = within(section).getByRole('button', { name: 'Show all 7' });
+    const link = within(section).getByRole('link', { name: 'Open the Past tab' });
+    expect(toggle.parentElement).toBe(link.parentElement);
+    await user.click(toggle);
+    expect(within(list).getAllByRole('listitem')).toHaveLength(7);
+  });
+
+  it('past tours alone are not "all caught up"', () => {
+    state = { status: 'ready', source: 'server', items: [] };
+    past = { status: 'ready', rows: [pastRow('a')], total: 1 };
+    renderToday();
+    expect(screen.getByRole('heading', { name: `${HEADING} 1` })).toBeInTheDocument();
+    expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
+  });
+
+  it('"all caught up" waits while the section is still loading, and the page keeps its spinner', () => {
+    state = { status: 'ready', source: 'server', items: [] };
+    past = { status: 'idle', rows: [], total: 0 };
+    renderToday();
+    expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: HEADING })).not.toBeInTheDocument();
+    expect(screen.getByRole('status')).toBeInTheDocument();
+  });
+
+  it('no spinner while the section loads when the queue already has rows', () => {
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [{ group: 'needs_you_now', refType: 'contact', refId: 'k1', who: 'A', why: 'Hi' }],
+    };
+    past = { status: 'idle', rows: [], total: 0 };
+    renderToday();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('a "Tours today" row also carries the back pointer to Today', async () => {
+    const user = userEvent.setup();
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [{ group: 'tours_today', refType: 'tour', refId: 'tt1', who: 'Tasha Nguyen', why: 'Tour today', tag: 'Tour' }],
+    };
+    renderToday();
+    await user.click(screen.getByRole('link', { name: /Tasha Nguyen/ }));
+    expect(await screen.findByText(/TOUR PAGE/)).toBeInTheDocument();
+    expect(screen.getByTestId('state')).toHaveTextContent('{"back":"/"}');
+  });
+
+  it("links the Past tab count when the Past tab holds more than Today lists (a deleted tenant's tour)", () => {
+    state = { status: 'ready', source: 'server', items: [] };
+    past = { status: 'ready', rows: [pastRow('a'), pastRow('b')], total: 3 };
+    renderToday();
+    expect(screen.getByRole('link', { name: 'See all 3 on the Past tab' })).toHaveAttribute('href', '/tours/past');
+  });
+
+  it('no section at all when nothing qualifies', () => {
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [{ group: 'needs_you_now', refType: 'contact', refId: 'k1', who: 'A', why: 'Hi' }],
+    };
+    past = { status: 'ready', rows: [], total: 0 };
+    renderToday();
+    expect(screen.queryByRole('heading', { name: HEADING })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Past tab/ })).not.toBeInTheDocument();
+  });
+
+  it('a failed section load says so in the section and leaves the rest of Today alone', () => {
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [{ group: 'identify', refType: 'contact', refId: 'k1', who: 'James Porter', why: 'New unknown contact' }],
+    };
+    past = { status: 'error', rows: [], total: 0 };
+    renderToday();
+    expect(screen.getByRole('heading', { name: HEADING })).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent(/couldn.t load past tours/i);
+    expect(screen.getByRole('link', { name: 'Open the Past tab' })).toHaveAttribute('href', '/tours/past');
+    expect(screen.getByRole('link', { name: /James Porter/ })).toHaveAttribute('href', '/contacts/k1');
+    expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
+  });
+});
+
+describe('Today - round-2 review fixes', () => {
+  it('a failed live reload keeps the rows and says so (N6)', () => {
+    state = { status: 'ready', source: 'server', items: [] };
+    past = { status: 'ready', rows: [pastRow('a')], total: 1, reloadFailed: true };
+    renderToday();
+    expect(within(screen.getByRole('list', { name: 'Past tours needing an outcome' })).getAllByRole('listitem')).toHaveLength(1);
+    expect(screen.getByRole('alert')).toHaveTextContent(/could not refresh past tours/i);
+  });
+
+  it('no refresh note when the last reload did not fail', () => {
+    state = { status: 'ready', source: 'server', items: [] };
+    past = { status: 'ready', rows: [pastRow('a')], total: 1 };
+    renderToday();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('the close-nag Open link to a tour carries the back pointer to Today (N4)', async () => {
+    const user = userEvent.setup();
+    state = { status: 'ready', source: 'server', items: [], relayCloseNags: [makeNag()], dismissNag: vi.fn() };
+    renderToday();
+    await user.click(screen.getByRole('link', { name: 'Open' }));
+    expect(await screen.findByText(/TOUR PAGE/)).toBeInTheDocument();
+    expect(screen.getByTestId('state')).toHaveTextContent('{"back":"/"}');
+  });
+});
+
+describe('Today - the sections below past tours are never held (round 4)', () => {
+  it('the AI suggestions line renders at once while the past-tours section is still loading', () => {
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [{ group: 'ai_suggestions', refType: 'contact', refId: 'k2', who: 'Ann Lee', why: '1 suggestion(s)' }],
+    };
+    past = { status: 'idle', rows: [], total: 0 };
+    renderToday();
+    // Core content never waits on the section's best-effort lookups - and a
+    // page with only an AI line is never a blank page (or a spinner).
+    expect(screen.getByRole('button', { name: 'AI suggestions for 1 contact' })).toBeInTheDocument();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    // But it is not "done" either until past tours settle.
+    expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
+  });
+});
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/dashboard; npx vitest run src/routes/today/Today.test.tsx
+```
+Expected failures, and why (the old page: bare headings, the old order,
+Unreplied, a heading-and-list AI group):
+- every case naming a heading with a count (`'Needs you now 2'`,
+  `'Relay groups to close 1'`, `` `${HEADING} 1` `` ...) - the heading is the
+  bare label;
+- `shows the AI suggestions as one collapsed line ...`, `names one AI
+  suggestion contact ...`, the round-4 case - no such button;
+- `lists Tours today under At a glance ...` - no "At a glance" heading;
+- the layout order, subtitle, help-line, 5-row, relay-limit, Tours to book
+  row, Quiet shares and every All-caught-up case - no such sections, copy
+  or buttons (the old page has no `identify` / `tours_to_book` group and
+  never reads `quietShares`; it shows "All caught up" on the fallback and on
+  an unavailable section);
+- `shows 5 rows with "Show all N" ...` - all 7 rows listed, no button.
+The unchanged cases stay green.
+
+#### Step 3 - implementation
+
+3a. Replace `dashboard/src/routes/today/Today.tsx` WHOLE (Read it first).
+The old file's two non-ASCII lines (the header and the `hrefFor` comment)
+are not carried over:
+```tsx
+// Today - the daily checklist (spec 2026-10-23-today-checklist-design,
+// tracker #31): Sam and the VA work it top to bottom at the start and the end
+// of the day. The checklist, in order: Needs you now, Identify these contacts,
+// Past tours needing an outcome, Tours to book, Quiet shares (QuietShares.tsx,
+// option C), Relay groups to close, Placements. Then a dashed divider and "At
+// a glance" - Tours today as compact rows, the AI suggestions as one collapsed
+// line - which never counts toward "done".
+//
+// Every section is a TodaySection: a heading with its count, an optional help
+// line for the VA, and a list named by the heading text that shows its first 5
+// rows with "Show all N". Rows are white cards (who - why - an optional red
+// urgency chip - a "Placement - Touring"-style tag - an amber attention
+// stripe), each a link to its placement/contact/conversation/tour. An empty
+// section is not rendered. A section the server could not compute shows "We
+// couldn't load <section>." in its place; the client fallback (buildToday,
+// only on a 404) shows one line instead. "All caught up" shows only when every
+// checklist section is empty and settled, none failed to load and the load is
+// not the fallback; At a glance still renders below it. Tokens + CSS Modules;
+// full width (no page-level max-width).
+import { useId, useState } from 'react';
+import { Link } from 'react-router-dom';
+import {
+  closeConversation,
+  deferCloseNag,
+  undatedTourLabel,
+  type RelayCloseNag,
+  type TodayGroup,
+  type TodayItem,
+} from '../../api/index.js';
+import { Spinner } from '../../ui/index.js';
+import { formatPhoneDisplay } from '../../lib/phone.js';
+import { timeLabel, whenLabel } from '../tours/tourTime.js';
+import { pastState } from '../tours/useTours.js';
+import { QuietSharesSection } from './QuietShares.js';
+import { LimitedList, TodaySection } from './TodaySection.js';
+import { useToday, type QuietSharesState } from './useToday.js';
+import {
+  useTodayPastTours,
+  type TodayPastTourRow,
+  type TodayPastToursState,
+} from './useTodayPastTours.js';
+import styles from './Today.module.css';
+
+/** Section headings (spec 2). Each list's accessible name is its heading text
+ *  without the count. Quiet shares' own lives in QuietShares.tsx. */
+const NEEDS_LABEL = 'Needs you now';
+const IDENTIFY_LABEL = 'Identify these contacts';
+const PAST_TOURS_LABEL = 'Past tours needing an outcome';
+const TOURS_TO_BOOK_LABEL = 'Tours to book';
+const RELAY_LABEL = 'Relay groups to close';
+const PLACEMENTS_LABEL = 'Placements';
+const GLANCE_LABEL = 'At a glance';
+const TOURS_TODAY_LABEL = 'Tours today';
+const AI_LABEL = 'AI suggestions';
+
+/** The VA help lines (spec 2.2), exact. Needs you now, Past tours, Relay
+ *  groups to close and Placements have none: their rows already say why. */
+const IDENTIFY_HELP =
+  "We don't know yet who these are. Call each one; after about a week with no contact, mark them Inactive.";
+const TOURS_TO_BOOK_HELP = 'Said yes to a property; the tour has no date yet. Oldest first.';
+
+/** Router state the tour links carry so the tour page's back arrow returns
+ *  to Today. */
+const BACK_TO_TODAY = { back: '/' } as const;
+
+/** useToday always sets quietShares; this default only keeps a partial test
+ *  mock rendering (as the relayCloseNags default does). */
+const NO_QUIET_SHARES: QuietSharesState = { status: 'ok', properties: [], people: 0, truncated: false };
+
+/** The deep-link target for a row, driven by its refType. The contact and
+ *  conversation routes are placeholders for now (B2+) - that's expected. */
+function hrefFor(item: TodayItem): string {
+  switch (item.refType) {
+    case 'placement':
+      return `/placements/${item.refId}`;
+    case 'contact':
+      return `/contacts/${item.refId}`;
+    case 'conversation':
+      return `/conversations/${item.refId}`;
+    case 'tour':
+      return `/tours/${item.refId}`;
+  }
+}
+
+function rowKey(item: TodayItem): string {
+  return `${item.refType}:${item.refId}`;
+}
+
+function Row({ item }: { item: TodayItem }): React.JSX.Element {
+  const hasMeta = Boolean(item.urgency) || Boolean(item.tag);
+  // A Tours to book row's urgency is its age ("Requested 3 days ago"): plain
+  // text, as in the approved mockup - not the red time chip.
+  const urgencyClass = item.group === 'tours_to_book' ? styles.when : styles.urg;
+  return (
+    <li className={styles.rowItem}>
+      <Link
+        to={hrefFor(item)}
+        // A tour opened from Today (Tours to book, Tours today) returns to
+        // Today, the same as the past-tours rows.
+        state={item.refType === 'tour' ? BACK_TO_TODAY : undefined}
+        className={`${styles.row} ${item.attention ? styles.flagged : ''}`}
+      >
+        {/* Attention flag = an amber severity stripe down the card's left edge (CSS,
+         *  ::before on .flagged). It's decorative, so announce it to screen readers
+         *  with visually-hidden text here. */}
+        {item.attention ? <span className={styles.srOnly}>Needs attention</span> : null}
+        {/* Text block (who - why). On a tight content pane it stacks above the meta
+         *  chips (container query in the CSS) so the "why" never gets crushed. */}
+        <span className={styles.main}>
+          <span className={styles.who}>{item.who}</span>
+          <span className={styles.why}>{item.why}</span>
+        </span>
+        {hasMeta ? (
+          <span className={styles.meta}>
+            {item.urgency ? <span className={urgencyClass}>{item.urgency}</span> : null}
+            {item.tag ? <span className={styles.tag}>{item.tag}</span> : null}
+          </span>
+        ) : null}
+      </Link>
+    </li>
+  );
+}
+
+/** A checklist section of queue rows; not rendered when empty (spec 2.1). */
+function ItemsSection({
+  label,
+  help,
+  rows,
+}: {
+  label: string;
+  help?: string;
+  rows: TodayItem[];
+}): React.JSX.Element | null {
+  if (rows.length === 0) return null;
+  return (
+    <TodaySection label={label} count={rows.length} help={help}>
+      <LimitedList label={label} items={rows} itemKey={rowKey} renderItem={(item) => <Row item={item} />} />
+    </TodaySection>
+  );
+}
+
+/** A section the server could not compute (spec 2.5): its bare heading and
+ *  the failure in place - never an empty section. */
+function UnavailableSection({ label, what }: { label: string; what: string }): React.JSX.Element {
+  return (
+    <TodaySection label={label}>
+      <p className={styles.sectionError} role="alert">
+        {`We couldn't load ${what}.`}
+      </p>
+    </TodaySection>
+  );
+}
+
+/** The owner's detail target for a nag ("Open"), else the group conversation. */
+function nagOpenHref(nag: RelayCloseNag): string {
+  if (nag.ownerType === 'tour' && nag.ownerId) return `/tours/${nag.ownerId}`;
+  if (nag.ownerType === 'placement' && nag.ownerId) return `/placements/${nag.ownerId}`;
+  return `/conversations/${nag.conversationId}`;
+}
+
+/** One "close this still-open relay group?" row (D5). The pool number is display
+ *  DATA (precedent: the opted-out Today card shows a phone). Close -> the existing
+ *  close endpoint (final message + keeps the number); Keep open -> the 28-day
+ *  defer. Either success dismisses the row (the server also drops it next refetch). */
+function RelayCloseNagRow({
+  nag,
+  onDone,
+}: {
+  nag: RelayCloseNag;
+  onDone: () => void;
+}): React.JSX.Element {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const who =
+    nag.tag && nag.tag.length > 0
+      ? nag.tag
+      : nag.memberNames.length > 0
+        ? nag.memberNames.join(' & ')
+        : null;
+  const number = formatPhoneDisplay(nag.poolNumber) || nag.poolNumber;
+
+  const run = (action: () => Promise<unknown>): void => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    void action()
+      .then(() => onDone())
+      .catch(() => {
+        setError('That did not go through - please try again.');
+        setBusy(false);
+      });
+  };
+
+  return (
+    <li className={styles.rowItem}>
+      <div className={styles.nagCard}>
+        <span className={styles.main}>
+          <span className={styles.who}>{number}</span>
+          <span className={styles.why}>
+            {who !== null
+              ? `Relay group for ${who} is still open - close it?`
+              : 'Relay group is still open - close it?'}
+          </span>
+        </span>
+        <span className={styles.nagActions}>
+          <Link
+            className={styles.nagOpen}
+            to={nagOpenHref(nag)}
+            // A tour opened from Today returns to Today (as the queue rows do).
+            state={nag.ownerType === 'tour' && nag.ownerId ? BACK_TO_TODAY : undefined}
+          >
+            Open
+          </Link>
+          <button
+            type="button"
+            className={styles.nagKeep}
+            disabled={busy}
+            onClick={() => run(() => deferCloseNag(nag.conversationId))}
+          >
+            Keep open
+          </button>
+          <button
+            type="button"
+            className={styles.nagClose}
+            disabled={busy}
+            onClick={() => run(() => closeConversation(nag.conversationId, true))}
+          >
+            Close
+          </button>
+        </span>
+      </div>
+      {error !== null ? (
+        <p role="alert" className={styles.nagError}>
+          {error}
+        </p>
+      ) : null}
+    </li>
+  );
+}
+
+/** One past tour (Sam's item 18): tenant - property - when - the Past tab's
+ *  state chip. A "Needs outcome" row opens the tour page with the Record
+ *  outcome dialog up (the Past tab's ?outcome=1 deep link); the others open the
+ *  plain tour page, where their next step lives (Mark toured, Start placement,
+ *  or a no-show's Reschedule / no-show check-in). Its accessible name mirrors a
+ *  Past row's: identity, date, then the state. */
+function PastTourRow({ row }: { row: TodayPastTourRow }): React.JSX.Element {
+  const { tour, tenant, property } = row;
+  const when = whenLabel(tour.scheduledAt);
+  const state = pastState(tour);
+  const needsOutcome = tour.status === 'toured' && tour.outcome === undefined;
+  const who = when.length > 0 ? `${tenant} at ${property} on ${when}` : `${tenant} at ${property}, undated`;
+  return (
+    <li className={styles.rowItem}>
+      <Link
+        to={needsOutcome ? `/tours/${tour.tourId}?outcome=1` : `/tours/${tour.tourId}`}
+        state={BACK_TO_TODAY}
+        className={`${styles.row} ${styles.pastRow}`}
+        aria-label={`Tour for ${who}, ${state}`}
+      >
+        <span className={styles.main}>
+          <span className={styles.who}>{tenant}</span>
+          <span className={styles.why}>{property}</span>
+        </span>
+        <span className={styles.meta}>
+          <span className={styles.when}>{when.length > 0 ? when : undatedTourLabel(tour)}</span>
+          <span className={styles.tag}>{state}</span>
+        </span>
+      </Link>
+    </li>
+  );
+}
+
+/** The past-tours section. Hidden until its rows (names included) are ready
+ *  and whenever there are none; a failed load says so here and leaves the rest
+ *  of Today alone. Its count is the rows Today qualifies (spec 5.3); the Past
+ *  tab link, beside the Show all button, carries the Past tab's own count
+ *  whenever that tab holds more than Today qualifies (a deleted tenant's
+ *  tours). */
+function PastToursSection({ past }: { past: TodayPastToursState }): React.JSX.Element | null {
+  if (past.status === 'idle') return null;
+  if (past.status === 'error') {
+    return (
+      <TodaySection label={PAST_TOURS_LABEL}>
+        <p className={styles.sectionError} role="alert">
+          We couldn&apos;t load past tours.{' '}
+          <Link className={styles.moreLink} to="/tours/past">
+            Open the Past tab
+          </Link>
+        </p>
+      </TodaySection>
+    );
+  }
+  if (past.rows.length === 0) return null;
+  const more = past.total > past.rows.length;
+  return (
+    <TodaySection label={PAST_TOURS_LABEL} count={past.rows.length}>
+      <LimitedList
+        label={PAST_TOURS_LABEL}
+        items={past.rows}
+        itemKey={(row) => row.tour.tourId}
+        renderItem={(row) => <PastTourRow row={row} />}
+        footer={
+          <Link className={styles.moreLink} to="/tours/past">
+            {more ? `See all ${past.total} on the Past tab` : 'Open the Past tab'}
+          </Link>
+        }
+      />
+      {past.reloadFailed ? (
+        <p className={styles.sectionError} role="alert">
+          Could not refresh past tours. Reload the page to see the latest.
+        </p>
+      ) : null}
+    </TodaySection>
+  );
+}
+
+/** One Tours today row, compact (spec 2.4): the local time, the tenant, the
+ *  property. A fallback row has neither `at` nor `unitLabel` and reads the
+ *  name alone. */
+function CompactTourRow({ item }: { item: TodayItem }): React.JSX.Element {
+  const time = timeLabel(item.at);
+  const place = item.unitLabel ?? '';
+  const name = [place.length > 0 ? `Tour for ${item.who} at ${place}` : `Tour for ${item.who}`, time]
+    .filter((s) => s.length > 0)
+    .join(', ');
+  return (
+    <li className={styles.compactItem}>
+      <Link
+        to={hrefFor(item)}
+        state={item.refType === 'tour' ? BACK_TO_TODAY : undefined}
+        className={styles.compactRow}
+        aria-label={name}
+      >
+        {time.length > 0 ? <span className={styles.compactTime}>{time}</span> : null}
+        <span className={styles.who}>{item.who}</span>
+        {place.length > 0 ? <span className={styles.why}>{place}</span> : null}
+      </Link>
+    </li>
+  );
+}
+
+/** Below the dashed divider (spec 2.4): Tours today, then the AI suggestions
+ *  as ONE collapsed line whose list is not in the accessibility tree until it
+ *  is opened. Never part of the checklist; not rendered when both are empty. */
+function AtAGlance({ toursToday, aiSuggestions }: { toursToday: TodayItem[]; aiSuggestions: TodayItem[] }): React.JSX.Element | null {
+  const [aiOpen, setAiOpen] = useState(false);
+  const aiBodyId = useId();
+  if (toursToday.length === 0 && aiSuggestions.length === 0) return null;
+  const aiLine = `AI suggestions for ${aiSuggestions.length} ${aiSuggestions.length === 1 ? 'contact' : 'contacts'}`;
+  return (
+    <section className={styles.glance}>
+      <h2 className={styles.groupHeading}>{GLANCE_LABEL}</h2>
+      {toursToday.length > 0 ? (
+        <TodaySection label={TOURS_TODAY_LABEL} count={toursToday.length} level={3}>
+          <LimitedList
+            label={TOURS_TODAY_LABEL}
+            items={toursToday}
+            itemKey={rowKey}
+            renderItem={(item) => <CompactTourRow item={item} />}
+          />
+        </TodaySection>
+      ) : null}
+      {aiSuggestions.length > 0 ? (
+        <div className={styles.group}>
+          <button
+            type="button"
+            className={styles.aiToggle}
+            aria-expanded={aiOpen}
+            aria-controls={aiOpen ? aiBodyId : undefined}
+            onClick={() => setAiOpen((open) => !open)}
+          >
+            <span>{aiLine}</span>
+            <span className={styles.aiChevron} aria-hidden="true">
+              {aiOpen ? 'Hide' : 'Show'}
+            </span>
+          </button>
+          {aiOpen ? (
+            <div id={aiBodyId} className={styles.aiBody}>
+              <LimitedList
+                label={AI_LABEL}
+                items={aiSuggestions}
+                itemKey={rowKey}
+                renderItem={(item) => <Row item={item} />}
+              />
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+export function Today(): React.JSX.Element {
+  const {
+    status,
+    items,
+    source,
+    relayCloseNags = [],
+    dismissNag = () => {},
+    quietShares = NO_QUIET_SHARES,
+    toursToBookStatus = 'ok',
+    generatedAt = '',
+  } = useToday();
+  const past = useTodayPastTours();
+  const rowsOf = (group: TodayGroup): TodayItem[] => items.filter((i) => i.group === group);
+  const needs = rowsOf('needs_you_now');
+  const identify = rowsOf('identify');
+  const toursToBook = rowsOf('tours_to_book');
+  const placements = rowsOf('follow_ups');
+  const toursToday = rowsOf('tours_today');
+  const aiSuggestions = rowsOf('ai_suggestions');
+  const fallback = source === 'fallback';
+  const quietProperties = quietShares.status === 'ok' ? quietShares.properties.length : 0;
+
+  // The checklist sections the queue itself fills (past tours settle on their own).
+  const queueEmpty =
+    needs.length === 0 &&
+    identify.length === 0 &&
+    toursToBook.length === 0 &&
+    quietProperties === 0 &&
+    relayCloseNags.length === 0 &&
+    placements.length === 0;
+  // A section that failed to load is not empty (spec 2.3, 2.5); the fallback
+  // computes neither Tours to book nor Quiet shares (spec 3.1).
+  const anyUnavailable =
+    fallback || quietShares.status === 'unavailable' || toursToBookStatus === 'unavailable' || past.status === 'error';
+  const glanceEmpty = toursToday.length === 0 && aiSuggestions.length === 0;
+  // "All caught up" waits for the past-tours section to settle, so it never
+  // flashes above rows that are about to appear (spec 2.3). At a glance never
+  // blocks it.
+  const allCaughtUp = status === 'ready' && queueEmpty && !anyUnavailable && past.status === 'ready' && past.rows.length === 0;
+  // Meanwhile a page with nothing else to show keeps its spinner rather than
+  // going blank.
+  const settling = status === 'ready' && queueEmpty && glanceEmpty && !anyUnavailable && past.status === 'idle';
+
+  return (
+    <div className={styles.page}>
+      <h1 className={styles.title}>Today</h1>
+      <p className={styles.sub}>
+        Clear every section above the line and today&apos;s checklist is done. New messages are in the Inbox.
+      </p>
+
+      {status === 'loading' || settling ? <Spinner center /> : null}
+
+      {status === 'error' ? (
+        <p className={styles.error} role="alert">
+          We couldn&apos;t load your queue. Please try again.
+        </p>
+      ) : null}
+
+      {status === 'ready' ? (
+        <>
+          {fallback ? <p className={styles.notice}>Some sections can&apos;t load right now.</p> : null}
+
+          {allCaughtUp ? (
+            <div className={styles.empty}>
+              <p className={styles.emptyTitle}>All caught up</p>
+              <p className={styles.emptyBody}>Nothing needs you right now.</p>
+            </div>
+          ) : null}
+
+          {/* The checklist (spec 2, sections 1-7). The sections after past
+           *  tours are NOT held until it settles (tried and reverted, review
+           *  round 4): core content must not wait on best-effort name lookups. */}
+          <ItemsSection label={NEEDS_LABEL} rows={needs} />
+          <ItemsSection label={IDENTIFY_LABEL} help={IDENTIFY_HELP} rows={identify} />
+          <PastToursSection past={past} />
+          {toursToBookStatus === 'unavailable' && !fallback ? (
+            <UnavailableSection label={TOURS_TO_BOOK_LABEL} what="tours to book" />
+          ) : (
+            <ItemsSection label={TOURS_TO_BOOK_LABEL} help={TOURS_TO_BOOK_HELP} rows={toursToBook} />
+          )}
+          {fallback ? null : <QuietSharesSection quiet={quietShares} now={generatedAt} />}
+          {relayCloseNags.length > 0 ? (
+            <TodaySection label={RELAY_LABEL} count={relayCloseNags.length}>
+              <LimitedList
+                label={RELAY_LABEL}
+                items={relayCloseNags}
+                itemKey={(nag) => nag.conversationId}
+                renderItem={(nag) => (
+                  <RelayCloseNagRow nag={nag} onDone={() => dismissNag(nag.conversationId)} />
+                )}
+              />
+            </TodaySection>
+          ) : null}
+          <ItemsSection label={PLACEMENTS_LABEL} rows={placements} />
+
+          <AtAGlance toursToday={toursToday} aiSuggestions={aiSuggestions} />
+        </>
+      ) : null}
+    </div>
+  );
+}
+```
+
+3b. `dashboard/src/routes/today/Today.module.css` - append after the S5.5
+block (its last block is `.note`). Edit:
+
+old:
+```css
+/* A muted note under a section ("Showing the first 100 properties"). */
+.note {
+  margin: var(--sp-2) 0 0;
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+```
+new:
+```css
+/* A muted note under a section ("Showing the first 100 properties"). */
+.note {
+  margin: var(--sp-2) 0 0;
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+
+/* The fallback's one line (spec 2.5): some sections cannot load right now. */
+.notice {
+  margin: 0 0 var(--sp-4);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface-2);
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+
+/* --- At a glance (spec 2026-10-23 2.4) ------------------------------------- */
+
+/* Below a dashed divider: reference only, never part of the checklist. */
+.glance {
+  margin-top: var(--sp-6);
+  padding-top: var(--sp-5);
+  border-top: 2px dashed var(--c-border-strong);
+}
+
+/* Tours today: compact rows (time - tenant - property), not cards. */
+.compactItem {
+  margin: 0;
+}
+
+.compactRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-1);
+  border-bottom: 1px solid var(--c-divider);
+  color: inherit;
+  font-size: var(--fs-sm);
+  text-decoration: none;
+}
+
+.compactRow:hover .who {
+  text-decoration: underline;
+}
+
+.compactRow:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
+.compactTime {
+  flex: 0 0 5rem;
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+  white-space: nowrap;
+}
+
+/* The AI suggestions line: one full-width button, collapsed by default. */
+.aiToggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  width: 100%;
+  min-height: 2.75rem;
+  padding: var(--sp-2) var(--sp-4);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface-2);
+  color: var(--c-text);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  text-align: left;
+  cursor: pointer;
+}
+
+.aiToggle:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
+.aiChevron {
+  flex: 0 0 auto;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+}
+
+.aiBody {
+  margin-top: var(--sp-2);
+}
+```
+
+3c. `dashboard/src/api/types.ts` - `'unreplied'` leaves the union (its
+last reader, the old `Today.tsx` GROUP_META, is gone). Edit:
+
+old:
+```ts
+/** Spec 2026-10-23-today-checklist-design 3 (mirrors app/src/routes/today.ts):
+ *  `identify` (split from needs_you_now) and `tours_to_book` are new.
+ *  `unreplied` has no producer left; plan task S5.6 removes it from this
+ *  union together with its last reader (Today.tsx). */
+export type TodayGroup =
+  | 'needs_you_now'
+  | 'identify'
+  | 'tours_to_book'
+  | 'tours_today'
+  | 'follow_ups'
+  | 'ai_suggestions'
+  | 'unreplied';
+```
+new:
+```ts
+/** Spec 2026-10-23-today-checklist-design 3 (mirrors app/src/routes/today.ts):
+ *  `identify` (split from needs_you_now) and `tours_to_book` are new; the
+ *  unread-thread group is gone (known contacts' unread threads live in the
+ *  Inbox only, spec 4). */
+export type TodayGroup =
+  | 'needs_you_now'
+  | 'identify'
+  | 'tours_to_book'
+  | 'tours_today'
+  | 'follow_ups'
+  | 'ai_suggestions';
+```
+Edit (~2180, the extraction comment names the old heading):
+
+old:
+```ts
+// the Today "AI suggestions to review" group. Wire shape mirrors the server's
+```
+new:
+```ts
+// the Today "AI suggestions for N contacts" line. Wire shape mirrors the server's
+```
+
+3d. `dashboard/src/routes/today/buildToday.ts` - the placeholder key goes
+with the group. Edit:
+
+old:
+```ts
+  ai_suggestions: 5,
+  // No producer is left (spec 2026-10-23 4). Plan task S5.6 deletes this key
+  // with the group itself, once Today.tsx no longer reads it.
+  unreplied: 6,
+};
+```
+new:
+```ts
+  ai_suggestions: 5,
+};
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/dashboard; npx vitest run src/routes/today src/routes/tours src/App.test.tsx
+```
+Expect all green (`App.test.tsx` renders the shell's Today h1 through the
+real page on a 404 fallback). Then:
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0. A type error naming `'unreplied'` means a reader this slice
+missed - grep it (`git grep -n "'unreplied'" -- dashboard`), fix it the same
+way, and record it in the report.
+
+#### Step 5 - ASCII check
+
+```
+cd W:/tmp/today-checklist; tr -d '\11\12\15\40-\176' < dashboard/src/routes/today/Today.tsx | wc -c; tr -d '\11\12\15\40-\176' < dashboard/src/routes/today/Today.test.tsx | wc -c; git diff -U0 -- dashboard/src/api/types.ts dashboard/src/routes/today/buildToday.ts dashboard/src/routes/today/Today.module.css | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0` three times (both rewritten files are now ASCII throughout).
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+test ! -e "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD" && echo no-merge-in-progress
+git -C W:/tmp/today-checklist add dashboard/src/routes/today/Today.tsx dashboard/src/routes/today/Today.test.tsx dashboard/src/routes/today/Today.module.css dashboard/src/api/types.ts dashboard/src/routes/today/buildToday.ts
+git -C W:/tmp/today-checklist commit -m "feat(dashboard): Today as the daily checklist - section order, counts, help lines, At a glance, All caught up rules (today-checklist S5.6)" -m "Spec 2-2.5, plan PR33, PR36. Unreplied leaves TodayGroup. Today.test.tsx re-written deliberately (cases listed in plan S5.6)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S5.7 - Slice close: re-grep, typecheck, dashboard tests, lint, ASCII, report
+
+No code. Step 1 may produce a fix commit only if it finds a missed reader.
+
+#### Step 1 - re-grep the dashboard for readers of the old page
+
+```
+cd W:/tmp/today-checklist; git grep -n -i -E "unreplied|Follow-ups due|AI suggestions to review|What needs you, across|TODAY_PAST_TOURS_CAP|PAST_TOURS_AFTER|GROUP_META" -- dashboard
+```
+Expected hits, ALL comments or assertions that record the removal:
+- `dashboard/src/routes/today/buildToday.test.ts` - the inversion comment
+  ("INVERTS the former \"puts an unread triaged 1:1 in unreplied\" ...").
+- `dashboard/src/routes/today/Today.test.tsx` - the
+  `/Unreplied|Follow-ups/` absence assertion and its comment, and the
+  subtitle absence assertion (`What needs you, across ...`).
+- `dashboard/src/routes/tours/useTours.test.ts` - the comment recording
+  `TODAY_PAST_TOURS_CAP`'s removal.
+Any other hit (a production reader, a fixture) is a defect: fix it, re-run
+Steps 2-3, commit it on its own with explicit paths, and record it in the
+report. Record the command and its full output in the report.
+
+#### Step 2 - typecheck (bare)
+
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0.
+
+#### Step 3 - the dashboard workspace tests, once
+
+```
+cd W:/tmp/today-checklist/dashboard; npx vitest run
+```
+Expect every file green. A failure outside `src/routes/today` and
+`src/routes/tours` is first re-run alone (`npx vitest run src/<file>`); if
+it still fails, it is S5's to diagnose (S5 touched only the files listed in
+S5.1-S5.6). Record the file and test counts in the report.
+
+#### Step 4 - lint on the files S5 touched (gate 5 shape; never empty)
+
+```
+cd W:/tmp/today-checklist; npx eslint dashboard/src/api/types.ts dashboard/src/routes/today/Today.tsx dashboard/src/routes/today/Today.test.tsx dashboard/src/routes/today/TodaySection.tsx dashboard/src/routes/today/TodaySection.test.tsx dashboard/src/routes/today/QuietShares.tsx dashboard/src/routes/today/QuietShares.test.tsx dashboard/src/routes/today/useToday.ts dashboard/src/routes/today/useToday.test.tsx dashboard/src/routes/today/buildToday.ts dashboard/src/routes/today/buildToday.test.ts dashboard/src/routes/today/useTodayPastTours.ts dashboard/src/routes/today/useTodayPastTours.test.tsx dashboard/src/routes/tours/useTours.ts dashboard/src/routes/tours/useTours.test.ts dashboard/src/routes/tours/tourTime.ts dashboard/src/routes/tours/tourTime.test.ts
+```
+Expected: exit 0 (`docs/issues/lint-backlog-repo-wide.md` names none of
+these files). Watch in particular for `react-hooks/set-state-in-render` on
+the conditional seed in `QuietSharesSection` (it flags only an
+UNCONDITIONAL setState; the seed is inside `if (!seeded && ...)`). If an
+error is reported, attribute it by baseline (AGENTS.md gate 5): run the
+same command against the same paths in the shared checkout at main
+`W:\AI Projects\Housing Choice\HC Application` (read it there; never move
+its HEAD); new files have no baseline, so any error in them is S5's. An
+error present here and absent there is S5's and is fixed before the report;
+a pre-existing one is named in the report and left.
+
+#### Step 5 - ASCII sweep across the slice (added lines only)
+
+```
+cd W:/tmp/today-checklist; BASE=$(git log --format=%H -1 --fixed-strings --grep='today-checklist S5.1)')~1; git diff -U0 "$BASE" HEAD -- dashboard | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0`. (Many dashboard files carry pre-existing non-ASCII; this
+counts only lines S5 added. `BASE` is the commit before S5.1.)
+
+#### Step 6 - slice report
+
+Write `docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S5-report.md`
+(ASCII, findings only, citing `file:line`). It must record at least:
+
+- WI10: `TODAY_PAST_TOURS_CAP` had one reader (`useTodayPastTours.ts`, the
+  labeling walk); after S5.3 none, so it and its pin
+  (`useTours.test.ts`, "caps Today at five rows") are removed. The 5-row
+  limit is `TODAY_SECTION_LIMIT` (`TodaySection.tsx`), pinned in
+  `TodaySection.test.tsx`. Include the S5.3 Step 4 grep output.
+- WI11: `buildTodayFromSources` runs only on `ApiError` 404 from GET
+  /api/today (`useToday.ts`, the `err.status !== 404` line in
+  `loadToday`); a fallback load is `source: 'fallback'` with quiet shares
+  and Tours to book UNAVAILABLE, and the page withholds "All caught up" on
+  `fallback || any unavailable` (`Today.tsx`, `anyUnavailable`). Pinned by
+  `useToday.test.tsx` "a fallback load has both sections unavailable" and
+  `Today.test.tsx` "the fallback shows one line ...".
+- C1-C7 as resolved (one line each), in particular C2 (count chips are back
+  on Today, reversing 2f0db66f deliberately) and C4 (`generatedAt` on
+  `useToday`, the quiet clock).
+- The spinner rule changed shape: it now spins only while past tours settle
+  AND nothing else would render (checklist and At a glance empty, nothing
+  unavailable) - `Today.tsx`, `settling`. "All caught up" itself still waits
+  for past tours (spec 2.3).
+- The fallback keeps its own Identify copy `'New inbound [U+2014]
+  untriaged'` with `attention: true` (`buildToday.ts`, the unknown branch),
+  unchanged per PR36 - the server's identify rows read "New unknown
+  contact".
+- Removed as dead after Unreplied: `CONTACT_TYPE_LABELS` and `ONE_TO_ONE`
+  in `buildToday.ts` (no other reader), and the `ConversationType` import.
+- The `Today.test.tsx` fate table from S5.6 Step 1 (or a pointer to it).
+- The Step 1 re-grep command and output; Step 3 counts; Step 4 lint result
+  (and any pre-existing error by name).
+- Risks for S7's live QA: the heading count chip and the `display: block`
+  heading at 360px; the Quiet shares property line wrapping a long address
+  and summary; the AI line's width; the Show all button beside the Past tab
+  link wrapping on a narrow pane.
+
+Commit it:
+```
+git -C W:/tmp/today-checklist status
+test ! -e "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD" && echo no-merge-in-progress
+git -C W:/tmp/today-checklist add docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S5-report.md
+git -C W:/tmp/today-checklist commit -m "docs(records): today-checklist S5 slice report (dashboard Today; WI10, WI11)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### S5 coverage
+
+| Spec / ruling | Covered by |
+|---|---|
+| Spec 2 page order; Unreplied removed; subtitle | S5.6 (`orders the checklist sections ...`, `reads the checklist subtitle`, the rewritten groups case) |
+| Spec 2 / PR33 heading + list named by heading text | S5.1 (`TodaySection.test.tsx`), S5.6 (every `getByRole('list', { name })`) |
+| Spec 2.1 5 rows, Show all N / Show fewer, aria-expanded | S5.1 (LimitedList cases), S5.6 (Needs you now, Relay groups, Past tours cases) |
+| Spec 2.1 count in the heading | S5.1, S5.6 (C2) |
+| Spec 2.1 Past tours keeps its link beside Show all | S5.6 (`shows 5 rows with "Show all N" beside the Past tab link`) |
+| Spec 2.1 Quiet shares limit counts property lines | S5.5 (`more than 5 properties ...`, `an open property shows ALL its people`) |
+| Spec 2.2 help lines (exact, three only) | S5.6 (`shows the VA help lines ...`), S5.5 |
+| Spec 2.3 All caught up: checklist only; At a glance below; settle wait | S5.6 (All caught up describe; the past-tours spinner and round-4 cases) |
+| Spec 2.4 At a glance: divider, Tours today compact, AI collapsed line absent from the tree | S5.6 (Tours today, AI line, singular, `no At a glance section ...`); S5.2 (`timeLabel`) |
+| Spec 2.5 "We couldn't load <section>." / fallback one line | S5.6 (two unavailable cases, two fallback cases), S5.5 (unavailable) |
+| Spec 3 / PR31 types mirror, optional fields read unavailable | S5.4 (types; `useToday` cases) |
+| Spec 3.1 / PR36 / WI11 fallback: identify, no unreplied, unavailable | S5.4 (buildToday cases, fallback useToday case), S5.6 |
+| PR32 useToday statuses; no new subscription | S5.4 |
+| Spec 5.3 / PR35 past tours: label every row, deleted skipped, oldest first, off-range last, Past tab count | S5.2 (`isOffRangePastTour`), S5.3 |
+| WI10 TODAY_PAST_TOURS_CAP | S5.3 (removed with its pin), S5.7 report |
+| Spec 5.4 Tours to book rows (who, property, age, tour link) | S5.6 (`a Tours to book row ...`) |
+| Spec 5.5 Relay groups at position 6 with the limit | S5.6 (order case, relay limit case) |
+| Spec 5.6 Placements heading | S5.6 (order case) |
+| Spec 6.2 person row copy, tags, caseworker role tag, contact link, no Interested buttons | S5.5 |
+| Spec 6.3 / PR34 option C: summary copy, order as received, first open, choices kept by unitId, later folded, Show all N properties, truncated note, people-list name | S5.5, S5.6 (`Quiet shares on the page ...`) |
+| Spec 9 dashboard tests list | S5.1-S5.6 as above |
+
+Not covered here (other slices): the server wire and its tests (S4); the
+`contact.updated` / `tour.updated` emits that drive Today's refetch (S2,
+S3); every e2e spec, the perf terminal, `selectors.md`, GLOSSARY and live
+browser QA (S7).
+
+## 10. S6 - Backfill: last_reached_out_at from the last 14 days
+
+Scope: plan section 2 row S6; ruling PR38 (binding); watch item WI12. Spec
+7.2, 7.3 and 7.5. Depends on S1 (`contactsRepo.touchLastReachedOut`, PR2).
+Every line number below is a hint against main @970a29b9; the QUOTED text is
+the anchor.
+
+The slice adds ONE new script, `app/scripts/backfill-last-reached-out.ts`,
+built as the twin of `app/scripts/backfill-last-heard-from.ts`: a pure planner
+(`planThreadPage`) that classifies one page of a thread's window rows into
+per-category counts and a latest-per-contact map, tested directly with row
+builders; and a runner (`backfillLastReachedOut`) with an injectable `doc` and
+`contacts`, tested through a fake `doc` that models the window Query's key
+condition and the tour reminders Scan. Plus its RUNBOOK entry. No
+package.json script (PR38, like the twin). The agent NEVER runs the CLI in
+this slice; the lane rehearsal is S7's (plan section 0, WI12).
+
+Test code in this slice runs as a PURE unit file (no database). Plan section
+0 allows `ALLOW_SKIP_DYNAMO_TESTS=1` for its red/green steps only; the
+slice-closing task runs it bare with DynamoDB Local up. If the environment
+exports `AWS_ACCESS_KEY_ID`, prefix every vitest command with
+`env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY`.
+
+### Contradictions
+
+C1. Spec 7.3 (W4 row) and PR21: "The reconcile's relay-leg adoption does not
+stamp" live. The backfill cannot tell an adopted leg from a fan-out leg: the
+adoption writes the slot as `sid: m.providerSid, sentAt: m.sentAt ?? m.createdAt`
+(`app/src/jobs/sendReconcile.ts:1037-1038`), exactly the shape PR38's relay
+rule counts ("slots keyed by contactId ... with a `sid` and `sentAt`").
+Resolution: COUNT it. Spec 7.2 counts every staff relay post to every member
+it reached; the live skip is a best-effort choice for a rare recovery path
+("a rare recovery path; best-effort"), not a 7.2 exclusion. The same holds for
+the reconcile's adoption of a ONE-TO-ONE staff send whose append failed: the
+adopted row is an ordinary staff row and counts. S6.4 records both in the
+slice report. No code difference from PR38.
+
+C2. Spec 7.5 / PR38: "1:1 text/email recipient: `recipient_contact_id`, else
+the thread's contact". The live W3 (PR12) stamps `input.contactId`, the
+ADDRESSED contact. Email rows never carry `recipient_contact_id`
+(`app/src/services/sendEmailMessage.ts:395-410` appends no such field), and
+call rows neither (`app/src/services/originateCall.ts:171-190`), so the
+backfill always names the thread's contact for them. The two agree except on
+a thread whose participant is a different contact than the one addressed (a
+shared address). Resolution: follow PR38 as written; S6.4 records the
+approximation in the report.
+
+C3. Spec 7.5: "Every category requires `direction` outbound, `author`
+'teammate' and no `imported_from`". The staff-edited intro rule PR38 picks
+counts rows with `author === 'system'` (the announcement row,
+`app/src/services/relayAnnouncements.ts:227-240`). Section 4 is binding:
+`planRow` routes an `author: 'system'` row to the intro rule BEFORE the
+teammate test; every other non-teammate author is skipped. The spec itself
+names the exception ("staff-edited relay intros: stored with `author`
+'system'").
+
+Checked, NOT contradictions (recorded so a reviewer need not re-derive them):
+- PR38 "skip failed" for email: a bounce sets `undelivered`, never `failed`
+  (`app/src/services/emailEvents.ts:10`), and `failed` is written only when
+  `adapter.send` threw (`sendEmailMessage.ts:477`), before any SES id exists.
+  The planner tests `failed` FIRST, so the rule holds even on an impossible
+  failed row with an SES id.
+- Spec 7.2 lists auto-replies and opt-in / opt-out confirmations as automated
+  sends. The app sends and persists none ("NO REPLY IS COMPOSED HERE",
+  `app/src/routes/webhooks/twilio.ts:1256-1258`), so there is no row to filter.
+  Missed-call texts, welcome texts, the tour reminder poll and the nudge poll
+  pass `automated: true` (`jobs/missedCallAutoText.ts:256`,
+  `routes/public.ts:655`, `jobs/tourReminders.ts:1440`,
+  `jobs/placementNudges.ts:676`); the two Send now paths pass `automated: false`
+  (`jobs/tourReminders.ts:2004`, `jobs/placementNudges.ts:860`).
+- The nudge Send now body is `resolveMessage` of the id `nudge.<kind>` with NO
+  override map (`jobs/placementNudges.ts:863`), so it is always the
+  catalog default even though the four entries are `editable: true`
+  (`app/src/messages/catalog.ts:206-238`). If an org override is ever wired
+  into that call, this exclusion misses it.
+- The tour reminder Send now composes `body` and snapshots it as `sentBody` in
+  the SAME claim (`jobs/tourReminders.ts:1967`,
+  `repos/tourRemindersRepo.ts:348-386`), so a body match is exact. A group
+  route reminder goes out as a relay announcement (`author: 'system'`) and is
+  already `system_other`.
+- Quo rows carry `author: 'staff'` (`app/src/lib/import/apply.ts:473`, a value
+  outside `MessageAuthor`, `app/src/repos/messagesRepo.ts:111`) and
+  `imported_from: 'quo-airtable-import'` (`apply.ts:60`, `:482`, `:518`). The
+  planner tests `imported_from` before the author, so they report as
+  `imported`; the author test alone would also drop them.
+- A relay 30003 retry row MIRRORS the original's direction and author and sets
+  `relay_retry_of` (`routes/webhooks/twilio.ts:3087-3108`), so it is skipped on
+  `relay_retry_of`, before the team-post rule.
+- The instants match the live writers: W1/W3 the row providerTs; W4/W7
+  `result.providerTs`, which is what the slot's `sentAt` holds
+  (`jobs/relayFanOut.ts:2213`, `services/relayAnnouncements.ts:345`); W5
+  `posted.dateCreated`, the row providerTs (`services/groupSend.ts:654`); W6
+  the press-1 instant, which is `answered_at` (`routes/webhooks/voice.ts:1676`,
+  `:1747`).
+
+### Cross-slice notes (for the planner)
+
+- S1 must ship `touchLastReachedOut(contactId: string, at: string): Promise<'written' | 'skipped' | 'failed'>`
+  on the `ContactsRepo` INTERFACE (PR2). S6.2's `BackfillOpts.contacts` is
+  `Pick<ContactsRepo, 'findByPhone' | 'findByEmail' | 'touchLastReachedOut'>`
+  and does not typecheck without it.
+- S2 PR14 MAY extract a `oneToOneThreadContactId` helper in
+  `app/src/lib/heardFrom.ts`. S6 does not depend on it: its
+  `oneToOneContactOf` asks `attributeInbound` about a synthetic inbound text on
+  the one-to-one thread, which is the same rule's one-to-one branch
+  (`heardFrom.ts:89-104`). If PR14's helper lands, swapping it in is optional
+  and behavior-neutral.
+- The script imports `isPointerConversation` from
+  `app/scripts/backfill-last-heard-from.ts` (no copy). That twin must not be
+  renamed or deleted while this script lives.
+- S7 lane rehearsal (S7 owns it): `npx tsx app/scripts/backfill-last-reached-out.ts --env local --lane <L>`
+  (dry run) then the same with `--apply`, then `--apply` again (expect
+  `written: 0`, `skipped` = `planned`). A staff text sent from the UI on the
+  lane BEFORE the apply is stamped live, so the apply reports that contact
+  `skipped` (forward-only). The lean world's outbound rows are reseeded with
+  their own timestamps; S7 records the dry-run counts it sees rather than
+  predicting them. Never a bare `--env local`.
+- S8 handback: the RUNBOOK entry S6.3 writes is a post-merge obligation
+  (Cameron runs dev then prod after the deploy, dry run first; WI12).
+- S7 docs: S6 adds no GLOSSARY noun (the field is S1's; S7 writes the entry).
+
+---
+
+### Task S6.1 - The planner: classify a page of window rows, keep the latest instant per contact
+
+Creates the script with its pure half: the window constants, the category
+lists, `newPlan`, `windowBounds`, `nudgeBodySet`, `indexReminderSends` and
+`planThreadPage`. Spec 7.5 "Which historical rows count", "Recipient",
+"Window"; PR38 every bullet except Usage and the Query.
+
+Files:
+- `app/scripts/backfill-last-reached-out.ts` (new)
+- Tests: `app/test/backfillLastReachedOut.test.ts` (new)
+
+#### Step 1 - failing tests
+
+Create `app/test/backfillLastReachedOut.test.ts` with exactly:
+
+```ts
+// Unit tests for the one-time last_reached_out_at backfill (spec
+// docs/superpowers/specs/2026-10-23-today-checklist-design.md, sections 7.2,
+// 7.3 and 7.5; plan ruling PR38), in two halves. No database.
+//
+// 1. The PLANNER. planThreadPage classifies one page of a thread's window rows
+//    into per-category counts and folds the latest instant per contact. Every
+//    category spec 7.5 + PR38 names has a counted case and every skipped kind a
+//    skipped case; each case pins EVERY non-zero counter (nonZero below), so a
+//    row can only land where the case says it does.
+// 2. The RUNNER, through a fake `doc` that models the window Query's key
+//    condition (tsMsgId >= the floor), its outbound FilterExpression and
+//    paging, plus the tourReminders Scan, and a fake contacts repo that models
+//    the forward-only conditional touch.
+import { describe, expect, it } from 'vitest';
+import {
+  COUNTED_KINDS,
+  KEY_FLOOR_MARGIN_MS,
+  NUDGE_MESSAGE_IDS,
+  REMINDER_TIME_MATCH_MS,
+  SKIP_KINDS,
+  WINDOW_MS,
+  indexReminderSends,
+  newPlan,
+  nudgeBodySet,
+  planThreadPage,
+  windowBounds,
+  type ReachedOutContext,
+  type ReachedOutPlan,
+  type ReachedOutThread,
+} from '../scripts/backfill-last-reached-out.js';
+import { TEAM_SENDER_KEY } from '../src/jobs/relayFanOut.js';
+import type { HeardFromLookup } from '../src/lib/heardFrom.js';
+import { MESSAGE_CATALOG } from '../src/messages/catalog.js';
+import { relayMemberKey, type MessageItem, type RelayRecipientDelivery } from '../src/repos/messagesRepo.js';
+import { groupMemberKey } from '../src/services/groupMembers.js';
+import { SYSTEM_SENDER_KEY } from '../src/services/relayAnnouncements.js';
+
+// ---------------------------------------------------------------------------
+// Half 1 - the planner
+// ---------------------------------------------------------------------------
+
+const NOW = new Date('2026-10-24T12:00:00.000Z');
+/** windowBounds(NOW).windowStart - pinned by the first case. */
+const WINDOW_START = '2026-10-10T12:00:00.000Z';
+/** lib/import/apply.ts IMPORT_SOURCE (a literal: importing apply.ts pulls the whole importer). */
+const QUO = 'quo-airtable-import';
+
+const PHONES = new Map([
+  ['+15550100004', 'c-d'],
+  ['+15550100005', 'c-p'],
+]);
+const EMAILS = new Map([['e@x.test', 'c-e']]);
+
+/** A SYNCHRONOUS fixture lookup (the rule accepts either kind). */
+const lookup: HeardFromLookup = {
+  byPhone: (e164) => {
+    const contactId = PHONES.get(e164);
+    return contactId === undefined ? undefined : { contactId };
+  },
+  byEmail: (address) => {
+    const contactId = EMAILS.get(address);
+    return contactId === undefined ? undefined : { contactId };
+  },
+};
+
+function ctx(over: Partial<ReachedOutContext> = {}): ReachedOutContext {
+  return { lookup, windowStart: WINDOW_START, nudgeBodies: nudgeBodySet(), reminderSends: new Map(), ...over };
+}
+
+/** A staff one-to-one text, the shape services/sendMessage.ts appends. */
+const text = (tsMsgId: string, over: Partial<MessageItem> = {}) =>
+  ({
+    conversationId: 'one',
+    tsMsgId,
+    type: 'sms',
+    direction: 'outbound',
+    author: 'teammate',
+    delivery_status: 'sent',
+    automated: false,
+    body: 'Checking in about the place on Elm.',
+    ...over,
+  }) as MessageItem;
+
+/** A staff email, the shape services/sendEmailMessage.ts appends (no automated flag, no recipient_contact_id). */
+const email = (tsMsgId: string, over: Partial<MessageItem> = {}) =>
+  ({
+    conversationId: 'one',
+    tsMsgId,
+    type: 'email',
+    direction: 'outbound',
+    author: 'teammate',
+    delivery_status: 'queued',
+    body: 'Email body.',
+    ...over,
+  }) as MessageItem;
+
+/** An outbound call, the shape services/originateCall.ts appends ('ringing' until the press-1 gate). */
+const call = (tsMsgId: string, over: Partial<MessageItem> = {}) =>
+  ({
+    conversationId: 'one',
+    tsMsgId,
+    type: 'call',
+    direction: 'outbound',
+    author: 'teammate',
+    delivery_status: 'delivered',
+    call_status: 'ringing',
+    ...over,
+  }) as MessageItem;
+
+/** A multi-party post: ONE row, one delivery slot per member key (the relay team
+ *  send in routes/api.ts, services/groupSend.ts, services/relayAnnouncements.ts). */
+const post = (tsMsgId: string, slots: Record<string, RelayRecipientDelivery>, over: Partial<MessageItem> = {}) =>
+  ({
+    conversationId: 'grp',
+    tsMsgId,
+    type: 'sms',
+    direction: 'outbound',
+    author: 'teammate',
+    delivery_status: 'queued',
+    relay_sender_key: TEAM_SENDER_KEY,
+    body: 'Team post.',
+    delivery_recipients: slots,
+    ...over,
+  }) as MessageItem;
+
+const slot = (over: Partial<RelayRecipientDelivery> = {}): RelayRecipientDelivery => ({ status: 'queued', ...over });
+
+const ONE: ReachedOutThread = {
+  conversationId: 'one',
+  type: 'tenant_1to1',
+  participants: [{ contactId: 'c-a', phone: '+15550100001' }],
+};
+const RELAY: ReachedOutThread = {
+  conversationId: 'grp',
+  type: 'relay_group',
+  participants: [
+    { contactId: 'c-b', phone: '+15550100002' },
+    { contactId: 'c-c', phone: '+15550100003' },
+    { contactId: '', phone: '+15550100004' },
+  ],
+};
+const GROUP: ReachedOutThread = {
+  conversationId: 'gt',
+  type: 'group_text',
+  participants: [
+    { contactId: 'c-g', phone: '+15550100008' },
+    { contactId: '', phone: '+15550100004' },
+    { contactId: '', phone: '+15550100009' },
+  ],
+};
+
+async function planRows(
+  thread: ReachedOutThread,
+  rows: readonly MessageItem[],
+  c: ReachedOutContext = ctx(),
+): Promise<ReachedOutPlan> {
+  const plan = newPlan();
+  await planThreadPage(plan, thread, rows, c);
+  return plan;
+}
+
+/** Every counter that is not zero, counted and skipped together (their keys are disjoint). */
+function nonZero(plan: ReachedOutPlan): Record<string, number> {
+  return Object.fromEntries(
+    [...Object.entries(plan.counted), ...Object.entries(plan.rowsSkipped)].filter(([, n]) => n > 0),
+  );
+}
+
+describe('the window and the plan shape', () => {
+  it('is the Follow up lookback (14 days) with a one-hour key floor margin', () => {
+    expect(WINDOW_MS).toBe(14 * 24 * 60 * 60 * 1000);
+    expect(KEY_FLOOR_MARGIN_MS).toBe(60 * 60 * 1000);
+    expect(REMINDER_TIME_MATCH_MS).toBe(10 * 60 * 1000);
+    expect(windowBounds(NOW)).toEqual({
+      windowStart: WINDOW_START,
+      keyFloor: '2026-10-10T11:00:00.000Z',
+    });
+  });
+
+  it('newPlan zeroes every category, in the declared order', () => {
+    const plan = newPlan();
+    expect(Object.keys(plan.counted)).toEqual([...COUNTED_KINDS]);
+    expect(Object.keys(plan.rowsSkipped)).toEqual([...SKIP_KINDS]);
+    expect(nonZero(plan)).toEqual({});
+    expect(plan.latest.size).toBe(0);
+  });
+});
+
+describe('planThreadPage - one-to-one texts (spec 7.5)', () => {
+  it('counts a staff sms and mms - automated false or absent - for the thread contact at the row providerTs', async () => {
+    const legacy = text('2026-10-21T10:00:00Z#SM2', { type: 'mms' });
+    delete legacy.automated;
+    const plan = await planRows(ONE, [text('2026-10-20T10:00:00.000Z#SM1'), legacy]);
+    expect(nonZero(plan)).toEqual({ text: 2 });
+    // The un-normalized key prefix is folded in canonical form.
+    expect([...plan.latest]).toEqual([['c-a', '2026-10-21T10:00:00.000Z']]);
+    expect(plan.messagesRead).toBe(2);
+  });
+
+  it('skips automated sends, shares (and a Retry of one) and automatic retries; a staff Retry counts', async () => {
+    const plan = await planRows(ONE, [
+      text('2026-10-20T10:00:00.000Z#A', { automated: true }),
+      text('2026-10-20T11:00:00.000Z#S', { broadcast_id: 'b-1' }),
+      text('2026-10-20T12:00:00.000Z#SR', { broadcast_id: 'b-1', retry_of: '2026-10-20T11:00:00.000Z#S' }),
+      text('2026-10-20T13:00:00.000Z#R1', {
+        retry_of: '2026-10-20T12:30:00.000Z#F',
+        retry_attempt: 1,
+        retry_window_start: '2026-10-20T12:30:00.000Z',
+      }),
+      text('2026-10-20T14:00:00.000Z#R2', { retry_window_start: '2026-10-20T12:30:00.000Z' }),
+      // The staff Retry button: retry_of (and retry_root) alone.
+      text('2026-10-20T15:00:00.000Z#M', {
+        retry_of: '2026-10-20T14:30:00.000Z#F2',
+        retry_root: '2026-10-20T14:30:00.000Z#F2',
+      }),
+    ]);
+    expect(nonZero(plan)).toEqual({ automated: 1, share: 2, machine_retry: 2, text: 1 });
+    expect([...plan.latest]).toEqual([['c-a', '2026-10-20T15:00:00.000Z']]);
+  });
+
+  it('names the row recipient_contact_id before the thread contact', async () => {
+    const plan = await planRows(ONE, [text('2026-10-20T10:00:00.000Z#H', { recipient_contact_id: 'c-held' })]);
+    expect(nonZero(plan)).toEqual({ text: 1 });
+    expect([...plan.latest]).toEqual([['c-held', '2026-10-20T10:00:00.000Z']]);
+  });
+
+  it('without one, the thread contact: participants, then the participant phone, then the participant email', async () => {
+    const rows = [text('2026-10-20T10:00:00.000Z#T')];
+    const byPhone = await planRows(
+      {
+        conversationId: 'np1',
+        type: 'unknown_1to1',
+        participants: [{ contactId: '', phone: '' }],
+        participant_phone: '+15550100005',
+        participant_email: 'e@x.test',
+      },
+      rows,
+    );
+    expect([...byPhone.latest.keys()]).toEqual(['c-p']);
+    const byEmail = await planRows(
+      { conversationId: 'np2', type: 'partner_1to1', participant_phone: '+15550100999', participant_email: 'e@x.test' },
+      rows,
+    );
+    expect([...byEmail.latest.keys()]).toEqual(['c-e']);
+    const nobody = await planRows({ conversationId: 'np3', type: 'unknown_1to1', participant_phone: '+15550100999' }, rows);
+    expect(nonZero(nobody)).toEqual({ no_recipient: 1 });
+    expect(nobody.latest.size).toBe(0);
+  });
+});
+
+describe('planThreadPage - emails and calls (spec 7.5, PR38)', () => {
+  it('counts an email once it left for SES; failed, or still queued without an SES id, does not', async () => {
+    const plan = await planRows(ONE, [
+      email('2026-10-20T10:00:00.000Z#e1', { delivery_status: 'sent' }),
+      email('2026-10-20T10:01:00.000Z#e2', { delivery_status: 'delivered', ses_message_id: 'ses-2' }),
+      // A bounce: emailEvents.ts maps every Bounce to undelivered.
+      email('2026-10-20T10:02:00.000Z#e3', { delivery_status: 'undelivered' }),
+      // SES took it but the queued->sent write failed (sendEmailMessage.ts step b).
+      email('2026-10-20T10:03:00.000Z#e4', { delivery_status: 'queued', ses_message_id: 'ses-4' }),
+      // The adapter threw: it never reached SES.
+      email('2026-10-20T10:04:00.000Z#e5', { delivery_status: 'failed' }),
+      // failed is tested FIRST, whatever else the row carries.
+      email('2026-10-20T10:05:00.000Z#e6', { delivery_status: 'failed', ses_message_id: 'ses-6' }),
+      // Persisted queued, nothing after it.
+      email('2026-10-20T10:06:00.000Z#e7', { delivery_status: 'queued' }),
+    ]);
+    expect(nonZero(plan)).toEqual({ email: 4, email_failed: 2, email_queued: 1 });
+    expect(plan.latest.get('c-a')).toBe('2026-10-20T10:03:00.000Z');
+  });
+
+  it('counts a call once the contact leg was dialed - at answered_at, else the row providerTs - and skips a ringing-only one', async () => {
+    const answered = await planRows(ONE, [
+      call('2026-10-20T10:00:00.000Z#CA1', {
+        call_status: 'completed',
+        call_outcome: 'answered',
+        answered_at: '2026-10-20T10:00:07Z',
+      }),
+    ]);
+    expect(nonZero(answered)).toEqual({ call: 1 });
+    expect(answered.latest.get('c-a')).toBe('2026-10-20T10:00:07.000Z');
+
+    const outcomeOnly = await planRows(ONE, [
+      call('2026-10-20T11:00:00.000Z#CA2', { call_status: 'no-answer', call_outcome: 'missed' }),
+    ]);
+    expect(nonZero(outcomeOnly)).toEqual({ call: 1 });
+    expect(outcomeOnly.latest.get('c-a')).toBe('2026-10-20T11:00:00.000Z');
+
+    // The staff cell never accepted: no answered_at, no call_outcome.
+    const ringing = await planRows(ONE, [call('2026-10-20T12:00:00.000Z#CA3')]);
+    expect(nonZero(ringing)).toEqual({ call_not_dialed: 1 });
+    expect(ringing.latest.size).toBe(0);
+  });
+});
+
+describe('planThreadPage - relay team posts (spec 7.5, PR38)', () => {
+  it('counts each CONTACT member whose slot shows a sent leg, at slot.sentAt, whatever the slot status', async () => {
+    const plan = await planRows(RELAY, [
+      post('2026-10-21T08:00:00.000Z#team-1', {
+        // Sent: a sid and a sent instant. The status can stay 'queued' after a successful send.
+        [relayMemberKey({ contactId: 'c-b', phone: '+15550100002' })]: slot({ sid: 'SM-b', sentAt: '2026-10-21T08:00:05Z' }),
+        // Never sent (suppressed): no sid.
+        [relayMemberKey({ contactId: 'c-c', phone: '+15550100003' })]: slot({
+          status: 'failed',
+          errorCode: 'contact_opted_out',
+        }),
+        // A sid with no sent instant is not proof of a sent leg.
+        'c-x': slot({ sid: 'SM-x' }),
+        // A phone-only member: no contact to stamp.
+        [relayMemberKey({ contactId: '', phone: '+15550100004' })]: slot({
+          status: 'sent',
+          sid: 'SM-p',
+          sentAt: '2026-10-21T08:00:06.000Z',
+        }),
+      }),
+    ]);
+    expect(nonZero(plan)).toEqual({ relay_team_slot: 1, slot_not_sent: 2, relay_phone_slot: 1 });
+    expect([...plan.latest]).toEqual([['c-b', '2026-10-21T08:00:05.000Z']]);
+  });
+
+  it('skips a relay 30003 retry row (relay_retry_of) and a staff row with no team sender key', async () => {
+    const plan = await planRows(RELAY, [
+      post(
+        '2026-10-21T08:05:00.000Z#SM-r',
+        { 'c-c': slot({ status: 'sent', sid: 'SM-r', sentAt: '2026-10-21T08:05:01.000Z' }) },
+        { relay_retry_of: '2026-10-21T08:00:00.000Z#team-1', relay_retry_member_key: 'c-c' },
+      ),
+      call('2026-10-21T09:00:00.000Z#CA9', {
+        conversationId: 'grp',
+        call_outcome: 'answered',
+        answered_at: '2026-10-21T09:00:05.000Z',
+      }),
+    ]);
+    expect(nonZero(plan)).toEqual({ relay_retry: 1, group_other: 1 });
+    expect(plan.latest.size).toBe(0);
+  });
+});
+
+describe('planThreadPage - group-text posts (spec 7.5, PR38)', () => {
+  it('counts every slot not excluded - roster first, then the phone lookup - at the row providerTs', async () => {
+    const attempted = slot({ transportAggregationState: 'attempted' });
+    const plan = await planRows(GROUP, [
+      post(
+        '2026-10-23T07:00:00.000Z#IM1',
+        {
+          [groupMemberKey('+15550100008')]: attempted, // roster contactId c-g
+          [groupMemberKey('+15550100004')]: attempted, // roster contactId '' -> findByPhone c-d
+          [groupMemberKey('+15550100009')]: attempted, // no contact anywhere
+          // Suppressed at the seed (groupSend.ts 7a): never stamped, though it would resolve.
+          [groupMemberKey('+15550100005')]: slot({
+            status: 'failed',
+            errorCode: 'contact_opted_out',
+            transportAggregationState: 'excluded',
+          }),
+        },
+        { conversationId: 'gt' },
+      ),
+      post('2026-10-23T08:00:00.000Z#IM2', { [groupMemberKey('+15550100008')]: attempted }, { conversationId: 'gt', author: 'ai' }),
+    ]);
+    expect(nonZero(plan)).toEqual({
+      group_text_slot: 2,
+      group_unresolved_slot: 1,
+      group_excluded_slot: 1,
+      not_teammate: 1,
+    });
+    expect([...plan.latest].sort()).toEqual([
+      ['c-d', '2026-10-23T07:00:00.000Z'],
+      ['c-g', '2026-10-23T07:00:00.000Z'],
+    ]);
+  });
+});
+
+describe('planThreadPage - staff-edited relay intros (PR38 body match)', () => {
+  const INTRO = 'Hi all - this group is for the 12 Elm move.';
+  const EDITED: ReachedOutThread = { ...RELAY, intro_body: INTRO };
+  const system = (tsMsgId: string, body: string, slots: Record<string, RelayRecipientDelivery>) =>
+    post(tsMsgId, slots, { author: 'system', relay_sender_key: SYSTEM_SENDER_KEY, body });
+
+  it('counts the intro whose body IS the thread intro_body, per contact member with a sent leg, at slot.sentAt', async () => {
+    const plan = await planRows(EDITED, [
+      system('2026-10-19T09:00:00.000Z#system-1', INTRO, {
+        'c-b': slot({
+          status: 'sent',
+          sid: 'SM-i1',
+          sentAt: '2026-10-19T09:00:03.000Z',
+          transportAggregationState: 'attempted',
+        }),
+        'c-c': slot({ status: 'failed', errorCode: 'contact_opted_out', transportAggregationState: 'excluded' }),
+        'phone#+15550100004': slot({ status: 'sent', sid: 'SM-i3', sentAt: '2026-10-19T09:00:04.000Z' }),
+      }),
+    ]);
+    expect(nonZero(plan)).toEqual({ edited_intro_slot: 1, slot_not_sent: 1, relay_phone_slot: 1 });
+    expect([...plan.latest]).toEqual([['c-b', '2026-10-19T09:00:03.000Z']]);
+  });
+
+  it('every other system announcement is system_other: a member added on that thread, any intro on a thread with no intro_body', async () => {
+    const sent = { 'c-b': slot({ status: 'sent', sid: 'SM-x', sentAt: '2026-10-19T10:00:01.000Z' }) };
+    const added = await planRows(EDITED, [system('2026-10-19T10:00:00.000Z#system-2', 'Hey, adding Pat to the group.', sent)]);
+    expect(nonZero(added)).toEqual({ system_other: 1 });
+    // The default intro: composed from the catalog, the thread has no intro_body.
+    const defaultIntro = await planRows(RELAY, [system('2026-10-19T11:00:00.000Z#system-3', INTRO, sent)]);
+    expect(nonZero(defaultIntro)).toEqual({ system_other: 1 });
+    expect(added.latest.size + defaultIntro.latest.size).toBe(0);
+  });
+});
+
+describe('planThreadPage - tour reminder and nudge "Send now" rows (PR38 exclude by body)', () => {
+  it('the nudge set is exactly the four nudge.* catalog defaults', () => {
+    expect([...NUDGE_MESSAGE_IDS].sort()).toEqual(
+      Object.keys(MESSAGE_CATALOG)
+        .filter((id) => id.startsWith('nudge.'))
+        .sort(),
+    );
+    expect(nudgeBodySet()).toEqual(new Set(NUDGE_MESSAGE_IDS.map((id) => MESSAGE_CATALOG[id].default)));
+    expect(nudgeBodySet().size).toBe(4);
+  });
+
+  it('excludes a staff-path text whose body is a nudge default; the poll send stays automated', async () => {
+    const bodies = NUDGE_MESSAGE_IDS.map((id) => MESSAGE_CATALOG[id].default);
+    const plan = await planRows(ONE, [
+      ...bodies.map((body, i) => text(`2026-10-20T1${i}:00:00.000Z#N${i}`, { body })),
+      text('2026-10-20T15:00:00.000Z#NP', {
+        body: MESSAGE_CATALOG['nudge.receipt_check'].default,
+        automated: true,
+      }),
+    ]);
+    expect(nonZero(plan)).toEqual({ excluded_nudge_body: 4, automated: 1 });
+    expect(plan.latest.size).toBe(0);
+  });
+
+  it('excludes a text equal to an in-window reminder sentBody, and counts those within 10 minutes after its sentAt', async () => {
+    const R1 = 'Reminder: your tour at 12 Elm is tomorrow at 10am.';
+    const R2 = 'Reminder: your tour at 9 Oak is today at 2pm.';
+    const reminderSends = indexReminderSends(
+      [
+        { sentAt: '2026-10-22T09:55:00.000Z', sentBody: R1 },
+        { sentAt: '2026-10-15T09:00:00.000Z', sentBody: R2 },
+      ],
+      WINDOW_START,
+    );
+    const plan = await planRows(
+      ONE,
+      [
+        text('2026-10-22T10:00:00.000Z#R1a', { body: R1 }), // 5 min after: time match
+        text('2026-10-22T10:05:00.000Z#R1b', { body: R1 }), // exactly 10 min after: time match
+        text('2026-10-22T10:05:00.001Z#R1c', { body: R1 }), // just over: body only
+        text('2026-10-22T09:50:00.000Z#R1d', { body: R1 }), // before the reminder: body only
+        text('2026-10-15T09:30:00.000Z#R2a', { body: R2 }), // 30 min after: body only
+        text('2026-10-22T11:00:00.000Z#T', { body: 'Something else.' }),
+      ],
+      ctx({ reminderSends }),
+    );
+    expect(nonZero(plan)).toEqual({ excluded_reminder_body: 5, text: 1 });
+    expect(plan.reminderBodyTimeMatched).toBe(2);
+    expect([...plan.latest]).toEqual([['c-a', '2026-10-22T11:00:00.000Z']]);
+  });
+
+  it('indexReminderSends keeps in-window sends that carry a body, normalized, several per body', () => {
+    const index = indexReminderSends(
+      [
+        { sentAt: '2026-10-22T09:55:00Z', sentBody: 'A' },
+        { sentAt: '2026-10-23T09:55:00.000Z', sentBody: 'A' },
+        { sentAt: '2026-10-01T09:55:00.000Z', sentBody: 'B' }, // before the window
+        { sentAt: '2026-10-22T09:55:00.000Z' }, // claimed before sentBody existed
+        { sentAt: 'garbage', sentBody: 'C' },
+        { sentAt: WINDOW_START, sentBody: 'D' }, // the window start itself is inside
+        { sentBody: 'E' }, // pending: never sent
+      ],
+      WINDOW_START,
+    );
+    expect([...index]).toEqual([
+      ['A', ['2026-10-22T09:55:00.000Z', '2026-10-23T09:55:00.000Z']],
+      ['D', [WINDOW_START]],
+    ]);
+  });
+});
+
+describe('planThreadPage - what never counts, and the window', () => {
+  it('never counts a Quo import row, whatever its shape; imported_from alone is enough', async () => {
+    const plan = await planRows(ONE, [
+      // The importer's own shapes (lib/import/apply.ts ~468-517): author 'staff'.
+      {
+        conversationId: 'one',
+        tsMsgId: '2026-10-20T10:00:00.000Z#q1',
+        type: 'sms',
+        direction: 'outbound',
+        author: 'staff',
+        delivery_status: 'sent',
+        imported_from: QUO,
+      } as unknown as MessageItem,
+      {
+        conversationId: 'one',
+        tsMsgId: '2026-10-20T11:00:00.000Z#q2',
+        type: 'call',
+        direction: 'outbound',
+        author: 'staff',
+        delivery_status: 'sent',
+        call_outcome: 'completed',
+        imported_from: QUO,
+      } as unknown as MessageItem,
+      text('2026-10-20T12:00:00.000Z#q3', { imported_from: QUO }),
+    ]);
+    const relay = await planRows(RELAY, [
+      {
+        conversationId: 'grp',
+        tsMsgId: '2026-10-20T13:00:00.000Z#q4',
+        type: 'sms',
+        direction: 'outbound',
+        author: 'staff',
+        delivery_status: 'sent',
+        relay_sender_key: TEAM_SENDER_KEY,
+        delivery_recipients: { 'c-b': { status: 'sent', sid: 'q', sentAt: '2026-10-20T13:00:00.000Z' } },
+        imported_from: QUO,
+      } as unknown as MessageItem,
+    ]);
+    expect(nonZero(plan)).toEqual({ imported: 3 });
+    expect(nonZero(relay)).toEqual({ imported: 1 });
+    expect(plan.latest.size + relay.latest.size).toBe(0);
+  });
+
+  it('an author that is not teammate never counts', async () => {
+    const plan = await planRows(ONE, [
+      { ...text('2026-10-20T10:00:00.000Z#s1'), author: 'staff' } as unknown as MessageItem,
+      text('2026-10-20T11:00:00.000Z#s2', { author: 'ai' }),
+    ]);
+    expect(nonZero(plan)).toEqual({ not_teammate: 2 });
+  });
+
+  it('never counts an inbound row', async () => {
+    const plan = await planRows(ONE, [text('2026-10-20T10:00:00.000Z#in', { direction: 'inbound', author: 'tenant' })]);
+    const relay = await planRows(RELAY, [
+      post('2026-10-20T11:00:00.000Z#in2', {}, { direction: 'inbound', author: 'tenant', relay_sender_key: 'c-b' }),
+    ]);
+    expect(nonZero(plan)).toEqual({ inbound: 1 });
+    expect(nonZero(relay)).toEqual({ inbound: 1 });
+  });
+
+  it('a row of a type outside sms/mms/email/call is other_type', async () => {
+    const plan = await planRows(ONE, [text('2026-10-20T10:00:00.000Z#f', { type: 'fax' as unknown as MessageItem['type'] })]);
+    expect(nonZero(plan)).toEqual({ other_type: 1 });
+  });
+
+  it('the window: the window start counts; a row above the key floor but before the window does not; an unparseable key is counted apart', async () => {
+    const plan = await planRows(ONE, [
+      text(`${WINDOW_START}#W0`),
+      text('2026-10-10T11:59:59.999Z#W1'),
+      text('2026-10-10T11:30:00.000Z#W2'), // inside the key floor margin
+      text('garbage#W3'),
+    ]);
+    expect(nonZero(plan)).toEqual({ text: 1, outside_window: 2 });
+    expect(plan.unparseableInstants).toBe(1);
+    expect([...plan.latest]).toEqual([['c-a', WINDOW_START]]);
+  });
+
+  it('keeps the latest instant per contact across threads, whichever is planned first, on NORMALIZED instants', async () => {
+    const relayA: ReachedOutThread = {
+      conversationId: 'ga',
+      type: 'relay_group',
+      participants: [{ contactId: 'c-a', phone: '+15550100001' }],
+    };
+    // Raw strings would pick '2026-10-20T10:00:00Z' ('Z' sorts after '.').
+    const oneRows = [text('2026-10-20T10:00:00Z#a')];
+    const relayRows = [
+      post('2026-10-20T09:59:00.000Z#team-a', { 'c-a': slot({ sid: 'SM-a', sentAt: '2026-10-20T10:00:00.500Z' }) }, { conversationId: 'ga' }),
+    ];
+
+    const oneFirst = newPlan();
+    await planThreadPage(oneFirst, ONE, oneRows, ctx());
+    await planThreadPage(oneFirst, relayA, relayRows, ctx());
+    expect(oneFirst.latest.get('c-a')).toBe('2026-10-20T10:00:00.500Z');
+
+    const relayFirst = newPlan();
+    await planThreadPage(relayFirst, relayA, relayRows, ctx());
+    await planThreadPage(relayFirst, ONE, oneRows, ctx());
+    expect(relayFirst.latest.get('c-a')).toBe('2026-10-20T10:00:00.500Z');
+  });
+});
+```
+
+#### Step 2 - RED
+
+Pure file; DynamoDB Local is not needed for this step only.
+
+```
+cd W:/tmp/today-checklist/app; ALLOW_SKIP_DYNAMO_TESTS=1 npx vitest run test/backfillLastReachedOut.test.ts
+```
+(PowerShell: `cd W:/tmp/today-checklist/app; $env:ALLOW_SKIP_DYNAMO_TESTS='1'; npx vitest run test/backfillLastReachedOut.test.ts`.)
+
+Expected: the file FAILS TO LOAD - an error naming
+`../scripts/backfill-last-reached-out.js` (the module does not exist yet), no
+test runs, non-zero exit.
+
+#### Step 3 - implementation
+
+Create `app/scripts/backfill-last-reached-out.ts` with exactly:
+
+```ts
+// backfill-last-reached-out - the ONE-TIME backfill of
+// contacts.last_reached_out_at from the last 14 days of outbound history (spec
+// docs/superpowers/specs/2026-10-23-today-checklist-design.md, sections 7.2,
+// 7.3 and 7.5; plan docs/superpowers/plans/2026-10-24-today-checklist.md,
+// ruling PR38). Twin of backfill-last-heard-from.ts.
+//
+// WHAT: Scans every conversation (phone#/email#/token# claim rows skipped),
+// reads each one's OUTBOUND rows of the window with a KEY-CONDITION Query
+// (tsMsgId >= the key floor - never the full history; no GSI exists on
+// messages), classifies every row with planThreadPage, keeps the latest
+// instant per contact ACROSS threads, then makes ONE
+// contactsRepo.touchLastReachedOut per contact. The writer is conditional and
+// forward-only: a value a live staff send wrote after the scan is never moved
+// back, and a second run writes nothing. It emits no live event.
+//
+// WINDOW: FOLLOW_UP_LOOKBACK_MS (14 days). A stamp matters only when it is
+// later than a share's sentAt, and no older share is a Follow up candidate.
+// The key floor is the window start minus KEY_FLOOR_MARGIN_MS; every row is
+// then re-checked on its NORMALIZED providerTs. No pre-filter on
+// last_activity_at: calls and queued relay posts do not move it.
+//
+// WHICH ROWS COUNT (spec 7.2, read through the fields each writer leaves; no
+// row says who started it). Outbound, no imported_from (a Quo row never
+// counts), author 'teammate' (except the edited intro below), and:
+//   - one-to-one sms/mms/email/call: automated not true; no broadcast_id (a
+//     share, or a Retry of one); no retry_attempt / retry_window_start (the
+//     automatic 30003 retry - a staff Retry carries retry_of alone and
+//     counts); an email once it left for SES (not failed; queued only with an
+//     SES id); a call once the contact's leg was dialed (answered_at or
+//     call_outcome), at answered_at when present. Recipient:
+//     recipient_contact_id, else the thread's contact (the attributeInbound
+//     one-to-one order).
+//   - relay team posts (relay_sender_key 'team', no relay_retry_of): each
+//     CONTACT-keyed slot with a sid and a sentAt, at slot.sentAt (a phone#
+//     slot has no contact to stamp).
+//   - group-text posts (relay_sender_key 'team' on a group_text thread): each
+//     slot not 'excluded'; phone -> contact by the roster, then findByPhone;
+//     at the row's providerTs.
+//   - staff-edited relay intros (author 'system'): BODY MATCH (INTRO_RULE) - a
+//     system row on a relay_group whose body IS the thread's intro_body; its
+//     sent contact slots, at slot.sentAt.
+//   - tour reminder / placement nudge "Send now" (automated false, no
+//     marker): EXCLUDED BY BODY (SEND_NOW_RULE) - a text equal to one of the
+//     four nudge.* catalog defaults, or to the sentBody of a tour reminder sent
+//     in the window. The report counts both, and how many reminder matches
+//     also fell within REMINDER_TIME_MATCH_MS after that reminder's sentAt.
+//
+// KNOWN GAP (accepted; RUNBOOK): a relay team post QUEUED on a connecting
+// group more than 14 days ago whose legs went out inside the window sits below
+// the key floor and is not read.
+//
+// TARGET: --env local|dev|prod through scripts/lib/stageClient.ts. DRY RUN IS
+// THE DEFAULT; --apply writes. An agent runs this ONLY with --env local
+// --lane <L> against a hermetic e2e lane it started (a bare --env local is the
+// human's live stack). NO AGENT RUNS THIS AGAINST A REAL ENVIRONMENT; Cameron
+// does, after the deploy, dry run first, per the RUNBOOK. No package.json
+// script, like its twin.
+//
+//   npx tsx app/scripts/backfill-last-reached-out.ts --env dev
+//   npx tsx app/scripts/backfill-last-reached-out.ts --env dev --apply
+//
+// ABORT: a touch answering 'failed' (any error but a lost condition) stops the
+// run with a PARTIAL report and exit 1. Re-running after the fix is safe.
+//
+// PII: logs counts and contactIds only - never a name, phone, address or body.
+import { attributeInbound, normalizeInstant, type HeardFromLookup } from '../src/lib/heardFrom.js';
+import { FOLLOW_UP_LOOKBACK_MS } from '../src/lib/listingSendOutcome.js';
+import type { MessageId } from '../src/messages/catalog.js';
+import { resolveMessage } from '../src/messages/resolve.js';
+import type { ConversationItem } from '../src/repos/conversationsRepo.js';
+import { splitTsMsgId, type MessageItem } from '../src/repos/messagesRepo.js';
+
+export const SCRIPT_NAME = 'backfill-last-reached-out';
+
+/** The window (spec 7.5): the Follow up candidate horizon. */
+export const WINDOW_MS = FOLLOW_UP_LOOKBACK_MS;
+/** The key-condition floor sits this far below the window start (spec 7.5 "a small margin"). */
+export const KEY_FLOOR_MARGIN_MS = 60 * 60 * 1000;
+/** A reminder-body row "also matched in time" when its providerTs is within this long AFTER that reminder's sentAt (PR38). */
+export const REMINDER_TIME_MATCH_MS = 10 * 60 * 1000;
+/** PR38: the rules the dry run reports it applied. */
+export const INTRO_RULE = 'body_match' as const;
+export const SEND_NOW_RULE = 'exclude_by_body' as const;
+
+/** The placement-nudge catalog ids. The Send now path sends
+ *  resolveMessage(`nudge.${kind}`) with no override (jobs/placementNudges.ts). */
+export const NUDGE_MESSAGE_IDS = [
+  'nudge.receipt_check',
+  'nudge.completion_check',
+  'nudge.approval_check',
+  'nudge.rta_window_closing',
+] as const satisfies readonly MessageId[];
+
+/** Local literals, as lib/heardFrom.ts keeps them: importing jobs/relayFanOut.ts
+ *  or services/relayAnnouncements.ts would pull the adapters into the script.
+ *  The tests build rows with the REAL constants, so a drift fails them. */
+const TEAM_SENDER_KEY = 'team';
+const SYSTEM_SENDER_KEY = 'system';
+const PHONE_KEY_PREFIX = 'phone#';
+const GROUP_THREAD_TYPES: ReadonlySet<string> = new Set(['relay_group', 'group_text']);
+/** An email row in one of these left for SES (a bounce is 'undelivered'). */
+const EMAIL_LEFT_STATUSES: ReadonlySet<string> = new Set(['sent', 'delivered', 'undelivered']);
+
+/** Counted per ROW (text, email, call) or per member SLOT (the rest). */
+export const COUNTED_KINDS = [
+  'text',
+  'email',
+  'call',
+  'relay_team_slot',
+  'group_text_slot',
+  'edited_intro_slot',
+] as const;
+export type CountedKind = (typeof COUNTED_KINDS)[number];
+
+/** Why a row (or a member slot) produced no instant. */
+export const SKIP_KINDS = [
+  'inbound',
+  'imported',
+  'outside_window',
+  'relay_retry',
+  'system_other',
+  'not_teammate',
+  'group_other',
+  'automated',
+  'share',
+  'machine_retry',
+  'call_not_dialed',
+  'email_failed',
+  'email_queued',
+  'excluded_nudge_body',
+  'excluded_reminder_body',
+  'other_type',
+  'no_recipient',
+  'relay_phone_slot',
+  'slot_not_sent',
+  'group_excluded_slot',
+  'group_unresolved_slot',
+] as const;
+export type SkipKind = (typeof SKIP_KINDS)[number];
+
+const nonEmpty = (s: unknown): s is string => typeof s === 'string' && s.length > 0;
+
+function zeroed<K extends string>(keys: readonly K[]): Record<K, number> {
+  return Object.fromEntries(keys.map((k) => [k, 0])) as Record<K, number>;
+}
+
+export interface ReachedOutPlan {
+  conversationsWalked: number;
+  pointerRows: number;
+  /** Rows the window Query returned (outbound, at or above the key floor). */
+  messagesRead: number;
+  counted: Record<CountedKind, number>;
+  rowsSkipped: Record<SkipKind, number>;
+  /** Of rowsSkipped.excluded_reminder_body: rows also within REMINDER_TIME_MATCH_MS after that reminder's sentAt. */
+  reminderBodyTimeMatched: number;
+  unparseableInstants: number;
+  /** contactId -> the latest normalized instant, across every thread. */
+  latest: Map<string, string>;
+}
+
+export function newPlan(): ReachedOutPlan {
+  return {
+    conversationsWalked: 0,
+    pointerRows: 0,
+    messagesRead: 0,
+    counted: zeroed(COUNTED_KINDS),
+    rowsSkipped: zeroed(SKIP_KINDS),
+    reminderBodyTimeMatched: 0,
+    unparseableInstants: 0,
+    latest: new Map(),
+  };
+}
+
+/** The thread fields the planner reads - the PERSISTED conversation. */
+export type ReachedOutThread = Pick<
+  ConversationItem,
+  'conversationId' | 'type' | 'participants' | 'participant_phone' | 'participant_email' | 'intro_body'
+>;
+
+export interface ReachedOutContext {
+  lookup: HeardFromLookup;
+  /** ISO: a row whose normalized providerTs is earlier is outside the window. */
+  windowStart: string;
+  /** nudgeBodySet(). */
+  nudgeBodies: ReadonlySet<string>;
+  /** indexReminderSends(): sentBody -> the normalized sentAt of each in-window reminder that sent it. */
+  reminderSends: ReadonlyMap<string, readonly string[]>;
+}
+
+/** The window start and the key-condition floor for a run at `now`. */
+export function windowBounds(now: Date): { windowStart: string; keyFloor: string } {
+  const windowStartMs = now.getTime() - WINDOW_MS;
+  return {
+    windowStart: new Date(windowStartMs).toISOString(),
+    keyFloor: new Date(windowStartMs - KEY_FLOOR_MARGIN_MS).toISOString(),
+  };
+}
+
+/** The four nudge bodies, resolved through the message catalog at run start. */
+export function nudgeBodySet(): Set<string> {
+  return new Set(NUDGE_MESSAGE_IDS.map((id) => resolveMessage(id)));
+}
+
+/** The tour reminder row fields the exclusion reads (repos/tourRemindersRepo.ts). */
+export interface ReminderSendRow {
+  sentAt?: unknown;
+  sentBody?: unknown;
+}
+
+/** Index the in-window tour reminder sends by body. A row with no sentBody
+ *  (pending, or claimed before the field existed) or an unparseable sentAt is
+ *  left out. */
+export function indexReminderSends(items: readonly ReminderSendRow[], windowStart: string): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const item of items) {
+    if (!nonEmpty(item.sentBody)) continue;
+    const sentAt = normalizeInstant(typeof item.sentAt === 'string' ? item.sentAt : undefined);
+    if (sentAt === undefined || sentAt < windowStart) continue;
+    const list = out.get(item.sentBody);
+    if (list === undefined) out.set(item.sentBody, [sentAt]);
+    else list.push(sentAt);
+  }
+  return out;
+}
+
+/**
+ * Plan ONE page of a thread's window rows into `plan`: each row (or member
+ * slot) lands in exactly one counted or skipped category, and every counted
+ * one folds its instant into `plan.latest`. The Query filters inbound rows
+ * out; the planner re-checks so it is right on any input.
+ */
+export async function planThreadPage(
+  plan: ReachedOutPlan,
+  thread: ReachedOutThread,
+  rows: readonly MessageItem[],
+  ctx: ReachedOutContext,
+): Promise<void> {
+  plan.messagesRead += rows.length;
+  for (const row of rows) await planRow(plan, thread, row, ctx);
+}
+
+function skip(plan: ReachedOutPlan, kind: SkipKind): void {
+  plan.rowsSkipped[kind] += 1;
+}
+
+function fold(plan: ReachedOutPlan, contactId: string, at: string): void {
+  const prior = plan.latest.get(contactId);
+  if (prior === undefined || at > prior) plan.latest.set(contactId, at);
+}
+
+async function planRow(plan: ReachedOutPlan, thread: ReachedOutThread, row: MessageItem, ctx: ReachedOutContext): Promise<void> {
+  if (row.direction !== 'outbound') return skip(plan, 'inbound');
+  if (nonEmpty(row['imported_from'])) return skip(plan, 'imported');
+  const at = normalizeInstant(splitTsMsgId(row.tsMsgId).providerTs);
+  if (at === undefined) {
+    plan.unparseableInstants += 1;
+    return;
+  }
+  if (at < ctx.windowStart) return skip(plan, 'outside_window');
+  if (nonEmpty(row.relay_retry_of)) return skip(plan, 'relay_retry');
+  if (row.author === 'system') return planSystemRow(plan, thread, row);
+  if (row.author !== 'teammate') return skip(plan, 'not_teammate');
+  if (GROUP_THREAD_TYPES.has(thread.type)) {
+    if (row.relay_sender_key !== TEAM_SENDER_KEY) return skip(plan, 'group_other');
+    if (thread.type === 'relay_group') return planSentSlots(plan, row, 'relay_team_slot');
+    return planGroupTextSlots(plan, thread, row, at, ctx);
+  }
+  return planOneToOneRow(plan, thread, row, at, ctx);
+}
+
+/** PR38 BODY MATCH: only the intro whose body IS the staff-edited intro_body. */
+function planSystemRow(plan: ReachedOutPlan, thread: ReachedOutThread, row: MessageItem): void {
+  if (
+    row.relay_sender_key === SYSTEM_SENDER_KEY &&
+    thread.type === 'relay_group' &&
+    nonEmpty(thread.intro_body) &&
+    row.body === thread.intro_body
+  ) {
+    planSentSlots(plan, row, 'edited_intro_slot');
+    return;
+  }
+  skip(plan, 'system_other');
+}
+
+/** Relay legs: a CONTACT-keyed slot (relayMemberKey) whose leg was SENT - a
+ *  sid and a sent instant, never its status (it can stay 'queued' after a
+ *  successful send) - at slot.sentAt. */
+function planSentSlots(plan: ReachedOutPlan, row: MessageItem, kind: 'relay_team_slot' | 'edited_intro_slot'): void {
+  for (const [key, slot] of Object.entries(row.delivery_recipients ?? {})) {
+    if (key.startsWith(PHONE_KEY_PREFIX)) {
+      skip(plan, 'relay_phone_slot');
+      continue;
+    }
+    const sentAt = nonEmpty(slot.sid) ? normalizeInstant(slot.sentAt) : undefined;
+    if (sentAt === undefined) {
+      skip(plan, 'slot_not_sent');
+      continue;
+    }
+    plan.counted[kind] += 1;
+    fold(plan, key, sentAt);
+  }
+}
+
+/** Group-text members: every slot not 'excluded' (suppressed at the seed),
+ *  phone-keyed (groupMemberKey), at the row's providerTs. */
+async function planGroupTextSlots(
+  plan: ReachedOutPlan,
+  thread: ReachedOutThread,
+  row: MessageItem,
+  at: string,
+  ctx: ReachedOutContext,
+): Promise<void> {
+  for (const [key, slot] of Object.entries(row.delivery_recipients ?? {})) {
+    if (slot.transportAggregationState === 'excluded') {
+      skip(plan, 'group_excluded_slot');
+      continue;
+    }
+    const contactId = key.startsWith(PHONE_KEY_PREFIX)
+      ? await groupMemberContactId(thread, key.slice(PHONE_KEY_PREFIX.length), ctx.lookup)
+      : undefined;
+    if (contactId === undefined) {
+      skip(plan, 'group_unresolved_slot');
+      continue;
+    }
+    plan.counted.group_text_slot += 1;
+    fold(plan, contactId, at);
+  }
+}
+
+/** The roster first (an entry with an EMPTY contactId counts as absent), then the phone lookup. */
+async function groupMemberContactId(
+  thread: ReachedOutThread,
+  e164: string,
+  lookup: HeardFromLookup,
+): Promise<string | undefined> {
+  const member = (thread.participants ?? []).find((p) => p.phone === e164 && nonEmpty(p.contactId));
+  if (member !== undefined) return member.contactId;
+  return (await lookup.byPhone(e164))?.contactId;
+}
+
+async function planOneToOneRow(
+  plan: ReachedOutPlan,
+  thread: ReachedOutThread,
+  row: MessageItem,
+  at: string,
+  ctx: ReachedOutContext,
+): Promise<void> {
+  if (row.automated === true) return skip(plan, 'automated');
+  if (nonEmpty(row.broadcast_id)) return skip(plan, 'share');
+  if (row.retry_attempt !== undefined || nonEmpty(row.retry_window_start)) return skip(plan, 'machine_retry');
+  let kind: 'text' | 'email' | 'call';
+  let instant = at;
+  if (row.type === 'call') {
+    if (!nonEmpty(row.answered_at) && !nonEmpty(row.call_outcome)) return skip(plan, 'call_not_dialed');
+    kind = 'call';
+    instant = normalizeInstant(row.answered_at) ?? at;
+  } else if (row.type === 'email') {
+    if (row.delivery_status === 'failed') return skip(plan, 'email_failed');
+    if (!nonEmpty(row.ses_message_id) && !EMAIL_LEFT_STATUSES.has(row.delivery_status)) {
+      return skip(plan, 'email_queued');
+    }
+    kind = 'email';
+  } else if (row.type === 'sms' || row.type === 'mms') {
+    const body = row.body;
+    if (typeof body === 'string' && ctx.nudgeBodies.has(body)) return skip(plan, 'excluded_nudge_body');
+    const reminderSentAts = typeof body === 'string' ? ctx.reminderSends.get(body) : undefined;
+    if (reminderSentAts !== undefined) {
+      skip(plan, 'excluded_reminder_body');
+      const atMs = Date.parse(at);
+      const inTime = reminderSentAts.some((sentAt) => {
+        const gap = atMs - Date.parse(sentAt);
+        return gap >= 0 && gap <= REMINDER_TIME_MATCH_MS;
+      });
+      if (inTime) plan.reminderBodyTimeMatched += 1;
+      return;
+    }
+    kind = 'text';
+  } else {
+    return skip(plan, 'other_type');
+  }
+  const contactId = nonEmpty(row.recipient_contact_id)
+    ? row.recipient_contact_id
+    : await oneToOneContactOf(thread, ctx.lookup);
+  if (contactId === undefined) return skip(plan, 'no_recipient');
+  plan.counted[kind] += 1;
+  fold(plan, contactId, instant);
+}
+
+/**
+ * The one-to-one thread's own contact, in the attributeInbound order:
+ * participants contactId, then the participant phone, then the participant
+ * email (spec 7.5 "Recipient"). Asks THE rule about an inbound text on this
+ * thread - an outbound row has no sender to attribute, but the thread's
+ * contact is the same answer - so the order can never drift from it. Called
+ * only for non-group threads.
+ */
+function oneToOneContactOf(thread: ReachedOutThread, lookup: HeardFromLookup): Promise<string | undefined> {
+  return attributeInbound({ direction: 'inbound', type: 'sms' }, thread, lookup);
+}
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; ALLOW_SKIP_DYNAMO_TESTS=1 npx vitest run test/backfillLastReachedOut.test.ts
+```
+Expect every case green (23 cases). Then the compile check (bare):
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0 (`tsconfig.scripts.json` covers the script, `tsconfig.test.json`
+the test). A failure naming `satisfies` means the TypeScript in the worktree
+is older than 5.0: stop and report (the root package.json pins ^5.8.0).
+
+#### Step 5 - ASCII check on the new files
+
+```
+cd W:/tmp/today-checklist; tr -d '\11\12\15\40-\176' < app/scripts/backfill-last-reached-out.ts | wc -c
+cd W:/tmp/today-checklist; tr -d '\11\12\15\40-\176' < app/test/backfillLastReachedOut.test.ts | wc -c
+```
+Expect `0` twice.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+```
+(The `ls` must report "No such file or directory"; in PowerShell use
+`Test-Path` and expect `False`.)
+```
+git -C W:/tmp/today-checklist add app/scripts/backfill-last-reached-out.ts app/test/backfillLastReachedOut.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(backfill): last_reached_out_at planner - classify window rows per spec 7.5 and PR38 (today-checklist S6.1)" -m "Pure half of app/scripts/backfill-last-reached-out.ts: one-to-one texts, emails and calls, relay team slots, group-text slots and staff-edited intros counted; shares, automated sends, machine retries, Quo rows, nudge and reminder Send now bodies skipped with a count per reason; latest instant per contact across threads." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S6.2 - The runner: scan, the window Query, the touch, the abort and the CLI
+
+Adds `backfillLastReachedOut` (the injectable runner), `reportBackfillRun`
+and the CLI to the script. Spec 7.5 "Script", "Read", "Writes", "Tests";
+PR38 "Key-condition Query per thread" and "Usage".
+
+Files:
+- `app/scripts/backfill-last-reached-out.ts`
+- Tests: `app/test/backfillLastReachedOut.test.ts`
+
+#### Step 1 - failing tests
+
+In `app/test/backfillLastReachedOut.test.ts`, replace the import block. Edit:
+
+old:
+```ts
+import { describe, expect, it } from 'vitest';
+import {
+  COUNTED_KINDS,
+  KEY_FLOOR_MARGIN_MS,
+  NUDGE_MESSAGE_IDS,
+  REMINDER_TIME_MATCH_MS,
+  SKIP_KINDS,
+  WINDOW_MS,
+  indexReminderSends,
+  newPlan,
+  nudgeBodySet,
+  planThreadPage,
+  windowBounds,
+  type ReachedOutContext,
+  type ReachedOutPlan,
+  type ReachedOutThread,
+} from '../scripts/backfill-last-reached-out.js';
+import { TEAM_SENDER_KEY } from '../src/jobs/relayFanOut.js';
+import type { HeardFromLookup } from '../src/lib/heardFrom.js';
+import { MESSAGE_CATALOG } from '../src/messages/catalog.js';
+import { relayMemberKey, type MessageItem, type RelayRecipientDelivery } from '../src/repos/messagesRepo.js';
+import { groupMemberKey } from '../src/services/groupMembers.js';
+import { SYSTEM_SENDER_KEY } from '../src/services/relayAnnouncements.js';
+```
+new:
+```ts
+import { describe, expect, it } from 'vitest';
+import { QueryCommand, ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import {
+  COUNTED_KINDS,
+  KEY_FLOOR_MARGIN_MS,
+  NUDGE_MESSAGE_IDS,
+  REMINDER_TIME_MATCH_MS,
+  SKIP_KINDS,
+  WINDOW_MS,
+  backfillLastReachedOut,
+  indexReminderSends,
+  newPlan,
+  nudgeBodySet,
+  planThreadPage,
+  reportBackfillRun,
+  windowBounds,
+  type ReachedOutContext,
+  type ReachedOutPlan,
+  type ReachedOutThread,
+} from '../scripts/backfill-last-reached-out.js';
+import { TEAM_SENDER_KEY } from '../src/jobs/relayFanOut.js';
+import type { HeardFromLookup } from '../src/lib/heardFrom.js';
+import { createLogger } from '../src/lib/logger.js';
+import { MESSAGE_CATALOG } from '../src/messages/catalog.js';
+import type { ContactItem } from '../src/repos/contactsRepo.js';
+import { relayMemberKey, type MessageItem, type RelayRecipientDelivery } from '../src/repos/messagesRepo.js';
+import { groupMemberKey } from '../src/services/groupMembers.js';
+import { SYSTEM_SENDER_KEY } from '../src/services/relayAnnouncements.js';
+import { createLogCapture } from './helpers/logCapture.js';
+```
+
+Append at the end of the file:
+```ts
+
+// ---------------------------------------------------------------------------
+// Half 2 - the runner
+// ---------------------------------------------------------------------------
+
+interface FakeTables {
+  conversations: Record<string, unknown>[];
+  messages: Record<string, unknown>[];
+  reminders: Record<string, unknown>[];
+}
+
+function fakeDoc(tables: FakeTables, pageSize = 1000) {
+  const queries: Record<string, any>[] = [];
+  const scans: Record<string, any>[] = [];
+  const doc = {
+    async send(command: unknown) {
+      if (command instanceof ScanCommand) {
+        const input = command.input as Record<string, any>;
+        scans.push(input);
+        if (input['TableName'] === 'hc-test-conversations') return { Items: tables.conversations };
+        if (input['TableName'] === 'hc-test-tourReminders') {
+          // Models the FilterExpression: attribute_exists(sentBody) AND sentAt >= :floor.
+          const floor = String(input['ExpressionAttributeValues'][':floor']);
+          return {
+            Items: tables.reminders.filter(
+              (r) => r['sentBody'] !== undefined && typeof r['sentAt'] === 'string' && r['sentAt'] >= floor,
+            ),
+          };
+        }
+        throw new Error(`unexpected Scan of ${String(input['TableName'])}`);
+      }
+      if (command instanceof QueryCommand) {
+        const input = command.input as Record<string, any>;
+        queries.push(input);
+        const values = input['ExpressionAttributeValues'];
+        // Models the KEY CONDITION (conversationId = :c AND tsMsgId >= :floor),
+        // the FilterExpression (#dir = :outbound) and ascending key order.
+        const rows = tables.messages
+          .filter((m) => m['conversationId'] === values[':c'] && String(m['tsMsgId']) >= String(values[':floor']))
+          .filter((m) => m['direction'] === values[':outbound'])
+          .sort((a, b) => (String(a['tsMsgId']) < String(b['tsMsgId']) ? -1 : 1));
+        const start = input['ExclusiveStartKey'] === undefined ? 0 : Number(input['ExclusiveStartKey'].idx);
+        const next = start + pageSize < rows.length ? { idx: start + pageSize } : undefined;
+        return { Items: rows.slice(start, start + pageSize), ...(next && { LastEvaluatedKey: next }) };
+      }
+      throw new Error('unexpected command');
+    },
+  };
+  return { doc: doc as unknown as DynamoDBDocumentClient, queries, scans };
+}
+
+/** Forward-only, like the real conditional writer. */
+function fakeContacts(failFor?: string) {
+  const stored = new Map<string, string>();
+  const touches: { contactId: string; at: string }[] = [];
+  const contacts = {
+    async findByPhone(phone: string): Promise<ContactItem | undefined> {
+      return phone === '+15550100004' ? ({ contactId: 'c-d' } as ContactItem) : undefined;
+    },
+    async findByEmail(): Promise<ContactItem | undefined> {
+      return undefined;
+    },
+    async touchLastReachedOut(contactId: string, at: string): Promise<'written' | 'skipped' | 'failed'> {
+      touches.push({ contactId, at });
+      if (contactId === failFor) return 'failed';
+      const prior = stored.get(contactId);
+      if (prior !== undefined && prior >= at) return 'skipped';
+      stored.set(contactId, at);
+      return 'written';
+    },
+  };
+  return { contacts, stored, touches };
+}
+
+const RUN_NOW = new Date('2026-10-24T12:00:00.000Z');
+const KEY_FLOOR = '2026-10-10T11:00:00.000Z';
+const REMINDER_BODY = 'SECRET reminder copy: your tour is tomorrow at 10am.';
+const OLD_REMINDER_BODY = 'SECRET old reminder copy.';
+const ENV = { TABLE_PREFIX: 'hc-test-' } as NodeJS.ProcessEnv;
+
+/** A stored staff text (the raw item the Query returns). */
+const staff = (conversationId: string, tsMsgId: string, over: Record<string, unknown> = {}) => ({
+  conversationId,
+  tsMsgId,
+  type: 'sms',
+  direction: 'outbound',
+  author: 'teammate',
+  delivery_status: 'sent',
+  automated: false,
+  body: 'SECRET staff text',
+  ...over,
+});
+
+const TABLES: FakeTables = {
+  conversations: [
+    { conversationId: 'phone#+15550100001', ref_conversationId: 'one' },
+    {
+      conversationId: 'one',
+      type: 'tenant_1to1',
+      participant_phone: '+15550100001',
+      participants: [{ contactId: 'c-a', phone: '+15550100001', name: 'Pat Secret' }],
+    },
+    {
+      conversationId: 'two',
+      type: 'partner_1to1',
+      participant_email: 'pat@x.test',
+      participants: [{ contactId: 'c-a', phone: '+15550100001', name: 'Pat Secret' }],
+    },
+    {
+      conversationId: 'three',
+      type: 'tenant_1to1',
+      participants: [{ contactId: 'c-e', phone: '+15550100006', name: 'Eve Secret' }],
+    },
+    {
+      conversationId: 'grp',
+      type: 'relay_group',
+      participants: [
+        { contactId: 'c-b', phone: '+15550100002', name: 'Bo Secret' },
+        { contactId: 'c-c', phone: '+15550100003', name: 'Cy Secret' },
+        { contactId: '', phone: '+15550100004' },
+      ],
+    },
+    {
+      conversationId: 'gt',
+      type: 'group_text',
+      participants: [
+        { contactId: 'c-g', phone: '+15550100008', name: 'Gus Secret' },
+        { contactId: '', phone: '+15550100004' },
+        { contactId: '', phone: '+15550100009' },
+      ],
+    },
+  ],
+  messages: [
+    staff('one', '2026-10-01T10:00:00.000Z#SM0'), // below the key floor: never read
+    staff('one', '2026-10-10T11:30:00.000Z#SM-m'), // above the floor, before the window
+    staff('one', '2026-10-20T10:00:00.000Z#SM1'),
+    staff('one', '2026-10-22T09:00:00.000Z#SM2'),
+    staff('one', '2026-10-22T10:00:00.000Z#SM3', { body: REMINDER_BODY }), // a reminder Send now
+    staff('one', '2026-10-22T11:00:00.000Z#SM4', { direction: 'inbound', author: 'tenant' }), // the Query filters it
+    {
+      conversationId: 'two',
+      tsMsgId: '2026-10-23T10:00:00.000Z#hc-1@mail.x.test',
+      type: 'email',
+      direction: 'outbound',
+      author: 'teammate',
+      delivery_status: 'sent',
+      ses_message_id: 'ses-1',
+      email_to: ['pat@x.test'],
+      body: 'SECRET email',
+    },
+    staff('three', '2026-10-15T09:00:00.000Z#SM5', { body: OLD_REMINDER_BODY }), // that reminder is outside the window
+    {
+      conversationId: 'grp',
+      tsMsgId: '2026-10-21T08:00:00.000Z#team-1',
+      type: 'sms',
+      direction: 'outbound',
+      author: 'teammate',
+      delivery_status: 'queued',
+      relay_sender_key: TEAM_SENDER_KEY,
+      body: 'SECRET team post',
+      delivery_recipients: {
+        'c-b': { status: 'sent', sid: 'SM-b', sentAt: '2026-10-21T08:00:05.000Z' },
+        'c-c': { status: 'queued' },
+        'phone#+15550100004': { status: 'sent', sid: 'SM-p', sentAt: '2026-10-21T08:00:06.000Z' },
+      },
+    },
+    {
+      conversationId: 'gt',
+      tsMsgId: '2026-10-23T07:00:00.000Z#IM1',
+      type: 'sms',
+      direction: 'outbound',
+      author: 'teammate',
+      delivery_status: 'queued',
+      relay_sender_key: TEAM_SENDER_KEY,
+      body: 'SECRET group text',
+      delivery_recipients: {
+        [groupMemberKey('+15550100008')]: { status: 'queued', transportAggregationState: 'attempted' },
+        [groupMemberKey('+15550100004')]: { status: 'queued', transportAggregationState: 'attempted' },
+        [groupMemberKey('+15550100009')]: {
+          status: 'failed',
+          errorCode: 'contact_opted_out',
+          transportAggregationState: 'excluded',
+        },
+      },
+    },
+  ],
+  reminders: [
+    { reminderId: 'r-1', tourId: 't-1', sentAt: '2026-10-22T09:55:00.000Z', sentBody: REMINDER_BODY },
+    { reminderId: 'r-0', tourId: 't-0', sentAt: '2026-10-01T09:00:00.000Z', sentBody: OLD_REMINDER_BODY },
+    { reminderId: 'r-2', tourId: 't-2', dueAt: '2026-10-30T09:00:00.000Z' },
+  ],
+};
+
+/** contactId order (the runner sorts). c-a: the email in `two` is later than its texts in `one`. */
+const EXPECTED_TOUCHES = [
+  { contactId: 'c-a', at: '2026-10-23T10:00:00.000Z' },
+  { contactId: 'c-b', at: '2026-10-21T08:00:05.000Z' },
+  { contactId: 'c-d', at: '2026-10-23T07:00:00.000Z' },
+  { contactId: 'c-e', at: '2026-10-15T09:00:00.000Z' },
+  { contactId: 'c-g', at: '2026-10-23T07:00:00.000Z' },
+];
+
+function zeroSkips(): Record<string, number> {
+  return Object.fromEntries(SKIP_KINDS.map((k) => [k, 0]));
+}
+
+function capturedLogger() {
+  const capture = createLogCapture();
+  return { capture, logger: createLogger({ level: 'info', destination: capture.stream }) };
+}
+
+describe('backfillLastReachedOut - the runner', () => {
+  it('a dry run (the default) reads the window, reports every category and writes nothing', async () => {
+    const { doc, queries, scans } = fakeDoc(TABLES);
+    const { contacts, touches } = fakeContacts();
+    const { logger } = capturedLogger();
+    const result = await backfillLastReachedOut({ doc, env: ENV, contacts, logger, now: RUN_NOW });
+    expect(touches).toEqual([]);
+    expect(result).toMatchObject({
+      windowStart: '2026-10-10T12:00:00.000Z',
+      keyFloor: KEY_FLOOR,
+      introRule: 'body_match',
+      sendNowRule: 'exclude_by_body',
+      conversationsWalked: 5,
+      pointerRows: 1,
+      messagesRead: 8,
+      remindersInWindow: 1,
+      reminderBodyTimeMatched: 1,
+      unparseableInstants: 0,
+      planned: 5,
+      written: 0,
+      skipped: 0,
+      failed: 0,
+    });
+    expect(result.counted).toEqual({
+      text: 3,
+      email: 1,
+      call: 0,
+      relay_team_slot: 1,
+      group_text_slot: 2,
+      edited_intro_slot: 0,
+    });
+    expect(result.rowsSkipped).toEqual({
+      ...zeroSkips(),
+      outside_window: 1,
+      excluded_reminder_body: 1,
+      slot_not_sent: 1,
+      relay_phone_slot: 1,
+      group_excluded_slot: 1,
+    });
+    // ONE key-condition Query per thread over the window - never the full history.
+    expect(queries.map((q) => q['ExpressionAttributeValues'][':c'])).toEqual(['one', 'two', 'three', 'grp', 'gt']);
+    for (const q of queries) {
+      expect(q['TableName']).toBe('hc-test-messages');
+      expect(q['KeyConditionExpression']).toBe('conversationId = :c AND tsMsgId >= :floor');
+      expect(q['ExpressionAttributeValues'][':floor']).toBe(KEY_FLOOR);
+      expect(q['FilterExpression']).toBe('#dir = :outbound');
+      expect(q['ExpressionAttributeNames']).toEqual({ '#dir': 'direction' });
+    }
+    const reminderScan = scans.find((s) => s['TableName'] === 'hc-test-tourReminders');
+    expect(reminderScan?.['FilterExpression']).toBe('attribute_exists(#sentBody) AND #sentAt >= :floor');
+    expect(reminderScan?.['ExpressionAttributeValues']).toEqual({ ':floor': KEY_FLOOR });
+  });
+
+  it('an apply makes ONE touch per contact with its latest instant across threads, and a second apply writes nothing', async () => {
+    const { doc } = fakeDoc(TABLES);
+    const { contacts, touches } = fakeContacts();
+    const { logger } = capturedLogger();
+    const first = await backfillLastReachedOut({ doc, env: ENV, contacts, logger, now: RUN_NOW, apply: true });
+    expect(touches).toEqual(EXPECTED_TOUCHES);
+    expect(first.written).toBe(5);
+    expect(first.written).toBe(first.planned);
+
+    const second = await backfillLastReachedOut({ doc, env: ENV, contacts, logger, now: RUN_NOW, apply: true });
+    expect(second.written).toBe(0);
+    expect(second.skipped).toBe(second.planned);
+    expect(second.skipped).toBe(5);
+  });
+
+  it('pages: every thread is read until LastEvaluatedKey is gone', async () => {
+    const { doc, queries } = fakeDoc(TABLES, 1);
+    const { contacts, touches } = fakeContacts();
+    const { logger } = capturedLogger();
+    await backfillLastReachedOut({ doc, env: ENV, contacts, logger, now: RUN_NOW, apply: true });
+    const byThread = (id: string) => queries.filter((q) => q['ExpressionAttributeValues'][':c'] === id).length;
+    // `one` returns four window rows (SM-m, SM1, SM2, SM3), one per page.
+    expect(byThread('one')).toBe(4);
+    expect(byThread('grp')).toBe(1);
+    expect(queries.length).toBe(8);
+    expect(touches).toEqual(EXPECTED_TOUCHES);
+  });
+
+  it('a FAILED touch aborts the run with a PARTIAL report and no later touch', async () => {
+    const { doc } = fakeDoc(TABLES);
+    const { contacts, touches } = fakeContacts('c-a');
+    const { capture, logger } = capturedLogger();
+    await expect(
+      backfillLastReachedOut({ doc, env: ENV, contacts, logger, now: RUN_NOW, apply: true }),
+    ).rejects.toThrow(/touchLastReachedOut failed for c-a/);
+    expect(touches.map((t) => t.contactId)).toEqual(['c-a']);
+    const partial = capture.atLevel(50).find((l) => String(l['msg']).includes('PARTIAL result'));
+    expect(partial).toBeDefined();
+    expect(partial?.['failed']).toBe(1);
+    expect(partial?.['written']).toBe(0);
+    expect(partial?.['planned']).toBe(5);
+    expect(partial?.['apply']).toBe(true);
+  });
+
+  it('logs counts and ids only - never a body, a phone, an address or a name', async () => {
+    const ok = capturedLogger();
+    await backfillLastReachedOut({
+      doc: fakeDoc(TABLES).doc,
+      env: ENV,
+      contacts: fakeContacts().contacts,
+      logger: ok.logger,
+      now: RUN_NOW,
+      apply: true,
+    });
+    const failing = capturedLogger();
+    await expect(
+      backfillLastReachedOut({
+        doc: fakeDoc(TABLES).doc,
+        env: ENV,
+        contacts: fakeContacts('c-a').contacts,
+        logger: failing.logger,
+        now: RUN_NOW,
+        apply: true,
+      }),
+    ).rejects.toThrow();
+    expect(ok.capture.lines.length).toBeGreaterThan(0);
+    expect(failing.capture.lines.length).toBeGreaterThan(0);
+    const logged = JSON.stringify([...ok.capture.lines, ...failing.capture.lines]);
+    for (const needle of ['SECRET', 'Secret', '+1555', 'x.test', 'ses-1']) {
+      expect(logged).not.toContain(needle);
+    }
+  });
+
+  it('reportBackfillRun returns 0, names a dry run in its done line, and carries the counts and the rules', async () => {
+    const { doc } = fakeDoc(TABLES);
+    const { contacts } = fakeContacts();
+    const result = await backfillLastReachedOut({ doc, env: ENV, contacts, logger: capturedLogger().logger, now: RUN_NOW });
+
+    const dry = capturedLogger();
+    expect(reportBackfillRun(result, false, dry.logger)).toBe(0);
+    const dryDone = dry.capture.atLevel(30).at(-1);
+    expect(dryDone?.['msg']).toBe('backfill-last-reached-out - done (DRY RUN - nothing written)');
+    expect(dryDone?.['planned']).toBe(5);
+    expect(dryDone?.['apply']).toBe(false);
+    expect(dryDone?.['introRule']).toBe('body_match');
+    expect(dryDone?.['sendNowRule']).toBe('exclude_by_body');
+    expect(dryDone?.['counted']).toEqual(result.counted);
+    expect(dryDone?.['rowsSkipped']).toEqual(result.rowsSkipped);
+
+    const live = capturedLogger();
+    expect(reportBackfillRun(result, true, live.logger)).toBe(0);
+    expect(live.capture.atLevel(30).at(-1)?.['msg']).toBe('backfill-last-reached-out - done');
+  });
+});
+```
+
+#### Step 2 - RED
+
+```
+cd W:/tmp/today-checklist/app; ALLOW_SKIP_DYNAMO_TESTS=1 npx vitest run test/backfillLastReachedOut.test.ts
+```
+Expected: the six `backfillLastReachedOut - the runner` cases fail with
+`TypeError: ... backfillLastReachedOut is not a function` (the done-line case
+on the same call before it reaches `reportBackfillRun`); every planner case
+stays green. If vitest instead reports a SyntaxError naming the missing
+export and loads nothing, that is the same RED.
+
+#### Step 3 - implementation
+
+3a. `app/scripts/backfill-last-reached-out.ts` - replace the import block.
+Edit:
+
+old:
+```ts
+import { attributeInbound, normalizeInstant, type HeardFromLookup } from '../src/lib/heardFrom.js';
+import { FOLLOW_UP_LOOKBACK_MS } from '../src/lib/listingSendOutcome.js';
+import type { MessageId } from '../src/messages/catalog.js';
+import { resolveMessage } from '../src/messages/resolve.js';
+import type { ConversationItem } from '../src/repos/conversationsRepo.js';
+import { splitTsMsgId, type MessageItem } from '../src/repos/messagesRepo.js';
+```
+new:
+```ts
+import { QueryCommand, ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { tableName } from '../src/lib/config.js';
+import { attributeInbound, normalizeInstant, type HeardFromLookup } from '../src/lib/heardFrom.js';
+import { FOLLOW_UP_LOOKBACK_MS } from '../src/lib/listingSendOutcome.js';
+import { logger as defaultLogger, type Logger } from '../src/lib/logger.js';
+import type { MessageId } from '../src/messages/catalog.js';
+import { resolveMessage } from '../src/messages/resolve.js';
+import { createContactsRepo, type ContactsRepo } from '../src/repos/contactsRepo.js';
+import type { ConversationItem } from '../src/repos/conversationsRepo.js';
+import { splitTsMsgId, type MessageItem } from '../src/repos/messagesRepo.js';
+import { isPointerConversation } from './backfill-last-heard-from.js';
+import { parseStageArgs, resolveStageClient, type StageClient } from './lib/stageClient.js';
+```
+
+3b. Append at the end of `app/scripts/backfill-last-reached-out.ts` (after
+`oneToOneContactOf`):
+
+```ts
+
+export interface BackfillResult {
+  /** The window read, and the key-condition floor (windowStart - KEY_FLOOR_MARGIN_MS). */
+  windowStart: string;
+  keyFloor: string;
+  /** PR38: the rules applied - reported so the dry run says which. */
+  introRule: typeof INTRO_RULE;
+  sendNowRule: typeof SEND_NOW_RULE;
+  conversationsWalked: number;
+  pointerRows: number;
+  messagesRead: number;
+  /** Tour reminder sends in the window that carry a sentBody (the reminder exclusion's input). */
+  remindersInWindow: number;
+  counted: Record<CountedKind, number>;
+  rowsSkipped: Record<SkipKind, number>;
+  reminderBodyTimeMatched: number;
+  unparseableInstants: number;
+  /** Contacts with a planned instant (dry run: would touch). */
+  planned: number;
+  written: number;
+  /** No contact row, or a value already as late (a live staff send won). */
+  skipped: number;
+  failed: number;
+}
+
+export interface BackfillOpts {
+  doc: DynamoDBDocumentClient;
+  env: NodeJS.ProcessEnv;
+  /** Write. Absent/false = dry run (the default). */
+  apply?: boolean;
+  /** Injectable for tests; defaults to createContactsRepo({ doc, env, logger }). */
+  contacts?: Pick<ContactsRepo, 'findByPhone' | 'findByEmail' | 'touchLastReachedOut'>;
+  scanLimit?: number;
+  queryLimit?: number;
+  logger?: Logger;
+  /** The run instant the window is measured from. Defaults to the wall clock. */
+  now?: Date;
+}
+
+function syncCounts(plan: ReachedOutPlan, result: BackfillResult): void {
+  result.conversationsWalked = plan.conversationsWalked;
+  result.pointerRows = plan.pointerRows;
+  result.messagesRead = plan.messagesRead;
+  result.counted = { ...plan.counted };
+  result.rowsSkipped = { ...plan.rowsSkipped };
+  result.reminderBodyTimeMatched = plan.reminderBodyTimeMatched;
+  result.unparseableInstants = plan.unparseableInstants;
+  result.planned = plan.latest.size;
+}
+
+export async function backfillLastReachedOut(opts: BackfillOpts): Promise<BackfillResult> {
+  const log = opts.logger ?? defaultLogger;
+  const bounds = windowBounds(opts.now ?? new Date());
+  const plan = newPlan();
+  const result: BackfillResult = {
+    windowStart: bounds.windowStart,
+    keyFloor: bounds.keyFloor,
+    introRule: INTRO_RULE,
+    sendNowRule: SEND_NOW_RULE,
+    conversationsWalked: 0,
+    pointerRows: 0,
+    messagesRead: 0,
+    remindersInWindow: 0,
+    counted: zeroed(COUNTED_KINDS),
+    rowsSkipped: zeroed(SKIP_KINDS),
+    reminderBodyTimeMatched: 0,
+    unparseableInstants: 0,
+    planned: 0,
+    written: 0,
+    skipped: 0,
+    failed: 0,
+  };
+  try {
+    await run(opts, bounds, plan, result, log);
+  } catch (err) {
+    syncCounts(plan, result);
+    log.error(
+      { ...result, apply: opts.apply === true },
+      `${SCRIPT_NAME} - PARTIAL result: the run ABORTED and these counters cover only what completed before the failure. Every write is conditional and forward-only, so re-running after the fix is safe.`,
+    );
+    throw err;
+  }
+  return result;
+}
+
+/** The in-window tour reminder sends, indexed by body (PR38). One Scan; the
+ *  table is small and has no index on sentAt. */
+async function readReminderSends(
+  opts: BackfillOpts,
+  bounds: { windowStart: string; keyFloor: string },
+): Promise<Map<string, string[]>> {
+  const items: ReminderSendRow[] = [];
+  let scanKey: Record<string, unknown> | undefined;
+  do {
+    const page = await opts.doc.send(
+      new ScanCommand({
+        TableName: tableName('tourReminders', opts.env),
+        FilterExpression: 'attribute_exists(#sentBody) AND #sentAt >= :floor',
+        ProjectionExpression: '#sentAt, #sentBody',
+        ExpressionAttributeNames: { '#sentAt': 'sentAt', '#sentBody': 'sentBody' },
+        ExpressionAttributeValues: { ':floor': bounds.keyFloor },
+        ...(opts.scanLimit !== undefined && { Limit: opts.scanLimit }),
+        ...(scanKey !== undefined && { ExclusiveStartKey: scanKey }),
+      }),
+    );
+    items.push(...((page.Items ?? []) as ReminderSendRow[]));
+    scanKey = page.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (scanKey !== undefined);
+  return indexReminderSends(items, bounds.windowStart);
+}
+
+async function run(
+  opts: BackfillOpts,
+  bounds: { windowStart: string; keyFloor: string },
+  plan: ReachedOutPlan,
+  result: BackfillResult,
+  log: Logger,
+): Promise<void> {
+  const contacts = opts.contacts ?? createContactsRepo({ doc: opts.doc, env: opts.env, logger: log });
+  // One byPhone/byEmail Query per distinct key, however many rows name it.
+  const memo = new Map<string, Promise<{ contactId: string } | undefined>>();
+  const memoized = (key: string, read: () => Promise<{ contactId: string } | undefined>) => {
+    let hit = memo.get(key);
+    if (hit === undefined) {
+      hit = read().then((c) => (c === undefined ? undefined : { contactId: c.contactId }));
+      memo.set(key, hit);
+    }
+    return hit;
+  };
+  const lookup: HeardFromLookup = {
+    byPhone: (e164) => memoized(`phone:${e164}`, () => contacts.findByPhone(e164)),
+    byEmail: (address) => memoized(`email:${address}`, () => contacts.findByEmail(address)),
+  };
+  const reminderSends = await readReminderSends(opts, bounds);
+  result.remindersInWindow = [...reminderSends.values()].reduce((n, sends) => n + sends.length, 0);
+  const ctx: ReachedOutContext = {
+    lookup,
+    windowStart: bounds.windowStart,
+    nudgeBodies: nudgeBodySet(),
+    reminderSends,
+  };
+  const messagesTable = tableName('messages', opts.env);
+
+  const walkThread = async (thread: ConversationItem): Promise<void> => {
+    let startKey: Record<string, unknown> | undefined;
+    do {
+      const page = await opts.doc.send(
+        new QueryCommand({
+          TableName: messagesTable,
+          KeyConditionExpression: 'conversationId = :c AND tsMsgId >= :floor',
+          FilterExpression: '#dir = :outbound',
+          ExpressionAttributeNames: { '#dir': 'direction' },
+          ExpressionAttributeValues: {
+            ':c': thread.conversationId,
+            ':floor': bounds.keyFloor,
+            ':outbound': 'outbound',
+          },
+          ...(opts.queryLimit !== undefined && { Limit: opts.queryLimit }),
+          ...(startKey !== undefined && { ExclusiveStartKey: startKey }),
+        }),
+      );
+      await planThreadPage(plan, thread, (page.Items ?? []) as MessageItem[], ctx);
+      startKey = page.LastEvaluatedKey as Record<string, unknown> | undefined;
+    } while (startKey !== undefined);
+  };
+
+  let scanKey: Record<string, unknown> | undefined;
+  do {
+    const page = await opts.doc.send(
+      new ScanCommand({
+        TableName: tableName('conversations', opts.env),
+        ...(opts.scanLimit !== undefined && { Limit: opts.scanLimit }),
+        ...(scanKey !== undefined && { ExclusiveStartKey: scanKey }),
+      }),
+    );
+    for (const raw of (page.Items ?? []) as ConversationItem[]) {
+      if (isPointerConversation(raw.conversationId)) {
+        plan.pointerRows += 1;
+        continue;
+      }
+      plan.conversationsWalked += 1;
+      await walkThread(raw);
+    }
+    scanKey = page.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (scanKey !== undefined);
+
+  syncCounts(plan, result);
+  log.info({ ...result, apply: opts.apply === true }, `${SCRIPT_NAME} - planned`);
+  if (opts.apply !== true) return;
+
+  // contactId order: deterministic logs and a deterministic abort point.
+  for (const [contactId, at] of [...plan.latest].sort(([a], [b]) => a.localeCompare(b))) {
+    const outcome = await contacts.touchLastReachedOut(contactId, at);
+    if (outcome === 'written') result.written += 1;
+    else if (outcome === 'skipped') result.skipped += 1;
+    else {
+      result.failed += 1;
+      log.error({ contactId }, `${SCRIPT_NAME} - touch FAILED (not a lost condition) - aborting`);
+      throw new Error(`${SCRIPT_NAME}: touchLastReachedOut failed for ${contactId}`);
+    }
+  }
+}
+
+/** The end-of-run report (exit 0: a failed touch has already aborted). */
+export function reportBackfillRun(result: BackfillResult, apply: boolean, log: Logger = defaultLogger): 0 {
+  log.info({ ...result, apply }, `${SCRIPT_NAME} - done${apply ? '' : ' (DRY RUN - nothing written)'}`);
+  return 0;
+}
+
+const invokedDirectly =
+  import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith(`${SCRIPT_NAME}.ts`);
+if (invokedDirectly) {
+  const parsed = parseStageArgs(process.argv.slice(2), { values: [], flags: ['--apply'] });
+  if ('usage' in parsed) {
+    console.error(
+      `Usage: npx tsx app/scripts/${SCRIPT_NAME}.ts --env local|dev|prod [--lane <L>] [--apply]\n` +
+        '  DRY RUN by default; --apply writes. Unknown or repeated arguments are refused. --lane selects a hermetic e2e lane\n' +
+        '  (local only). An agent uses --env local --lane <L> ONLY. Run it AFTER the deploy (RUNBOOK).',
+    );
+    process.exit(2);
+  }
+  const apply = parsed.flags.has('--apply');
+  void (async () => {
+    // STEP 1 - resolve the target on its own: a refusal here happens BEFORE any
+    // table is read, so it must never point the operator at a PARTIAL report.
+    let stage: StageClient;
+    try {
+      stage = await resolveStageClient(parsed.target, {}, parsed.lane !== undefined ? { lane: parsed.lane } : {});
+    } catch (err) {
+      defaultLogger.error({ err }, `${SCRIPT_NAME} - FAILED before the run started (no table was read or written)`);
+      process.exitCode = 1;
+      return;
+    }
+    // STEP 2 - the run.
+    try {
+      defaultLogger.info(
+        { target: parsed.target, endpoint: stage.describe, prefix: stage.prefix, apply },
+        `${SCRIPT_NAME} - starting`,
+      );
+      const result = await backfillLastReachedOut({ doc: stage.doc, env: stage.env, apply });
+      process.exitCode = reportBackfillRun(result, apply);
+    } catch (err) {
+      defaultLogger.error({ err }, `${SCRIPT_NAME} - FAILED (see the PARTIAL report above)`);
+      process.exitCode = 1;
+    } finally {
+      stage.doc.destroy();
+    }
+  })();
+}
+```
+
+#### Step 4 - GREEN
+
+```
+cd W:/tmp/today-checklist/app; ALLOW_SKIP_DYNAMO_TESTS=1 npx vitest run test/backfillLastReachedOut.test.ts test/backfillLastHeardFrom.test.ts
+```
+Expect every case green in both files (the twin is re-run because the new
+script imports `isPointerConversation` from it). Then (bare):
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Expect exit 0. A failure naming `touchLastReachedOut` on `ContactsRepo` means
+S1 (PR2) is not in the tree: stop and report.
+
+Do NOT run the CLI. Its first run is S7's lane rehearsal (WI12).
+
+#### Step 5 - ASCII check on the new files
+
+```
+cd W:/tmp/today-checklist; tr -d '\11\12\15\40-\176' < app/scripts/backfill-last-reached-out.ts | wc -c
+cd W:/tmp/today-checklist; tr -d '\11\12\15\40-\176' < app/test/backfillLastReachedOut.test.ts | wc -c
+```
+Expect `0` twice.
+
+#### Step 6 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+```
+(Expect "No such file or directory"; PowerShell `Test-Path` -> `False`.)
+```
+git -C W:/tmp/today-checklist add app/scripts/backfill-last-reached-out.ts app/test/backfillLastReachedOut.test.ts
+git -C W:/tmp/today-checklist commit -m "feat(backfill): last_reached_out_at runner and CLI - window Query, one forward-only touch per contact (today-checklist S6.2)" -m "Scans conversations, reads each thread's outbound rows with conversationId = :c AND tsMsgId >= the key floor, indexes in-window tour reminder sends for the Send now exclusion, then one touchLastReachedOut per contact. Dry run by default; a failed touch aborts with a PARTIAL report; counts and ids only in the logs." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S6.3 - RUNBOOK entry: the backfill commands (docs-only)
+
+Spec 7.5 "Who runs it", spec 10 "RUNBOOK.md: the backfill commands (7.5),
+dry run first"; PR38 "RUNBOOK entry right after the 'Last heard from: the
+backfill' entry ... same six steps"; WI12. Docs-only: no test, no RED step
+(plan section 0).
+
+Files:
+- `RUNBOOK.md`
+
+#### Step 1 - the entry
+
+Insert the new entry directly after the "Last heard from: the backfill" entry
+(it ends ~551 with the "No agent runs it against dev or prod" line) and
+before the Caseworkers heading. Edit:
+
+old:
+```md
+### Caseworkers (`feat/caseworkers`): DEPLOYED dev + prod 2026-10-12 (release 1.5.1) - nothing was owed; the conversion's repair, and putting a mistaken conversion back
+```
+new:
+```md
+### Last reached out: the backfill (`feat/today-checklist`) - OWED on dev AND prod after the deploy
+
+**OWED on dev AND prod once this branch has deployed there; take dev all the way through before prod. Cameron runs it; an agent never runs it against dev or prod.** No Terraform, no secrets, no env var, no schema or index change (`last_reached_out_at` is a plain contact attribute, never an index key). Spec: `docs/superpowers/specs/2026-10-23-today-checklist-design.md`, sections 7.2, 7.3 and 7.5; plan ruling PR38.
+
+What `app/scripts/backfill-last-reached-out.ts` does: from the deploy on, every staff text, email, call, relay group post and group text moves the contacted people's `last_reached_out_at` - the staff follow-up clock behind Today's Quiet shares (shares and automated sends never move it, and it is shown nowhere). People staff followed up with BEFORE the deploy have no value until this backfill runs, so Quiet shares would list them too early. The script reads the last 14 days of outbound messages of every conversation (a share older than 14 days is never a Quiet shares candidate, so older rows cannot matter), applies the same rules the live sends follow, keeps the latest instant per contact across all threads, and makes one conditional, forward-only write per contact. It never moves a value backward, so a contact staff reached after the deploy keeps that newer value. It emits no live events.
+
+Which rows count (a stored row does not say who started it, so the script reads the fields each sender leaves): outbound, author `teammate`, never a Quo import row; one-to-one texts that are not automated, not a share (`broadcast_id`) and not an automatic retry (a staff Retry counts); emails once they left for SES; calls once the contact's phone was dialed (`answered_at` or `call_outcome` - a call the staff member never picked up does not count); relay team posts, per contact member whose text was sent; group texts, per member not suppressed; and a relay intro staff edited before creating the group (matched by its text). Excluded by text: the four placement nudge texts, and any text equal to a tour reminder sent in the window - their "Send now" sends carry no marker, so a staff text with exactly the same words is excluded too.
+
+Known gap, accepted: a relay team post queued on a still-connecting group MORE than 14 days ago whose texts went out inside the window is not read (the read starts at the post's own time). Those contacts get no value from the backfill; their next staff send sets it.
+
+Per environment, in this order:
+
+1. **Deploy FIRST** (`npm run deploy:dev`, then the promote for prod). The live stamps start at the deploy; running the backfill before it leaves a gap (a staff send between the backfill and the deploy is stamped by nothing). After the deploy nothing can be missed: the last 14 days are backfilled and new sends are stamped live.
+2. **Dry run (the DEFAULT; writes nothing):** `npx tsx app/scripts/backfill-last-reached-out.ts --env dev`. Read the start line (`target`, `prefix`) and confirm it names the environment you mean.
+3. **Read the counts** on the `backfill-last-reached-out - done (DRY RUN - nothing written)` line:
+   - `windowStart` - the oldest instant read (14 days before the run); `keyFloor` is one hour earlier (a margin, re-checked per row);
+   - `conversationsWalked` - conversations read (`pointerRows` are claim rows, skipped);
+   - `messagesRead` - outbound rows of the window read;
+   - `counted` - per category: `text`, `email`, `call` (messages) and `relay_team_slot`, `group_text_slot`, `edited_intro_slot` (one per member reached);
+   - `rowsSkipped` - per reason, for example `automated`, `share`, `machine_retry`, `imported`, `call_not_dialed`, `slot_not_sent`, `outside_window` (inside the margin, before the window). `excluded_nudge_body` and `excluded_reminder_body` are the "Send now" texts the script cannot tell apart from a staff text; `reminderBodyTimeMatched` says how many of the latter also went out within 10 minutes of a reminder (most should). `no_recipient` and `group_unresolved_slot` are messages with no contact to name (a handful is normal);
+   - `introRule: body_match` and `sendNowRule: exclude_by_body` - the rules applied;
+   - `remindersInWindow` - tour reminders sent in the window, the input of the reminder exclusion;
+   - `planned` - contacts that will get a value;
+   - `unparseableInstants` - rows whose stored key carries no readable time (expected 0).
+4. **Apply:** `npx tsx app/scripts/backfill-last-reached-out.ts --env dev --apply`. `written` = values set; `skipped` = no contact row (a removed contact) or a value already as late (a live staff send since the deploy); `failed` = any other write error, which STOPS the run with a `PARTIAL result` line (the counters as of the stop) and exit 1 - fix the cause (usually throttling or credentials) and re-run.
+5. **Verify in THAT environment:** sign in to its dashboard, open the browser DevTools console on any dashboard page, and run `(await (await fetch('/api/contacts/<contactId>')).json()).contact.last_reached_out_at` for a contact staff texted in the last two weeks: it is the time of the latest staff text, email or call to them. On Today, a person staff texted after their share no longer shows under Quiet shares until 2 days (they replied) or 5 days (no reply) after that text.
+6. **Idempotent:** a second `--apply` reports `written: 0` and `skipped` equal to `planned`. Safe to re-run at any time.
+
+Cost: one Scan of the conversations table, one Scan of the tour reminders table, one key-condition Query per conversation over the last 14 days (plus pages for busy threads), one byPhone or byEmail Query per distinct number or address the rules need, and on an apply one conditional UpdateItem per planned contact - seconds to a minute at today's volume. Exit codes: 0 the run completed (dry run or apply); 1 a write failed, or a read failed mid-run (either way a `PARTIAL result` report), or the target could not be resolved (nothing read); 2 usage. There is no npm script for it; run it with `npx tsx` from the repo root.
+
+**No agent runs it against dev or prod; an agent rehearses on a lane: `--env local --lane <L>`.** Never a bare `--env local` - that is the live local stack.
+
+### Caseworkers (`feat/caseworkers`): DEPLOYED dev + prod 2026-10-12 (release 1.5.1) - nothing was owed; the conversion's repair, and putting a mistaken conversion back
+```
+
+#### Step 2 - check
+
+```
+cd W:/tmp/today-checklist; git diff -U0 -- RUNBOOK.md | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+cd W:/tmp/today-checklist; grep -c "^### Last reached out: the backfill" RUNBOOK.md
+cd W:/tmp/today-checklist; grep -c "^### Caseworkers (\`feat/caseworkers\`)" RUNBOOK.md
+```
+Expect `0`, `1`, `1`. Read the two entries side by side once: the new one
+must sit between "Last heard from: the backfill" and "Caseworkers".
+
+#### Step 3 - commit
+
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add RUNBOOK.md
+git -C W:/tmp/today-checklist commit -m "docs(runbook): last_reached_out_at backfill - commands, dry run first, after the deploy, Cameron runs dev then prod (today-checklist S6.3)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S6.4 - Slice checks, slice report, commit
+
+#### Step 1 - typecheck (bare)
+
+```
+cd W:/tmp/today-checklist; npm run typecheck
+```
+Exit 0.
+
+#### Step 2 - the script's test files, bare
+
+DynamoDB Local up (`npm run db:start` STARTS it; never restart it). No
+`ALLOW_SKIP_DYNAMO_TESTS`.
+```
+cd W:/tmp/today-checklist/app; npx vitest run test/backfillLastReachedOut.test.ts test/backfillLastHeardFrom.test.ts
+```
+Expect green. Any `[dynamoAdmin]` line in the output is a real container
+fault: capture `err.$metadata.httpStatusCode` and `attempts` into the report.
+
+#### Step 3 - lint the two new files (no new errors)
+
+```
+cd W:/tmp/today-checklist; npx eslint app/scripts/backfill-last-reached-out.ts app/test/backfillLastReachedOut.test.ts
+```
+Expect exit 0 (neither file existed at the merge base, so every error would
+be this slice's - fix it, re-run Steps 1-2, commit with explicit paths).
+
+#### Step 4 - ASCII sweep across the slice
+
+```
+cd W:/tmp/today-checklist; tr -d '\11\12\15\40-\176' < app/scripts/backfill-last-reached-out.ts | wc -c
+cd W:/tmp/today-checklist; tr -d '\11\12\15\40-\176' < app/test/backfillLastReachedOut.test.ts | wc -c
+cd W:/tmp/today-checklist; git log --format=%H -n 1 -- RUNBOOK.md
+```
+The first two print `0`. The third prints the S6.3 commit (the only S6
+commit touching RUNBOOK.md); call it `<S6.3>`:
+```
+cd W:/tmp/today-checklist; git show --format= -U0 <S6.3> -- RUNBOOK.md | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+Expect `0`.
+
+#### Step 5 - slice report
+
+Write `W:/tmp/today-checklist/docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S6-report.md`
+(ASCII, findings only, code cited by `file:line`). It must record at least:
+- C1 (the reconcile's relay-leg and one-to-one adoptions are COUNTED by the
+  backfill though the live writers skip them; `jobs/sendReconcile.ts:1037-1038`),
+  C2 (email and call rows carry no `recipient_contact_id`, so the backfill
+  names the thread contact where live W3 names the addressed contact;
+  `services/sendEmailMessage.ts:395-410`), C3 (the `author: 'system'`
+  edited-intro rule runs before the teammate test).
+- The PR38 rule picks as built: `introRule: body_match`,
+  `sendNowRule: exclude_by_body`, the 10-minute time match, the email order
+  (`failed` first), the call instant (`answered_at`, else providerTs), the
+  relay instant (`slot.sentAt`), the group instant (row providerTs).
+- The "checked, not contradictions" list from this section, with its
+  `file:line` evidence (no persisted auto-replies or opt confirmations; nudge
+  Send now sends the catalog default with no override; Quo rows carry author
+  `staff` and `imported_from`).
+- The accepted queued-relay gap (in the RUNBOOK entry).
+- WI12: the agent did NOT run the CLI in S6 (against anything); the RUNBOOK
+  says Cameron runs dev then prod after the deploy, dry run first; the lane
+  rehearsal is S7's.
+- The case count per describe block, and that the PII case asserts no body,
+  phone, address or name reaches the log on both the success and the abort
+  path.
+- Any red file or lint error from Steps 2-3 and what was done.
+
+Commit:
+```
+git -C W:/tmp/today-checklist status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/today-checklist/MERGE_HEAD"
+git -C W:/tmp/today-checklist add docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S6-report.md
+git -C W:/tmp/today-checklist commit -m "docs(records): today-checklist S6 slice report - backfill rule picks, contradictions, WI12" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### S6 coverage
+
+Spec 7.5 and PR38, each item to the case that pins it
+(`app/test/backfillLastReachedOut.test.ts`):
+
+| Item | Where |
+|---|---|
+| Script at `app/scripts/backfill-last-reached-out.ts`, twin shape, `--env` via stageClient, dry run default, `--apply` | S6.1 / S6.2 Step 3; "a dry run (the default) ..." |
+| Window = 14 days (FOLLOW_UP_LOOKBACK_MS), key floor = window start - 1 hour | "is the Follow up lookback ..." |
+| Key-condition Query `conversationId = :c AND tsMsgId >= :floor`, one per thread, outbound filter | "a dry run (the default) ..." (query params), "pages: ..." |
+| `normalizeInstant` re-check: window start counts, margin rows and earlier skipped, unparseable counted apart | "the window: ..." |
+| No `last_activity_at` pre-filter | S6.2 runner reads every non-pointer thread ("a dry run" conversationsWalked 5) |
+| 1:1 sms/mms counted (automated false or absent) | "counts a staff sms and mms ..." |
+| automated / broadcast_id / retry_attempt / retry_window_start skipped; manual retry_of counts | "skips automated sends, shares ..." |
+| Email: sent/delivered/undelivered or SES id counts; failed and queued-without-SES skipped | "counts an email once it left for SES ..." |
+| Calls: answered_at or call_outcome; instant rule; ringing-only skipped | "counts a call once the contact leg was dialed ..." |
+| Relay team: contact-keyed sid+sentAt at slot.sentAt; phone# skipped; status ignored; relay_retry_of skipped | "counts each CONTACT member ...", "skips a relay 30003 retry row ..." |
+| Group text: excluded skipped; roster then findByPhone; unresolved skipped; row providerTs | "counts every slot not excluded ..." |
+| Staff-edited intro body match; member_added and default intro not | both cases in "staff-edited relay intros" |
+| Nudge-body exclusion and its count; the four catalog defaults | "the nudge set is exactly ...", "excludes a staff-path text whose body is a nudge default ..." |
+| Reminder sentBody exclusion, in-window only, time-matched count | "excludes a text equal to an in-window reminder sentBody ...", "indexReminderSends ..." |
+| Quo rows (author `staff`, `imported_from`) never counted | "never counts a Quo import row ..." |
+| Non-teammate authors never counted | "an author that is not teammate ...", group-text `ai` row |
+| Inbound never counted | "never counts an inbound row" |
+| Recipient: `recipient_contact_id` preferred; thread contact fallback order | "names the row recipient_contact_id ...", "without one, the thread contact ..." |
+| Latest per contact across threads, normalized | "keeps the latest instant per contact across threads ...", runner "an apply makes ONE touch ..." |
+| Dry run writes nothing | "a dry run (the default) ..." |
+| Apply: one touch per contact; second apply writes 0 | "an apply makes ONE touch per contact ..." |
+| Failed touch aborts with a PARTIAL report (CLI exit 1) | "a FAILED touch aborts ..."; CLI catch sets `process.exitCode = 1` |
+| Counts-and-ids-only logging | "logs counts and ids only ..." |
+| The done line (dry run / apply) carries counts and the rules | "reportBackfillRun returns 0 ..." |
+| Usage per PR38, no package.json script | S6.2 Step 3 CLI block; RUNBOOK entry |
+| RUNBOOK entry after "Last heard from: the backfill", six steps, Cameron runs dev then prod, dry run first, the queued-relay gap | S6.3 |
+| Lane rehearsal | S7 (not this slice; WI12) |
+
+## 11. S7 - e2e, backfill lane rehearsal, docs
+
+Scope: plan section 2 row S7; rulings PR8 (the events doc comment), PR38
+(backfill usage), PR39 (the e2e plan, binding); watch items WI9, WI12, WI13.
+Spec sections 2, 5, 6, 9 and 10. Depends on S1-S6, all committed. Line
+numbers are hints against main @970a29b9 (the e2e files are untouched by
+S1-S6); the QUOTED text is the anchor.
+
+Every e2e run in this slice goes through the e2e WORKSPACE, cold-boot, one
+run at a time, through the run script created in S7.1 step 1 (the root
+`npm run e2e -- <args>` is a double npm hop that drops the arguments and
+runs EVERYTHING, `e2e/README.md` "Two modes"). No `e2e:session` is used for
+spec runs: the preflight refuses a reused stack whose boot commit differs
+from HEAD (`e2e/support/preflight.ts:87-131`), and every task here commits.
+`e2e:session` is used only for the backfill rehearsal (S7.15) and the live
+self-QA (S7.16). Never edit app or dashboard source while a run or the
+session is alive; never commit while a spec run is in flight.
+
+### Contradictions
+
+C1. PR39 / brief: "Keep tours-page.spec.ts ... selectors valid (verify)".
+It does not stay valid. `e2e/tests/dashboard-next/tours-page.spec.ts:268-271`
+asserts, whenever a Tours today section is on the page, that NO element on
+the whole page links the just-created REQUESTED tour:
+`await expect(page.locator(`a[href="/tours/${tourId}"]`)).toHaveCount(0);`.
+After S4/S5 that tour is a Tours to book row whose link is the same
+`/tours/<tourId>` (refType `tour`, `dashboard/src/routes/today/Today.tsx:66-67`
+`hrefFor`). Resolution: S7.10 scopes the absence to the Tours today list
+and adds the positive Tours to book assertion. Not a weakening: the
+original intent ("not in Tours today") is kept exactly.
+
+C2. PR39: "scenarios/participant-names (new vehicle: a requested tour for
+the tenant ...)". The scenario ALREADY creates a requested tour:
+`teamCreatesTourFromInterest` leaves the date empty, so the tour is
+`requested` (`e2e/scenarios/steps.ts:1880-1885`, `:1940-1944`), and it
+returns the tourId (`:1886-1889`, `:1945`). No new tour is needed. And the
+unmodified spec PASSES on the S1-S6 tree by accident: its
+`page.getByText(renamed.name).first()` (`participant-names.spec.ts:56`) now
+finds the name in the Tours to book row, so it is not RED. Resolution
+(S7.7): drop the unread-text vehicle (Unreplied is gone), assert the row
+INSIDE the Tours to book list by its tour href, with the new name and
+without the old one; the RED is a probe that the scoped assertion
+discriminates.
+
+C3. PR39: caseworkers ~551 "the AI line is ABSENT when there are none".
+`caseworkers.spec.ts` reseeds once per FILE (`:20-24` "The one reseed in
+beforeAll"), and `conversation-fact-extraction.spec.ts` the same (`:100-102`),
+so "none" cannot be assumed at that point - another test or spec can have
+left pending suggestions. On the S1-S6 tree the old assertions
+(`caseworkers.spec.ts:547-553`, `conversation-fact-extraction.spec.ts:354-360`,
+`:399-405`) pass VACUOUSLY: the list they count is not in the accessibility
+tree until the line is opened (spec 2.4). Resolution: one shared helper,
+`expectNoAiSuggestionFor` (S7.2), reads server truth first (the contact has
+no `ai_suggestions` item), then on the page asserts the AI line ABSENT when
+the server holds no AI rows at all, else opens the line, checks its count
+matches the server and that the opened list holds no row for the contact.
+That is exactly "absent when there are none", made safe for a shared lane.
+
+C4. PR39: today-past-tours "5 rows + Show all N + the Past-tab link". With
+PR35 (the section labels EVERY Past row; the Past-tab link keeps
+`past.total`) and the link rule as it stands (`Today.tsx:245`
+`const more = past.total > past.rows.length;`, `:259-261`), seven qualifying
+rows and no deleted tenant give `past.total === past.rows.length === 7`, so
+the link reads "Open the Past tab", not the "See all 7 on the Past tab" the
+spec asserts today (`today-past-tours.spec.ts:188`). Which text shows
+depends on S5's as-built `more` condition. Resolution: S7.8 asserts
+"Open the Past tab" (the existing rule applied to all-labeled rows) through
+ONE constant, `PAST_TAB_LINK_AT_SEVEN`; if S5 made the link compare against
+the shown 5 rows, change only that constant to `See all 7 on the Past tab`
+and record it in the S7 report.
+
+C5. PR39: `e2e/performance/routes.ts` `TODAY_TERMINAL` "(new headings)". The
+At a glance parts must NOT be populated terminals: "All caught up" renders
+WITH At a glance below it (spec 2.3, 2.4), and the profiler reads populated
+and empty together as `contradictory_terminal`
+(`e2e/performance/cli.ts:497`, `if (populated && empty) return
+'contradictory_terminal';`). Resolution (S7.11): populated = the seven
+checklist lists only. Also `e2e/performance/routes.test.ts` does not pin
+`TODAY_TERMINAL` at all (grep: no Today terminal assertion; the citation
+check at `:451-464` is format-only), so S7.11 adds that pin - it is the
+task's RED.
+
+C6. WI12 / brief: "dry run, then --apply, then --apply again (written 0)".
+On a lane where every staff send happened AFTER S2, the first apply also
+writes 0: the live W1 stamp is the appended row's providerTs (PR9) and the
+backfill's instant for that row is the same providerTs (PR38), and the
+writer is forward-only (`f < :at`), so it answers 'skipped'. A rehearsal
+that never sees `written > 0` does not prove the apply path. Resolution
+(S7.15): two staff sends, then ONE contact's stamp is removed with a
+gitignored, lane-only helper (`.superpowers/s7/lane-reached-out.ts`, built on
+the backfill's own pinned `resolveStageClient('local', {}, { lane })`) to
+stand for a contact staff reached before the deploy. Expected: dry run
+planned 2; apply written 1, skipped 1; second apply written 0, skipped 2;
+the restored value equals the live stamp. PLANNER: this writes to the lane's
+DynamoDB Local database outside the app; approve or strike the helper step
+(without it, expect written 0 / skipped 2 on both applies and record that
+the write path was not exercised).
+
+C7. Spec 10 lists three GLOSSARY entries and two issue edits. The tree holds
+more text that this branch makes FALSE: `documentation/GLOSSARY.md:699-703`
+(signed up: "under Unreplied", "under Needs you now"), `:719-732` (Inactive:
+"Needs you now", "still feeds Unreplied"),
+`documentation/STATUS-MODEL.md:231-233` and `:282-295` (Needs you now,
+Unreplied), and the OPEN issue
+`docs/issues/public-signup-abuse-hardening.md:122-124`, `:142-143`, `:149-178`
+("a Today row under Unreplied", "Today crowd-out"). AGENTS.md (Product
+vocabulary) requires drift to be fixed in the same change. Resolution: S7.13
+and S7.14 fix them. Resolved issues (`inbound-calls-invisible-in-inbox`,
+`today-shows-phone-instead-of-name`, `case-single-next-deadline-slot`) are
+history and stay untouched.
+
+No other conflict with plan sections 0-4 or the spec.
+
+### Cross-slice notes (for the planner)
+
+- As-built names S7 depends on (verified in S7.1 step 3; if one differs,
+  change ONLY the `UI` constant object of the spec that uses it and record
+  the difference in the S7 report):
+  - S5: list accessible names = heading text without the count, exactly
+    "Needs you now", "Identify these contacts", "Past tours needing an
+    outcome", "Tours to book", "Quiet shares", "Relay groups to close",
+    "Placements", "Tours today"; each list's nearest `<section>` ancestor is
+    its own section (S7's `todaySection` uses `xpath=ancestor::section[1]`);
+    the heading's accessible name starts with the heading text and contains
+    the count; "Show all N" (Quiet shares: "Show all N properties") and
+    "Show fewer" are buttons with `aria-expanded` inside the section; the AI
+    line is a button named exactly `AI suggestions for N contact(s)` with
+    `aria-expanded`, its opened list named "AI suggestions"; the Quiet
+    shares property line is a button inside the Quiet shares section whose
+    accessible name STARTS with the street line and whose text carries the
+    summary ("2 people: 1 replied, then quiet - 1 never replied", "1 person:
+    1 replied, then quiet"); the people list is named
+    "People waiting on <unitLabel>", one listitem per person with ONE link
+    to `/contacts/<id>`, the quiet text and the state tag as separate text
+    nodes; the subtitle and the three help lines are each one text node with
+    exactly the spec 2 / 2.2 copy; the page error stays
+    `We couldn't load your queue` and the empty state `All caught up`.
+  - S4: GET /api/today (no query) answers 200 with `group: 'identify'` for a
+    created `(unknown, needs_review)` contact (triage partition, `why` "New
+    unknown contact"); a `tours_to_book` row with `why === unitLabel ===
+    formatAddress(...)` (`<line1>, Atlanta, GA 30314` for the units S7
+    creates), `urgency` "Requested today", `at` an ISO string;
+    `toursToBook: 'ok'`; `quietShares: { status: 'ok', properties: [{
+    unitId, unitLabel, people: [{ contactId, state }] }], people }`.
+  - S2: the 1:1 route passes `staffOutreach` (S7.2 RED A removes it); POST
+    /api/tours emits `tour.updated` after create (S7.2 RED B removes it).
+  - S6: `npx tsx app/scripts/backfill-last-reached-out.ts --env local --lane
+    <L> [--apply]`; a start line carrying `stage.describe`
+    (`DynamoDB Local http://localhost:8000 database hclane<L> (e2e lane <L>)`)
+    and the prefix; a done line with `planned`, `written`, `skipped`,
+    `failed` (the twin's names) plus the PR38 per-category counts. If S6
+    named the counters differently, record the as-built names; the expected
+    VALUES in S7.15 still hold.
+  - S4 report carries the WI7 Query counts; S7.14 cites them in the new
+    issue. If the S4 report has none, STOP S7.14 and ask the planner.
+- S7.2 moves five helpers out of `e2e/tests/dashboard-next/follow-up-tab.spec.ts`
+  (not a PR39 file) into `e2e/support/followUpFixtures.ts`, verbatim, because
+  the new spec needs the same ones (brief: extract when both need them). The
+  follow-up-tab spec's behavior is unchanged; it runs green in S7.2.
+- S7 adds to `e2e/support/today.ts`: `todayList`, `todaySection`,
+  `showAllIn`, `aiSuggestionsLine`, `openAiSuggestions`,
+  `expectNoAiSuggestionFor`, `AI_SUGGESTIONS_LIST`. `showAllIn` is also used
+  by `e2e/scenarios/steps.ts` (Placements), `participant-names` and
+  `tours-page` (Tours to book), because the 5-row limit can hide a row on a
+  shared lane where these specs do not reseed.
+- Needs you now readers in `e2e/scenarios/steps.ts` (`:3087`, `:3153`, the RTA
+  and voucher rows) stay valid: those rows are still `needs_you_now` (spec
+  5.1). Only `:3190` "Follow-ups due" changes.
+- `relay-number-lifecycle.spec.ts:367-393` stays valid unchanged: the FULL
+  world seeds ONE past-due nag (`app/src/lib/seed/matrix.ts:1207`
+  `i === 0 && { close_nag_next_at: ... }`), well inside the 5-row limit, and
+  the heading regex `/Relay groups to close/i` tolerates the count. It runs
+  as a pin in S7.17.
+- S7 does NOT touch RUNBOOK.md (S6 owns the backfill entry) and does NOT
+  record the tracker #31 decisions (spec 10, last bullet): that is the
+  planner's handback item (Google Docs connector).
+- S8 runs the five bare gates; S7 runs only subsets plus
+  `npm run typecheck -w @housingchoice/e2e` and `npm run test -w @housingchoice/e2e`.
+
+---
+
+### Task S7.1 - re-grep every reader of the old Today page, the baseline run, the run script, the S7 report
+
+Files:
+- Create (gitignored, never committed) `W:/tmp/today-checklist/.superpowers/s7/run-spec.sh`
+- Create `docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S7-report.md`
+
+No source or spec edit in this task. Its "RED" is the baseline run: the
+unmodified specs on the S1-S6 tree, which proves which pins S7 must change
+(and which pass only vacuously).
+
+Step 1 - the run script. Create
+`W:/tmp/today-checklist/.superpowers/s7/run-spec.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Usage: bash run-spec.sh <tag> <spec path relative to e2e/>... [--grep <title>]
+# A cold-boot run through the e2e WORKSPACE (the root `npm run e2e -- <args>`
+# is a double npm hop that drops the arguments and runs EVERYTHING). Each run
+# boots its own hermetic lane (Playwright webServer) and tears it down. The
+# gate command is the LAST thing on its line; its status is read on the next
+# line only.
+tag="$1"
+shift
+D=W:/tmp/today-checklist/.superpowers/s7
+cd W:/tmp/today-checklist || exit 99
+rm -f "$D/$tag.exit"
+timeout 2700 npm run e2e -w @housingchoice/e2e -- "$@" > "$D/$tag.log" 2>&1
+echo "$?" > "$D/$tag.exit"
+```
+
+Launch every run DETACHED (the Bash tool caps a command near 600 s) and wait
+for its `.exit` file (Monitor until-loop on
+`test -f W:/tmp/today-checklist/.superpowers/s7/<tag>.exit`, or one check
+command at a time); never TaskStop it (on Windows that does not end the
+tree). Read the verdict from the LOG:
+
+```
+cat W:/tmp/today-checklist/.superpowers/s7/<tag>.exit
+grep -nE "passed|failed|flaky|skipped|Error:|npm error code" W:/tmp/today-checklist/.superpowers/s7/<tag>.log
+```
+
+Before EVERY run: Docker running, `npm run db:start` (STARTS DynamoDB Local;
+never restart it - that wipes local data), and no other e2e stack of THIS
+worktree alive: if `W:/tmp/today-checklist/e2e/.artifacts/session.pid`
+exists, `npm run e2e:stop` from the worktree root; then read the lane's
+four ports from `W:/tmp/today-checklist/e2e/.artifacts/lane.json` (if
+present) and prove none listens (PowerShell):
+
+```
+Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -in <app>,<dashboard>,<fake>,<publicBase> }
+```
+
+prints nothing. `reuseExistingServer` would otherwise adopt an orphan on a
+commit match alone (AGENTS.md).
+
+After any run that fails, BEFORE a re-run: copy
+`W:/tmp/today-checklist/e2e/.artifacts/` (test-results, report, results.json)
+and the run's `.log` to `W:/tmp/today-checklist/.superpowers/s7/<tag>-artifacts/`.
+A named-spec failure is a regression to diagnose (WI13; AGENTS.md: there is
+no named-flake list), never a re-run-until-green.
+
+Step 2 - the re-grep (read-only). From the worktree root:
+
+```
+cd W:/tmp/today-checklist
+grep -rn -E "Needs you now|Follow-ups due|Unreplied|unreplied|AI suggestions to review|Group texts to close|What needs you|needs_you_now|follow_ups|tours_today|ai_suggestions|New unknown contact|All caught up|Past tours needing|Tours today|Relay groups to close|api/today|TODAY_TERMINAL" e2e --include=*.ts --include=*.mjs --include=*.md
+grep -rn -E "unreplied|Unreplied|Follow-ups due|AI suggestions to review|What needs you|Group texts to close" app/src app/test dashboard/src
+grep -rn -i -E "unreplied|follow-ups due|needs you now|ai suggestions to review" documentation docs/issues RUNBOOK.md README.md
+grep -rn -E "toursFrom|toursTo" dashboard/src/api/endpoints.ts dashboard/src/routes/today/useToday.ts
+grep -rn -E "We couldn't load your queue|All caught up" dashboard/src/routes/today
+```
+
+Expected e2e hits (main @970a29b9 plus S1-S6, which touch no e2e file) and
+their disposition - record the table in the report, adding any hit not
+listed:
+
+| Hit | Disposition |
+|---|---|
+| `e2e/tests/dashboard-next/unknown-caller-triage.spec.ts:7,66-67,74,76,87,90` | S7.3 |
+| `e2e/tests/dashboard-next/unknown-inactive.spec.ts:6,10,19,51-52,129-135,161,189,321` | S7.4 |
+| `e2e/tests/flows/conversation-fact-extraction.spec.ts:19,357,402,430` | S7.5 |
+| `e2e/tests/dashboard-next/caseworkers.spec.ts:88,213(comment, unrelated),551` | S7.6 |
+| `e2e/tests/scenarios/participant-names.spec.ts:46` | S7.7 |
+| `e2e/tests/dashboard-next/today-past-tours.spec.ts:1,31` | S7.8 |
+| `e2e/scenarios/steps.ts:550,3077,3087,3100,3143,3146,3153,3182,3190` | S7.9 (`:3190` only); the rest stay (needs_you_now rows; comments about the `Tours today` heading trap are still true) |
+| `e2e/performance/routes.ts:268,274,396-402,622`; `routes.test.ts:73`; `collect.ts:69`; `templates.ts:30` | S7.11 (`:396-402` and the `'/'` terminal citation); the `/api/today` shapes stay (verify with the `toursFrom|toursTo` grep: the Today fetch still sends `day`, `toursFrom`, `toursTo`) |
+| `e2e/support/selectors.md:18,65` | S7.2 (`:65`); `:18` stays true (Tours today is still an `<h2>`) |
+| `e2e/support/today.ts:11` | stays (true) |
+| `e2e/tests/dashboard-next/tours-page.spec.ts:7,46,88,178,187-188,255-273` | S7.10 (C1); the rest stay |
+| `e2e/tests/dashboard-next/relay-number-lifecycle.spec.ts:25,367,375,378` | stays; pin in S7.17 |
+| `contact-create-relay-group.spec.ts:101`, `deleted-contact-resurfacing.spec.ts:29`, `outbound-mms.spec.ts:64`, `tour-roster.spec.ts:73`, `org-lists.spec.ts:20`, `scenarios/post-tour-application.spec.ts:238` | comments, still true; stay |
+
+Expected app/dashboard hits: none naming Unreplied, "Follow-ups due", "AI
+suggestions to review", "What needs you" or "Group texts to close" as a
+Today section (PR26 removed them from the server, PR36 from the fallback,
+S5 from the page). A hit in live code (a group value, a heading, a copy
+string) is an S4/S5 leftover: record it and REPORT it to the planner; S7
+does not edit app or dashboard source. A hit in a historical comment that
+says what used to be is recorded only.
+
+Expected docs hits: `documentation/GLOSSARY.md:700-701,720,725,728` and
+`documentation/STATUS-MODEL.md:232,283-292` (S7.13);
+`docs/issues/public-signup-abuse-hardening.md` (S7.14);
+`docs/issues/relay-groups-ignore-member-deletion.md:27` (relay opt-out rows
+are still `needs_you_now`, spec 5.1 - stays); the resolved issues
+`case-single-next-deadline-slot`, `inbound-calls-invisible-in-inbox`,
+`today-shows-phone-instead-of-name` (history - stay).
+
+Step 3 - confirm the as-built names S7 depends on (read-only; Cross-slice
+notes list them):
+
+```
+cd W:/tmp/today-checklist
+grep -rn -E "Identify these contacts|Tours to book|Quiet shares|Relay groups to close|'Placements'|\"Placements\"|At a glance|People waiting on|AI suggestions for|Show all|Show fewer|replied, then quiet|never replied|No reply in|Replied, then quiet|Clear every section above the line" dashboard/src/routes/today --include=*.tsx --include=*.ts
+grep -rn -E "'identify'|'tours_to_book'|Requested today|quietShares|toursToBook" app/src/routes/today.ts
+grep -n "staffOutreach" app/src/routes/api.ts
+grep -n "tour.updated" app/src/routes/tours.ts
+grep -n -E "planned|written|skipped|failed|--lane|--apply" app/scripts/backfill-last-reached-out.ts
+```
+
+Each name is present. If one differs from the Cross-slice notes, note the
+as-built text in the report; the spec tasks below change only their `UI`
+constants for it.
+
+Step 4 - the baseline run (the RED for S7.3-S7.10): the UNMODIFIED specs on
+the S1-S6 tree, one cold boot:
+
+```
+mkdir -p W:/tmp/today-checklist/.superpowers/s7
+nohup bash W:/tmp/today-checklist/.superpowers/s7/run-spec.sh baseline tests/dashboard-next/unknown-caller-triage.spec.ts tests/dashboard-next/unknown-inactive.spec.ts tests/flows/conversation-fact-extraction.spec.ts tests/dashboard-next/caseworkers.spec.ts tests/scenarios/participant-names.spec.ts tests/dashboard-next/today-past-tours.spec.ts tests/scenarios/post-tour-application.spec.ts tests/dashboard-next/tours-page.spec.ts tests/dashboard-next/relay-number-lifecycle.spec.ts tests/dashboard-next/follow-up-tab.spec.ts > W:/tmp/today-checklist/.superpowers/s7/baseline.runner 2>&1 & disown
+```
+
+Expected (exit non-zero). FAIL, each at this assertion:
+- unknown-caller-triage, test 1: `expect(row!.group).toBe('needs_you_now')`
+  (received `identify`); test 2 passes.
+- unknown-inactive: step (3), `await expect(todayRow(today, phoneA)).toBeVisible();`
+  (no "Needs you now" list holds the row).
+- conversation-fact-extraction, "Today tile": `await expect(group).toBeVisible({ timeout: 10_000 });`
+  (no list named "AI suggestions to review").
+- today-past-tours: `expect(hrefs).toEqual([...])` at `:121` (the order is
+  now oldest first).
+- post-tour-application: `expectPlacementStuckInFollowUps` (no "Follow-ups
+  due" list; `row` toBeVisible times out).
+- tours-page, "schedule WITHOUT a time": `toHaveCount(0)` at `:270`
+  (received 1, the Tours to book link) - ONLY when a Tours today section is
+  on the page at that moment; if `hasTodaySection` was false the test
+  passes. Record which.
+PASS (vacuously or validly; recorded, not a reason to skip the task):
+conversation-fact-extraction's two "clears Today review" tests (vacuous,
+C3), caseworkers (its Unknown-card test vacuous, C3), participant-names
+(by accident, C2), relay-number-lifecycle, follow-up-tab, every other test
+in these files.
+
+If a spec fails ANYWHERE else, STOP: that is a regression in S1-S6 to
+diagnose, not an S7 pin to change (WI13). Copy the artifacts (step 1) first.
+
+Step 5 - start the S7 report. Create
+`docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S7-report.md`
+(ASCII, findings only, `file:line` citations), with the builder's actual
+results filled in where marked:
+
+```
+# S7 report - e2e, backfill lane rehearsal, docs
+
+## Re-grep of the old Today page's readers (S7.1)
+
+<fill: the step 2 table, with every hit the grep found and its
+disposition; app/dashboard hits, if any, flagged for the planner>
+
+As-built names (S7.1 step 3): <fill: "all as planned", or each difference
+and the UI constant changed for it>
+
+## Baseline run on the S1-S6 tree (S7.1 step 4)
+
+<fill: exit code; per file, each failing test and its failing assertion as
+the log shows it; each passing test this slice changes, marked vacuous /
+accidental / valid; tours-page: whether hasTodaySection was true>
+```
+
+Step 6 - ASCII check and commit (no run alive). Read bare `git status`
+first; check
+`W:\AI Projects\Housing Choice\HC Application\.git\worktrees\today-checklist\MERGE_HEAD`
+is absent; expect only the report as new (`.superpowers/` is gitignored).
+
+```
+cd W:/tmp/today-checklist
+tr -d '\11\12\15\40-\176' < docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S7-report.md | wc -c
+git status
+git add docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S7-report.md
+git commit -m "docs(records): today-checklist S7 re-grep of old Today readers and the baseline e2e run" -m "Every e2e, app, dashboard and docs reader of the old Today groups, headings and copy, with its disposition; the unmodified pins run on the S1-S6 tree (which fail, which pass only vacuously)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+The ASCII check prints `0`.
+
+---
+
+### Task S7.2 - the new spec today-checklist.spec.ts, its shared helpers, the selector rows
+
+Spec 9 (e2e), PR39, WI9. Builds its own state on the lean world; no seed
+edit.
+
+Files:
+- Create `e2e/support/followUpFixtures.ts`
+- Modify `e2e/support/today.ts` (new helpers)
+- Modify `e2e/tests/dashboard-next/follow-up-tab.spec.ts` (imports the moved helpers)
+- Create `e2e/tests/dashboard-next/today-checklist.spec.ts`
+- Modify `e2e/support/selectors.md` (the Today rows)
+
+Step 1 - `e2e/support/followUpFixtures.ts`, complete (the helper bodies are
+moved VERBATIM from `follow-up-tab.spec.ts:20-24, 33-100`; only `export`
+and the module header are new):
+
+```ts
+/**
+ * Listing-share fixtures shared by the Matching Follow up tab spec and the
+ * Today checklist spec (tracker #31, plan S7.2): a consented run-unique
+ * tenant, an Available property, a hermetic listed send with a chosen sentAt,
+ * and the contact's last_heard_from_at read back. Moved verbatim from
+ * tests/dashboard-next/follow-up-tab.spec.ts; behavior unchanged.
+ */
+import { expect, type APIRequestContext } from '@playwright/test';
+import { dashboardUrl } from './urls.js';
+
+const NEXT = dashboardUrl;
+export const DAY = 86_400_000;
+
+export function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** A consented, run-unique tenant (consent so a send reaches them). */
+export async function createTenant(
+  api: APIRequestContext,
+  firstName: string,
+  voucherSize = 2,
+): Promise<{ contactId: string; firstName: string; name: string; phone: string }> {
+  // The house idiom (matching-entry-points.spec.ts): 7 random digits.
+  const phone = `+1555${Math.floor(Math.random() * 9000000 + 1000000)}`;
+  const lastName = 'Followtest';
+  const res = await api.post(`${NEXT}/api/contacts`, {
+    data: { type: 'tenant', firstName, lastName, phone, voucherSize },
+  });
+  expect(res.status(), await res.text()).toBe(201);
+  const contactId = ((await res.json()) as { contact: { contactId: string } }).contact.contactId;
+  const consent = await api.patch(`${NEXT}/api/contacts/${contactId}`, {
+    data: { consent_method: 'verbal_in_person', consent_at: new Date().toISOString() },
+  });
+  expect(consent.ok(), await consent.text()).toBeTruthy();
+  return { contactId, firstName, name: `${firstName} ${lastName}`, phone };
+}
+
+export async function heardAt(api: APIRequestContext, contactId: string): Promise<string | undefined> {
+  const res = await api.get(`${NEXT}/api/contacts/${contactId}`);
+  expect(res.ok(), await res.text()).toBeTruthy();
+  return ((await res.json()) as { contact: { last_heard_from_at?: string } }).contact.last_heard_from_at;
+}
+
+/** An Available 2-BR property; `tourType` set = the Interested ROUTE mode. */
+export async function createUnitViaApi(
+  api: APIRequestContext,
+  stamp: string,
+  tourType?: 'self_guided' | 'landlord_led' | 'pm_team',
+): Promise<{ unitId: string; line1: string }> {
+  const line1 = `${stamp}${Math.floor(Math.random() * 90) + 10} Heardfrom Ave`;
+  const res = await api.post(`${NEXT}/api/units`, {
+    data: {
+      landlordId: 'contact-landlord-0001',
+      beds: 2,
+      accepted_authorities: ['Atlanta Housing Authority'],
+      address: { line1, city: 'Atlanta', state: 'GA', zip: '30314' },
+      rent_min: 1500,
+      rent_max: 1600,
+    },
+  });
+  expect(res.ok(), await res.text()).toBeTruthy();
+  const unitId = ((await res.json()) as { unit: { unitId: string } }).unit.unitId;
+  if (tourType !== undefined) {
+    const typed = await api.patch(`${NEXT}/api/units/${unitId}`, { data: { tour_type: tourType } });
+    expect(typed.ok(), await typed.text()).toBeTruthy();
+  }
+  const flip = await api.patch(`${NEXT}/api/units/${unitId}/listing-status`, {
+    data: { toStatus: 'available', source: 'manual' },
+  });
+  expect(flip.ok(), await flip.text()).toBeTruthy();
+  return { unitId, line1 };
+}
+
+/** A COUNTED, listed send with the given sentAt and NO broadcast behind it
+ *  (S7's hermetic seam). */
+export async function plantListedSend(
+  api: APIRequestContext,
+  unitId: string,
+  contactId: string,
+  sentAt: string,
+): Promise<void> {
+  const res = await api.post(`${NEXT}/__dev/listing-send-fixture`, { data: { unitId, contactId, sentAt } });
+  expect(res.status(), await res.text()).toBe(201);
+}
+
+/** A sentAt n days back, padded a minute so floor() cannot read n-1. */
+export function daysAgo(n: number): string {
+  return new Date(Date.now() - n * DAY - 60_000).toISOString();
+}
+```
+
+Step 2 - `follow-up-tab.spec.ts` imports them. Three edits.
+
+Edit A. Anchor (`:1-4`):
+
+```ts
+import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
+import { APP_NUMBER, registerParty, sendAsParty } from '../../fixtures/fakeTwilio.js';
+import { reseed } from '../../fixtures/reseed.js';
+import { expectTodayReady } from '../../support/today.js';
+```
+
+Replacement:
+
+```ts
+import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
+import { APP_NUMBER, registerParty, sendAsParty } from '../../fixtures/fakeTwilio.js';
+import { reseed } from '../../fixtures/reseed.js';
+import {
+  createTenant,
+  createUnitViaApi,
+  daysAgo,
+  escapeRegExp,
+  heardAt,
+  plantListedSend,
+} from '../../support/followUpFixtures.js';
+import { expectTodayReady } from '../../support/today.js';
+```
+
+Edit B. Anchor (`:19-26`):
+
+```ts
+const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
+const DAY = 86_400_000;
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+async function devLogin(page: Page): Promise<void> {
+```
+
+Replacement:
+
+```ts
+const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
+
+async function devLogin(page: Page): Promise<void> {
+```
+
+Edit C. Delete the block from `/** A consented, run-unique tenant (consent so a send reaches them). */`
+(`:33`) through the closing `}` of `function daysAgo` (`:100`) - exactly the
+five functions Step 1 now exports, copied there verbatim - leaving the
+blank line before `interface FollowUpWire {`. After the edit
+`grep -n "function createTenant\|function heardAt\|function createUnitViaApi\|function plantListedSend\|function daysAgo\|const DAY" e2e/tests/dashboard-next/follow-up-tab.spec.ts`
+prints nothing and the `interface FollowUpWire` block follows `devLogin`.
+`APIRequestContext` stays imported (`followUps(api: APIRequestContext)`
+uses it).
+
+Step 3 - `e2e/support/today.ts` gains the Today section helpers.
+
+Edit A. Anchor (`:36`):
+
+```ts
+import { expect, type Page } from '@playwright/test';
+```
+
+Replacement:
+
+```ts
+import { expect, type Locator, type Page } from '@playwright/test';
+import { dashboardUrl } from './urls.js';
+```
+
+Edit B. Append at the end of the file (after `expectTodayReady`'s closing
+`}`):
+
+```ts
+
+/** The accessible name of the OPENED AI suggestions list (tracker #31). */
+export const AI_SUGGESTIONS_LIST = 'AI suggestions';
+
+/**
+ * A Today section's list. Since tracker #31 (spec
+ * docs/superpowers/specs/2026-10-23-today-checklist-design.md section 2,
+ * plan PR33) every list's accessible name is its section heading WITHOUT the
+ * count, so the match is exact: 'Needs you now', 'Identify these contacts',
+ * 'Past tours needing an outcome', 'Tours to book', 'Quiet shares', 'Relay
+ * groups to close', 'Placements', and under At a glance 'Tours today'.
+ */
+export function todayList(page: Page, name: string): Locator {
+  return page.getByRole('list', { name, exact: true });
+}
+
+/** The `<section>` around that list (its nearest section ancestor), which
+ *  holds the heading, the help line and the Show all / Show fewer button. */
+export function todaySection(page: Page, name: string): Locator {
+  return todayList(page, name).locator('xpath=ancestor::section[1]');
+}
+
+/**
+ * Every Today section shows its first 5 rows; past that a "Show all N"
+ * button expands it in place. A spec whose row can sit past the fifth (a
+ * shared lane it does not reseed, an oldest-first order where its row is the
+ * newest) expands the section first. A no-op when the section has 5 or fewer.
+ */
+export async function showAllIn(page: Page, name: string): Promise<void> {
+  await expect(todayList(page, name)).toBeVisible({ timeout: 10_000 });
+  const more = todaySection(page, name).getByRole('button', { name: /^Show all \d+/ });
+  if ((await more.count()) > 0) await more.click();
+}
+
+/** The At a glance AI line: ONE collapsed button (spec 2.4). */
+export function aiSuggestionsLine(page: Page): Locator {
+  return page.getByRole('button', { name: /^AI suggestions for \d+ contacts?$/ });
+}
+
+/**
+ * Opens the AI line (when collapsed) and returns its list. The list is not
+ * in the accessibility tree until the line is open, so never count rows on
+ * it without this. The worlds that call it hold at most 5 AI contacts, so no
+ * Show all is needed.
+ */
+export async function openAiSuggestions(page: Page): Promise<Locator> {
+  const line = aiSuggestionsLine(page);
+  await expect(line).toBeVisible({ timeout: 10_000 });
+  if ((await line.getAttribute('aria-expanded')) !== 'true') await line.click();
+  await expect(line).toHaveAttribute('aria-expanded', 'true');
+  const list = page.getByRole('list', { name: AI_SUGGESTIONS_LIST, exact: true });
+  await expect(list).toBeVisible();
+  return list;
+}
+
+interface TodayWireRow {
+  group: string;
+  refType: string;
+  refId: string;
+}
+
+/**
+ * The contact has no AI suggestions row on Today - asserted on server truth
+ * first (GET /api/today; a non-200 throws, so a failed read never passes),
+ * then on a freshly loaded page: when the server holds NO AI rows at all the
+ * line itself must be ABSENT (tracker #31: the list is hidden until opened,
+ * so a zero count on it would be vacuous); otherwise the line must name the
+ * server's count and the opened list must hold no row matching `rowText`.
+ * Leaves the page on Today.
+ */
+export async function expectNoAiSuggestionFor(page: Page, contactId: string, rowText: string): Promise<void> {
+  let aiIds: string[] = [];
+  await expect
+    .poll(
+      async () => {
+        const res = await page.request.get(`${dashboardUrl}/api/today`);
+        if (res.status() !== 200) throw new Error(`GET /api/today: ${res.status()} ${await res.text()}`);
+        const { items } = (await res.json()) as { items: TodayWireRow[] };
+        aiIds = items.filter((i) => i.group === 'ai_suggestions').map((i) => i.refId);
+        return aiIds.includes(contactId);
+      },
+      { timeout: 10_000, message: `contact ${contactId} still has an AI suggestions row on Today` },
+    )
+    .toBe(false);
+  const loaded = page.waitForResponse(
+    (r) => new URL(r.url()).pathname === '/api/today' && r.status() === 200,
+  );
+  await page.goto(`${dashboardUrl}/`);
+  await loaded;
+  await expectTodayReady(page);
+  if (aiIds.length === 0) {
+    await expect(aiSuggestionsLine(page)).toHaveCount(0);
+    return;
+  }
+  await expect(aiSuggestionsLine(page)).toHaveAccessibleName(
+    `AI suggestions for ${aiIds.length} ${aiIds.length === 1 ? 'contact' : 'contacts'}`,
+  );
+  const list = await openAiSuggestions(page);
+  await expect(list.getByRole('listitem')).toHaveCount(Math.min(aiIds.length, 5));
+  await expect(list.getByRole('listitem').filter({ hasText: rowText })).toHaveCount(0);
+}
+```
+
+Step 4 - the new spec, complete. Create
+`e2e/tests/dashboard-next/today-checklist.spec.ts`:
+
+```ts
+// e2e/tests/dashboard-next/today-checklist.spec.ts
+//
+// Today as the daily checklist (tracker #31; spec
+// docs/superpowers/specs/2026-10-23-today-checklist-design.md sections 2, 4,
+// 5, 6 and 9; plan PR39). Against the real backend on the hermetic lane:
+//   1. the checklist reads top to bottom - Identify these contacts, Tours to
+//      book, Quiet shares, Placements - with the exact subtitle and help
+//      lines; a known contact's unread text is NOT on Today (Unreplied is
+//      gone, the inbox still has it); the page is not "All caught up";
+//   2. Quiet shares groups by property: the first property line is open on
+//      first render, folds and reopens, and lists the person who replied
+//      first, then the one who never did, each with the exact quiet text and
+//      state tag, and no Interested / Not interested buttons;
+//   3. a staff text sent from the contact page composer drops that person
+//      off an OPEN Today page live (the last_reached_out_at stamp and its
+//      contact.updated event), keeps the viewer's open property open, and
+//      leaves the other person;
+//   4. Tours to book: two requested tours appear on an OPEN Today page live
+//      (the tour.updated create emit), oldest request first, and booking one
+//      on the tour page removes it live.
+//
+// STATE. The lean world seeds no listing sends, tours or unknown contacts,
+// so every Identify, Tours to book and Quiet shares row is this spec's own.
+// Every test reseeds before and after: the after keeps planted quiet shares,
+// requested tours and an unknown contact off later specs' Today pages.
+// Quiet shares are planted with the hermetic /__dev/listing-send-fixture
+// (sentAt in the past) and an AGED inbound with
+// /__dev/extraction/message-fixture, polled until last_heard_from_at is set
+// (the follow-up-tab.spec.ts pattern). The Placements row is the lean
+// placement made stuck through /__dev/placements/:id/deadline-fixture, so it
+// does not depend on the seed's dates. No seed file is edited (plan WI9).
+//
+// "All caught up" itself is not driven here: the lean world always holds the
+// stuck placement. Its rule (every checklist section empty and settled, At a
+// glance ignored, withheld for an unavailable section and the fallback) is
+// pinned by the dashboard Today tests (S5).
+import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
+import { postInboundSms } from '../../fixtures/fakeTwilio.js';
+import { reseed } from '../../fixtures/reseed.js';
+import {
+  createTenant,
+  createUnitViaApi,
+  daysAgo,
+  escapeRegExp,
+  heardAt,
+  plantListedSend,
+} from '../../support/followUpFixtures.js';
+import { expectTodayReady, todayList, todaySection } from '../../support/today.js';
+import { NARROW_360, WIDE_RESTORE, expectNoHorizontalOverflow } from '../../support/viewport.js';
+
+const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
+/** The lean world's one placement (app/src/lib/seed/lean.ts IDS.placement). */
+const LEAN_PLACEMENT = 'placement-0001';
+
+/** Every accessible name and copy string this spec uses (spec 2, 2.2, 5.4,
+ *  6.2, 6.3). If an as-built name differs, change it HERE only. */
+const UI = {
+  subtitle: "Clear every section above the line and today's checklist is done. New messages are in the Inbox.",
+  identify: 'Identify these contacts',
+  toursToBook: 'Tours to book',
+  quietShares: 'Quiet shares',
+  placements: 'Placements',
+  identifyHelp:
+    "We don't know yet who these are. Call each one; after about a week with no contact, mark them Inactive.",
+  toursToBookHelp: 'Said yes to a property; the tour has no date yet. Oldest first.',
+  quietSharesHelp:
+    'Properties sent in the last 14 days. Replied and then went quiet for 2+ days, or never replied in 5+ days. A message or call from either side restarts the clock; sending another property does not.',
+  peopleWaitingOn: (unitLabel: string): string => `People waiting on ${unitLabel}`,
+  repliedQuiet: (n: number): string => `Replied, then quiet ${n} days`,
+  repliedTag: 'Replied',
+  noReplyQuiet: (n: number): string => `No reply in ${n} days`,
+  noReplyTag: 'No reply yet',
+  summaryBoth: '2 people: 1 replied, then quiet - 1 never replied',
+  summaryRepliedOnly: '1 person: 1 replied, then quiet',
+  newUnknown: 'New unknown contact',
+  requestedToday: 'Requested today',
+  allCaughtUp: 'All caught up',
+  replyBox: 'Reply message',
+  send: 'Send',
+  timeline: 'Communications and activity',
+  scheduleTour: 'Schedule tour',
+  scheduleTourForm: 'Schedule tour form',
+  dateAndTime: 'Date and time',
+  confirmSchedule: 'Confirm schedule',
+};
+
+/** The server's TodayGroup values (spec 3). */
+const TODAY_GROUPS = ['needs_you_now', 'identify', 'tours_to_book', 'tours_today', 'follow_ups', 'ai_suggestions'];
+
+/** A window flag set on an open Today page; still set later = no reload. */
+const NO_RELOAD = '__hcTodayChecklistNoReload';
+
+type Tenant = Awaited<ReturnType<typeof createTenant>>;
+
+interface TodayWireItem {
+  group: string;
+  refType: string;
+  refId: string;
+  who: string;
+  why: string;
+  urgency?: string;
+  at?: string;
+  unitLabel?: string;
+}
+
+interface QuietSharesWire {
+  status: 'ok' | 'unavailable';
+  properties?: Array<{ unitId: string; unitLabel: string; people: Array<{ contactId: string; state: string }> }>;
+  people?: number;
+  truncated?: boolean;
+}
+
+interface TodayWire {
+  items: TodayWireItem[];
+  quietShares?: QuietSharesWire;
+  toursToBook?: string;
+}
+
+async function devLogin(page: Page): Promise<void> {
+  const res = await page.request.post(`${NEXT}/auth/dev-login`, { data: { email: 'va@example.com' } });
+  expect(res.ok(), `dev-login failed: ${res.status()} ${await res.text()}`).toBeTruthy();
+  await page.goto(`${NEXT}/`);
+  await expectTodayReady(page);
+}
+
+/** GET /api/today, server truth. Throws on a non-200 so a failed read can
+ *  never pass an absence check. */
+async function readToday(api: APIRequestContext): Promise<TodayWire> {
+  const res = await api.get(`${NEXT}/api/today`);
+  if (res.status() !== 200) throw new Error(`GET /api/today: ${res.status()} ${await res.text()}`);
+  return (await res.json()) as TodayWire;
+}
+
+/** The server's unit label for a unit createUnitViaApi made
+ *  (formatAddress, app/src/lib/address.ts). */
+function unitLabelOf(line1: string): string {
+  return `${line1}, Atlanta, GA 30314`;
+}
+
+async function conversationIdOf(api: APIRequestContext, contactId: string): Promise<string> {
+  const res = await api.post(`${NEXT}/api/contacts/${contactId}/conversation`);
+  expect(res.ok(), await res.text()).toBeTruthy();
+  return ((await res.json()) as { conversation: { conversationId: string } }).conversation.conversationId;
+}
+
+interface QuietWorld {
+  unitId: string;
+  line1: string;
+  unitLabel: string;
+  /** Sent 6 days ago, never replied: No reply yet, quiet 6 days. */
+  quiet: Tenant;
+  /** Sent 5 days ago, replied 3 days ago: Replied, quiet 3 days. */
+  replied: Tenant;
+}
+
+/** One property, two quiet shares on it (spec 6.1: 120 h for no_reply,
+ *  48 h for replied, both past). */
+async function plantQuietShares(api: APIRequestContext, stamp: string): Promise<QuietWorld> {
+  const { unitId, line1 } = await createUnitViaApi(api, stamp, 'self_guided');
+  const quiet = await createTenant(api, `Quietn${stamp}`);
+  const replied = await createTenant(api, `Quietr${stamp}`);
+  await plantListedSend(api, unitId, quiet.contactId, daysAgo(6));
+  await plantListedSend(api, unitId, replied.contactId, daysAgo(5));
+  const conversationId = await conversationIdOf(api, replied.contactId);
+  const heard = daysAgo(3);
+  const fixture = await api.post(`${NEXT}/__dev/extraction/message-fixture`, {
+    data: { conversationId, body: 'Is it still open?', createdAt: heard, direction: 'inbound' },
+  });
+  expect(fixture.ok(), await fixture.text()).toBeTruthy();
+  await expect
+    .poll(async () => Date.parse((await heardAt(api, replied.contactId)) ?? ''), { timeout: 20_000 })
+    .toBe(Date.parse(heard));
+  return { unitId, line1, unitLabel: unitLabelOf(line1), quiet, replied };
+}
+
+/** POST /api/tours with NO scheduledAt: a requested tour (Tours to book). */
+async function requestTour(api: APIRequestContext, tenantId: string, unitId: string): Promise<string> {
+  const res = await api.post(`${NEXT}/api/tours`, { data: { tenantId, unitId, tourType: 'self_guided' } });
+  expect(res.status(), await res.text()).toBe(201);
+  const { tour } = (await res.json()) as { tour: { tourId: string; status: string; scheduledAt?: string } };
+  expect(tour.status).toBe('requested');
+  expect(tour.scheduledAt).toBeUndefined();
+  return tour.tourId;
+}
+
+/** An (unknown, needs_review) contact: the triage partition's Identify row. */
+async function createUnknownContact(api: APIRequestContext, firstName: string): Promise<string> {
+  const phone = `+1555${Math.floor(Math.random() * 9000000 + 1000000)}`;
+  const res = await api.post(`${NEXT}/api/contacts`, { data: { type: 'unknown', firstName, phone } });
+  expect(res.status(), await res.text()).toBe(201);
+  return ((await res.json()) as { contact: { contactId: string } }).contact.contactId;
+}
+
+/** Backdate the lean placement's stage so its DERIVED stuck row is on
+ *  Placements whatever the seed's dates are. */
+async function makeLeanPlacementStuck(api: APIRequestContext): Promise<void> {
+  const res = await api.post(`${NEXT}/__dev/placements/${LEAN_PLACEMENT}/deadline-fixture`, {
+    data: { stageEnteredAt: daysAgo(60) },
+  });
+  expect(res.ok(), await res.text()).toBeTruthy();
+}
+
+/** A second tab on Today, listening on the event stream, flagged for the
+ *  no-reload check (the unknown-inactive.spec.ts idiom). */
+async function openWatchingToday(page: Page): Promise<Page> {
+  const today = await page.context().newPage();
+  const streamOpen = today.waitForResponse(
+    (r) => new URL(r.url()).pathname === '/api/events' && r.status() === 200,
+  );
+  await today.goto(`${NEXT}/`);
+  await expectTodayReady(today);
+  await streamOpen;
+  await today.evaluate((k) => {
+    (window as unknown as Record<string, unknown>)[k] = true;
+  }, NO_RELOAD);
+  return today;
+}
+
+async function expectNotReloaded(today: Page): Promise<void> {
+  expect(
+    await today.evaluate((k) => (window as unknown as Record<string, unknown>)[k], NO_RELOAD),
+    'the Today page reloaded - the change was not live',
+  ).toBe(true);
+}
+
+/** The top edge of a rendered list (sections stack in one column). */
+async function topOf(list: Locator): Promise<number> {
+  await expect(list).toBeVisible();
+  const box = await list.boundingBox();
+  if (box === null) throw new Error('a visible list has no box');
+  return box.y;
+}
+
+/** A property line in Quiet shares: a button whose name starts with the
+ *  street line. */
+function quietLine(page: Page, line1: string): Locator {
+  return todaySection(page, UI.quietShares).getByRole('button', {
+    name: new RegExp(`^${escapeRegExp(line1)}`),
+  });
+}
+
+function peopleOn(page: Page, unitLabel: string): Locator {
+  return page.getByRole('list', { name: UI.peopleWaitingOn(unitLabel), exact: true });
+}
+
+/** A Date's LOCAL components as a datetime-local value (steps.ts idiom). */
+function localInput(d: Date): string {
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+test.describe('Today - the daily checklist (tracker #31)', () => {
+  test.beforeEach(async ({ request }) => {
+    await reseed(request);
+  });
+  test.afterEach(async ({ request }) => {
+    await reseed(request);
+  });
+
+  test('reads top to bottom: Identify, Tours to book, Quiet shares, Placements; no Unreplied; not all caught up', async ({
+    page,
+    request,
+  }) => {
+    test.slow(); // a reseed each side, a quiet-share world, a tour, an inbound and two feeds
+    await devLogin(page);
+    const api = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+    const world = await plantQuietShares(api, stamp);
+    const booker = await createTenant(api, `Booker${stamp}`);
+    const tourId = await requestTour(api, booker.contactId, world.unitId);
+    const unknownFirst = `Ident${stamp}`;
+    const unknownId = await createUnknownContact(api, unknownFirst);
+    await makeLeanPlacementStuck(api);
+
+    // A KNOWN contact's unread text: before tracker #31 an Unreplied row.
+    const bookerConversationId = await conversationIdOf(api, booker.contactId);
+    const sms = await postInboundSms(request, {
+      from: booker.phone,
+      body: `When can I see it ${stamp}?`,
+      messageSid: `SMtc${Date.now()}`,
+    });
+    expect(sms.status, sms.body).toBe(200);
+    await expect
+      .poll(
+        async () => {
+          const res = await api.get(`${NEXT}/api/inbox?filter=unread&limit=100`);
+          if (!res.ok()) return 0;
+          const { rows } = (await res.json()) as { rows: Array<{ contactId?: string; unreadCount: number }> };
+          return rows.find((r) => r.contactId === booker.contactId)?.unreadCount ?? 0;
+        },
+        { timeout: 15_000, message: 'the inbound never made the booker thread unread' },
+      )
+      .toBeGreaterThan(0);
+
+    // Server truth.
+    const wire = await readToday(api);
+    for (const item of wire.items) expect(TODAY_GROUPS, JSON.stringify(item)).toContain(item.group);
+    expect(wire.items.find((i) => i.refId === unknownId)).toMatchObject({
+      group: 'identify',
+      refType: 'contact',
+      why: UI.newUnknown,
+    });
+    const booking = wire.items.find((i) => i.refId === tourId);
+    expect(booking).toMatchObject({
+      group: 'tours_to_book',
+      refType: 'tour',
+      why: world.unitLabel,
+      unitLabel: world.unitLabel,
+      urgency: UI.requestedToday,
+    });
+    expect(Number.isNaN(Date.parse(booking?.at ?? '')), `tours_to_book at: ${booking?.at}`).toBe(false);
+    expect(wire.items.some((i) => i.group === 'follow_ups' && i.refId === LEAN_PLACEMENT)).toBe(true);
+    expect(wire.toursToBook).toBe('ok');
+    expect(wire.quietShares?.status).toBe('ok');
+    expect(wire.quietShares?.people).toBe(2);
+    // The unread typed thread feeds ONLY the Inbox (spec 4): no row of any
+    // group points at the booker or their thread, beyond their tour.
+    expect(
+      wire.items.filter(
+        (i) => i.refType !== 'tour' && (i.refId === booker.contactId || i.refId === bookerConversationId),
+      ),
+    ).toEqual([]);
+
+    // The page.
+    await page.goto(`${NEXT}/`);
+    await expectTodayReady(page);
+    await expect(page.getByText(UI.subtitle, { exact: true })).toBeVisible();
+    const identifyList = todayList(page, UI.identify);
+    const toursList = todayList(page, UI.toursToBook);
+    const quietList = todayList(page, UI.quietShares);
+    const placementsList = todayList(page, UI.placements);
+    const tops = [
+      await topOf(identifyList),
+      await topOf(toursList),
+      await topOf(quietList),
+      await topOf(placementsList),
+    ];
+    expect(new Set(tops).size, `section tops ${JSON.stringify(tops)}`).toBe(4);
+    expect(tops, 'Identify, Tours to book, Quiet shares, Placements - top to bottom').toEqual(
+      [...tops].sort((a, b) => a - b),
+    );
+    await expect(page.getByText(UI.identifyHelp, { exact: true })).toBeVisible();
+    await expect(page.getByText(UI.toursToBookHelp, { exact: true })).toBeVisible();
+    await expect(page.getByText(UI.quietSharesHelp, { exact: true })).toBeVisible();
+
+    const identifyRow = identifyList.getByRole('link').filter({ hasText: unknownFirst });
+    await expect(identifyRow).toHaveAttribute('href', `/contacts/${unknownId}`);
+    await expect(identifyRow).toContainText(UI.newUnknown);
+    const tourRow = toursList.locator(`a[href="/tours/${tourId}"]`);
+    await expect(tourRow).toContainText(booker.firstName);
+    await expect(tourRow).toContainText(world.unitLabel);
+    await expect(tourRow).toContainText(UI.requestedToday);
+    await expect(placementsList.locator(`a[href="/placements/${LEAN_PLACEMENT}"]`)).toBeVisible();
+
+    // Gone for good: Unreplied and the old Placements heading; and the page
+    // is not done while the checklist has rows.
+    await expect(page.getByRole('heading', { name: /^Unreplied/ })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: /^Follow-ups due/ })).toHaveCount(0);
+    await expect(page.getByText(UI.allCaughtUp, { exact: true })).toHaveCount(0);
+    // The booker's unread text is on no Today row (their tour row links the tour).
+    await expect(page.locator(`a[href="/contacts/${booker.contactId}"]`)).toHaveCount(0);
+    await expect(page.locator(`a[href="/conversations/${bookerConversationId}"]`)).toHaveCount(0);
+  });
+
+  test('Quiet shares: one line per property, the first open; the replied person first, then the one who never replied', async ({
+    page,
+  }) => {
+    test.slow();
+    await devLogin(page);
+    const api = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+    const w = await plantQuietShares(api, stamp);
+
+    const wire = await readToday(api);
+    expect(wire.quietShares?.status).toBe('ok');
+    expect(wire.quietShares?.people).toBe(2);
+    expect(
+      wire.quietShares?.properties?.map((p) => [p.unitId, p.unitLabel, p.people.map((x) => [x.contactId, x.state])]),
+    ).toEqual([[w.unitId, w.unitLabel, [[w.replied.contactId, 'replied'], [w.quiet.contactId, 'no_reply']]]]);
+
+    await page.goto(`${NEXT}/`);
+    await expectTodayReady(page);
+    await expect(page.getByRole('heading', { name: new RegExp(`^${UI.quietShares}`) })).toContainText('2');
+    await expect(page.getByText(UI.quietSharesHelp, { exact: true })).toBeVisible();
+    const line = quietLine(page, w.line1);
+    // The first property in order is open when the section first renders.
+    await expect(line).toHaveAttribute('aria-expanded', 'true');
+    await expect(line).toContainText(UI.summaryBoth);
+    const people = peopleOn(page, w.unitLabel);
+    const rows = people.getByRole('listitem');
+    await expect(rows).toHaveCount(2);
+    await expect(rows.nth(0)).toContainText(w.replied.name);
+    await expect(rows.nth(0).getByText(UI.repliedQuiet(3), { exact: true })).toBeVisible();
+    await expect(rows.nth(0).getByText(UI.repliedTag, { exact: true })).toBeVisible();
+    await expect(rows.nth(0).getByRole('link')).toHaveAttribute('href', `/contacts/${w.replied.contactId}`);
+    await expect(rows.nth(1)).toContainText(w.quiet.name);
+    await expect(rows.nth(1).getByText(UI.noReplyQuiet(6), { exact: true })).toBeVisible();
+    await expect(rows.nth(1).getByText(UI.noReplyTag, { exact: true })).toBeVisible();
+    await expect(rows.nth(1).getByRole('link')).toHaveAttribute('href', `/contacts/${w.quiet.contactId}`);
+    // No Interested / Not interested on Today (spec 6.2).
+    await expect(todaySection(page, UI.quietShares).getByRole('button', { name: /interested/i })).toHaveCount(0);
+
+    // The line folds and reopens in place.
+    await line.click();
+    await expect(line).toHaveAttribute('aria-expanded', 'false');
+    await expect(people).toHaveCount(0);
+    await line.click();
+    await expect(line).toHaveAttribute('aria-expanded', 'true');
+    await expect(rows).toHaveCount(2);
+
+    // Phone width: the open section does not push Today sideways.
+    await page.setViewportSize(NARROW_360);
+    await expect(rows).toHaveCount(2);
+    await expectNoHorizontalOverflow(page, 'Today with an open quiet share at 360px');
+    await page.setViewportSize(WIDE_RESTORE);
+  });
+
+  test('a staff text from the contact page drops that person off an open Today page, live', async ({ page }) => {
+    test.slow();
+    await devLogin(page);
+    const api = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+    const w = await plantQuietShares(api, stamp);
+
+    const today = await openWatchingToday(page);
+    const people = peopleOn(today, w.unitLabel);
+    await expect(people.getByRole('listitem')).toHaveCount(2);
+
+    // A staff text through the contact page composer: POST
+    // /api/conversations/:id/messages, the W1 writer (spec 7.3).
+    await page.bringToFront();
+    await page.goto(`${NEXT}/contacts/${w.quiet.contactId}`);
+    const body = `Still interested in ${w.line1}? ${stamp}`;
+    await page.getByRole('textbox', { name: UI.replyBox }).fill(body);
+    const send = page.getByRole('button', { name: UI.send, exact: true });
+    await expect(send).toBeEnabled({ timeout: 20_000 });
+    await send.click();
+    await expect(page.getByRole('region', { name: UI.timeline }).getByText(body)).toBeVisible({ timeout: 15_000 });
+
+    // Server truth: the person left Quiet shares; the other stays.
+    await expect
+      .poll(
+        async () => {
+          const qs = (await readToday(api)).quietShares;
+          return qs?.status === 'ok' ? (qs.properties ?? []).flatMap((p) => p.people.map((x) => x.contactId)) : null;
+        },
+        { timeout: 15_000, message: 'the staff text never took the person off Quiet shares' },
+      )
+      .toEqual([w.replied.contactId]);
+    // Outbound never moves last heard from (spec 7.1).
+    expect(await heardAt(api, w.quiet.contactId)).toBeUndefined();
+
+    // The open Today page dropped them WITHOUT a reload, kept the viewer's
+    // open property open, and re-counted.
+    await today.bringToFront();
+    await expect(people.getByRole('listitem')).toHaveCount(1);
+    await expect(people.getByRole('listitem').filter({ hasText: w.quiet.name })).toHaveCount(0);
+    await expect(people.getByRole('listitem')).toContainText(w.replied.name);
+    await expect(quietLine(today, w.line1)).toHaveAttribute('aria-expanded', 'true');
+    await expect(quietLine(today, w.line1)).toContainText(UI.summaryRepliedOnly);
+    await expect(today.getByRole('heading', { name: new RegExp(`^${UI.quietShares}`) })).toContainText('1');
+    await expectNotReloaded(today);
+    await today.close();
+  });
+
+  test('Tours to book: requested tours appear live, oldest request first, and a booked one leaves live', async ({
+    page,
+  }) => {
+    test.slow();
+    await devLogin(page);
+    const api = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+    const { unitId, line1 } = await createUnitViaApi(api, stamp, 'self_guided');
+    const first = await createTenant(api, `Bookfirst${stamp}`);
+    const second = await createTenant(api, `Booksecond${stamp}`);
+
+    const today = await openWatchingToday(page);
+    const list = todayList(today, UI.toursToBook);
+    await expect(list).toHaveCount(0);
+
+    const firstTour = await requestTour(api, first.contactId, unitId);
+    const secondTour = await requestTour(api, second.contactId, unitId);
+
+    // Both appear on the OPEN page (POST /api/tours emits tour.updated, PR16).
+    await expect(list.getByRole('link')).toHaveCount(2);
+    const hrefs = await list.getByRole('link').evaluateAll((els) => els.map((e) => e.getAttribute('href')));
+    expect(hrefs, 'oldest request first').toEqual([`/tours/${firstTour}`, `/tours/${secondTour}`]);
+    const firstRow = list.locator(`a[href="/tours/${firstTour}"]`);
+    await expect(firstRow).toContainText(first.firstName);
+    await expect(firstRow).toContainText(unitLabelOf(line1));
+    await expect(firstRow).toContainText(UI.requestedToday);
+    await expect(today.getByText(UI.toursToBookHelp, { exact: true })).toBeVisible();
+    await expectNotReloaded(today);
+
+    // Book the first through the tour page's Schedule tour form (3 days out,
+    // so it is not a Tours today row either).
+    await page.bringToFront();
+    await page.goto(`${NEXT}/tours/${firstTour}`);
+    await page.getByRole('button', { name: UI.scheduleTour }).click();
+    const form = page.getByRole('form', { name: UI.scheduleTourForm });
+    await expect(form).toBeVisible();
+    const when = new Date(Date.now() + 3 * 86_400_000);
+    when.setHours(10, 0, 0, 0);
+    await form.getByLabel(UI.dateAndTime).fill(localInput(when));
+    await page.getByRole('button', { name: UI.confirmSchedule }).click();
+    await expect(
+      page.locator('header').filter({ hasText: 'Tour -' }).getByText('Scheduled', { exact: true }),
+    ).toBeVisible({ timeout: 10_000 });
+
+    // Server truth, then the open page - no reload.
+    await expect
+      .poll(
+        async () => (await readToday(api)).items.filter((i) => i.group === 'tours_to_book').map((i) => i.refId),
+        { timeout: 15_000 },
+      )
+      .toEqual([secondTour]);
+    await today.bringToFront();
+    await expect(list.getByRole('link')).toHaveCount(1);
+    await expect(list.locator(`a[href="/tours/${firstTour}"]`)).toHaveCount(0);
+    await expectNotReloaded(today);
+    await today.close();
+  });
+});
+```
+
+Step 5 - the selector rows. Edit `e2e/support/selectors.md` (pre-existing
+non-ASCII elsewhere in the file; every added line is ASCII).
+
+Anchor (`:65`, one line):
+
+```
+| Today (AI extraction) | suggestions group | `getByRole('list', { name: 'AI suggestions to review' })` - the group's `<ul>`; `getByRole('listitem')` within it counts distinct contacts with pending suggestions. NOTE the Today queue is the dashboard HOME route `/`, not `/today` |
+```
+
+Replacement (three lines):
+
+```
+| Today | a section's rows | `todayList(page, '<heading>')` from `support/today.ts` = `getByRole('list', { name: '<heading>', exact: true })` - since tracker #31 the list's accessible name is the section heading WITHOUT its count: `Needs you now`, `Identify these contacts`, `Past tours needing an outcome`, `Tours to book`, `Quiet shares`, `Relay groups to close`, `Placements` (the checklist, in that order), then under "At a glance" `Tours today`. There is NO `Unreplied` and no `Follow-ups due` any more. Every section shows 5 rows; past that `showAllIn(page, '<heading>')` clicks its `Show all <n>` button (`Show fewer` collapses; both carry `aria-expanded`). An empty section is not rendered, so assert an absence on server truth (`GET /api/today` `items[].group`), never on a missing list alone. NOTE the Today page is the dashboard HOME route `/`, not `/today` |
+| Today | the AI suggestions line | `aiSuggestionsLine(page)` from `support/today.ts`: ONE collapsed button `AI suggestions for <n> contact(s)` with `aria-expanded`; `openAiSuggestions(page)` opens it and returns `getByRole('list', { name: 'AI suggestions', exact: true })`, which is NOT in the accessibility tree until opened - so a zero count on it is vacuous; use `expectNoAiSuggestionFor(page, contactId, rowText)` (server truth, then the line absent or the opened list without the row) |
+| Today | a quiet share | the property line `todaySection(page, 'Quiet shares').getByRole('button', { name: /^<street line>/ })` carries `aria-expanded` (the first property is open on first render, the rest folded); its people are `getByRole('list', { name: 'People waiting on <unitLabel>', exact: true })`, each row a link to the contact page reading `Replied, then quiet <n> days` / `No reply in <n> days` with a `Replied` / `No reply yet` tag (`today-checklist.spec.ts`) |
+```
+
+Step 6 - GREEN (first run): the new spec and the follow-up tab spec (its
+helpers moved):
+
+```
+nohup bash W:/tmp/today-checklist/.superpowers/s7/run-spec.sh s72-green1 tests/dashboard-next/today-checklist.spec.ts tests/dashboard-next/follow-up-tab.spec.ts > W:/tmp/today-checklist/.superpowers/s7/s72-green1.runner 2>&1 & disown
+```
+
+Expected: exit `0`, `6 passed`. This spec lands after S1-S6, so it is green
+on arrival; steps 7-8 are its real RED cases (each proves an assertion
+discriminates against a real regression).
+
+Step 7 - RED case A (W1, the stamp). With no run alive, in
+`app/src/routes/api.ts` make the 1:1 send route (POST
+`/conversations/:conversationId/messages`) pass NO `staffOutreach` to
+`sendMessage` - delete only that property from that call's input (find it
+with `grep -n "staffOutreach" app/src/routes/api.ts`; leave the Retry
+route's occurrence). Then:
+
+```
+nohup bash W:/tmp/today-checklist/.superpowers/s7/run-spec.sh s72-redA tests/dashboard-next/today-checklist.spec.ts --grep "staff text" > W:/tmp/today-checklist/.superpowers/s7/s72-redA.runner 2>&1 & disown
+```
+
+Expected: `1 failed`, at the server-truth poll after the send
+(`.toEqual([w.replied.contactId])`, received both contactIds - the message
+'the staff text never took the person off Quiet shares'). If it fails
+anywhere else, STOP and report. Restore and prove it:
+
+```
+cd W:/tmp/today-checklist
+git checkout -- app/src/routes/api.ts
+git status
+```
+
+`git status` shows no change to `app/src/routes/api.ts`.
+
+Step 8 - RED case B (PR16 (a), the create emit). In `app/src/routes/tours.ts`
+comment out the `tour.updated` emit S2 added to POST `/` after
+`tours.create` (find it with `grep -n "tour.updated" app/src/routes/tours.ts`;
+it is the one inside `router.post('/', ...)`, before the 201). Then:
+
+```
+nohup bash W:/tmp/today-checklist/.superpowers/s7/run-spec.sh s72-redB tests/dashboard-next/today-checklist.spec.ts --grep "Tours to book" > W:/tmp/today-checklist/.superpowers/s7/s72-redB.runner 2>&1 & disown
+```
+
+Expected: `1 failed`, at `await expect(list.getByRole('link')).toHaveCount(2);`
+(received 0: the open page never hears the two creates). Restore:
+
+```
+cd W:/tmp/today-checklist
+git checkout -- app/src/routes/tours.ts
+git status
+```
+
+Step 9 - GREEN again on the restored tree (same command as step 6, tag
+`s72-green2`). Expected: exit `0`, `6 passed`.
+
+Step 10 - ASCII and commit (no run alive). Record the four runs (tag, exit,
+pass/fail line, the RED failure messages) under a new "## RED evidence
+(S7.2)" heading in the S7 report.
+
+```
+cd W:/tmp/today-checklist
+tr -d '\11\12\15\40-\176' < e2e/tests/dashboard-next/today-checklist.spec.ts | wc -c
+tr -d '\11\12\15\40-\176' < e2e/support/followUpFixtures.ts | wc -c
+git diff -U0 -- e2e/support/today.ts e2e/support/selectors.md e2e/tests/dashboard-next/follow-up-tab.spec.ts docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S7-report.md | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git status
+git add e2e/tests/dashboard-next/today-checklist.spec.ts e2e/support/followUpFixtures.ts e2e/support/today.ts e2e/support/selectors.md e2e/tests/dashboard-next/follow-up-tab.spec.ts docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S7-report.md
+git commit -m "test(e2e): Today checklist - section order, quiet shares by property, live drop after a staff text, Tours to book" -m "New today-checklist.spec.ts builds its own state on the lean world (listing-send and message fixtures, a requested tour, an unknown contact, the lean placement made stuck): the checklist order and copy, no Unreplied for a known contact's unread text, quiet shares grouped by property with the first line open, a staff text from the composer dropping the person off an open Today page, and requested tours appearing and leaving live. Shared follow-up fixtures move to e2e/support; support/today.ts gains the section, Show all and AI-line helpers." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+All three checks print `0`.
+
+---
+
+### Task S7.3 - unknown-caller-triage: the row moves to Identify these contacts
+
+Spec 5.2, 9. RED: the S7.1 baseline (`expect(row!.group).toBe('needs_you_now')`
+received `identify`).
+
+Files: Modify `e2e/tests/dashboard-next/unknown-caller-triage.spec.ts` (ASCII file).
+
+Edit 1. Anchor (`:7`):
+
+```ts
+//   2. Today surfaces a needs_you_now "New unknown contact" row for them
+```
+
+Replacement:
+
+```ts
+//   2. Today surfaces an identify "New unknown contact" row for them (the
+//      "Identify these contacts" section; Needs you now before tracker #31)
+```
+
+Edit 2. Anchor (`:66`):
+
+```ts
+  // (2) Today: a needs_you_now row anchored to the captured CONTACT.
+```
+
+Replacement:
+
+```ts
+  // (2) Today: an identify row anchored to the captured CONTACT - and only
+  //     that one row for it (tracker #31 moved "New unknown contact" rows out
+  //     of needs_you_now; spec 2026-10-23-today-checklist-design.md 5.2).
+```
+
+Edit 3. Anchor (`:74`):
+
+```ts
+  expect(row!.group).toBe('needs_you_now');
+```
+
+Replacement:
+
+```ts
+  expect(row!.group).toBe('identify');
+  expect(items.filter((i) => i.refId === stub!.contactId), JSON.stringify(items)).toHaveLength(1);
+```
+
+Edit 4. Anchor (`:86-87`):
+
+```ts
+  const todayRow = page
+    .getByRole('list', { name: 'Needs you now' })
+```
+
+Replacement:
+
+```ts
+  const todayRow = page
+    .getByRole('list', { name: 'Identify these contacts', exact: true })
+```
+
+GREEN:
+
+```
+nohup bash W:/tmp/today-checklist/.superpowers/s7/run-spec.sh s73 tests/dashboard-next/unknown-caller-triage.spec.ts > W:/tmp/today-checklist/.superpowers/s7/s73.runner 2>&1 & disown
+```
+
+Expected: exit `0`, `2 passed`.
+
+Commit (no run alive; bare `git status` first, MERGE_HEAD absent, one path):
+
+```
+cd W:/tmp/today-checklist
+git diff -U0 -- e2e/tests/dashboard-next/unknown-caller-triage.spec.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git status
+git add e2e/tests/dashboard-next/unknown-caller-triage.spec.ts
+git commit -m "test(e2e): unknown caller's Today row is in Identify these contacts" -m "Tracker #31 moved New unknown contact rows from needs_you_now to the identify group; the server-truth and DOM assertions follow, and the contact has exactly one Today row." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S7.4 - unknown-inactive: Needs you now server truth and DOM become Identify
+
+Spec 5.2, 9. RED: the S7.1 baseline (step (3) `todayRow(today, phoneA)` not
+visible: no "Needs you now" list holds it).
+
+Files: Modify `e2e/tests/dashboard-next/unknown-inactive.spec.ts` (ASCII file).
+
+Edit 1. Anchor (`:5-11`):
+
+```ts
+// staff mark an unknown Needs review contact Inactive from the contact page
+// HEADER DROPDOWN, without giving it a type. It leaves Today's Needs you now
+// (live, on an already-open Today page), stays on Contacts > Unknown (listed
+// after the Needs review contacts), sits on the inbox Unknown tab BELOW the
+// Needs review rows with an "Inactive" tag, and a new inbound text from it
+// shows unread in the inbox without putting it back in Needs you now or moving
+// its status.
+```
+
+Replacement:
+
+```ts
+// staff mark an unknown Needs review contact Inactive from the contact page
+// HEADER DROPDOWN, without giving it a type. It leaves Today's Identify these
+// contacts (live, on an already-open Today page; the "New unknown contact"
+// rows moved there from Needs you now in tracker #31), stays on Contacts >
+// Unknown (listed after the Needs review contacts), sits on the inbox Unknown
+// tab BELOW the Needs review rows with an "Inactive" tag, and a new inbound
+// text from it shows unread in the inbox without putting it back in Identify
+// these contacts or moving its status.
+```
+
+Edit 2. Anchor (`:18-20`):
+
+```ts
+// marked Inactive, and B, a Needs review POSITIVE CONTROL that must stay on
+// Needs you now and sit ABOVE A on the Unknown tab. No lean-seed contact is
+// added (plan AR12).
+```
+
+Replacement:
+
+```ts
+// marked Inactive, and B, a Needs review POSITIVE CONTROL that must stay on
+// Identify these contacts and sit ABOVE A on the Unknown tab. No lean-seed
+// contact is added (plan AR12).
+```
+
+Edit 3. Anchor (`:51`):
+
+```ts
+  needsYouNow: 'Needs you now',
+```
+
+Replacement:
+
+```ts
+  identify: 'Identify these contacts',
+```
+
+Edit 4. Anchor (`:129-136`):
+
+```ts
+/** The contact ids on Today's Needs you now, server truth. Throws on a
+ *  non-200 so a failed read can never pass a "not in" check. */
+async function needsYouNowIds(api: APIRequestContext): Promise<string[]> {
+  const res = await api.get(`${NEXT}/api/today`);
+  if (res.status() !== 200) throw new Error(`GET /api/today: ${res.status()} ${await res.text()}`);
+  const { items } = (await res.json()) as { items: TodayWireItem[] };
+  return items.filter((i) => i.group === 'needs_you_now' && i.refType === 'contact').map((i) => i.refId);
+}
+```
+
+Replacement:
+
+```ts
+/** The contact ids on Today's Identify these contacts (the `identify` group
+ *  since tracker #31), server truth. Throws on a non-200 so a failed read can
+ *  never pass a "not in" check. */
+async function identifyIds(api: APIRequestContext): Promise<string[]> {
+  const res = await api.get(`${NEXT}/api/today`);
+  if (res.status() !== 200) throw new Error(`GET /api/today: ${res.status()} ${await res.text()}`);
+  const { items } = (await res.json()) as { items: TodayWireItem[] };
+  return items.filter((i) => i.group === 'identify' && i.refType === 'contact').map((i) => i.refId);
+}
+```
+
+Edit 5. Anchor (`:161-164`):
+
+```ts
+/** A "New unknown contact" row on Today's Needs you now, by the display phone. */
+function todayRow(page: Page, phone: string): Locator {
+  return page.getByRole('list', { name: UI.needsYouNow }).getByRole('link').filter({ hasText: displayOf(phone) });
+}
+```
+
+Replacement:
+
+```ts
+/** A "New unknown contact" row on Today's Identify these contacts, by the
+ *  display phone. */
+function todayRow(page: Page, phone: string): Locator {
+  return page
+    .getByRole('list', { name: UI.identify, exact: true })
+    .getByRole('link')
+    .filter({ hasText: displayOf(phone) });
+}
+```
+
+Edit 6. Anchor (`:189`):
+
+```ts
+  test('the header dropdown marks an unknown contact Inactive: off Needs you now, still in the inbox, status kept', async ({
+```
+
+Replacement:
+
+```ts
+  test('the header dropdown marks an unknown contact Inactive: off Identify these contacts, still in the inbox, status kept', async ({
+```
+
+Edit 7 (two occurrences; `replace_all: true`). Anchor:
+
+```ts
+      const ids = await needsYouNowIds(api);
+```
+
+Replacement:
+
+```ts
+      const ids = await identifyIds(api);
+```
+
+Edit 8. Anchor (`:321`):
+
+```ts
+    // (9) ...but NOT back in Needs you now (D5); B still is.
+```
+
+Replacement:
+
+```ts
+    // (9) ...but NOT back in Identify these contacts (D5); B still is.
+```
+
+Check: `grep -n "needsYouNow\|Needs you now\|needs_you_now" e2e/tests/dashboard-next/unknown-inactive.spec.ts`
+prints nothing.
+
+GREEN:
+
+```
+nohup bash W:/tmp/today-checklist/.superpowers/s7/run-spec.sh s74 tests/dashboard-next/unknown-inactive.spec.ts > W:/tmp/today-checklist/.superpowers/s7/s74.runner 2>&1 & disown
+```
+
+Expected: exit `0`, `1 passed`.
+
+Commit (no run alive; bare `git status` first, MERGE_HEAD absent):
+
+```
+cd W:/tmp/today-checklist
+git diff -U0 -- e2e/tests/dashboard-next/unknown-inactive.spec.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git status
+git add e2e/tests/dashboard-next/unknown-inactive.spec.ts
+git commit -m "test(e2e): unknown-inactive reads Identify these contacts, not Needs you now" -m "Server truth (the identify group) and the DOM row follow tracker #31; the Inactive contact still leaves live and does not come back on a new inbound, and the Needs review control stays." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S7.5 - conversation-fact-extraction: open the AI line first; absence on server truth
+
+Spec 2.4, 9; C3. RED: the S7.1 baseline ("Today tile" fails at the missing
+"AI suggestions to review" list) plus the probe in step 2 (the two "clears
+Today review" assertions are vacuous today; the probe proves the
+replacement is not).
+
+Files: Modify `e2e/tests/flows/conversation-fact-extraction.spec.ts` (ASCII file).
+
+Step 1 - the edits.
+
+Edit 1. Anchor (`:4`):
+
+```ts
+import { expectTodayReady } from '../../support/today.js';
+```
+
+Replacement:
+
+```ts
+import {
+  AI_SUGGESTIONS_LIST,
+  aiSuggestionsLine,
+  expectNoAiSuggestionFor,
+  expectTodayReady,
+  openAiSuggestions,
+} from '../../support/today.js';
+```
+
+Edit 2. Anchor (`:19`):
+
+```ts
+//   - Today group-> role list, name `AI suggestions to review`
+```
+
+Replacement:
+
+```ts
+//   - Today AI   -> one collapsed button `AI suggestions for N contact(s)`
+//                   under At a glance (tracker #31); opened, a role list named
+//                   `AI suggestions` (support/today.ts openAiSuggestions)
+```
+
+Edit 3. Anchor (`:354-363`, the end of the partner test and the next test's
+first line):
+
+```ts
+  await page.goto(`${NEXT}/`);
+  await expectTodayReady(page);
+  const item = page
+    .getByRole('list', { name: 'AI suggestions to review' })
+    .getByRole('listitem')
+    .filter({ hasText: formattedPhone(phone) });
+  await expect(item).toHaveCount(0);
+});
+
+test('type recommendation: an unknown property manager triages to the landlord preset and clears Today review', async ({
+```
+
+Replacement:
+
+```ts
+  // Today's AI suggestions are one collapsed line (tracker #31): a zero count
+  // on the closed list would be vacuous, so read server truth, then the line
+  // (absent when Today holds no AI rows) or the opened list.
+  await expectNoAiSuggestionFor(page, contactId, formattedPhone(phone));
+});
+
+test('type recommendation: an unknown property manager triages to the landlord preset and clears Today review', async ({
+```
+
+Edit 4. Anchor (`:399-408`):
+
+```ts
+  await page.goto(`${NEXT}/`);
+  await expectTodayReady(page);
+  const item = page
+    .getByRole('list', { name: 'AI suggestions to review' })
+    .getByRole('listitem')
+    .filter({ hasText: formattedPhone(phone) });
+  await expect(item).toHaveCount(0);
+});
+
+test('Today tile: a phone-only contact shows its number in the AI-suggestions-to-review group', async ({
+```
+
+Replacement:
+
+```ts
+  // As above: server truth, then the line or the opened list (tracker #31).
+  await expectNoAiSuggestionFor(page, contactId, formattedPhone(phone));
+});
+
+test('Today tile: a phone-only contact shows its number in the AI suggestions line', async ({
+```
+
+Edit 5. Anchor (`:426-431`):
+
+```ts
+  // The Today action queue is the dashboard home route ("/"). Re-navigate so
+  // useToday refetches now that a pending suggestion exists.
+  await page.goto(`${NEXT}/`);
+  await expectTodayReady(page);
+  const group = page.getByRole('list', { name: 'AI suggestions to review' });
+  await expect(group).toBeVisible({ timeout: 10_000 });
+```
+
+Replacement:
+
+```ts
+  // The Today page is the dashboard home route ("/"). Re-navigate so useToday
+  // refetches now that a pending suggestion exists. The AI suggestions are
+  // ONE collapsed line under At a glance (tracker #31): closed by default,
+  // its list out of the accessibility tree until the line is opened.
+  await page.goto(`${NEXT}/`);
+  await expectTodayReady(page);
+  await expect(aiSuggestionsLine(page)).toHaveAttribute('aria-expanded', 'false', { timeout: 10_000 });
+  await expect(page.getByRole('list', { name: AI_SUGGESTIONS_LIST, exact: true })).toHaveCount(0);
+  const group = await openAiSuggestions(page);
+```
+
+The rest of that test (`expectedPhone`, `item`, the three assertions) is
+unchanged. Check:
+`grep -n "AI suggestions to review" e2e/tests/flows/conversation-fact-extraction.spec.ts`
+prints nothing.
+
+Step 2 - RED probe (proves `expectNoAiSuggestionFor` fails when the row
+EXISTS; reverted before commit). In the partner test ("an unknown caseworker
+triages to Partner and clears Today review"), insert ONE line directly after
+`const contactId = await findUnknownContactId(page.request, phone);` (the
+suggestion is still pending there):
+
+```ts
+  await expectNoAiSuggestionFor(page, contactId, formattedPhone(phone)); // RED PROBE - remove
+```
+
+Run:
+
+```
+nohup bash W:/tmp/today-checklist/.superpowers/s7/run-spec.sh s75-probe tests/flows/conversation-fact-extraction.spec.ts --grep "triages to Partner" > W:/tmp/today-checklist/.superpowers/s7/s75-probe.runner 2>&1 & disown
+```
+
+Expected: `1 failed`, at the probe line, message `contact <id> still has an
+AI suggestions row on Today`. Remove the probe line;
+`grep -n "RED PROBE" e2e/tests/flows/conversation-fact-extraction.spec.ts`
+prints nothing.
+
+Step 3 - GREEN (whole file; its `beforeAll` reseed is once per file):
+
+```
+nohup bash W:/tmp/today-checklist/.superpowers/s7/run-spec.sh s75 tests/flows/conversation-fact-extraction.spec.ts > W:/tmp/today-checklist/.superpowers/s7/s75.runner 2>&1 & disown
+```
+
+Expected: exit `0`, every test passed (`12 passed`).
+
+Commit (no run alive; bare `git status` first, MERGE_HEAD absent):
+
+```
+cd W:/tmp/today-checklist
+git diff -U0 -- e2e/tests/flows/conversation-fact-extraction.spec.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git status
+git add e2e/tests/flows/conversation-fact-extraction.spec.ts
+git commit -m "test(e2e): fact extraction opens Today's AI suggestions line; absence checked on server truth" -m "Tracker #31 collapsed AI suggestions into one At a glance line whose list is hidden until opened, so the old zero-count checks were vacuous. The Today tile test asserts the line closed by default and opens it; the two clears-Today-review tests use expectNoAiSuggestionFor (probe-proven to fail while the row exists)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S7.6 - caseworkers: the Unknown card's "Today's review clear", non-vacuously
+
+Spec 2.4, 9; PR39 (~551), C3. RED: a probe (the S7.1 baseline passes
+vacuously).
+
+Files: Modify `e2e/tests/dashboard-next/caseworkers.spec.ts` (ASCII file).
+
+Edit 1. Anchor (`:31`):
+
+```ts
+import { expectTodayReady } from '../../support/today.js';
+```
+
+Replacement:
+
+```ts
+import { expectNoAiSuggestionFor, expectTodayReady } from '../../support/today.js';
+```
+
+Edit 2. Anchor (`:87-89`):
+
+```ts
+  markAsCaseworker: 'Mark as Caseworker',
+  todayReview: 'AI suggestions to review',
+};
+```
+
+Replacement:
+
+```ts
+  markAsCaseworker: 'Mark as Caseworker',
+};
+```
+
+Edit 3. Anchor (`:544-554`):
+
+```ts
+    // through the canonicalizer, D16): nothing pending, Today's review clear.
+    expect(await pendingSuggestionTargets(req, contactId)).not.toContain('type');
+    await page.goto(`${NEXT}/`);
+    await expectTodayReady(page);
+    await expect(
+      page
+        .getByRole('list', { name: UI.todayReview })
+        .getByRole('listitem')
+        .filter({ hasText: formattedPhone(phone) }),
+    ).toHaveCount(0);
+  });
+```
+
+Replacement:
+
+```ts
+    // through the canonicalizer, D16): nothing pending, Today's review clear.
+    expect(await pendingSuggestionTargets(req, contactId)).not.toContain('type');
+    // Today's AI suggestions are one collapsed line under At a glance
+    // (tracker #31). The original intent - this contact has no AI row left -
+    // is checked on server truth, then on the page: the line ABSENT when Today
+    // holds no AI rows at all, else the opened list without this contact.
+    await expectNoAiSuggestionFor(page, contactId, formattedPhone(phone));
+  });
+```
+
+`expectTodayReady` stays imported (devLogin uses it). Check:
+`grep -n "todayReview\|AI suggestions to review" e2e/tests/dashboard-next/caseworkers.spec.ts`
+prints nothing.
+
+RED probe (reverted before commit). Insert ONE line directly after
+`expect(await pendingSuggestionTargets(req, contactId)).toContain('type');`
+(`:519`, the suggestion still pending):
+
+```ts
+    await expectNoAiSuggestionFor(page, contactId, formattedPhone(phone)); // RED PROBE - remove
+```
+
+```
+nohup bash W:/tmp/today-checklist/.superpowers/s7/run-spec.sh s76-probe tests/dashboard-next/caseworkers.spec.ts --grep "Mark as Caseworker converts" > W:/tmp/today-checklist/.superpowers/s7/s76-probe.runner 2>&1 & disown
+```
+
+Expected: `1 failed`, at the probe, `contact <id> still has an AI
+suggestions row on Today`. Remove the probe line (`grep -n "RED PROBE"`
+prints nothing).
+
+GREEN (whole file):
+
+```
+nohup bash W:/tmp/today-checklist/.superpowers/s7/run-spec.sh s76 tests/dashboard-next/caseworkers.spec.ts > W:/tmp/today-checklist/.superpowers/s7/s76.runner 2>&1 & disown
+```
+
+Expected: exit `0`, every test passed.
+
+Commit (no run alive; bare `git status` first, MERGE_HEAD absent):
+
+```
+cd W:/tmp/today-checklist
+git diff -U0 -- e2e/tests/dashboard-next/caseworkers.spec.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git status
+git add e2e/tests/dashboard-next/caseworkers.spec.ts
+git commit -m "test(e2e): caseworker conversion clears Today's AI suggestions, checked on server truth" -m "The old zero count on the AI review list was vacuous once tracker #31 hid that list behind a collapsed line; expectNoAiSuggestionFor asserts the line absent when Today holds no AI rows, else the opened list without the contact (probe-proven)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S7.7 - participant-names: the renamed tenant in Tours to book
+
+Spec 5.4, 9; PR39; C2. RED: a probe (the S7.1 baseline passes by accident).
+
+Files: Modify `e2e/tests/scenarios/participant-names.spec.ts` (ASCII file).
+
+Edit 1. Anchor (`:3-7`):
+
+```ts
+// M1 (2026-08-31): a contact's name is resolved when a surface renders, not
+// copied onto the conversation when it is created. One flow: open a tour relay
+// group, rename the tenant, then assert the NEW name on the three surfaces the
+// founder reported stale - Today, the group thread header, the Relay groups
+// card on the contact file.
+```
+
+Replacement:
+
+```ts
+// M1 (2026-08-31): a contact's name is resolved when a surface renders, not
+// copied onto the conversation when it is created. One flow: open a tour relay
+// group, rename the tenant, then assert the NEW name on the three surfaces the
+// founder reported stale - Today (the tour's row in Tours to book: the flow's
+// tour has no time, so it is a requested tour), the group thread header, the
+// Relay groups card on the contact file.
+```
+
+Edit 2. Anchor (`:14`):
+
+```ts
+import { expectTodayReady } from '../../support/today.js';
+```
+
+Replacement:
+
+```ts
+import { expectTodayReady, showAllIn } from '../../support/today.js';
+```
+
+Edit 3. Anchor (`:32`):
+
+```ts
+  await flow.teamCreatesTourFromInterest(unit, 'Landlord-led');
+```
+
+Replacement:
+
+```ts
+  const tourId = await flow.teamCreatesTourFromInterest(unit, 'Landlord-led');
+```
+
+Edit 4. Anchor (`:39-59`):
+
+```ts
+  // Leave the tenant's contact page FIRST. The rename left the browser on it,
+  // and an open contact timeline marks a live inbound read the moment it lands
+  // (POST /api/inbox/:contactId/read - "conversation unread reset"), which would
+  // keep the thread off Today entirely.
+  await page.goto(`${NEXT}/`);
+  await expectTodayReady(page);
+
+  // An unread 1:1 from the tenant puts them on Today's Unreplied list.
+  await flow.tenantTexts(tenant, 'Is the tour still on?');
+
+  // 1. Today names the person by the NEW name. Today is the dashboard ROOT
+  // route ("/" - the nav's "Today" link points there); there is no /today path,
+  // it falls through to the Not-found placeholder. The board fetches once on
+  // mount and never polls, so reload until the inbound has been ingested.
+  await expect(async () => {
+    await page.goto(`${NEXT}/`);
+    await expectTodayReady(page);
+    await expect(page.getByText(renamed.name, { exact: false }).first()).toBeVisible({
+      timeout: 5_000,
+    });
+  }).toPass({ timeout: 20_000 });
+```
+
+Replacement:
+
+```ts
+  // 1. Today names the person by the NEW name, on the row of the tour the flow
+  // created: no time was booked, so it is a requested tour in the checklist's
+  // Tours to book section, whose who is resolved at render time. (Before
+  // tracker #31 the vehicle was an unread text in Unreplied, a section Today no
+  // longer has.) Today is the dashboard ROOT route ("/"); there is no /today
+  // path. Expanded first: this spec does not reseed, and the section lists the
+  // OLDEST request first, so on a shared lane this one can sit past the fifth.
+  await page.goto(`${NEXT}/`);
+  await expectTodayReady(page);
+  await showAllIn(page, 'Tours to book');
+  const tourRow = page
+    .getByRole('list', { name: 'Tours to book', exact: true })
+    .locator(`a[href="/tours/${tourId}"]`);
+  await expect(tourRow).toContainText(renamed.name);
+  await expect(tourRow).not.toContainText(tenant.name);
+```
+
+RED probe (reverted before commit): change the new
+`await expect(tourRow).toContainText(renamed.name);` to
+`await expect(tourRow).toContainText(tenant.name); // RED PROBE - restore`
+and run:
+
+```
+nohup bash W:/tmp/today-checklist/.superpowers/s7/run-spec.sh s77-probe tests/scenarios/participant-names.spec.ts > W:/tmp/today-checklist/.superpowers/s7/s77-probe.runner 2>&1 & disown
+```
+
+Expected: `1 failed` at that line (the row shows only the new name). Restore
+the line exactly as in the replacement (`grep -n "RED PROBE"` prints
+nothing).
+
+GREEN:
+
+```
+nohup bash W:/tmp/today-checklist/.superpowers/s7/run-spec.sh s77 tests/scenarios/participant-names.spec.ts > W:/tmp/today-checklist/.superpowers/s7/s77.runner 2>&1 & disown
+```
+
+Expected: exit `0`, `1 passed`.
+
+Commit (no run alive; bare `git status` first, MERGE_HEAD absent):
+
+```
+cd W:/tmp/today-checklist
+git diff -U0 -- e2e/tests/scenarios/participant-names.spec.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git status
+git add e2e/tests/scenarios/participant-names.spec.ts
+git commit -m "test(e2e): participant-names reads the renamed tenant on its Tours to book row" -m "Unreplied is gone (tracker #31), so the Today surface is the flow's own requested tour in Tours to book, matched by its tour href, with the new name and without the old one." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S7.8 - today-past-tours: oldest first, five rows, Show all, Show fewer, the Past-tab link
+
+Spec 2.1, 5.3; PR35, PR39; C4. RED: the S7.1 baseline (`expect(hrefs)` at
+`:121`, most-recent-first order).
+
+Files: Modify `e2e/tests/dashboard-next/today-past-tours.spec.ts` (ASCII file).
+
+Edit 1. Anchor (`:1-22`, the whole header comment):
+
+```ts
+// The Today page's "Past tours needing an outcome" section (Sam's item 18,
+// Cameron 2026-09-30): the Tours page's Past rows, no-shows included, most
+// recent first, up to five, with a link to the Past tab.
+//
+// Against the real backend on the hermetic lane. The lean world seeds NO tours,
+// so this spec creates PAST-DATED tours through POST /api/tours (the route
+// accepts any valid ISO scheduledAt; the arm writes a visible booked_too_late
+// skipped reminder row and sends nothing), then advances some through the API
+// - the same setup as tours-past.spec.ts.
+//
+//   Today lists the Not marked, the Needs outcome and the No show tour, most
+//   recent first - a no-show now closes on its own two weeks after its last
+//   mark, so Today lists it meanwhile (tour auto-close, spec 9.4); Today is not
+//   "all caught up"; with every Past row shown the link simply reads "Open the
+//   Past tab". The Needs outcome row opens its tour with the Record outcome
+//   dialog up, and the back arrow ("Back to Today") returns to Today. Recording
+//   that outcome through the API drops the row LIVE (the tour.updated event),
+//   with no reload. With seven qualifying tours Today shows five, and "See all
+//   7 on the Past tab" lands on seven Past rows. No horizontal overflow at
+//   360px. Every tour this spec creates is decided afterwards - in afterEach
+//   too, so a failure midway cannot leave a later spec a Today section it did
+//   not expect.
+```
+
+Replacement:
+
+```ts
+// The Today page's "Past tours needing an outcome" section (Sam's item 18,
+// Cameron 2026-09-30; reordered by tracker #31, spec
+// docs/superpowers/specs/2026-10-23-today-checklist-design.md 2.1 and 5.3):
+// the Tours page's Past rows, no-shows included, OLDEST first, five rows and
+// then "Show all N", with a link to the Past tab beside it.
+//
+// Against the real backend on the hermetic lane. The lean world seeds NO tours,
+// so this spec creates PAST-DATED tours through POST /api/tours (the route
+// accepts any valid ISO scheduledAt; the arm writes a visible booked_too_late
+// skipped reminder row and sends nothing), then advances some through the API
+// - the same setup as tours-past.spec.ts.
+//
+//   Today lists the No show, the Needs outcome and the Not marked tour, oldest
+//   first - a no-show now closes on its own two weeks after its last mark, so
+//   Today lists it meanwhile (tour auto-close, spec 9.4); Today is not "all
+//   caught up"; three rows need no Show all, and with every Past row on Today
+//   the link simply reads "Open the Past tab". The Needs outcome row opens its
+//   tour with the Record outcome dialog up, and the back arrow ("Back to
+//   Today") returns to Today. Recording that outcome through the API drops the
+//   row LIVE (the tour.updated event), with no reload. With seven qualifying
+//   tours Today shows the five OLDEST and "Show all 7", which expands in place
+//   to all seven and collapses again with "Show fewer"; the Past-tab link
+//   lands on seven Past rows. No horizontal overflow at 360px. Every tour this
+//   spec creates is decided afterwards - in afterEach too, so a failure midway
+//   cannot leave a later spec a Today section it did not expect.
+```
+
+Edit 2. Anchor (`:24`):
+
+```ts
+import { expectTodayReady } from '../../support/today.js';
+```
+
+Replacement:
+
+```ts
+import { expectTodayReady, todaySection } from '../../support/today.js';
+```
+
+Edit 3. Anchor (`:31`):
+
+```ts
+const HEADING = 'Past tours needing an outcome';
+```
+
+Replacement:
+
+```ts
+const HEADING = 'Past tours needing an outcome';
+/** The Past-tab link with seven rows that all qualify for Today: the link
+ *  carries the Past tab's own count only when that tab holds MORE than Today
+ *  lists (Today.tsx `past.total > past.rows.length`; plan PR35 labels every
+ *  row), so here it simply opens the tab. If S5 made the link compare against
+ *  the five SHOWN rows, this reads `See all 7 on the Past tab` - change it
+ *  here only (plan S7 C4). */
+const PAST_TAB_LINK_AT_SEVEN = 'Open the Past tab';
+```
+
+Edit 4. Anchor (`:117-121`):
+
+```ts
+    await expect(list.getByRole('listitem')).toHaveCount(3);
+    // Most recent first; the Needs outcome row deep-links the dialog, the
+    // no-show row opens its plain tour page (no ?outcome=1).
+    const hrefs = await list.getByRole('link').evaluateAll((els) => els.map((e) => e.getAttribute('href')));
+    expect(hrefs).toEqual([`/tours/${notMarkedId}`, `/tours/${needsOutcomeId}?outcome=1`, `/tours/${noShowId}`]);
+```
+
+Replacement:
+
+```ts
+    await expect(list.getByRole('listitem')).toHaveCount(3);
+    // OLDEST first (tracker #31 reversed the Sep 29 "most recent first"
+    // ruling): three days ago, two, then yesterday. The Needs outcome row
+    // deep-links the dialog, the no-show row opens its plain tour page (no
+    // ?outcome=1). Three rows: no Show all.
+    const hrefs = await list.getByRole('link').evaluateAll((els) => els.map((e) => e.getAttribute('href')));
+    expect(hrefs).toEqual([`/tours/${noShowId}`, `/tours/${needsOutcomeId}?outcome=1`, `/tours/${notMarkedId}`]);
+    await expect(todaySection(page, HEADING).getByRole('button', { name: /^Show all/ })).toHaveCount(0);
+```
+
+Edit 5. Anchor (`:173-191`):
+
+```ts
+    // The cap: five more Not marked tours (4-8 days ago) make seven that qualify.
+    const older: string[] = [];
+    for (let d = 4; d <= 8; d++) older.push(await createTour(page, d % 2 === 0 ? UNIT_A : UNIT_B, pastAt(d, 10)));
+    await page.goto(`${NEXT}/`);
+    await expectTodayReady(page);
+    await expect(list.getByRole('listitem')).toHaveCount(5);
+    const capped = await list.getByRole('link').evaluateAll((els) => els.map((e) => e.getAttribute('href')));
+    // Most recent first: yesterday's, the no-show (3 days ago), then 4, 5 and 6
+    // days ago (7 and 8 are cut).
+    expect(capped).toEqual([
+      `/tours/${notMarkedId}`,
+      `/tours/${noShowId}`,
+      ...older.slice(0, 3).map((id) => `/tours/${id}`),
+    ]);
+    // Seven qualify for Today and the Past tab alike; Today shows five.
+    const seeAll = page.getByRole('link', { name: 'See all 7 on the Past tab' });
+    await expect(seeAll).toBeVisible();
+    await seeAll.click();
+    await expect(page).toHaveURL(/\/tours\/past$/);
+```
+
+Replacement:
+
+```ts
+    // Five rows, then "Show all 7" (spec 2.1): five more Not marked tours
+    // (4-8 days ago) make seven that qualify.
+    const older: string[] = [];
+    for (let d = 4; d <= 8; d++) older.push(await createTour(page, d % 2 === 0 ? UNIT_A : UNIT_B, pastAt(d, 10)));
+    await page.goto(`${NEXT}/`);
+    await expectTodayReady(page);
+    await expect(list.getByRole('listitem')).toHaveCount(5);
+    const capped = await list.getByRole('link').evaluateAll((els) => els.map((e) => e.getAttribute('href')));
+    // Oldest first: 8, 7, 6, 5 and 4 days ago; the no-show (3 days ago) and
+    // yesterday's are past the fifth row.
+    const oldestFirst = [...older].reverse().map((id) => `/tours/${id}`);
+    expect(capped).toEqual(oldestFirst);
+    const section = todaySection(page, HEADING);
+    await expect(page.getByRole('heading', { name: new RegExp(`^${HEADING}`) })).toContainText('7');
+    const showAll = section.getByRole('button', { name: 'Show all 7', exact: true });
+    await expect(showAll).toHaveAttribute('aria-expanded', 'false');
+    await showAll.click();
+    const showFewer = section.getByRole('button', { name: 'Show fewer', exact: true });
+    await expect(showFewer).toHaveAttribute('aria-expanded', 'true');
+    await expect(list.getByRole('listitem')).toHaveCount(7);
+    const expanded = await list.getByRole('link').evaluateAll((els) => els.map((e) => e.getAttribute('href')));
+    expect(expanded).toEqual([...oldestFirst, `/tours/${noShowId}`, `/tours/${notMarkedId}`]);
+    await showFewer.click();
+    await expect(list.getByRole('listitem')).toHaveCount(5);
+    // The Past-tab link stays beside the button; seven qualify for Today and
+    // the Past tab alike (see PAST_TAB_LINK_AT_SEVEN).
+    const pastTab = section.getByRole('link', { name: PAST_TAB_LINK_AT_SEVEN, exact: true });
+    await expect(pastTab).toHaveAttribute('href', '/tours/past');
+    await pastTab.click();
+    await expect(page).toHaveURL(/\/tours\/past$/);
+```
+
+The two lines after it (the Past tours heading and its seven listitems) stay.
+
+GREEN:
+
+```
+nohup bash W:/tmp/today-checklist/.superpowers/s7/run-spec.sh s78 tests/dashboard-next/today-past-tours.spec.ts > W:/tmp/today-checklist/.superpowers/s7/s78.runner 2>&1 & disown
+```
+
+Expected: exit `0`, `1 passed`. If it fails ONLY at the `pastTab` locator
+and the page shows `See all 7 on the Past tab` beside the button, apply C4
+(change `PAST_TAB_LINK_AT_SEVEN` only), re-run, and record it in the report.
+
+Commit (no run alive; bare `git status` first, MERGE_HEAD absent):
+
+```
+cd W:/tmp/today-checklist
+git diff -U0 -- e2e/tests/dashboard-next/today-past-tours.spec.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git status
+git add e2e/tests/dashboard-next/today-past-tours.spec.ts
+git commit -m "test(e2e): Today past tours oldest first, five rows then Show all and Show fewer" -m "Tracker #31 reverses the most-recent-first order and replaces the five-row cap with the shared Show all / Show fewer; the Past-tab link stays beside it and still lands on the seven Past rows." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S7.9 - steps.ts: the stuck placement in Placements, not Follow-ups due
+
+Spec 5.6, 9; PR39. RED: the S7.1 baseline (post-tour-application fails in
+`expectPlacementStuckInFollowUps`).
+
+Files: Modify `e2e/scenarios/steps.ts`. The file carries non-ASCII (em
+dashes, arrows); every anchor below is an ASCII line and every added line
+is ASCII. The docblock line `* placement (scoped by its /placements/:id link) reading "Stuck <em dash> needs a check".`
+and `row.getByText('Stuck <em dash> needs a check')` stay exactly as they are
+(the server's STUCK_WHY string, plan section 0).
+
+Edit 1. Anchor (`:46`):
+
+```ts
+import { expectTodayReady } from '../support/today.js';
+```
+
+Replacement:
+
+```ts
+import { expectTodayReady, showAllIn } from '../support/today.js';
+```
+
+Edit 2. Anchor (`:3180`):
+
+```ts
+   * [App] The DERIVED stuck flag renders in Today's Follow-ups: a row for THIS
+```
+
+Replacement:
+
+```ts
+   * [App] The DERIVED stuck flag renders in Today's Placements section (the
+   * follow_ups group, headed "Follow-ups due" until tracker #31): a row for THIS
+```
+
+Edit 3. Anchor (`:3188`):
+
+```ts
+    return step('App: the placement shows as Stuck in Follow-ups (derived)', async () => {
+```
+
+Replacement:
+
+```ts
+    return step('App: the placement shows as Stuck in Placements (derived)', async () => {
+```
+
+Edit 4. Anchor (`:3190-3191`):
+
+```ts
+      const followUps = this.page.getByRole('list', { name: 'Follow-ups due' });
+      const row = followUps.locator(`a[href="/placements/${id}"]`);
+```
+
+Replacement:
+
+```ts
+      // Every Today section shows 5 rows (tracker #31): expand first so a row
+      // past the fifth on a shared lane is reachable.
+      await showAllIn(this.page, 'Placements');
+      const placements = this.page.getByRole('list', { name: 'Placements', exact: true });
+      const row = placements.locator(`a[href="/placements/${id}"]`);
+```
+
+The method keeps its name `expectPlacementStuckInFollowUps` (its caller,
+`e2e/tests/scenarios/post-tour-application.spec.ts:315`, is unchanged).
+
+GREEN:
+
+```
+nohup bash W:/tmp/today-checklist/.superpowers/s7/run-spec.sh s79 tests/scenarios/post-tour-application.spec.ts > W:/tmp/today-checklist/.superpowers/s7/s79.runner 2>&1 & disown
+```
+
+Expected: exit `0`, every test passed.
+
+Commit (no run alive; bare `git status` first, MERGE_HEAD absent):
+
+```
+cd W:/tmp/today-checklist
+git diff -U0 -- e2e/scenarios/steps.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git status
+git add e2e/scenarios/steps.ts
+git commit -m "test(e2e): scenario step reads the stuck placement under Today's Placements heading" -m "Tracker #31 renamed the follow_ups section from Follow-ups due to Placements; the step expands the section first because every Today section now shows five rows." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S7.10 - tours-page: scope the requested tour's absence to Tours today; it is in Tours to book
+
+Spec 5.4; C1. RED: the S7.1 baseline (`:270` received 1) when a Tours today
+section was on the page; if the baseline passed (no Tours today section at
+that moment), record that and proceed - the page-wide locator fails
+whenever the section renders, which the earlier test in this file makes
+likely.
+
+Files: Modify `e2e/tests/dashboard-next/tours-page.spec.ts`. The file
+carries non-ASCII (box-drawing and em dashes in comments); the anchors are
+ASCII lines, the comment lines with those characters stay untouched.
+
+Edit 1. Anchor (`:2`):
+
+```ts
+import { expectTodayReady } from '../../support/today.js';
+```
+
+Replacement:
+
+```ts
+import { expectTodayReady, showAllIn } from '../../support/today.js';
+```
+
+Edit 2. Anchor (`:268-271`):
+
+```ts
+    if (hasTodaySection) {
+      // Assert that the link to /tours/<requestedTourId> is not present.
+      await expect(page.locator(`a[href="/tours/${tourId}"]`)).toHaveCount(0);
+    }
+```
+
+Replacement:
+
+```ts
+    if (hasTodaySection) {
+      // Assert that the link to /tours/<requestedTourId> is not in Tours today.
+      // Scoped to that list: since tracker #31 the SAME tour links from the
+      // checklist's Tours to book section, so a page-wide count finds it there.
+      await expect(toursTodayList.locator(`a[href="/tours/${tourId}"]`)).toHaveCount(0);
+    }
+```
+
+Edit 3. Anchor (`:280`):
+
+```ts
+    // Additional: the requested tour DOES link from the Needs booking section
+```
+
+Replacement:
+
+```ts
+    // Tracker #31: a requested tour IS Today work - the checklist's Tours to
+    // book section lists it (oldest request first, so expand on a shared lane).
+    await showAllIn(page, 'Tours to book');
+    await expect(
+      page.getByRole('list', { name: 'Tours to book', exact: true }).locator(`a[href="/tours/${tourId}"]`),
+    ).toBeVisible();
+
+    // Additional: the requested tour DOES link from the Needs booking section
+```
+
+Verify-only: `relay-number-lifecycle.spec.ts:375-378` needs no edit (Cross-
+slice notes); it runs as a pin in S7.17.
+
+GREEN:
+
+```
+nohup bash W:/tmp/today-checklist/.superpowers/s7/run-spec.sh s710 tests/dashboard-next/tours-page.spec.ts > W:/tmp/today-checklist/.superpowers/s7/s710.runner 2>&1 & disown
+```
+
+Expected: exit `0`, every test passed.
+
+Commit (no run alive; bare `git status` first, MERGE_HEAD absent):
+
+```
+cd W:/tmp/today-checklist
+git diff -U0 -- e2e/tests/dashboard-next/tours-page.spec.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git status
+git add e2e/tests/dashboard-next/tours-page.spec.ts
+git commit -m "test(e2e): tours-page checks the requested tour is absent from Tours today, present in Tours to book" -m "The page-wide href count would now find the same tour in tracker #31's Tours to book section; the absence is scoped to the Tours today list and the new section gets a positive check." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S7.11 - perf: TODAY_TERMINAL names the checklist; a pin in routes.test.ts
+
+PR39 (`TODAY_TERMINAL`, the stale 'Group texts to close'); C5.
+
+Files:
+- Modify `e2e/performance/routes.ts` (ASCII file)
+- Modify `e2e/performance/routes.test.ts` (ASCII file)
+
+Step 1 - failing test. `routes.test.ts`, Edit A. Anchor (`:1-2`):
+
+```ts
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+```
+
+Replacement:
+
+```ts
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+```
+
+Edit B. Insert a new describe directly BEFORE the line
+`describe('Properties list terminal copy', () => {` (anchor that line;
+replacement = the block below, a blank line, then that same line):
+
+```ts
+describe('Today terminal copy', () => {
+  // Tracker #31 (spec docs/superpowers/specs/2026-10-23-today-checklist-design.md
+  // 2, 2.3, 2.4): the seven CHECKLIST lists are the populated terminal and
+  // "All caught up" the empty one. At a glance (Tours today, the AI line) is
+  // NOT a terminal: "All caught up" renders with At a glance below it, and the
+  // profiler reads populated plus empty as contradictory_terminal
+  // (cli.ts terminalStateFor). Every name must be a string the Today page
+  // source actually carries.
+  it('waits for the checklist lists or All caught up, never an At a glance part', () => {
+    const today = ROUTES.find((candidate) => candidate.surfaceId === '/')!;
+    expect(today.terminal.populated.map((c) => [c.role, c.name, c.exactness])).toEqual([
+      ['list', 'Needs you now', 'exact'],
+      ['list', 'Identify these contacts', 'exact'],
+      ['list', 'Past tours needing an outcome', 'exact'],
+      ['list', 'Tours to book', 'exact'],
+      ['list', 'Quiet shares', 'exact'],
+      ['list', 'Relay groups to close', 'exact'],
+      ['list', 'Placements', 'exact'],
+    ]);
+    expect(today.terminal.empty.map((c) => [c.role, c.name])).toEqual([['text', 'All caught up']]);
+    expect(today.terminal.populatedAlternatives).toHaveLength(7);
+    const dir = fileURLToPath(new URL('../../dashboard/src/routes/today/', import.meta.url));
+    const source = readdirSync(dir)
+      .filter((file) => /\.tsx?$/u.test(file) && !/\.test\.tsx?$/u.test(file))
+      .map((file) => readFileSync(join(dir, file), 'utf8'))
+      .join('\n');
+    for (const contract of [...today.terminal.populated, ...today.terminal.empty]) {
+      const name = contract.name!;
+      expect(
+        [`'${name}'`, `"${name}"`, `>${name}<`].some((needle) => source.includes(needle)),
+        `the Today page source carries "${name}"`,
+      ).toBe(true);
+    }
+  });
+});
+```
+
+Step 2 - RED:
+
+```
+cd W:/tmp/today-checklist
+npm run test -w @housingchoice/e2e -- performance/routes.test.ts
+```
+
+Expected: 1 failed, "Today terminal copy", at the first `toEqual` (received
+the old names, starting `['list', 'Group texts to close', 'exact']`); every
+other case passes.
+
+Step 3 - implementation. `routes.ts`. Anchor (`:396-403`):
+
+```ts
+const TODAY_TERMINAL = terminal(
+  [
+    'Group texts to close', 'Needs you now', 'Tours today', 'Unreplied', 'Follow-ups due',
+    'Past tours needing an outcome', 'AI suggestions to review',
+  ].map((name) => locator('list', name)),
+  [locator('text', 'All caught up')],
+  [locator('alert', "We couldn't load your queue", 'contains')],
+);
+```
+
+Replacement:
+
+```ts
+// Today (tracker #31, spec docs/superpowers/specs/2026-10-23-today-checklist-design.md
+// 2): the seven CHECKLIST lists, in page order, are the populated terminal.
+// The At a glance parts (Tours today, the collapsed AI suggestions line) are
+// deliberately NOT: "All caught up" renders WITH At a glance below it (spec
+// 2.3), so listing them would read a done page as contradictory_terminal. A
+// page whose only content is a section's "We couldn't load <section>." line
+// matches neither and samples unknown; the hermetic perf world never fails a
+// section.
+const TODAY_TERMINAL = terminal(
+  [
+    'Needs you now', 'Identify these contacts', 'Past tours needing an outcome', 'Tours to book',
+    'Quiet shares', 'Relay groups to close', 'Placements',
+  ].map((name) => locator('list', name)),
+  [locator('text', 'All caught up')],
+  [locator('alert', "We couldn't load your queue", 'contains')],
+);
+```
+
+Step 4 - re-cite the `'/'` terminal source. In `CONTRACT_SOURCE_LEDGER.terminals`
+(`:818`), the line
+`    '/': 'dashboard/src/routes/today/Today.tsx:36-48,226-261,278-291',`
+cites the old GROUP_META, PastToursSection and empty-state ranges. Replace
+the value with the AS-BUILT ranges (S5) of: the section heading labels, the
+"All caught up" block and the queue error alert, in the same
+`<file>:<a>-<b>,<c>-<d>` form; if the labels live in a separate section
+component file, add it after `; ` (the citation regex at
+`routes.test.ts:452` allows `; <file>:<ranges>`). Find them with:
+
+```
+grep -n -E "Identify these contacts|All caught up|We couldn't load your queue" dashboard/src/routes/today/*.tsx
+```
+
+Likewise re-cite the `'/'` endpoint base (`:764`,
+`'dashboard/src/routes/today/useToday.ts:41-74; dashboard/src/routes/today/useTodayPastTours.ts:71-163; dashboard/src/routes/tours/useTours.ts:293-340'`)
+only where S5 moved those functions (the `getToday` call in `useToday.ts`,
+the loader in `useTodayPastTours.ts`); `TODAY_GETS` itself is unchanged
+(the Today fetch shapes did not change: S7.1 step 2 grep).
+
+Step 5 - GREEN:
+
+```
+cd W:/tmp/today-checklist
+npm run test -w @housingchoice/e2e -- performance/routes.test.ts
+```
+
+Expected: exit 0, every case passed (including the citation-format case).
+
+Commit (bare `git status` first, MERGE_HEAD absent):
+
+```
+cd W:/tmp/today-checklist
+git diff -U0 -- e2e/performance/routes.ts e2e/performance/routes.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git status
+git add e2e/performance/routes.ts e2e/performance/routes.test.ts
+git commit -m "test(perf): Today's terminal is the seven checklist lists or All caught up" -m "Tracker #31 renamed and reordered Today: Identify these contacts, Tours to book, Quiet shares and Placements join; Unreplied, Follow-ups due, AI suggestions to review and the stale Group texts to close leave. At a glance stays out of the terminal because All caught up renders with it. A new routes.test case pins the names against the Today page source." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S7.12 - events.ts: the ContactUpdatedEvent doc comment names the staff-outreach emitters (comment-only)
+
+PR8. Comment-only: no RED. The check is that every name the comment cites
+exists in the tree.
+
+Files: Modify `app/src/lib/events.ts` (pre-existing non-ASCII elsewhere;
+every added line ASCII).
+
+Step 1 - confirm the as-built names (read-only):
+
+```
+cd W:/tmp/today-checklist
+grep -n "staffOutreach" app/src/services/sendMessage.ts app/src/routes/api.ts
+grep -n "recordStaffOutreach\|contact.updated" app/src/services/sendEmailMessage.ts
+grep -n "stampOutboundDial\|afterResponse" app/src/routes/webhooks/voice.ts
+grep -n "touchFixtureReachedOut" app/src/routes/dev.ts
+grep -n "contact.updated" app/src/services/inboundEmail.ts app/src/routes/webhooks/voice.ts
+grep -n "getByIdConsistent\|stampRelayOutreach" app/src/jobs/relayFanOut.ts app/src/services/relayAnnouncements.ts
+grep -n "touchLastReachedOut\|recordStaffOutreach" app/src/services/groupSend.ts
+```
+
+Each grep finds its name. If S2/S3 named one differently, write the as-built
+name in the comment below.
+
+Step 2 - the edit. Anchor (`:308-312`):
+
+```ts
+ * no event at all. ID-only - NEVER a name, phone or status value (PII, doc
+ * section 9); consumers re-read.
+ */
+export interface ContactUpdatedEvent {
+  contactId: string;
+```
+
+Replacement:
+
+```ts
+ * no event at all. ID-only - NEVER a name, phone or status value (PII, doc
+ * section 9); consumers re-read.
+ *
+ * Staff outreach (tracker #31; spec 2026-10-23-today-checklist-design.md
+ * 7.3; plan PR8): it is ALSO the one live event of a one-to-one staff send
+ * whose `last_reached_out_at` stamp was written - emitted AFTER the send's
+ * own events, and only for a contactId recordStaffOutreach
+ * (services/staffOutreach.ts) returned as written, so Today's Quiet shares
+ * drops the person on the refetch. Emitters: services/sendMessage.ts (a send
+ * carrying the `staffOutreach` option - the 1:1 route's first batch and the
+ * staff Retry of a non-share row), services/sendEmailMessage.ts (after SES
+ * accepts), routes/webhooks/voice.ts stampOutboundDial (the outbound
+ * whisper-gate dial, after the TwiML is sent, handed to `afterResponse`),
+ * and routes/dev.ts touchFixtureReachedOut (the dev fixture seams' outbound
+ * rows). Two INBOUND paths emit it too, right after their
+ * `last_heard_from_at` touch returns 'written', because their
+ * conversation.updated fires before that touch: services/inboundEmail.ts and
+ * the masked relay call paths in routes/webhooks/voice.ts (refused and
+ * bridged). A relay or group post emits NO contact.updated per member:
+ * jobs/relayFanOut.ts (a team post's legs) and services/relayAnnouncements.ts
+ * (a staff-edited intro) each emit ONE conversation.updated after their
+ * member loop, built from a fresh consistent read
+ * (conversationsRepo.getByIdConsistent), and services/groupSend.ts stamps
+ * BEFORE its existing conversation.updated.
+ */
+export interface ContactUpdatedEvent {
+  contactId: string;
+```
+
+Step 3 - checks (a comment cannot change behavior; typecheck proves the file
+still parses):
+
+```
+cd W:/tmp/today-checklist
+git diff -U0 -- app/src/lib/events.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+npm run typecheck -w @housingchoice/app
+```
+
+Expected: `0`; typecheck exit 0. (If the app workspace name differs, run the
+root `npm run typecheck`.)
+
+Commit (bare `git status` first, MERGE_HEAD absent, one path):
+
+```
+cd W:/tmp/today-checklist
+git status
+git add app/src/lib/events.ts
+git commit -m "docs(events): contact.updated doc names the staff-outreach emitters and the relay after-loop events" -m "Comment only (plan PR8): the 1:1 send, staff Retry, email, outbound dial and dev fixture emitters, the two inbound post-touch emits, and the one-per-loop conversation.updated of relay team posts and staff-edited intros." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S7.13 - GLOSSARY.md and STATUS-MODEL.md: Quiet shares, last reached out, At a glance; the Today drift (docs-only)
+
+Spec 10; C7. Docs-only: the RED/GREEN are greps.
+
+Files: Modify `documentation/GLOSSARY.md` (lines 589-740 are ASCII:
+`sed -n 589,740p documentation/GLOSSARY.md | tr -d '\11\12\15\40-\176' | wc -c`
+prints 0), `documentation/STATUS-MODEL.md` (lines 225-300 ASCII; line 3
+has an em dash and is untouched).
+
+RED:
+
+```
+cd W:/tmp/today-checklist
+grep -n "^- \*\*Quiet shares\*\*\|^- \*\*last reached out\*\*\|^- \*\*At a glance\*\*" documentation/GLOSSARY.md
+grep -c "Unreplied" documentation/GLOSSARY.md documentation/STATUS-MODEL.md
+```
+
+Expected: no output from the first (exit 1); the second prints a non-zero
+count for each file (`GLOSSARY.md:4`, `STATUS-MODEL.md:2`).
+
+GLOSSARY Edit 1 - Requested tour. Anchor (`:609-610`):
+
+```
+  date splits across every status, unlike the Active tab's Upcoming section
+  and the Past tab (curated work lists).
+```
+
+Replacement:
+
+```
+  date splits across every status, unlike the Active tab's Upcoming section
+  and the Past tab (curated work lists). On Today the same requests are the
+  checklist's "Tours to book" section (tracker #31, 2026-10-24): every
+  `requested` tour, oldest request first, reading "Requested today" or
+  "Requested N days ago", until it is booked, canceled or closed.
+```
+
+GLOSSARY Edit 2 - last heard from. Anchor (`:623-624`):
+
+```
+  address. Outbound and automated traffic never move it. Not a conversation's
+  `last_activity_at` (any direction) and not a phone's `lastSeenAt`.
+```
+
+Replacement:
+
+```
+  address. Outbound and automated traffic never move it. Not a conversation's
+  `last_activity_at` (any direction) and not a phone's `lastSeenAt`. Its
+  staff-outbound twin is **last reached out** (`last_reached_out_at`).
+```
+
+GLOSSARY Edit 3 - signed up. Anchor (`:698-703`):
+
+```
+  (unknown contacts included; never an **Inactive** contact, see **waiting
+  on a reply**). The unread thread also shows on Today: a
+  tenant's, landlord's or partner's under Unreplied as "<name> -
+  Unreplied", an existing unknown contact's under Needs you now as a "New
+  unknown contact" (not when that contact is **Inactive**: its unknown thread
+  shows only in the inbox). When the contact had no thread on that phone, the
+```
+
+Replacement:
+
+```
+  (unknown contacts included; never an **Inactive** contact, see **waiting
+  on a reply**). On Today only an existing unknown contact's unread thread
+  shows, under Identify these contacts as a "New unknown contact" (not when
+  that contact is **Inactive**); a tenant's, landlord's or partner's shows
+  only in the inbox (Today's Unreplied section was removed by tracker #31,
+  2026-10-24). When the contact had no thread on that phone, the
+```
+
+GLOSSARY Edit 4 - Inactive. Anchor (`:719-732`):
+
+```
+  An inbound text or call never moves it back to Needs review. An unknown
+  contact's or team member's unknown threads leave Today's Needs you now
+  when it is marked Inactive (a team member's 1:1 threads are unknown
+  threads too; those unread texts show only in the inbox, while a typed
+  thread it kept from an earlier type - a re-type to unknown or team
+  member, through the API or an import, re-types none of its threads -
+  still feeds Unreplied), and an Inactive unknown contact sorts below the
+  Needs review ones on the inbox Unknown tab and on Contacts > Unknown; an
+  Inactive tenant's or partner's unread text still shows on Today where it
+  would otherwise (under Unreplied, or as a "New unknown contact" row when
+  its thread is still an unknown thread: the importer mints every imported
+  one-to-one thread as one, whatever the contact's type -
+  `docs/issues/imported-unknown-threads-surface-as-unknown-on-today.md` -
+  and a second number's can stay one after the contact is typed).
+```
+
+Replacement:
+
+```
+  An inbound text or call never moves it back to Needs review. An Inactive
+  unknown contact leaves Today's Identify these contacts (its unread texts
+  show only in the inbox) and sorts below the Needs review ones on the
+  inbox Unknown tab and on Contacts > Unknown. Since tracker #31
+  (2026-10-24) Today shows no other contact's unread texts at all - of any
+  type, Active or Inactive, whatever its thread's type (an imported
+  contact's or a team member's unknown thread included) - so Inactive
+  changes nothing else on Today.
+```
+
+GLOSSARY Edit 5 - the three new entries, at the end of "Feature & label
+notes" (after **Inactive**, before the `---` above "For the future AI
+layer"). Anchor (`:737-740`):
+
+```
+  reason), which none of these rules touch. Full rules:
+  [STATUS-MODEL.md](STATUS-MODEL.md) section 5b.
+
+---
+```
+
+Replacement:
+
+```
+  reason), which none of these rules touch. Full rules:
+  [STATUS-MODEL.md](STATUS-MODEL.md) section 5b.
+
+- **Quiet shares** (Today section; today-checklist, 2026-10-24, tracker #31)
+  - the Today checklist section of people a property was sent to who have
+  gone quiet: a send from the last 14 days at Replied that has been quiet
+  for 2 days, or at No reply yet for 5 days (fixed 48-hour and 120-hour
+  durations, not calendar days). The clock starts at the latest of the
+  send, the person's **last heard from** and their **last reached out**, so
+  a message, email or call from either side restarts it; sending another
+  property does not (a share never moves **last reached out**). The
+  candidates are exactly the Follow up tab's **waiting on a reply** rows
+  (`collectWaitingFollowUps`, `app/src/services/followUps.ts`), so every
+  Quiet shares person is also on that tab, whose own 24-hour rule is
+  unchanged. Grouped by property, one expandable line each ("3 people: 1
+  replied, then quiet - 2 never replied"), the first property open on first
+  render; a person row reads "Replied, then quiet N days" or "No reply in N
+  days" and opens the contact page (no Interested / Not interested on
+  Today). The heading counts distinct people; the 5-row limit counts
+  property lines. Code: `buildQuietShares` (`app/src/services/quietShares.ts`),
+  wire `TodayResponse.quietShares`.
+
+- **last reached out** (`last_reached_out_at`; today-checklist, 2026-10-24)
+  - the latest instant STAFF followed up with a contact: a text, email or
+  call staff sent themselves, in any thread (one-to-one, relay group, native
+  group text; a relay or group post counts for every member it reached; a
+  call counts once the contact's leg is dialed, answered or not). Shares and
+  broadcasts, automated sends (tour reminders, nudges, auto-replies,
+  confirmations, relay system announcements) and machine resends never move
+  it. The outbound twin of **last heard from**, which outbound never moves;
+  "last communication either way" is the later of the two, never a stored
+  field. Forward-only, written ONLY by `contactsRepo.touchLastReachedOut`
+  through `recordStaffOutreach` (`app/src/services/staffOutreach.ts`; the
+  writer table is spec 2026-10-23-today-checklist-design.md section 7.3),
+  refused from clients, seeded once by
+  `app/scripts/backfill-last-reached-out.ts`. Never shown in the UI: it only
+  feeds the **Quiet shares** clock.
+
+- **At a glance** (Today; today-checklist, 2026-10-24) - the lower part of
+  the Today page, below a dashed divider: Tours today (compact rows: the
+  time, the tenant, the property) and the AI suggestions, collapsed to one
+  line ("AI suggestions for N contacts"). Reference only: it never counts
+  toward the checklist, so "All caught up" shows when every section ABOVE
+  the line is empty, with At a glance still rendered below it. The
+  checklist above the line, in order: Needs you now, Identify these
+  contacts, Past tours needing an outcome, Tours to book, **Quiet shares**,
+  Relay groups to close, Placements (the `follow_ups` group, headed
+  "Follow-ups due" before). Every section shows 5 rows, then "Show all N".
+  Today has no Unreplied section: known contacts' replies are the Inbox
+  badge's job.
+
+---
+```
+
+STATUS-MODEL Edit 1. Anchor (`:7`):
+
+```
+> [GLOSSARY.md](GLOSSARY.md)). Last substantive update: **2026-10-23**.
+```
+
+Replacement:
+
+```
+> [GLOSSARY.md](GLOSSARY.md)). Last substantive update: **2026-10-24**.
+```
+
+STATUS-MODEL Edit 2. Anchor (`:231-233`):
+
+```
+- **`Needs review`** - the same front door as above. An unknown contact that is
+  Needs review shows on Today's Needs you now as a "New unknown contact" and
+  carries the inbox "Needs triage" chip.
+```
+
+Replacement:
+
+```
+- **`Needs review`** - the same front door as above. An unknown contact that is
+  Needs review shows on Today's Identify these contacts as a "New unknown
+  contact" and carries the inbox "Needs triage" chip.
+```
+
+STATUS-MODEL Edit 3. Anchor (`:282-295`):
+
+```
+- An Inactive tenant's or partner's unread text still shows on Today, exactly where
+  it would if the contact were not Inactive: in Unreplied, or as a "New unknown
+  contact" row in Needs you now when its thread is still an unknown thread (the
+  importer mints every imported one-to-one thread as an unknown thread, whatever
+  the contact's type -
+  `docs/issues/imported-unknown-threads-surface-as-unknown-on-today.md` - and a
+  second number's thread can stay one after the contact is typed). An Inactive
+  unknown contact's or team member's unknown threads do NOT show in Needs you now
+  (a team member's 1:1 threads are unknown threads, so the same rule covers them) -
+  those unread texts show only in the inbox. A typed thread such a contact kept
+  from an earlier type still feeds Unreplied: a re-type to unknown or team member
+  (through the API or an import; the Edit contact details picker offers neither)
+  re-types none of the contact's threads.
+```
+
+Replacement:
+
+```
+- On Today, a Needs review unknown contact's unread texts show in Identify these
+  contacts and an Inactive unknown contact's do NOT - they show only in the
+  inbox. Since tracker #31 (2026-10-24) no other contact's unread text shows on
+  Today at all (any type, Active or Inactive, whatever its thread's type), so
+  Today draws no other line between Inactive and the rest.
+```
+
+GREEN:
+
+```
+cd W:/tmp/today-checklist
+grep -n "^- \*\*Quiet shares\*\*\|^- \*\*last reached out\*\*\|^- \*\*At a glance\*\*" documentation/GLOSSARY.md
+grep -n "Unreplied" documentation/GLOSSARY.md documentation/STATUS-MODEL.md
+grep -n "Needs you now" documentation/GLOSSARY.md documentation/STATUS-MODEL.md
+git diff -U0 -- documentation/GLOSSARY.md documentation/STATUS-MODEL.md | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+
+Expected: three entry matches; the Unreplied grep shows only lines that say
+it was removed (GLOSSARY "signed up" and "At a glance"); the Needs you now
+grep shows only the At a glance checklist list; `0`.
+
+Commit (bare `git status` first, MERGE_HEAD absent, two paths):
+
+```
+cd W:/tmp/today-checklist
+git status
+git add documentation/GLOSSARY.md documentation/STATUS-MODEL.md
+git commit -m "docs(glossary,status-model): Quiet shares, last reached out, At a glance; Today without Unreplied" -m "Spec 10 entries for tracker #31, plus the drift it makes: Requested tours are Today's Tours to book, last heard from names its outbound twin, and the signed up and Inactive entries and STATUS-MODEL 5b no longer send unread texts to Unreplied or Needs you now." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S7.14 - the 2026-06-16 spec note, the issue updates, the new quiet-shares cost issue, `npm run issues` (docs-only)
+
+Spec 10, 6.5, 5.2; WI7; C7. Docs-only: RED/GREEN are greps.
+
+Files:
+- Modify `docs/superpowers/specs/2026-06-16-new-dashboard-design.md` (pre-existing non-ASCII; added lines ASCII)
+- Modify `docs/issues/imported-unknown-threads-surface-as-unknown-on-today.md` (ASCII)
+- Modify `docs/issues/public-signup-abuse-hardening.md` (ASCII)
+- Create `docs/issues/today-quiet-shares-read-cost.md`
+
+Step 0 - the WI7 numbers. Read
+`docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S4-report.md`
+and find the WI7 record (the Query and BatchGet counts one Today load made in
+the harness). If it is absent, STOP this task and ask the planner (the issue
+must cite measured counts, spec 6.5).
+
+RED:
+
+```
+cd W:/tmp/today-checklist
+grep -n "Superseded grouping" docs/superpowers/specs/2026-06-16-new-dashboard-design.md
+grep -n "tracker #31" docs/issues/imported-unknown-threads-surface-as-unknown-on-today.md docs/issues/public-signup-abuse-hardening.md
+test -f docs/issues/today-quiet-shares-read-cost.md && echo exists
+```
+
+Expected: no output from any (exit 1 / nothing printed).
+
+Edit 1 - the 2026-06-16 spec. Anchor (`:55`, ASCII):
+
+```
+`CaseItem.attention`, unread conversations, and missed calls.
+```
+
+Replacement:
+
+```
+`CaseItem.attention`, unread conversations, and missed calls.
+
+> **Superseded grouping (2026-10-24).** The groups above are no longer
+> Today's. `docs/superpowers/specs/2026-10-23-today-checklist-design.md`
+> (tracker #31) supersedes them: the checklist Needs you now, Identify these
+> contacts, Past tours needing an outcome, Tours to book, Quiet shares, Relay
+> groups to close and Placements (the former "Follow-ups due"), then "At a
+> glance" (Tours today, AI suggestions as one collapsed line); Unreplied is
+> removed. `app/src/routes/today.ts` follows that spec.
+```
+
+Edit 2 - imported-unknown issue, frontmatter. Anchor:
+
+```
+created: 2026-10-08
+refs: app/src/lib/import/apply.ts:1227, app/src/routes/today.ts:784, dashboard/src/routes/today/buildToday.ts:287, app/src/routes/contacts.ts:1543, app/src/routes/contacts.ts:1916, dashboard/src/routes/contact/ContactEditForm.tsx:306
+```
+
+Replacement (replace `<L1>` with the as-built line of the S4 owner test -
+`grep -n "owner.type === 'unknown'" app/src/routes/today.ts` - and `<L2>`
+with the as-built line of the fallback's unknown_1to1 branch -
+`grep -n "unknown_1to1" dashboard/src/routes/today/buildToday.ts`):
+
+```
+created: 2026-10-08
+updated: 2026-10-24
+refs: app/src/lib/import/apply.ts:1227, app/src/routes/today.ts:<L1>, dashboard/src/routes/today/buildToday.ts:<L2>, app/src/routes/contacts.ts:1543, app/src/routes/contacts.ts:1916, dashboard/src/routes/contact/ContactEditForm.tsx:306
+```
+
+Edit 3 - imported-unknown issue, body. Append at the end of the file (after
+the "Suggested fix" paragraph, one blank line first):
+
+```
+
+**Update (2026-10-24, tracker #31, `feat/today-checklist`).** Today no longer
+shows these rows. Its unread pass keeps an `unknown_1to1` thread only when the
+thread's owner contact is type `unknown` and not Inactive (spec
+`docs/superpowers/specs/2026-10-23-today-checklist-design.md` 5.2;
+`app/src/routes/today.ts:<L1>`), so a reply on an imported tenant's,
+landlord's or partner's unknown thread stays in the inbox, where it belongs.
+Still open: the threads themselves stay `unknown_1to1` (the importer and the
+same-type PATCH behavior above are unchanged), and the dashboard's fallback
+Today (`dashboard/src/routes/today/buildToday.ts:<L2>`, used only when GET
+/api/today answers 404) still lists every unread `unknown_1to1` thread, now
+under Identify these contacts. The suggested fix (measure, then re-type or
+mint the right type) still applies.
+```
+
+Edit 4 - public-signup-abuse-hardening, frontmatter. Anchor (one line):
+
+```
+created: 2026-10-21
+```
+
+Replacement:
+
+```
+created: 2026-10-21
+updated: 2026-10-24
+```
+
+(If the file already carries an `updated:` line, change its date instead of
+adding a second one.)
+
+Edit 5 - public-signup-abuse-hardening, body. Insert directly BEFORE the
+line `**Today crowd-out** (planner review P1, `P1-adversarial.md` M2, in`
+(anchor that line; replacement = the block below, a blank line, then that
+same line):
+
+```
+**Update (2026-10-24, tracker #31, `feat/today-checklist`).** Today no longer
+has an Unreplied section, and its unread pass keeps only `unknown_1to1`
+threads, BEFORE the 100-row cap (spec
+`docs/superpowers/specs/2026-10-23-today-checklist-design.md` section 4). A
+made-up-phone sign-up creates a tenant with a `tenant_1to1` thread, so it no
+longer adds a Today row or takes a cap slot: the "Today row under Unreplied"
+under "New phones" no longer lands, and the crowd-out below no longer
+applies to tenants. A sign-up from a live unknown contact's phone still
+marks an unknown thread unread, which Today lists under Identify these
+contacts. The inbox noise, the pin and the Sent to row are unchanged, so
+this issue stays open.
+```
+
+Step 6 - the new issue. Create `docs/issues/today-quiet-shares-read-cost.md`
+(copied from `docs/issues/_TEMPLATE.md`, comments removed), with the S4
+report's WI7 numbers filled in where marked:
+
+```
+---
+id: today-quiet-shares-read-cost
+title: Every Today load re-runs the Follow up core for Quiet shares - a properties walk, two Queries per property and a consistent contacts BatchGet - with no cache
+type: improvement
+severity: low
+status: open
+area: app/today
+created: 2026-10-24
+refs: app/src/routes/today.ts, app/src/services/followUps.ts, app/src/services/quietShares.ts, dashboard/src/routes/today/useToday.ts
+---
+
+**Problem.** Today's Quiet shares section (tracker #31, spec
+`docs/superpowers/specs/2026-10-23-today-checklist-design.md` 6.1 and 6.5)
+computes its rows on every GET /api/today by running the Follow up core,
+`collectWaitingFollowUps` (`app/src/services/followUps.ts`): the
+available-properties walk (capped at 100 properties), two Queries per
+property that has recent sends (10-way concurrency), and one contacts
+BatchGet - read CONSISTENTLY on Today's call (`consistentRead: true`, so a
+refetch triggered by a stamp's event sees the stamp), which costs twice the
+read units of the Follow up tab's eventually consistent read. Today refetches
+on every placement, conversation, suggestion, tour and contact event,
+debounced 300 ms (`dashboard/src/routes/today/useToday.ts`), and each staff
+send now emits one more event (spec 7.3), so a busy hour with Today open in
+several tabs multiplies these reads. No cache was added (spec 6.5).
+
+Measured in the test harness by the build (S4 report, watch item WI7):
+<fill: the WI7 numbers from S4-report.md - Queries per Today load for N
+available properties, the BatchGet count and keys, and the harness world they
+were measured in>. Prod holds tens of available properties (spec 6.5), so a
+load is tens of small Queries.
+
+**Suggested fix.** Only if load grows (Today p95, or consumed read units on
+the units, listing_sends and contacts tables): a short-lived per-process
+cache of the core's rows (tens of seconds), dropped on share, outcome, tour
+and contact events, so a burst of refetches reads once. Today's consistent
+contacts read must stay behind it (or the cache must be keyed past a stamp)
+so a staff send still drops the person on the next refetch. Measure first
+with `npm run perf:pages` on the hermetic target; the `-- hosted-dev` target
+is human-invoked only.
+```
+
+Step 7 - regenerate the index (never committed):
+
+```
+cd W:/tmp/today-checklist
+npm run issues
+git check-ignore docs/issues/INDEX.md
+```
+
+Expected: the summary lists `today-quiet-shares-read-cost` (open, low);
+`git check-ignore` prints `docs/issues/INDEX.md` (it is gitignored - do not
+add it).
+
+GREEN:
+
+```
+cd W:/tmp/today-checklist
+grep -n "Superseded grouping" docs/superpowers/specs/2026-06-16-new-dashboard-design.md
+grep -n "tracker #31" docs/issues/imported-unknown-threads-surface-as-unknown-on-today.md docs/issues/public-signup-abuse-hardening.md
+grep -n "<fill\|<L1>\|<L2>" docs/issues/today-quiet-shares-read-cost.md docs/issues/imported-unknown-threads-surface-as-unknown-on-today.md
+tr -d '\11\12\15\40-\176' < docs/issues/today-quiet-shares-read-cost.md | wc -c
+git diff -U0 -- docs/superpowers/specs/2026-06-16-new-dashboard-design.md docs/issues/imported-unknown-threads-surface-as-unknown-on-today.md docs/issues/public-signup-abuse-hardening.md | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+
+Expected: one match; one match per issue file; NO output from the
+placeholder grep; `0`; `0`.
+
+Commit (bare `git status` first, MERGE_HEAD absent; `INDEX.md` must NOT be
+staged):
+
+```
+cd W:/tmp/today-checklist
+git status
+git add docs/superpowers/specs/2026-06-16-new-dashboard-design.md docs/issues/imported-unknown-threads-surface-as-unknown-on-today.md docs/issues/public-signup-abuse-hardening.md docs/issues/today-quiet-shares-read-cost.md
+git commit -m "docs(specs,issues): Today checklist supersedes the 2026-06-16 grouping; issue updates; quiet-shares read cost filed" -m "The old Today action queue spec points at the tracker #31 spec. The imported-unknown-threads issue records that Today no longer shows those rows (the thread type and the fallback remain). The public sign-up issue records that made-up-phone sign-ups no longer reach Today. A new low issue files the per-load Follow up core cost with the measured harness counts (spec 6.5, WI7)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S7.15 - the backfill lane rehearsal (WI12, PR38)
+
+Spec 7.5 ("an agent runs it only against a hermetic e2e lane"); WI12; C6.
+No source change. RED/GREEN: the dry run and the two applies report the
+expected counts, and the restored value equals the live stamp.
+
+HARD RULES: only `--env local --lane <L>` with the lane THIS task started;
+never a bare `--env local` (the human's live stack), never `--env dev` or
+`--env prod`, never against `:5174` / `:8080`. If any hermetic check in step
+3 fails, do NOT run the script: `npm run e2e:stop`, prove the ports free,
+and report to the planner.
+
+Files:
+- Create (gitignored, never committed) `W:/tmp/today-checklist/.superpowers/s7/lane-reached-out.ts`
+- Modify `docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S7-report.md`
+
+Step 1 - the lane helper (C6; planner-approved or struck). Create
+`W:/tmp/today-checklist/.superpowers/s7/lane-reached-out.ts`:
+
+```ts
+// S7 rehearsal helper (gitignored; never committed). LANE ONLY: reads, or
+// removes, ONE contact's last_reached_out_at in a hermetic e2e lane's own
+// DynamoDB Local database (hclane<L>, tables hc-local-<L>-*), through the
+// same pinned client the backfill uses. It refuses anything but a positive
+// lane number, so it can never reach the live local stack or AWS.
+//   npx tsx .superpowers/s7/lane-reached-out.ts <lane> get <contactId>
+//   npx tsx .superpowers/s7/lane-reached-out.ts <lane> unstamp <contactId>
+import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { tableName } from '../../app/src/lib/config.js';
+import { parseLane, resolveStageClient } from '../../app/scripts/lib/stageClient.js';
+
+void (async () => {
+  const [rawLane, mode, contactId] = process.argv.slice(2);
+  const lane = parseLane(rawLane);
+  if (lane === undefined || (mode !== 'get' && mode !== 'unstamp') || !contactId) {
+    console.error('usage: lane-reached-out.ts <lane> get|unstamp <contactId>');
+    process.exitCode = 2;
+    return;
+  }
+  const stage = await resolveStageClient('local', {}, { lane });
+  try {
+    const TableName = tableName('contacts', stage.env);
+    console.log(`${stage.describe} table ${TableName}`);
+    if (mode === 'unstamp') {
+      await stage.doc.send(
+        new UpdateCommand({
+          TableName,
+          Key: { contactId },
+          UpdateExpression: 'REMOVE last_reached_out_at',
+          ConditionExpression: 'attribute_exists(contactId)',
+        }),
+      );
+    }
+    const got = await stage.doc.send(new GetCommand({ TableName, Key: { contactId }, ConsistentRead: true }));
+    console.log(JSON.stringify({ contactId, last_reached_out_at: got.Item?.['last_reached_out_at'] ?? null }));
+  } finally {
+    stage.doc.destroy();
+  }
+})();
+```
+
+Step 2 - start the lane. No other e2e run of this worktree alive (S7.1 step
+1 checks). Then:
+
+```
+cd W:/tmp/today-checklist
+npm run db:start
+nohup npm run e2e:session > W:/tmp/today-checklist/.superpowers/s7/session.log 2>&1 & disown
+```
+
+Wait (Monitor until-loop) for
+`grep -q "ready" W:/tmp/today-checklist/.superpowers/s7/session.log`. Then:
+
+```
+cat W:/tmp/today-checklist/e2e/.artifacts/lane.json
+```
+
+Note `<L>` (`lane`), `<DASH>` (`urls.dashboard`), the four ports.
+
+Step 3 - prove the lane is hermetic and this worktree's. ALL must hold:
+
+```
+cd W:/tmp/today-checklist
+curl -s <DASH>/__dev/ping
+git rev-parse --short HEAD
+```
+
+- `lane` is an integer 1-16, and none of the four ports is 8080, 5174, 8889
+  or 5173 (lane 0, the live dev stack);
+- `tablePrefix` is exactly `hc-local-<L>-` and `accessKeyId` exactly
+  `hclane<L>`;
+- the ping answers JSON with `"dev":true` and its `appCommit` equals
+  `git rev-parse --short HEAD`.
+
+Step 4 - a clean lean world and two real staff sends in the window (the W1
+route, POST /api/conversations/:id/messages), with a cookie jar in the
+gitignored folder. In Git Bash, with `D=<DASH>`:
+
+```
+cd W:/tmp/today-checklist
+J=W:/tmp/today-checklist/.superpowers/s7/cookies.txt
+npm run e2e:reseed
+curl -s -c $J -H 'content-type: application/json' -d '{"email":"va@example.com"}' -o /dev/null -w '%{http_code}\n' $D/auth/dev-login
+```
+
+Expected `200` (reseed logs the browser out; this is a fresh session). For
+each of A and B (first names `RehearseA` / `RehearseB`, phones
+`+15557<HHMMSS>` / `+15558<HHMMSS>` from the current time):
+
+```
+curl -s -b $J -H 'content-type: application/json' -d '{"type":"tenant","firstName":"RehearseA","lastName":"Backfill","phone":"+15557HHMMSS","voucherSize":2}' $D/api/contacts
+curl -s -b $J -X PATCH -H 'content-type: application/json' -d '{"consent_method":"verbal_in_person","consent_at":"<now ISO>"}' -o /dev/null -w '%{http_code}\n' $D/api/contacts/<idA>
+curl -s -b $J -X POST $D/api/contacts/<idA>/conversation
+curl -s -b $J -H 'content-type: application/json' -d '{"body":"Checking in about the home - rehearsal A"}' -w '\n%{http_code}\n' $D/api/conversations/<convA>/messages
+```
+
+(take `<idA>` from the first response's `contact.contactId`, `<convA>` from
+the third's `conversation.conversationId`). Expected: 201, 200, 200 and a
+2xx for the send. Then the live stamps:
+
+```
+npx tsx .superpowers/s7/lane-reached-out.ts <L> get <idA>
+npx tsx .superpowers/s7/lane-reached-out.ts <L> get <idB>
+```
+
+Expected: each line names `database hclane<L> (e2e lane <L>)` and
+`hc-local-<L>-contacts`, and each contact holds a non-null ISO value `V_A`,
+`V_B`. A null here is a W1 regression (S2): STOP and report.
+
+Step 5 - stand B in for a contact reached before the deploy (C6):
+
+```
+npx tsx .superpowers/s7/lane-reached-out.ts <L> unstamp <idB>
+```
+
+Expected: `"last_reached_out_at":null` for `<idB>`.
+
+Step 6 - dry run (writes nothing):
+
+```
+npx tsx app/scripts/backfill-last-reached-out.ts --env local --lane <L>
+```
+
+Expected: exit 0; the start line names `DynamoDB Local http://localhost:8000
+database hclane<L> (e2e lane <L>)` and prefix `hc-local-<L>-` (if it names
+anything else, STOP before any apply); the done line says DRY RUN with
+`planned 2`, `written 0`, `failed 0`, and the per-category counts show the
+two 1:1 texts counted and nothing in the reminder / nudge / relay / group /
+call / email categories (the lean seed's outbound rows are from 2026-06 and
+outside the 14-day window). A different `planned` is a finding: list every
+planned contactId from the report (LOG_LEVEL=debug if the script logs ids
+there) and explain each before applying.
+
+Step 7 - apply, then apply again:
+
+```
+npx tsx app/scripts/backfill-last-reached-out.ts --env local --lane <L> --apply
+npx tsx app/scripts/backfill-last-reached-out.ts --env local --lane <L> --apply
+npx tsx .superpowers/s7/lane-reached-out.ts <L> get <idA>
+npx tsx .superpowers/s7/lane-reached-out.ts <L> get <idB>
+```
+
+Expected: first apply exit 0, `written 1` (B), `skipped 1` (A: its live
+stamp is already as late - the same providerTs), `failed 0`; second apply
+exit 0, `written 0`, `skipped 2`, `failed 0`; afterwards A still holds
+`V_A` and B holds exactly `V_B` (the backfill computed the instant the live
+writer stamps - PR9 and PR38 agree). Any other result: STOP, keep the lane
+up, report to the planner.
+
+If the planner struck the helper (C6), skip steps 1 and 5 and expect
+`planned 2`, then `written 0`, `skipped 2` on both applies; record that the
+write path was not exercised.
+
+Step 8 - record. Add to the S7 report (counts and ids only - never a name,
+phone or body):
+
+```
+## Backfill lane rehearsal (WI12, S7.15)
+
+- Lane <L>, prefix hc-local-<L>-, database hclane<L>, ports <app>/<dash>/
+  <fake>/<public>, booted at <commit> (= HEAD); reseeded LEAN before the runs.
+- Staff sends: two W1 1:1 texts (contactIds <idA>, <idB>); live stamps
+  V_A <iso>, V_B <iso>. B's stamp removed with the lane-only helper to stand
+  for a pre-deploy contact (plan S7 C6).
+- Dry run: <fill: the start line and the done line, verbatim counts>.
+- Apply 1: <fill: done line>. Apply 2: <fill: done line>.
+- After: A <iso> (= V_A), B <iso> (= V_B).
+- <fill: anything unexpected, or "nothing else to report">.
+```
+
+Leave the session running for S7.16 if it follows immediately; otherwise
+`npm run e2e:stop` now and prove the ports free (S7.1 step 1).
+
+Commit the report (no spec run in flight; bare `git status` first,
+MERGE_HEAD absent; `.superpowers/` is gitignored):
+
+```
+cd W:/tmp/today-checklist
+git diff -U0 -- docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S7-report.md | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git status
+git add docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S7-report.md
+git commit -m "docs(records): today-checklist backfill rehearsal on a hermetic lane" -m "Dry run, apply and a second apply of backfill-last-reached-out against e2e lane <L> only: counts, contactIds and the restored stamp equal to the live one (WI12)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S7.16 - live self-QA of the Today page (desktop and ~380px)
+
+AGENTS.md UI verification; the full-width rule (no page-level max-width
+cap); spec 2, 2.1, 2.4, 6.3. No source change. Findings go to the report; a
+UI defect is NOT fixed here (S5 owns the dashboard; the planner routes a
+fix) - record it with its screenshot.
+
+Step 1 - the lane. Reuse the S7.15 session if it is still up (re-run the
+step 3 checks of S7.15), else start one exactly as S7.15 steps 2-3. Then
+`npm run e2e:reseed`.
+
+Step 2 - sign the Playwright MCP browser in (it starts logged out,
+`--isolated`): `browser_navigate` to `<DASH>/`, then `browser_snapshot` and
+`browser_click` the "Continue as dev user" button (or `browser_evaluate`
+`async () => (await fetch('/auth/dev-login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'va@example.com' }) })).status`
+then navigate to `<DASH>/` again). Confirm the h1 "Today".
+
+Step 3 - build a world that exercises every part (same-origin fetches from
+the signed-in page). `browser_evaluate` with this function:
+
+```js
+async () => {
+  const j = async (method, path, data) => {
+    const res = await fetch(path, {
+      method,
+      headers: { 'content-type': 'application/json' },
+      body: data === undefined ? undefined : JSON.stringify(data),
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`${method} ${path}: ${res.status} ${text}`);
+    return text.length > 0 ? JSON.parse(text) : {};
+  };
+  const DAY = 86400000;
+  const ago = (d) => new Date(Date.now() - d * DAY - 60000).toISOString();
+  const stamp = String(Date.now()).slice(-6);
+  const phone = () => `+1555${Math.floor(Math.random() * 9000000 + 1000000)}`;
+  const unit = async (n) => {
+    const u = await j('POST', '/api/units', {
+      landlordId: 'contact-landlord-0001', beds: 2, accepted_authorities: ['Atlanta Housing Authority'],
+      address: { line1: `${stamp}${n} Selfqa Ave`, city: 'Atlanta', state: 'GA', zip: '30314' },
+      rent_min: 1500, rent_max: 1600,
+    });
+    await j('PATCH', `/api/units/${u.unit.unitId}/listing-status`, { toStatus: 'available', source: 'manual' });
+    return u.unit.unitId;
+  };
+  const tenant = async (first) => {
+    const c = await j('POST', '/api/contacts', { type: 'tenant', firstName: first, lastName: 'Selfqa', phone: phone(), voucherSize: 2 });
+    await j('PATCH', `/api/contacts/${c.contact.contactId}`, { consent_method: 'verbal_in_person', consent_at: new Date().toISOString() });
+    return c.contact.contactId;
+  };
+  const u1 = await unit(11);
+  const u2 = await unit(22);
+  // Quiet shares on two properties: the first opens, the second starts folded.
+  for (const [u, first, sent, heard] of [[u1, 'Noreply', 6, null], [u1, 'Replied', 5, 3], [u2, 'Later', 7, null]]) {
+    const id = await tenant(`${first}${stamp}`);
+    await j('POST', '/__dev/listing-send-fixture', { unitId: u, contactId: id, sentAt: ago(sent) });
+    if (heard !== null) {
+      const conv = await j('POST', `/api/contacts/${id}/conversation`);
+      await j('POST', '/__dev/extraction/message-fixture', {
+        conversationId: conv.conversation.conversationId, body: 'Is it still open?', createdAt: ago(heard), direction: 'inbound',
+      });
+    }
+  }
+  // Tours to book: six requests, so "Show all 6" shows.
+  for (let i = 0; i < 6; i++) {
+    const id = await tenant(`Booker${i}${stamp}`);
+    await j('POST', '/api/tours', { tenantId: id, unitId: u1, tourType: 'self_guided' });
+  }
+  // At a glance: one tour later today (skipped when that would cross midnight).
+  const later = new Date(Date.now() + 2 * 3600000);
+  if (later.getDate() === new Date().getDate()) {
+    const id = await tenant(`Today${stamp}`);
+    await j('POST', '/api/tours', { tenantId: id, unitId: u2, tourType: 'self_guided', scheduledAt: later.toISOString() });
+  }
+  // Identify: one unknown contact. Placements: the lean placement made stuck.
+  await j('POST', '/api/contacts', { type: 'unknown', firstName: `Ident${stamp}`, phone: phone() });
+  await j('POST', '/__dev/placements/placement-0001/deadline-fixture', { stageEnteredAt: ago(60) });
+  return { stamp, u1, u2 };
+}
+```
+
+Then reload `<DASH>/` and wait ~3 s (the aged inbound's heard stamp is
+asynchronous; reload once more if the Replied person is missing).
+
+Step 4 - desktop (`browser_resize` 1280 x 900). `browser_snapshot`, then
+`browser_take_screenshot` with filename
+`.playwright-mcp/s7-today-desktop.png` (full page). Check and record each:
+- the subtitle text exactly (spec 2); section order Identify these contacts,
+  Tours to book, Quiet shares, Placements (Needs you now / Past tours /
+  Relay groups only if the lane has rows); the dashed divider and the "At a
+  glance" heading, Tours today below it with compact rows (time, tenant,
+  property); the three help lines exactly;
+- Tours to book shows 5 rows and "Show all 6"; click it: 6 rows and "Show
+  fewer"; click: 5 again;
+- Quiet shares: heading count 3; the first property line open (2 people,
+  replied first, "Replied, then quiet 3 days" / "No reply in 6 days" with
+  their tags), the second folded ("1 person: 1 never replied"); open and fold
+  each;
+- no "All caught up", no Unreplied, no "Follow-ups due";
+- full width (no page-level cap): `browser_evaluate`
+  `() => { const h1 = document.querySelector('main h1'); const box = h1.parentElement; return { maxWidth: getComputedStyle(box).maxWidth, page: Math.round(box.getBoundingClientRect().width), main: document.querySelector('main').clientWidth }; }`
+  - expect `maxWidth` `none` and `page` within the main pane's padding of
+  `main`;
+- no horizontal scroll: `browser_evaluate`
+  `() => { const d = document.documentElement; const m = document.querySelector('main'); return { doc: d.scrollWidth - d.clientWidth, main: m.scrollWidth - m.clientWidth }; }`
+  - both at most 1.
+
+Step 5 - phone width (`browser_resize` 380 x 800). Reload; screenshot
+`.playwright-mcp/s7-today-380.png` (full page); open the first quiet share,
+"Show all 6" on Tours to book, then screenshot
+`.playwright-mcp/s7-today-380-expanded.png`. Check: the two overflow numbers
+at most 1 in both states; no clipped text in the property line summaries and
+the Tours to book rows (read the snapshot; compare the screenshot); every
+control reachable. Restore with `browser_resize` 1280 x 900.
+
+Step 6 - stop the lane and prove it gone:
+
+```
+cd W:/tmp/today-checklist
+npm run e2e:stop
+```
+
+Then the S7.1 step 1 port check prints nothing.
+
+Step 7 - record in the S7 report:
+
+```
+## Live self-QA (S7.16)
+
+- Lane <L>, booted at <commit>. World: <fill: what step 3 created>.
+- Desktop 1280x900 (.playwright-mcp/s7-today-desktop.png): <fill: each
+  step 4 check, pass or the finding>.
+- 380x800 (.playwright-mcp/s7-today-380.png, s7-today-380-expanded.png):
+  <fill: each step 5 check>.
+- Full width: maxWidth <value>, page <px> of main <px>. Overflow: desktop
+  doc <n> / main <n>; 380 doc <n> / main <n>.
+- <fill: defects for the planner (S5), or "no defects found">.
+```
+
+Commit (no run alive; bare `git status` first, MERGE_HEAD absent; the
+`.playwright-mcp/` screenshots are gitignored and are not added):
+
+```
+cd W:/tmp/today-checklist
+git diff -U0 -- docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S7-report.md | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git status
+git add docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S7-report.md
+git commit -m "docs(records): today-checklist live self-QA at desktop and 380px" -m "Section order, help lines, Show all / Show fewer, quiet-share property lines, At a glance, the full-width rule and no horizontal scroll, on a hermetic lane." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task S7.17 - slice close: the changed specs together, the e2e workspace checks, ASCII sweep, watch items, the S7 report
+
+Step 1 - every new and changed spec plus the pins this slice relies on, one
+cold boot (S7.1 step 1 pre-checks first):
+
+```
+nohup bash W:/tmp/today-checklist/.superpowers/s7/run-spec.sh close tests/dashboard-next/today-checklist.spec.ts tests/dashboard-next/follow-up-tab.spec.ts tests/dashboard-next/unknown-caller-triage.spec.ts tests/dashboard-next/unknown-inactive.spec.ts tests/flows/conversation-fact-extraction.spec.ts tests/dashboard-next/caseworkers.spec.ts tests/scenarios/participant-names.spec.ts tests/dashboard-next/today-past-tours.spec.ts tests/scenarios/post-tour-application.spec.ts tests/dashboard-next/tours-page.spec.ts tests/dashboard-next/relay-number-lifecycle.spec.ts > W:/tmp/today-checklist/.superpowers/s7/close.runner 2>&1 & disown
+```
+
+Expected: exit `0`, every test passed, no `flaky`. A failure is a
+regression to diagnose (WI13): copy the artifacts first (S7.1 step 1), then
+re-run the failing FILE alone and report both runs.
+
+Step 2 - the e2e workspace's own checks (typecheck covers the spec and
+support files; the vitest suite includes `performance/routes.test.ts` and
+`support/viewport.guard.test.ts`, which fails on a hand-rolled overflow
+idiom anywhere under `e2e/`):
+
+```
+cd W:/tmp/today-checklist
+npm run typecheck -w @housingchoice/e2e
+npm run test -w @housingchoice/e2e
+```
+
+Expected: both exit 0.
+
+Step 3 - ASCII sweep over everything S7 touched:
+
+```
+cd W:/tmp/today-checklist
+for f in e2e/tests/dashboard-next/today-checklist.spec.ts e2e/support/followUpFixtures.ts docs/issues/today-quiet-shares-read-cost.md docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S7-report.md; do echo "$f $(tr -d '\11\12\15\40-\176' < $f | wc -c)"; done
+git diff -U0 <S7.1 commit>^..HEAD -- e2e app/src/lib/events.ts documentation docs/issues docs/superpowers/specs | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+```
+
+(`<S7.1 commit>` = the commit S7.1 step 6 made.) Expected: every count `0`.
+
+Step 4 - watch items:
+- WI9: `git diff --name-only main...HEAD -- app/src/lib/seed` prints nothing
+  (no seed file changed on the whole branch).
+- WI12: the backfill ran only with `--env local --lane <L>` (S7.15); the
+  RUNBOOK entry (S6) says Cameron runs dev then prod after the deploy, dry
+  run first: `grep -n "backfill-last-reached-out" RUNBOOK.md` shows the
+  entry and no agent command against dev/prod.
+- WI13: no test in any S7 run was re-run to green or excused as a flake.
+
+Step 5 - finish the report. Append:
+
+```
+## Closing run and watch items (S7.17)
+
+- Closing run: <fill: exit, "<n> passed", per file>.
+- e2e typecheck <exit>; e2e vitest <exit>, <n> passed.
+- ASCII: all 0.
+- WI9: no seed file changed (git diff --name-only main...HEAD -- app/src/lib/seed empty).
+- WI12: backfill run on lane <L> only (S7.15); RUNBOOK entry at RUNBOOK.md:<line>.
+- WI13: no re-run-to-green; <fill: any failure, its diagnosis, both runs>.
+- Plan deviations: <fill: each UI constant changed for an as-built name,
+  C4 if applied, C6 as approved or struck; or "none">.
+```
+
+Step 6 - commit (no run alive; bare `git status` first, MERGE_HEAD absent;
+only the report is changed):
+
+```
+cd W:/tmp/today-checklist
+tr -d '\11\12\15\40-\176' < docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S7-report.md | wc -c
+git status
+git add docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S7-report.md
+git commit -m "docs(records): today-checklist S7 report - closing e2e run, e2e workspace checks, WI9/WI12/WI13" -m "Every new and changed spec green in one cold-boot run through the e2e workspace; e2e typecheck and vitest green; no seed change; the backfill rehearsed on a hermetic lane only." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### S7 coverage
+
+- Spec 9 e2e: section order, a quiet share that drops off after a staff
+  message, Tours to book (S7.2), with the replied case's heard stamp from the
+  message fixture (the seam spec 9 asks the plan to name). Every pin spec 9
+  lists that lives under `e2e/` (S7.3-S7.9, S7.11) plus `tours-page` (C1,
+  S7.10); `app/test/*` and dashboard tests are S4/S5's.
+- Spec 2: order (S7.2 test 1), subtitle and help lines (S7.2), the 5-row
+  limit with Show all / Show fewer (S7.8; S7.16 for Tours to book), Quiet
+  shares counting property lines and the first-open rule (S7.2 test 2,
+  S7.16), the AI line collapsed (S7.5), "All caught up" absent with rows
+  (S7.2 test 1). Spec 4: a known contact's unread text off Today (S7.2 test
+  1). Spec 5.2 (S7.3, S7.4), 5.3 (S7.8), 5.4 (S7.2 test 4, S7.7, S7.10), 5.6
+  (S7.9). Spec 6.2/6.3 copy (S7.2 test 2). Spec 7.1 (outbound does not move
+  last heard from, S7.2 test 3). Spec 8 live updates: contact.updated after a
+  staff send (S7.2 test 3), tour.updated on create and on book (S7.2 test 4).
+- Spec 7.5 / WI12: the lane rehearsal (S7.15). Spec 10 docs: GLOSSARY
+  (S7.13), the 2026-06-16 note, the imported-unknown issue, the new cost
+  issue (S7.14); RUNBOOK is S6's; the tracker record is the planner's.
+- PR8 comment (S7.12); PR38 usage (S7.15); PR39 whole (S7.1-S7.11, S7.17).
+
+## 12. S8 - final: one main sync, the five bare gates, gate report
+
+Depends on S1-S7 committed. Writes
+`docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S8-gates.md`
+(gate results, real exit codes) and
+`docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S8-report.md`
+(the overlap re-check and the sync record - one file, one kind). No source edits
+in this slice except merge results. Never pipe a gate; never `;`-chain
+anything after a gate on its line; never edit or commit while a gate runs.
+
+### Task S8.1 - overlap re-check and the one main sync
+
+Step 1 - overlap, read-only:
+
+```
+cd W:/tmp/today-checklist
+git worktree list --porcelain
+git branch -a
+```
+
+For every OTHER live branch `<b>` (not main, not feat/today-checklist):
+
+```
+git diff --name-only main...<b> -- app/src/routes/today.ts app/src/services/followUps.ts app/src/services/sendMessage.ts app/src/jobs/relayFanOut.ts app/src/repos/contactsRepo.ts dashboard/src/routes/today
+```
+
+If any lists a path, read that branch's PLAN (not its commits;
+`git ls-tree -r --name-only <b> -- docs/superpowers/plans`, then
+`git show <b>:<plan path>`) and record in S8-report.md which of its tasks
+touch the same regions. Do NOT change course; the planner decides. None ->
+record "overlap: no other branch touches these paths as of <date time>".
+
+Step 2 - has main advanced? Read-only:
+
+```
+cd W:/tmp/today-checklist
+git status
+git rev-parse HEAD main
+git merge-base HEAD main
+git rev-list --count HEAD..main
+git rev-parse github/main origin/main
+```
+
+`git status` must be clean (it is the bare read; `.superpowers/` is
+ignored). Record all SHAs. The sync source is the local `main` (the shared
+checkout's branch). If `github/main` or `origin/main` is AHEAD of local
+`main` (`git rev-list --count main..github/main` > 0), do not fetch or
+merge a remote ref: record it and tell the planner.
+
+- Count `0`: nothing to merge. Record "main @<sha> already contained;
+  no merge commit".
+- Count > 0: dry-run the merge without touching the tree:
+
+```
+cd W:/tmp/today-checklist
+git diff --name-only HEAD...main
+git merge-tree --write-tree --name-only HEAD main
+```
+
+  If `merge-tree` exits non-zero (conflicts) AND any conflicted path is one
+  this branch changed (`git diff --name-only main...HEAD`), STOP and ask
+  the planner before merging. Otherwise merge (bare `git status` read just
+  before; check that
+  `W:\AI Projects\Housing Choice\HC Application\.git\worktrees\today-checklist\MERGE_HEAD`
+  is absent first):
+
+```
+cd W:/tmp/today-checklist
+git merge --no-ff main -m "merge main into feat/today-checklist (S8 sync, once)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+  Expected: exit 0, a merge commit. If git still reports a conflict
+  (merge-tree said clean but the merge did not), run `git merge --abort`
+  and STOP for the planner. After the merge:
+
+```
+cd W:/tmp/today-checklist
+git diff --name-only HEAD^1 HEAD -- package-lock.json package.json app/package.json dashboard/package.json e2e/package.json fake-twilio/package.json
+```
+
+  Any path listed -> run `npm ci` at the worktree root (bare; expect exit
+  0) before the gates. Sync happens ONCE; later drift of main is reported,
+  not chased.
+
+### Task S8.2 - gates 1-4 (detached, sequential, logged)
+
+Step 1 - preconditions (read-only, then one start):
+
+```
+cd W:/tmp/today-checklist
+env | grep '^AWS_' | cut -d= -f1
+docker ps
+npm run db:start
+```
+
+Record the NAMES of any exported `AWS_*` variables (never their values).
+`npm run db:start` STARTS DynamoDB Local if it is down; never restart or
+remove the shared container (it wipes local data; ask the human). Gate 2
+is required with DynamoDB Local up; `ALLOW_SKIP_DYNAMO_TESTS` is NOT set
+for a gate. No e2e stack of this worktree may be alive: if
+`e2e/.artifacts/session.pid` exists run `npm run e2e:stop`; then read the
+lane ports from `e2e/.artifacts/lane.json` and prove none listens
+(`Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -in <app>,<dashboard>,<fake>,<publicBase> }`
+prints nothing).
+
+Step 2 - the runner (gitignored location, not committed). Create
+`W:/tmp/today-checklist/.superpowers/gates/run-gates.sh`:
+
+```bash
+#!/usr/bin/env bash
+# S8 gates 1-4, in AGENTS.md order. Each gate is the LAST command on its
+# line; its status is read on the NEXT line only (never pipe a gate).
+G=W:/tmp/today-checklist/.superpowers/gates
+cd W:/tmp/today-checklist || exit 99
+rm -f "$G"/*.exit "$G/ALL.done"
+date > "$G/started.txt"
+npm run typecheck > "$G/1-typecheck.log" 2>&1
+echo "$?" > "$G/1-typecheck.exit"
+env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY npm test > "$G/2-test.log" 2>&1
+echo "$?" > "$G/2-test.exit"
+npm run smoke > "$G/3-smoke.log" 2>&1
+echo "$?" > "$G/3-smoke.exit"
+timeout 2700 npm run e2e > "$G/4-e2e.log" 2>&1
+echo "$?" > "$G/4-e2e.exit"
+date > "$G/ALL.done"
+```
+
+(`env -u` drops any exported AWS key for `npm test` only - AGENTS.md: an
+exported key collapses every app test file onto one DynamoDB Local
+database. `npm run e2e` is unaffected: each lane forces its own key. The
+45-minute `timeout` is a hard outer cap for a suite that can wedge; a
+timeout is a gate FAILURE to report, not a pass.)
+
+Step 3 - launch detached (the Bash tool caps one command near 600 s; the
+gates take 30-60 min):
+
+```
+mkdir -p W:/tmp/today-checklist/.superpowers/gates
+nohup bash W:/tmp/today-checklist/.superpowers/gates/run-gates.sh > W:/tmp/today-checklist/.superpowers/gates/runner.out 2>&1 & disown
+```
+
+Wait for `ALL.done` (Monitor until-loop; re-arm it; never TaskStop the
+script - on Windows that kills the current step and the script runs the
+NEXT gate as an orphan). Do not edit any file in the worktree or commit
+while it runs (the e2e gate builds and serves the current tree).
+
+Step 4 - read the verdicts from the exit files and LOGS (never from a
+notification):
+
+```
+cd W:/tmp/today-checklist/.superpowers/gates
+cat 1-typecheck.exit 2-test.exit 3-smoke.exit 4-e2e.exit
+grep -nE "error TS|npm error code" 1-typecheck.log
+grep -nE "Test Files|Tests |FAIL|npm error code|\[dynamoAdmin\]" 2-test.log
+grep -nE "npm error code|Error|ok" 3-smoke.log
+grep -nE "passed|failed|flaky|timed out|npm error code" 4-e2e.log
+```
+
+Expected: every exit file `0`; gate 2 lists each workspace's `Test Files`
+/ `Tests` lines with 0 failed; gate 4 ends `<n> passed`.
+
+If a gate is red:
+- Gate 2 red on DynamoDB Local suites: re-run-and-compare (AGENTS.md; do
+  NOT export an access key). (1) Re-run each failing FILE alone, twice
+  (`cd W:/tmp/today-checklist/app; npx vitest run test/<file>`, bare, one
+  per Bash call); (2) run the full suite at the branch's merge base (a
+  detached worktree, e.g. `git worktree add --detach W:\tmp\today-checklist-base <merge-base>`,
+  copy `.claude\settings.local.json` into it, `npm ci` there, then the same
+  `env -u ... npm test` redirected to a log; leave that worktree for the
+  human to remove); (3) compare failing FILES, not cases, and report both
+  runs. Any `[dynamoAdmin]` line in real suite output is one real container
+  fault: capture that run's `err.$metadata.httpStatusCode` and `attempts`
+  first.
+- Gate 4 red: a named-spec failure is a REGRESSION (no named-flake list).
+  FIRST copy the run's artifacts (`e2e/.artifacts/` test results and
+  reports, and `4-e2e.log`) to
+  `W:/tmp/today-checklist/.superpowers/gates/e2e-run1/`; then re-run the
+  failing file(s) alone through the e2e workspace exactly as the S7
+  closing task runs a subset (detached, logged)
+  and report both runs. A failure in a file this branch touched, or on a
+  surface it changed, goes to the planner as blocking.
+- Gate 4 exit 124 (timeout) or any aborted run: orphan cleanup before
+  anything else - `npm run e2e:stop`, then prove the lane ports from
+  `e2e/.artifacts/lane.json` free; if a listener survives, list this
+  worktree's node processes
+  (`Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*today-checklist*' }`)
+  and `taskkill /PID <pid> /T /F` from the TOP of each surviving tree.
+  Never kill shared MCP browser processes.
+- A fix is a new task for the planner, not an edit inside S8; after any
+  fix ALL gates run again from gate 1.
+
+### Task S8.3 - gate 5 (eslint on the branch's own files)
+
+Step 1 - the file list (the extension filter, `main...HEAD` - a bare
+`git diff --name-only` lists unstaged changes and would check nothing):
+
+```
+cd W:/tmp/today-checklist
+git diff --name-only --diff-filter=d main...HEAD -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs' > .superpowers/gates/5-files.txt
+wc -l < .superpowers/gates/5-files.txt
+```
+
+This branch changes `.ts`/`.tsx` files, so the count is not 0. (If it ever
+were 0, gate 5 is SKIPPED - never run `npx eslint` with no paths: it goes
+repo-wide and fails on the pre-existing backlog.)
+
+Step 2 - the gate, bare, last on its line; status on the next line:
+
+```
+cd W:/tmp/today-checklist
+npx eslint $(git diff --name-only --diff-filter=d main...HEAD -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs') > .superpowers/gates/5-eslint.log 2>&1
+echo "$?" > .superpowers/gates/5-eslint.exit
+```
+
+Exit `0` with an empty log: done. Note in the report that the config lints
+`.ts`/`.tsx` only, so any `.mjs`/`.js` in the list was checked by NO rule.
+
+Step 3 - only if errors are reported: attribute by BASELINE, not by line
+number. Lint each listed file as it stands at the merge base, through the
+branch's config, and compare per file by rule id and message (line numbers
+shift):
+
+```
+cd W:/tmp/today-checklist
+BASE=$(git merge-base main HEAD)
+: > .superpowers/gates/5-eslint-base.log
+while read -r f; do if git cat-file -e "$BASE:$f" 2>/dev/null; then echo "== $f" >> .superpowers/gates/5-eslint-base.log; git show "$BASE:$f" | npx eslint --stdin --stdin-filename "$f" >> .superpowers/gates/5-eslint-base.log 2>&1; else echo "== $f NEW FILE (no baseline)" >> .superpowers/gates/5-eslint-base.log; fi; done < .superpowers/gates/5-files.txt
+```
+
+(This baseline is an attribution aid, not the gate, so its pipe is
+allowed.) An error present on the branch and absent at the base is THIS
+branch's and BLOCKING - including `no-unused-vars` on an import line the
+diff never touched (a deleted last use). Every error in a NEW file is the
+branch's. The rest are pre-existing: leave them, and NAME each one
+(`file:line rule`) in S8-gates.md so nobody re-diagnoses them.
+
+### Task S8.4 - the gate report, the S8 report, commit
+
+Step 1 - write
+`docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S8-gates.md`
+(ASCII; real exit codes copied from the `.exit` files; result lines copied
+from the logs):
+
+```
+# S8 - gate results (feat/today-checklist)
+
+- Gates run: <start - end, local time>, Windows host, Node <node --version>.
+- Tree under test: HEAD <sha>. main synced: <main sha>; <"already
+  contained, no merge commit" | "merge commit <sha>">. npm ci after the
+  merge: <yes/no>.
+- DynamoDB Local: up (npm run db:start). Exported AWS_* names: <none |
+  names only>.
+
+| # | Gate | Command (bare) | Exit | Result (from the log) |
+|---|---|---|---|---|
+| 1 | typecheck | npm run typecheck | <n> | <"no errors" or the first error lines> |
+| 2 | test | env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY npm test | <n> | <each workspace's Test Files / Tests line> |
+| 3 | smoke | npm run smoke | <n> | <the smoke's summary line> |
+| 4 | e2e | timeout 2700 npm run e2e | <n> | <"N passed (Xm)" or the failed list> |
+| 5 | eslint, branch files | npx eslint $(git diff --name-only --diff-filter=d main...HEAD -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs') | <n> | <file count; "0 problems" or the attributed list> |
+
+- [dynamoAdmin] lines in gate 2: <none | each line, httpStatusCode, attempts>.
+- Re-runs: <none | which file, why, both results>.
+- Pre-existing lint errors (baseline-attributed, not this branch's):
+  <none | file:line rule>.
+- Lint coverage hole: <any .js/.mjs in the list, checked by no rule | none>.
+```
+
+Step 2 - write
+`docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S8-report.md`
+(ASCII, findings only): the overlap result (S8.1 step 1), the sync record
+(main/github/origin SHAs, merged or already contained, any conflict
+dry-run result), any remote main ahead of local main, and anything the
+tree held that the plan got wrong. Nothing else to report -> one line
+saying so beside the overlap and sync lines.
+
+Step 3 - ASCII checks and commit (no gate running; bare `git status`
+first; MERGE_HEAD absent; exactly the two reports new):
+
+```
+cd W:/tmp/today-checklist
+tr -d '\11\12\15\40-\176' < docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S8-gates.md | wc -c
+tr -d '\11\12\15\40-\176' < docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S8-report.md | wc -c
+git status
+git add docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S8-gates.md docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S8-report.md
+git commit -m "docs(records): today-checklist S8 - main sync and the five gate results" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+Both ASCII checks print `0`. The branch is merge-ready only if every gate
+exit is 0 (gate 5: no error attributable to this branch). Merging into
+main is the human's call; S8 never merges the branch into main, never
+deploys, and deletes no branch or worktree.
+
+### S8 coverage
+
+- Spec sections 2-8: none directly; S8 proves every slice's surfaces
+  together under the five AGENTS.md completion gates.
+- Spec section 9: every listed test runs inside gates 2 and 4.
+- Overlap re-checked at S8 (S8-report.md).

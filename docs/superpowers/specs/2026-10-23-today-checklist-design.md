@@ -1,6 +1,6 @@
 # Today as the daily checklist - design (tracker #31)
 
-Status: DRAFT r2 (after design review round 1). Branch `feat/today-checklist`,
+Status: DRAFT r3 (after design review round 2). Branch `feat/today-checklist`,
 cut from `main` @970a29b9. Tracker: HousingChoice Improvements Tracker item #31
 (Oct 16 meeting with Sam, Oct 18 and Oct 23 decisions). Mockups shared with
 Sam (Design canvas https://claude.ai/artifact/673Q7i9fjQ7zWAH1XydJ5v); Sam
@@ -99,7 +99,7 @@ heading, written for the VA:
   first."
 - Quiet shares: "Properties sent in the last 14 days. Replied and then went
   quiet for 2+ days, or never replied in 5+ days. A message or call from
-  either side restarts the clock."
+  either side restarts the clock; sending another property does not."
 - Needs you now, Past tours, Relay groups to close and Placements: no help
   line (their rows already say why).
 
@@ -132,10 +132,13 @@ Below a dashed divider, headed "At a glance":
 - The route answers 200 whenever its core reads succeed. Quiet shares and
   Tours to book are each computed inside their own try/catch: ANY throw in
   that computation (a units walk, a per-unit read, a contacts batch, the
-  tours read, a units lookup) makes that one section unavailable, logs at
-  WARN with ids and counts only, and leaves the rest of the page intact.
+  tours read) makes that one section unavailable, logs at WARN with ids and
+  counts only, and leaves the rest of the page intact. A failed unit LABEL
+  lookup is not a failure: the row shows the unitId (section 3).
 - The dashboard shows "We couldn't load <section>." in place of an unavailable
-  section (the past-tours error pattern) and withholds "All caught up".
+  section (the past-tours error pattern) and withholds "All caught up". On the
+  fallback (3.1) it shows one line instead, "Some sections can't load right
+  now.", not an error per section.
 
 ## 3. Wire contract (GET /api/today)
 
@@ -252,7 +255,11 @@ Identify lists contacts we do not yet know: contacts whose type is `unknown`
   memoized as now), not only the first five, so the heading count and "Show
   all N" are the rows Today actually qualifies (deleted tenants excluded). The
   "See all N on the Past tab" link keeps the Past tab's own count. Prod: about
-  23 rows.
+  23 rows. Cost: a live reload (tour.updated, now also fired on tour create)
+  re-reads every listed tenant for its delete state, about 23 point reads,
+  debounced; properties stay memoized. The "All caught up" settle wait covers
+  this labeling, which is only ever reached when the rest of the checklist is
+  empty.
 
 ### 5.4 Tours to book (new group `tours_to_book`)
 
@@ -326,7 +333,9 @@ waiting rows together with each row's recipient (the projection it already
 reads, now including `last_reached_out_at`), and the existing Follow up
 projection on top of it. The Follow up route's output stays byte-for-byte the
 same; Today applies the rule above to the core's rows. One contacts read, not
-two.
+two. Today's call passes `consistentRead: true` to that contacts batch
+(`getRecipientDisplaysByIds` already supports it), so a refetch triggered by a
+stamp's event sees the stamp; the Follow up tab keeps its current read.
 
 A person drops off when any of these happens:
 
@@ -350,8 +359,9 @@ A person drops off when any of these happens:
   tenant or caseworker, the contact page's Properties sent list has the
   buttons. An unknown contact's page has no such list
   (`dashboard/src/routes/contact/UnknownFile.tsx`): an unknown leaves Quiet
-  shares when staff reach them (restarting the clock), identify them (a
-  tenant's page then has the buttons), or mark them Inactive.
+  shares when staff reach them (restarting the clock) or mark them Inactive.
+  Identifying them as a tenant does not by itself remove the row; it makes the
+  tenant page's buttons reachable.
 - Inside a property: `replied` people first, then `no_reply`; within each,
   the longest quiet first (oldest quietSince); ties by contactId.
 
@@ -429,14 +439,22 @@ combined field is stored.
   forward-only UpdateItem (`attribute_exists(contactId) AND
   (attribute_not_exists(f) OR f < :at)`), the `'written' | 'skipped' |
   'failed'` result, never throwing.
-- One shared helper, for example `recordStaffOutreach({ contacts, events, log },
-  contactIds, at)`: awaited inline, after the outbound row exists, inside
-  try/catch, ERROR log on 'failed' (ids only), best-effort (a failed stamp never
-  fails or retries the send). When at least one stamp is 'written' it emits
-  `contact.updated` for that contact, so an open Today refetches AFTER the
-  stamp has landed (Today already subscribes to it; this closes the race with
-  the earlier `conversation.updated`). Its doc comment says every new outbound
-  writer must decide stamp or no stamp explicitly.
+- One shared helper, for example `recordStaffOutreach({ contacts, log },
+  contactIds, at)`: awaited inside try/catch, ERROR log on 'failed' (ids
+  only), best-effort (a failed stamp never fails, delays or retries the send).
+  It returns whether any stamp was 'written'. Its doc comment says every new
+  outbound writer must decide stamp or no stamp explicitly.
+- ONE live event per send operation, after its stamps: a one-to-one send,
+  email or call emits `contact.updated` for its contact when its stamp was
+  written; a relay or group post emits nothing per member and instead ONE
+  `conversation.updated` for the thread after its fan-out loop finishes, when
+  any member's stamp was written. Today subscribes to both. This bounds the
+  extra events at one per staff send (not one per relay leg); the
+  `ContactUpdatedEvent` doc comment (`app/src/lib/events.ts`) is updated to
+  name this new emitter. Every client that hears `contact.updated` (Today,
+  Inbox, the open contact page) already refetches on it; at one event per
+  staff send this is the same order of load as the send's own
+  `conversation.updated`.
 - The instant is the outbound row's own timestamp (or, for a call, the dial
   instant), not the request time.
 - The field is server-owned, in all four places `last_heard_from_at` sits: the
@@ -454,12 +472,12 @@ Writers that STAMP:
 | # | Writer | Where the stamp goes | Contact(s) stamped |
 |---|---|---|---|
 | W1 | One-to-one SMS/MMS send, POST /api/conversations/:id/messages (`routes/api.ts` -> `services/sendMessage.ts`) | inside `sendMessage`, after the row is persisted, when the caller passes a staff-outreach option (only W1 and W2 pass it). The service owns the judged recipient (`heldRecipient ?? phoneContact`), which its outcome does not return | the judged recipient |
-| W2 | Staff Retry button, POST .../messages/:sid/retry | as W1 | as W1 |
+| W2 | Staff Retry button, POST .../messages/:sid/retry | as W1, EXCEPT a retry of a share text (the retried row carries `broadcast_id`, `routes/api.ts` ~1880) does not stamp: it is a share, and shares do not count (7.2) | as W1 |
 | W3 | Email send, POST .../email (`services/sendEmailMessage.ts`) | after SES accepts the message | the addressed contact |
-| W4 | Relay group team post (`sendRelayTeamMessage` in `routes/api.ts`, open or still connecting) | where each member's leg is SENT in the relay fan-out (`jobs/relayFanOut.ts`), only for legs of a team post. A suppressed member gets no leg and no stamp; a post queued while the group connects stamps when its legs go out | each member whose leg was sent and who has a contactId |
-| W5 | Native group text post (`services/groupSend.ts`) | after the post succeeds (the row is written only then) | every resolved member contact |
-| W6 | Outbound call (`services/originateCall.ts` + `routes/webhooks/voice.ts`) | in the outbound whisper-gate branch (`POST /voice/whisper-gate`, outbound=1) at the point it returns the `<Dial>` to the target, after the DNC re-check passes. Not at originate (that rings the staff cell first) | the called contact |
-| W7 | Relay group intro whose body staff wrote (`intro_body` set on the create routes for relay groups, tours and placements; `jobs/relayFanOut.ts` applies it) | as W4, for the intro's legs | as W4 |
+| W4 | Relay group team post (`sendRelayTeamMessage` in `routes/api.ts`, open or still connecting) | in the relay fan-out LOOP (`jobs/relayFanOut.ts`, around the `sendOneRelayLeg` call ~1535), when a leg of a team post comes back sent or `sent_unrecorded` - NOT inside `sendOneRelayLeg`, which the 30003 retry rung also calls (`relayRetryLeg.ts`). The instant is the leg's send time, so a post queued while the group connects stamps when its legs actually go out. A suppressed member gets no leg and no stamp. The reconcile's relay-leg adoption does not stamp (a rare recovery path; best-effort) | each member whose leg was sent and who has a contactId |
+| W5 | Native group text post (`services/groupSend.ts`) | after the post succeeds (the row is written only then) | every resolved member contact EXCEPT members whose slot is seeded `excluded` (suppressed, `groupSend.ts` ~607-637) |
+| W6 | Outbound call (`services/originateCall.ts` + `routes/webhooks/voice.ts`) | in the outbound whisper-gate branch (`POST /voice/whisper-gate`, outbound=1), only when it returns the `<Dial>` to the target (after the DNC re-check passes), and AFTER the TwiML response is sent - never between press-1 and the `<Dial>`, where the file forbids awaited work because a slow answer drops the call. The target resolution (`resolveOutboundTarget`) must also carry the contactId the stamp needs. Not at originate (that rings the staff cell first) | the called contact |
+| W7 | Relay group intro whose body staff wrote (`intro_body`, set on the create routes for relay groups, tours and placements) | in `sendRelayAnnouncement`'s own member loop (`services/relayAnnouncements.ts` ~266-321, called from `jobs/relayFanOut.ts` ~1124), gated on the announcement kind being the intro AND the body being the staff-edited `intro_body`. Every other announcement through that loop (default intro, member added, group closed, tour reminder) does not stamp | each member the intro was sent to, with a contactId |
 | W8 | Dev seams that write outbound rows: `/__dev/voice/transcript-fixture` and `/__dev/extraction/message-fixture` (`routes/dev.ts`) | as their inbound twin `touchFixtureHeardFrom` does, when the fixture row is outbound | the fixture's contact |
 
 Writers that do NOT stamp:
@@ -495,9 +513,10 @@ Edge rules:
 
 - Today already refetches (debounced 300 ms) on placement, conversation,
   suggestion, tour and contact events.
-- A staff message, email or call that stamps `last_reached_out_at` emits
-  `contact.updated` after the stamp (7.3), which covers calls (they emit no
-  `conversation.updated`) and closes the race with the earlier event.
+- A staff send that stamps `last_reached_out_at` emits one event after its
+  stamps (7.3), which covers calls (they emit no `conversation.updated`) and
+  closes the race with the send's earlier event; Today reads the contacts
+  consistently (6.1), so the refetch sees the stamp.
 - An inbound message moves `last_heard_from_at` before its
   `conversation.updated` fires (UNVERIFIED for every inbound path; the plan
   checks each and adds the same post-stamp `contact.updated` where the order is
@@ -526,8 +545,11 @@ Edge rules:
   thrown read while the route answers 200.
 - The Follow up tab: its route output is unchanged when `last_reached_out_at`
   is set (regression).
-- Writers: each W1-W8 has a test that it moves the field and emits
-  `contact.updated`; each no-stamp writer has a test that it does not move it.
+- Writers: each W1-W8 has a test that it moves the field and that its send
+  emits exactly one post-stamp event (7.3); each no-stamp writer (including a
+  Retry of a share text, a 30003 relay retry rung and non-intro announcements)
+  has a test that it does not move it. The W6 stamp is asserted to run after
+  the TwiML is sent.
   The PATCH and create parsers refuse the field.
 - Dashboard: section order, help lines, the 5-row limit and Show all / Show
   fewer, quiet-shares property lines (first open, others folded, choices kept
@@ -545,6 +567,9 @@ Edge rules:
     now -> Identify)
   - `e2e/tests/dashboard-next/unknown-inactive.spec.ts` (Needs you now server
     truth and DOM -> Identify)
+  - `app/test/todayApi.test.ts` #30 pins that an ACTIVE team member's
+    unknown_1to1 thread keeps its row (~1037, ~1089): these are INVERTED, not
+    moved - under 5.2 that thread emits no Today row
   - `e2e/tests/flows/conversation-fact-extraction.spec.ts` (the "AI
     suggestions to review" list is now behind the collapsed line)
   - `e2e/tests/dashboard-next/caseworkers.spec.ts`

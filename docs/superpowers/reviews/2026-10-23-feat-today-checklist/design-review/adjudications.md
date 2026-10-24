@@ -55,3 +55,24 @@ counts; A found the unique relay-intro and suppressed-member surfaces).
 <parameter name="command">cd W:/tmp/today-checklist && git status --short && git add docs/superpowers/specs/2026-10-23-today-checklist-design.md docs/superpowers/reviews/2026-10-23-feat-today-checklist/design-review/spec-r1-reviewer-a.md docs/superpowers/reviews/2026-10-23-feat-today-checklist/design-review/spec-r1-reviewer-b.md docs/superpowers/reviews/2026-10-23-feat-today-checklist/design-review/adjudications.md && git commit -q -m "docs(spec,records): today-checklist spec r2 after design review round 1 - shares stop restarting the clock, Identify unknown-only (Cameron), call/relay stamp points, live emits, wire fields
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" && git log --oneline -1
+## Round 2 (spec r2 @e6b5a3cb -> r3), reviewer A continued
+
+Reviewer A conceded the round-1 REJECT of A3 (Tours to book unbounded): the
+prod count and the "Requested N days ago" text justify it.
+
+| Finding | Verdict | What changed / why |
+|---|---|---|
+| R2-1 W6 awaited stamp between press-1 and the Dial; target resolution drops the contactId | ACCEPT | W6 stamps after the TwiML response is sent; `resolveOutboundTarget` carries the contactId. Writer timing changed. |
+| R2-2 W7 points at the wrong loop (intro goes through sendRelayAnnouncement) | ACCEPT | W7 stamps in `sendRelayAnnouncement`'s member loop, gated on the intro kind + staff-edited body. |
+| R2-3 manual Retry of a failed share text stamps | ACCEPT | W2 excludes a retried row carrying `broadcast_id`. |
+| R2-4 post-stamp event still races an eventually consistent BatchGet | ACCEPT | Today's call to the contacts batch passes `consistentRead: true`. DECISION CHANGED (read mode). |
+| R2-5 one contact.updated per relay leg multiplies reloads | ACCEPT | One event per send operation: contact.updated for 1:1/email/call, one conversation.updated per relay/group post after its loop. DECISION CHANGED (event mechanism). |
+| R2-6 W5 stamps suppressed group-text members | ACCEPT | W5 skips slots seeded `excluded`. |
+| R2-7 per-leg stamp location, queued-post instant, sent_unrecorded, reconcile adoption | ACCEPT | W4 stamps in the fan-out loop (not `sendOneRelayLeg`), on sent or sent_unrecorded, at leg send time; reconcile relay-leg adoption does not stamp. |
+| R2-8 2.5 vs 3 contradiction on unit lookups | ACCEPT | 2.5: a label lookup failure degrades to the unitId. |
+| R2-9 help line and 6.2 copy made untrue by r2 decisions | ACCEPT | Help line adds "sending another property does not"; 6.2 no longer says identifying removes the row. |
+| R2-10 #30 active-team-member pin tests are inverted, not moved | ACCEPT | Section 9 names them. |
+| R2-11 labeling every Past row re-reads tenants on every tour.updated | ACCEPT (stated) | 5.3 states the cost (~23 point reads per debounced reload). |
+| R2-12 fallback shows two section errors it never tried | ACCEPT | 2.5: one "Some sections can't load right now." line on the fallback. |
+
+Round 2 changed decisions (read mode, event mechanism), so round 3 runs.

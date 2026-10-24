@@ -9,10 +9,10 @@
   `docs/superpowers/reviews/2026-10-23-feat-today-checklist/`.
 - Spec review: 4 rounds -
   `docs/superpowers/reviews/2026-10-23-feat-today-checklist/design-review/adjudications.md`.
-- Status: PLAN v1 (2026-10-24). Sections 0-4 are BINDING and written by the
+- Status: PLAN v2 (2026-10-24), after plan review round 1. Sections 0-4 are BINDING and written by the
   planner; slice sections 5-11 (S1-S7) are opus section drafts assembled
   verbatim; section 12 (S8) is the planner's.
-  Section 4 (planner rulings PR1-PR80) wins over any slice text it
+  Section 4 (planner rulings PR1-PR93) wins over any slice text it
   contradicts. "Plan section N" always means this file's top-level sections.
 
 ## 0. Ground rules for this plan
@@ -652,6 +652,71 @@ where it differs from these, these win.
   ~719-732, STATUS-MODEL ~231-233 and ~282-295, the open issue
   `public-signup-abuse-hardening.md`). Resolved issues are not edited.
 - PR80 WI10's ruling is PR35 (amended by PR63), not PR30.
+
+### Plan review round 1 rulings (adjudications: `design-review/plan-adjudications.md`)
+
+- PR81 (A1) The founder-triage inbound call (`routes/webhooks/voice.ts`
+  ~834) also emits `contact.updated` for the touched contact right after
+  `touchLastHeardFrom` returns 'written' (ring time emits only
+  `message.persisted`; an abandoned ring has no Dial summary). S2 adds it
+  with a test beside PR15(b), and the S2 inbound-order table records it as
+  fixed, not "touch first".
+- PR82 (A2) Every assertion on `world.recipientDisplayCalls` reads
+  `call.opts?.consistentRead` / `call.opts?.requireComplete` (PR60's
+  `{ contactIds, opts? }` shape); the S4.1 WI1 pin is not a vacuous PIN.
+- PR83 (B2) Every ruling PR41-PR93 that changes what a slice step does is
+  applied INTO that slice's text, with the ruling id in brackets at the
+  changed step. Section 4 still wins on anything left over.
+- PR84 (A3, B7) S2.2 lists the harness suites that drive the default 1:1
+  send path; after the wiring move their deleted / opt-out / consent gates
+  judge `world.contacts`. A case that goes red because its world contact
+  lacks consent is a fixture that relied on the old real-DynamoDB miss: seed
+  consent on that contact and name it in the S2 report; never weaken the
+  assertion. S2.2 also rewrites the stale harness comment
+  (`twilioWebhookHarness.ts` ~5590-5596).
+- PR85 (A4) The S8 report template carries two handback lines: "POST-MERGE
+  OBLIGATION: run the last_reached_out_at backfill AFTER the deploy -
+  Cameron, dev then prod, dry run first (RUNBOOK entry)" and "Tracker #31:
+  the planner records the Oct 23 decisions and Sam's option C pick".
+- PR86 (A5, B4) PR25's degrade rule is replaced: `unitLabelOf` returns
+  `formatAddress(unit.address) || unitId` for any unit `getById` returns,
+  deleted or not; ONLY a throw or an absent item returns the unitId and
+  logs WARN `{ unitId }` (once per request).
+- PR87 (A6) The W6 tests' injected `afterResponse` asserts, when it
+  receives the work, that the response has finished (`res.headersSent`
+  or an equivalent finished flag) and that the fake `touchLastReachedOut`
+  had not been called before the TwiML body was produced.
+- PR88 (A7) One after-loop `conversation.updated` per fan-out PASS is
+  accepted as the reading of spec 7.3's "one per staff send": continuation
+  passes exist only for deferred members and are bounded. S3 records the
+  pass count (WI5).
+- PR89 (A8) `TODAY_TERMINAL` also holds "We couldn't load " (contains,
+  per-section unavailable alerts) and "Some sections can't load right
+  now." (the fallback line).
+- PR90 (A9, B1) WI8 is replaced: Today's eventually consistent reads that
+  matter are the tours byStatus GSI (Tours to book), the tours byUnit GSI
+  and the units byStatus GSI (Quiet shares, via the Follow up core);
+  listing sends is a base-table Query. A tour create's single refetch can
+  miss a not-yet-propagated GSI; no mechanism is added (the same residue
+  Today carries for `conversation.updated` over the byUnread GSI). The S4
+  report and the S7 cost issue record it; no e2e result is read as proof of
+  prod liveness.
+- PR91 (B3) W2 (PR11) passes `staffOutreach: true` only when
+  `original.broadcast_id === undefined && original.automated !== true`. A
+  Retry of a reminder / nudge Send-now row (stored `automated: false`)
+  still stamps: rare, accepted, recorded. The backfill (S6) excludes a
+  manual-retry row (`retry_of` set) whose retried row is in the same
+  thread's window and is automated or matches the PR38 Send-now body rules;
+  one whose retried row is outside the window counts (residue, reported).
+- PR92 (B5) With the type filter first, the unread walk no longer stops at
+  its 100-row cap and reads the byUnread index to its budget; WI7 records
+  the pages one load reads, and the S7 cost issue names it.
+- PR93 (B6, B8) Stamping the `stranded` + `afterSend: true` arm (PR17/PR55)
+  is a deliberate widening of spec 7.3 W4 (the provider accepted the
+  text). The backfill cannot see such a leg (no slot sid); the RUNBOOK
+  entry notes it. PR70 is amended: the backfill counts reconcile RELAY-LEG
+  adoptions only; there is no one-to-one reconcile adoption (`adoptRetry`
+  rows are machine retries and are excluded).
 
 ## 5. S1 - The signal: last_reached_out_at, touchLastReachedOut, recordStaffOutreach
 

@@ -69,12 +69,18 @@
 // run with a PARTIAL report and exit 1. Re-running after the fix is safe.
 //
 // PII: logs counts and contactIds only - never a name, phone, address or body.
+import { QueryCommand, ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { tableName } from '../src/lib/config.js';
 import { attributeInbound, normalizeInstant, type HeardFromLookup } from '../src/lib/heardFrom.js';
 import { FOLLOW_UP_LOOKBACK_MS } from '../src/lib/listingSendOutcome.js';
+import { logger as defaultLogger, type Logger } from '../src/lib/logger.js';
 import type { MessageId } from '../src/messages/catalog.js';
 import { resolveMessage } from '../src/messages/resolve.js';
+import { createContactsRepo, type ContactsRepo } from '../src/repos/contactsRepo.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
 import { splitTsMsgId, type MessageItem } from '../src/repos/messagesRepo.js';
+import { isPointerConversation } from './backfill-last-heard-from.js';
+import { parseStageArgs, resolveStageClient, type StageClient } from './lib/stageClient.js';
 
 export const SCRIPT_NAME = 'backfill-last-reached-out';
 
@@ -463,4 +469,257 @@ async function planOneToOneRow(
  */
 function oneToOneContactOf(thread: ReachedOutThread, lookup: HeardFromLookup): Promise<string | undefined> {
   return attributeInbound({ direction: 'inbound', type: 'sms' }, thread, lookup);
+}
+
+export interface BackfillResult {
+  /** The window read, and the key-condition floor (windowStart - KEY_FLOOR_MARGIN_MS). */
+  windowStart: string;
+  keyFloor: string;
+  /** PR38: the rules applied - reported so the dry run says which. */
+  introRule: typeof INTRO_RULE;
+  sendNowRule: typeof SEND_NOW_RULE;
+  conversationsWalked: number;
+  pointerRows: number;
+  messagesRead: number;
+  /** Tour reminder sends in the window that carry a sentBody (the reminder exclusion's input). */
+  remindersInWindow: number;
+  counted: Record<CountedKind, number>;
+  rowsSkipped: Record<SkipKind, number>;
+  reminderBodyTimeMatched: number;
+  /** PR105: counted staff Retries whose retried row and root were both outside the window (residue). */
+  retryOriginOutsideWindow: number;
+  unparseableInstants: number;
+  /** Contacts with a planned instant (dry run: would touch). */
+  planned: number;
+  written: number;
+  /** No contact row, or a value already as late (a live staff send won). */
+  skipped: number;
+  failed: number;
+}
+
+export interface BackfillOpts {
+  doc: DynamoDBDocumentClient;
+  env: NodeJS.ProcessEnv;
+  /** Write. Absent/false = dry run (the default). */
+  apply?: boolean;
+  /** Injectable for tests; defaults to createContactsRepo({ doc, env, logger }). */
+  contacts?: Pick<ContactsRepo, 'findByPhone' | 'findByEmail' | 'touchLastReachedOut'>;
+  scanLimit?: number;
+  queryLimit?: number;
+  logger?: Logger;
+  /** The run instant the window is measured from. Defaults to the wall clock. */
+  now?: Date;
+}
+
+function syncCounts(plan: ReachedOutPlan, result: BackfillResult): void {
+  result.conversationsWalked = plan.conversationsWalked;
+  result.pointerRows = plan.pointerRows;
+  result.messagesRead = plan.messagesRead;
+  result.counted = { ...plan.counted };
+  result.rowsSkipped = { ...plan.rowsSkipped };
+  result.reminderBodyTimeMatched = plan.reminderBodyTimeMatched;
+  result.retryOriginOutsideWindow = plan.retryOriginOutsideWindow;
+  result.unparseableInstants = plan.unparseableInstants;
+  result.planned = plan.latest.size;
+}
+
+export async function backfillLastReachedOut(opts: BackfillOpts): Promise<BackfillResult> {
+  const log = opts.logger ?? defaultLogger;
+  const bounds = windowBounds(opts.now ?? new Date());
+  const plan = newPlan();
+  const result: BackfillResult = {
+    windowStart: bounds.windowStart,
+    keyFloor: bounds.keyFloor,
+    introRule: INTRO_RULE,
+    sendNowRule: SEND_NOW_RULE,
+    conversationsWalked: 0,
+    pointerRows: 0,
+    messagesRead: 0,
+    remindersInWindow: 0,
+    counted: zeroed(COUNTED_KINDS),
+    rowsSkipped: zeroed(SKIP_KINDS),
+    reminderBodyTimeMatched: 0,
+    retryOriginOutsideWindow: 0,
+    unparseableInstants: 0,
+    planned: 0,
+    written: 0,
+    skipped: 0,
+    failed: 0,
+  };
+  try {
+    await run(opts, bounds, plan, result, log);
+  } catch (err) {
+    syncCounts(plan, result);
+    log.error(
+      { ...result, apply: opts.apply === true },
+      `${SCRIPT_NAME} - PARTIAL result: the run ABORTED and these counters cover only what completed before the failure. Every write is conditional and forward-only, so re-running after the fix is safe.`,
+    );
+    throw err;
+  }
+  return result;
+}
+
+/** The in-window tour reminder sends, indexed by body (PR38). One Scan; the
+ *  table is small and has no index on sentAt. */
+async function readReminderSends(
+  opts: BackfillOpts,
+  bounds: { windowStart: string; keyFloor: string },
+): Promise<Map<string, string[]>> {
+  const items: ReminderSendRow[] = [];
+  let scanKey: Record<string, unknown> | undefined;
+  do {
+    const page = await opts.doc.send(
+      new ScanCommand({
+        TableName: tableName('tourReminders', opts.env),
+        FilterExpression: 'attribute_exists(#sentBody) AND #sentAt >= :floor',
+        ProjectionExpression: '#sentAt, #sentBody',
+        ExpressionAttributeNames: { '#sentAt': 'sentAt', '#sentBody': 'sentBody' },
+        ExpressionAttributeValues: { ':floor': bounds.keyFloor },
+        ...(opts.scanLimit !== undefined && { Limit: opts.scanLimit }),
+        ...(scanKey !== undefined && { ExclusiveStartKey: scanKey }),
+      }),
+    );
+    items.push(...((page.Items ?? []) as ReminderSendRow[]));
+    scanKey = page.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (scanKey !== undefined);
+  return indexReminderSends(items, bounds.windowStart);
+}
+
+async function run(
+  opts: BackfillOpts,
+  bounds: { windowStart: string; keyFloor: string },
+  plan: ReachedOutPlan,
+  result: BackfillResult,
+  log: Logger,
+): Promise<void> {
+  const contacts = opts.contacts ?? createContactsRepo({ doc: opts.doc, env: opts.env, logger: log });
+  // One byPhone/byEmail Query per distinct key, however many rows name it.
+  const memo = new Map<string, Promise<{ contactId: string } | undefined>>();
+  const memoized = (key: string, read: () => Promise<{ contactId: string } | undefined>) => {
+    let hit = memo.get(key);
+    if (hit === undefined) {
+      hit = read().then((c) => (c === undefined ? undefined : { contactId: c.contactId }));
+      memo.set(key, hit);
+    }
+    return hit;
+  };
+  const lookup: HeardFromLookup = {
+    byPhone: (e164) => memoized(`phone:${e164}`, () => contacts.findByPhone(e164)),
+    byEmail: (address) => memoized(`email:${address}`, () => contacts.findByEmail(address)),
+  };
+  const reminderSends = await readReminderSends(opts, bounds);
+  result.remindersInWindow = [...reminderSends.values()].reduce((n, sends) => n + sends.length, 0);
+  const ctx: ReachedOutContext = {
+    lookup,
+    windowStart: bounds.windowStart,
+    nudgeBodies: nudgeBodySet(),
+    reminderSends,
+  };
+  const messagesTable = tableName('messages', opts.env);
+
+  const walkThread = async (thread: ConversationItem): Promise<void> => {
+    let startKey: Record<string, unknown> | undefined;
+    do {
+      const page = await opts.doc.send(
+        new QueryCommand({
+          TableName: messagesTable,
+          KeyConditionExpression: 'conversationId = :c AND tsMsgId >= :floor',
+          FilterExpression: '#dir = :outbound',
+          ExpressionAttributeNames: { '#dir': 'direction' },
+          ExpressionAttributeValues: {
+            ':c': thread.conversationId,
+            ':floor': bounds.keyFloor,
+            ':outbound': 'outbound',
+          },
+          ...(opts.queryLimit !== undefined && { Limit: opts.queryLimit }),
+          ...(startKey !== undefined && { ExclusiveStartKey: startKey }),
+        }),
+      );
+      await planThreadPage(plan, thread, (page.Items ?? []) as MessageItem[], ctx);
+      startKey = page.LastEvaluatedKey as Record<string, unknown> | undefined;
+    } while (startKey !== undefined);
+  };
+
+  let scanKey: Record<string, unknown> | undefined;
+  do {
+    const page = await opts.doc.send(
+      new ScanCommand({
+        TableName: tableName('conversations', opts.env),
+        ...(opts.scanLimit !== undefined && { Limit: opts.scanLimit }),
+        ...(scanKey !== undefined && { ExclusiveStartKey: scanKey }),
+      }),
+    );
+    for (const raw of (page.Items ?? []) as ConversationItem[]) {
+      if (isPointerConversation(raw.conversationId)) {
+        plan.pointerRows += 1;
+        continue;
+      }
+      plan.conversationsWalked += 1;
+      await walkThread(raw);
+    }
+    scanKey = page.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (scanKey !== undefined);
+
+  syncCounts(plan, result);
+  log.info({ ...result, apply: opts.apply === true }, `${SCRIPT_NAME} - planned`);
+  if (opts.apply !== true) return;
+
+  // contactId order: deterministic logs and a deterministic abort point.
+  for (const [contactId, at] of [...plan.latest].sort(([a], [b]) => a.localeCompare(b))) {
+    const outcome = await contacts.touchLastReachedOut(contactId, at);
+    if (outcome === 'written') result.written += 1;
+    else if (outcome === 'skipped') result.skipped += 1;
+    else {
+      result.failed += 1;
+      log.error({ contactId }, `${SCRIPT_NAME} - touch FAILED (not a lost condition) - aborting`);
+      throw new Error(`${SCRIPT_NAME}: touchLastReachedOut failed for ${contactId}`);
+    }
+  }
+}
+
+/** The end-of-run report (exit 0: a failed touch has already aborted). */
+export function reportBackfillRun(result: BackfillResult, apply: boolean, log: Logger = defaultLogger): 0 {
+  log.info({ ...result, apply }, `${SCRIPT_NAME} - done${apply ? '' : ' (DRY RUN - nothing written)'}`);
+  return 0;
+}
+
+const invokedDirectly =
+  import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith(`${SCRIPT_NAME}.ts`);
+if (invokedDirectly) {
+  const parsed = parseStageArgs(process.argv.slice(2), { values: [], flags: ['--apply'] });
+  if ('usage' in parsed) {
+    console.error(
+      `Usage: npx tsx app/scripts/${SCRIPT_NAME}.ts --env local|dev|prod [--lane <L>] [--apply]\n` +
+        '  DRY RUN by default; --apply writes. Unknown or repeated arguments are refused. --lane selects a hermetic e2e lane\n' +
+        '  (local only). An agent uses --env local --lane <L> ONLY. Run it AFTER the deploy (RUNBOOK).',
+    );
+    process.exit(2);
+  }
+  const apply = parsed.flags.has('--apply');
+  void (async () => {
+    // STEP 1 - resolve the target on its own: a refusal here happens BEFORE any
+    // table is read, so it must never point the operator at a PARTIAL report.
+    let stage: StageClient;
+    try {
+      stage = await resolveStageClient(parsed.target, {}, parsed.lane !== undefined ? { lane: parsed.lane } : {});
+    } catch (err) {
+      defaultLogger.error({ err }, `${SCRIPT_NAME} - FAILED before the run started (no table was read or written)`);
+      process.exitCode = 1;
+      return;
+    }
+    // STEP 2 - the run.
+    try {
+      defaultLogger.info(
+        { target: parsed.target, endpoint: stage.describe, prefix: stage.prefix, apply },
+        `${SCRIPT_NAME} - starting`,
+      );
+      const result = await backfillLastReachedOut({ doc: stage.doc, env: stage.env, apply });
+      process.exitCode = reportBackfillRun(result, apply);
+    } catch (err) {
+      defaultLogger.error({ err }, `${SCRIPT_NAME} - FAILED (see the PARTIAL report above)`);
+      process.exitCode = 1;
+    } finally {
+      stage.doc.destroy();
+    }
+  })();
 }

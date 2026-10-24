@@ -12,6 +12,7 @@
 //    paging, plus the tourReminders Scan, and a fake contacts repo that models
 //    the forward-only conditional touch.
 import { describe, expect, it } from 'vitest';
+import { QueryCommand, ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import {
   COUNTED_KINDS,
   KEY_FLOOR_MARGIN_MS,
@@ -19,10 +20,12 @@ import {
   REMINDER_TIME_MATCH_MS,
   SKIP_KINDS,
   WINDOW_MS,
+  backfillLastReachedOut,
   indexReminderSends,
   newPlan,
   nudgeBodySet,
   planThreadPage,
+  reportBackfillRun,
   windowBounds,
   type ReachedOutContext,
   type ReachedOutPlan,
@@ -30,10 +33,13 @@ import {
 } from '../scripts/backfill-last-reached-out.js';
 import { TEAM_SENDER_KEY } from '../src/jobs/relayFanOut.js';
 import type { HeardFromLookup } from '../src/lib/heardFrom.js';
+import { createLogger } from '../src/lib/logger.js';
 import { MESSAGE_CATALOG } from '../src/messages/catalog.js';
+import type { ContactItem } from '../src/repos/contactsRepo.js';
 import { relayMemberKey, type MessageItem, type RelayRecipientDelivery } from '../src/repos/messagesRepo.js';
 import { groupMemberKey } from '../src/services/groupMembers.js';
 import { SYSTEM_SENDER_KEY } from '../src/services/relayAnnouncements.js';
+import { createLogCapture } from './helpers/logCapture.js';
 
 // ---------------------------------------------------------------------------
 // Half 1 - the planner
@@ -645,5 +651,365 @@ describe('planThreadPage - what never counts, and the window', () => {
     await planThreadPage(relayFirst, relayA, relayRows, ctx());
     await planThreadPage(relayFirst, ONE, oneRows, ctx());
     expect(relayFirst.latest.get('c-a')).toBe('2026-10-20T10:00:00.500Z');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Half 2 - the runner
+// ---------------------------------------------------------------------------
+
+interface FakeTables {
+  conversations: Record<string, unknown>[];
+  messages: Record<string, unknown>[];
+  reminders: Record<string, unknown>[];
+}
+
+function fakeDoc(tables: FakeTables, pageSize = 1000) {
+  const queries: Record<string, any>[] = [];
+  const scans: Record<string, any>[] = [];
+  const doc = {
+    async send(command: unknown) {
+      if (command instanceof ScanCommand) {
+        const input = command.input as Record<string, any>;
+        scans.push(input);
+        if (input['TableName'] === 'hc-test-conversations') return { Items: tables.conversations };
+        if (input['TableName'] === 'hc-test-tourReminders') {
+          // Models the FilterExpression: attribute_exists(sentBody) AND sentAt >= :floor.
+          const floor = String(input['ExpressionAttributeValues'][':floor']);
+          return {
+            Items: tables.reminders.filter(
+              (r) => r['sentBody'] !== undefined && typeof r['sentAt'] === 'string' && r['sentAt'] >= floor,
+            ),
+          };
+        }
+        throw new Error(`unexpected Scan of ${String(input['TableName'])}`);
+      }
+      if (command instanceof QueryCommand) {
+        const input = command.input as Record<string, any>;
+        queries.push(input);
+        const values = input['ExpressionAttributeValues'];
+        // Models the KEY CONDITION (conversationId = :c AND tsMsgId >= :floor),
+        // the FilterExpression (#dir = :outbound) and ascending key order.
+        const rows = tables.messages
+          .filter((m) => m['conversationId'] === values[':c'] && String(m['tsMsgId']) >= String(values[':floor']))
+          .filter((m) => m['direction'] === values[':outbound'])
+          .sort((a, b) => (String(a['tsMsgId']) < String(b['tsMsgId']) ? -1 : 1));
+        const start = input['ExclusiveStartKey'] === undefined ? 0 : Number(input['ExclusiveStartKey'].idx);
+        const next = start + pageSize < rows.length ? { idx: start + pageSize } : undefined;
+        return { Items: rows.slice(start, start + pageSize), ...(next && { LastEvaluatedKey: next }) };
+      }
+      throw new Error('unexpected command');
+    },
+  };
+  return { doc: doc as unknown as DynamoDBDocumentClient, queries, scans };
+}
+
+/** Forward-only, like the real conditional writer. */
+function fakeContacts(failFor?: string) {
+  const stored = new Map<string, string>();
+  const touches: { contactId: string; at: string }[] = [];
+  const contacts = {
+    async findByPhone(phone: string): Promise<ContactItem | undefined> {
+      return phone === '+15550100004' ? ({ contactId: 'c-d' } as ContactItem) : undefined;
+    },
+    async findByEmail(): Promise<ContactItem | undefined> {
+      return undefined;
+    },
+    async touchLastReachedOut(contactId: string, at: string): Promise<'written' | 'skipped' | 'failed'> {
+      touches.push({ contactId, at });
+      if (contactId === failFor) return 'failed';
+      const prior = stored.get(contactId);
+      if (prior !== undefined && prior >= at) return 'skipped';
+      stored.set(contactId, at);
+      return 'written';
+    },
+  };
+  return { contacts, stored, touches };
+}
+
+const RUN_NOW = new Date('2026-10-24T12:00:00.000Z');
+const KEY_FLOOR = '2026-10-10T11:00:00.000Z';
+const REMINDER_BODY = 'SECRET reminder copy: your tour is tomorrow at 10am.';
+const OLD_REMINDER_BODY = 'SECRET old reminder copy.';
+const ENV = { TABLE_PREFIX: 'hc-test-' } as NodeJS.ProcessEnv;
+
+/** A stored staff text (the raw item the Query returns). */
+const staff = (conversationId: string, tsMsgId: string, over: Record<string, unknown> = {}) => ({
+  conversationId,
+  tsMsgId,
+  type: 'sms',
+  direction: 'outbound',
+  author: 'teammate',
+  delivery_status: 'sent',
+  automated: false,
+  body: 'SECRET staff text',
+  ...over,
+});
+
+const TABLES: FakeTables = {
+  conversations: [
+    { conversationId: 'phone#+15550100001', ref_conversationId: 'one' },
+    {
+      conversationId: 'one',
+      type: 'tenant_1to1',
+      participant_phone: '+15550100001',
+      participants: [{ contactId: 'c-a', phone: '+15550100001', name: 'Pat Secret' }],
+    },
+    {
+      conversationId: 'two',
+      type: 'partner_1to1',
+      participant_email: 'pat@x.test',
+      participants: [{ contactId: 'c-a', phone: '+15550100001', name: 'Pat Secret' }],
+    },
+    {
+      conversationId: 'three',
+      type: 'tenant_1to1',
+      participants: [{ contactId: 'c-e', phone: '+15550100006', name: 'Eve Secret' }],
+    },
+    {
+      conversationId: 'grp',
+      type: 'relay_group',
+      participants: [
+        { contactId: 'c-b', phone: '+15550100002', name: 'Bo Secret' },
+        { contactId: 'c-c', phone: '+15550100003', name: 'Cy Secret' },
+        { contactId: '', phone: '+15550100004' },
+      ],
+    },
+    {
+      conversationId: 'gt',
+      type: 'group_text',
+      participants: [
+        { contactId: 'c-g', phone: '+15550100008', name: 'Gus Secret' },
+        { contactId: '', phone: '+15550100004' },
+        { contactId: '', phone: '+15550100009' },
+      ],
+    },
+  ],
+  messages: [
+    staff('one', '2026-10-01T10:00:00.000Z#SM0'), // below the key floor: never read
+    staff('one', '2026-10-10T11:30:00.000Z#SM-m'), // above the floor, before the window
+    staff('one', '2026-10-20T10:00:00.000Z#SM1'),
+    staff('one', '2026-10-22T09:00:00.000Z#SM2'),
+    staff('one', '2026-10-22T10:00:00.000Z#SM3', { body: REMINDER_BODY }), // a reminder Send now
+    staff('one', '2026-10-22T11:00:00.000Z#SM4', { direction: 'inbound', author: 'tenant' }), // the Query filters it
+    {
+      conversationId: 'two',
+      tsMsgId: '2026-10-23T10:00:00.000Z#hc-1@mail.x.test',
+      type: 'email',
+      direction: 'outbound',
+      author: 'teammate',
+      delivery_status: 'sent',
+      ses_message_id: 'ses-1',
+      email_to: ['pat@x.test'],
+      body: 'SECRET email',
+    },
+    staff('three', '2026-10-15T09:00:00.000Z#SM5', { body: OLD_REMINDER_BODY }), // that reminder is outside the window
+    {
+      conversationId: 'grp',
+      tsMsgId: '2026-10-21T08:00:00.000Z#team-1',
+      type: 'sms',
+      direction: 'outbound',
+      author: 'teammate',
+      delivery_status: 'queued',
+      relay_sender_key: TEAM_SENDER_KEY,
+      body: 'SECRET team post',
+      delivery_recipients: {
+        'c-b': { status: 'sent', sid: 'SM-b', sentAt: '2026-10-21T08:00:05.000Z' },
+        'c-c': { status: 'queued' },
+        'phone#+15550100004': { status: 'sent', sid: 'SM-p', sentAt: '2026-10-21T08:00:06.000Z' },
+      },
+    },
+    {
+      conversationId: 'gt',
+      tsMsgId: '2026-10-23T07:00:00.000Z#IM1',
+      type: 'sms',
+      direction: 'outbound',
+      author: 'teammate',
+      delivery_status: 'queued',
+      relay_sender_key: TEAM_SENDER_KEY,
+      body: 'SECRET group text',
+      delivery_recipients: {
+        [groupMemberKey('+15550100008')]: { status: 'queued', transportAggregationState: 'attempted' },
+        [groupMemberKey('+15550100004')]: { status: 'queued', transportAggregationState: 'attempted' },
+        [groupMemberKey('+15550100009')]: {
+          status: 'failed',
+          errorCode: 'contact_opted_out',
+          transportAggregationState: 'excluded',
+        },
+      },
+    },
+  ],
+  reminders: [
+    { reminderId: 'r-1', tourId: 't-1', sentAt: '2026-10-22T09:55:00.000Z', sentBody: REMINDER_BODY },
+    { reminderId: 'r-0', tourId: 't-0', sentAt: '2026-10-01T09:00:00.000Z', sentBody: OLD_REMINDER_BODY },
+    { reminderId: 'r-2', tourId: 't-2', dueAt: '2026-10-30T09:00:00.000Z' },
+  ],
+};
+
+/** contactId order (the runner sorts). c-a: the email in `two` is later than its texts in `one`. */
+const EXPECTED_TOUCHES = [
+  { contactId: 'c-a', at: '2026-10-23T10:00:00.000Z' },
+  { contactId: 'c-b', at: '2026-10-21T08:00:05.000Z' },
+  { contactId: 'c-d', at: '2026-10-23T07:00:00.000Z' },
+  { contactId: 'c-e', at: '2026-10-15T09:00:00.000Z' },
+  { contactId: 'c-g', at: '2026-10-23T07:00:00.000Z' },
+];
+
+function zeroSkips(): Record<string, number> {
+  return Object.fromEntries(SKIP_KINDS.map((k) => [k, 0]));
+}
+
+function capturedLogger() {
+  const capture = createLogCapture();
+  return { capture, logger: createLogger({ level: 'info', destination: capture.stream }) };
+}
+
+describe('backfillLastReachedOut - the runner', () => {
+  it('a dry run (the default) reads the window, reports every category and writes nothing', async () => {
+    const { doc, queries, scans } = fakeDoc(TABLES);
+    const { contacts, touches } = fakeContacts();
+    const { logger } = capturedLogger();
+    const result = await backfillLastReachedOut({ doc, env: ENV, contacts, logger, now: RUN_NOW });
+    expect(touches).toEqual([]);
+    expect(result).toMatchObject({
+      windowStart: '2026-10-10T12:00:00.000Z',
+      keyFloor: KEY_FLOOR,
+      introRule: 'body_match',
+      sendNowRule: 'exclude_by_body',
+      conversationsWalked: 5,
+      pointerRows: 1,
+      messagesRead: 8,
+      remindersInWindow: 1,
+      reminderBodyTimeMatched: 1,
+      // PR91: the fixture holds no staff Retry.
+      retryOriginOutsideWindow: 0,
+      unparseableInstants: 0,
+      planned: 5,
+      written: 0,
+      skipped: 0,
+      failed: 0,
+    });
+    expect(result.counted).toEqual({
+      text: 3,
+      email: 1,
+      call: 0,
+      relay_team_slot: 1,
+      group_text_slot: 2,
+      edited_intro_slot: 0,
+    });
+    expect(result.rowsSkipped).toEqual({
+      ...zeroSkips(),
+      outside_window: 1,
+      excluded_reminder_body: 1,
+      slot_not_sent: 1,
+      relay_phone_slot: 1,
+      group_excluded_slot: 1,
+    });
+    // ONE key-condition Query per thread over the window - never the full history.
+    expect(queries.map((q) => q['ExpressionAttributeValues'][':c'])).toEqual(['one', 'two', 'three', 'grp', 'gt']);
+    for (const q of queries) {
+      expect(q['TableName']).toBe('hc-test-messages');
+      expect(q['KeyConditionExpression']).toBe('conversationId = :c AND tsMsgId >= :floor');
+      expect(q['ExpressionAttributeValues'][':floor']).toBe(KEY_FLOOR);
+      expect(q['FilterExpression']).toBe('#dir = :outbound');
+      expect(q['ExpressionAttributeNames']).toEqual({ '#dir': 'direction' });
+    }
+    const reminderScan = scans.find((s) => s['TableName'] === 'hc-test-tourReminders');
+    expect(reminderScan?.['FilterExpression']).toBe('attribute_exists(#sentBody) AND #sentAt >= :floor');
+    expect(reminderScan?.['ExpressionAttributeValues']).toEqual({ ':floor': KEY_FLOOR });
+  });
+
+  it('an apply makes ONE touch per contact with its latest instant across threads, and a second apply writes nothing', async () => {
+    const { doc } = fakeDoc(TABLES);
+    const { contacts, touches } = fakeContacts();
+    const { logger } = capturedLogger();
+    const first = await backfillLastReachedOut({ doc, env: ENV, contacts, logger, now: RUN_NOW, apply: true });
+    expect(touches).toEqual(EXPECTED_TOUCHES);
+    expect(first.written).toBe(5);
+    expect(first.written).toBe(first.planned);
+
+    const second = await backfillLastReachedOut({ doc, env: ENV, contacts, logger, now: RUN_NOW, apply: true });
+    expect(second.written).toBe(0);
+    expect(second.skipped).toBe(second.planned);
+    expect(second.skipped).toBe(5);
+  });
+
+  it('pages: every thread is read until LastEvaluatedKey is gone', async () => {
+    const { doc, queries } = fakeDoc(TABLES, 1);
+    const { contacts, touches } = fakeContacts();
+    const { logger } = capturedLogger();
+    await backfillLastReachedOut({ doc, env: ENV, contacts, logger, now: RUN_NOW, apply: true });
+    const byThread = (id: string) => queries.filter((q) => q['ExpressionAttributeValues'][':c'] === id).length;
+    // `one` returns four window rows (SM-m, SM1, SM2, SM3), one per page.
+    expect(byThread('one')).toBe(4);
+    expect(byThread('grp')).toBe(1);
+    expect(queries.length).toBe(8);
+    expect(touches).toEqual(EXPECTED_TOUCHES);
+  });
+
+  it('a FAILED touch aborts the run with a PARTIAL report and no later touch', async () => {
+    const { doc } = fakeDoc(TABLES);
+    const { contacts, touches } = fakeContacts('c-a');
+    const { capture, logger } = capturedLogger();
+    await expect(
+      backfillLastReachedOut({ doc, env: ENV, contacts, logger, now: RUN_NOW, apply: true }),
+    ).rejects.toThrow(/touchLastReachedOut failed for c-a/);
+    expect(touches.map((t) => t.contactId)).toEqual(['c-a']);
+    const partial = capture.atLevel(50).find((l) => String(l['msg']).includes('PARTIAL result'));
+    expect(partial).toBeDefined();
+    expect(partial?.['failed']).toBe(1);
+    expect(partial?.['written']).toBe(0);
+    expect(partial?.['planned']).toBe(5);
+    expect(partial?.['apply']).toBe(true);
+  });
+
+  it('logs counts and ids only - never a body, a phone, an address or a name', async () => {
+    const ok = capturedLogger();
+    await backfillLastReachedOut({
+      doc: fakeDoc(TABLES).doc,
+      env: ENV,
+      contacts: fakeContacts().contacts,
+      logger: ok.logger,
+      now: RUN_NOW,
+      apply: true,
+    });
+    const failing = capturedLogger();
+    await expect(
+      backfillLastReachedOut({
+        doc: fakeDoc(TABLES).doc,
+        env: ENV,
+        contacts: fakeContacts('c-a').contacts,
+        logger: failing.logger,
+        now: RUN_NOW,
+        apply: true,
+      }),
+    ).rejects.toThrow();
+    expect(ok.capture.lines.length).toBeGreaterThan(0);
+    expect(failing.capture.lines.length).toBeGreaterThan(0);
+    const logged = JSON.stringify([...ok.capture.lines, ...failing.capture.lines]);
+    for (const needle of ['SECRET', 'Secret', '+1555', 'x.test', 'ses-1']) {
+      expect(logged).not.toContain(needle);
+    }
+  });
+
+  it('reportBackfillRun returns 0, names a dry run in its done line, and carries the counts and the rules', async () => {
+    const { doc } = fakeDoc(TABLES);
+    const { contacts } = fakeContacts();
+    const result = await backfillLastReachedOut({ doc, env: ENV, contacts, logger: capturedLogger().logger, now: RUN_NOW });
+
+    const dry = capturedLogger();
+    expect(reportBackfillRun(result, false, dry.logger)).toBe(0);
+    const dryDone = dry.capture.atLevel(30).at(-1);
+    expect(dryDone?.['msg']).toBe('backfill-last-reached-out - done (DRY RUN - nothing written)');
+    expect(dryDone?.['planned']).toBe(5);
+    expect(dryDone?.['apply']).toBe(false);
+    expect(dryDone?.['introRule']).toBe('body_match');
+    expect(dryDone?.['sendNowRule']).toBe('exclude_by_body');
+    expect(dryDone?.['counted']).toEqual(result.counted);
+    expect(dryDone?.['rowsSkipped']).toEqual(result.rowsSkipped);
+
+    const live = capturedLogger();
+    expect(reportBackfillRun(result, true, live.logger)).toBe(0);
+    expect(live.capture.atLevel(30).at(-1)?.['msg']).toBe('backfill-last-reached-out - done');
   });
 });

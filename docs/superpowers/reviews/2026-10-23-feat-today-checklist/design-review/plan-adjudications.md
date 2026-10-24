@@ -86,3 +86,14 @@ the `system_copy` marker, PR104-PR106). Round 3 reviewed only that delta
 | R3-2 work map: S6 also depends on S2 (it reads `MessageItem.system_copy`) | ACCEPT | Plan section 2 amended. |
 
 Round 3 added two writer surfaces, so round 4 (the cap) reviews PR107 only.
+
+## Round 4 (PR107 only) - TERMINAL, the cap
+
+| Finding | Verdict | What changed / why |
+|---|---|---|
+| R4-1 pre-deploy Send-now rows and manual retries of automated texts carry no marker, so a post-deploy staff Retry of one stamps | ACCEPT (record) | PR108: accepted residue - Retry is offered only on failed rows, the effect ages out of Quiet shares in 14 days, and the backfill's root/body rules cover the same history; no chain-root lookup. |
+
+The reviewer confirmed PR107 complete (every re-send of an existing 1:1 row
+goes through retrySend or adoptRetry; no other row builder or dev seam
+re-creates a row) and S2.2a sound cold. No decision changed: round 4 is
+TERMINAL. Plan review: 4 rounds, 26 findings, no reject. Plan v4 FINAL.

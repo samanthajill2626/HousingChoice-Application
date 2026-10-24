@@ -9,12 +9,12 @@
   `docs/superpowers/reviews/2026-10-23-feat-today-checklist/`.
 - Spec review: 4 rounds -
   `docs/superpowers/reviews/2026-10-23-feat-today-checklist/design-review/adjudications.md`.
-- Status: PLAN v4 (2026-10-24): v3 FINAL plus Cameron's launch-gate revisions (PR102-PR105, spec r8). Sections 0-4 are BINDING and written by the
+- Status: PLAN v4 FINAL (2026-10-24): v3 plus Cameron's launch-gate revisions (PR102-PR108, spec r8); plan review CLOSED after 4 rounds (round 4 terminal). Sections 0-4 are BINDING and written by the
   planner; slice sections 5-11 (S1-S7) are opus section drafts assembled
   verbatim, with every ruling PR41-PR93 that changes a step applied into
   the slice text and marked `[PRnn]` at the changed step (PR83); section 12
   (S8) is the planner's.
-  Section 4 (planner rulings PR1-PR107) wins over any slice text it
+  Section 4 (planner rulings PR1-PR108) wins over any slice text it
   contradicts. "Plan section N" always means this file's top-level sections.
 
 ## 0. Ground rules for this plan
@@ -829,6 +829,13 @@ where it differs from these, these win.
   then a staff Retry of THAT newest row - does not stamp and writes the
   marker. Section 2's work map: S6 depends on S1 and S2 (R3-2). S2 carries
   it as Task S2.2a.
+
+- PR108 (R4-1) Accepted residue: a failed Send-now row, or a manual Retry of
+  an automated text, written BEFORE the deploy carries no `system_copy`, so
+  a staff Retry of it after the deploy stamps (W2 judges the pressed row).
+  Rare (Retry is offered only on failed rows) and it ages out of Quiet
+  shares within 14 days; the backfill's root and body rules cover the same
+  history. No chain-root lookup is added; the S2 report records it.
 
 ## 5. S1 - The signal: last_reached_out_at, touchLastReachedOut, recordStaffOutreach
 

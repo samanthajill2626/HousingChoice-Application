@@ -486,17 +486,16 @@ export type SystemTraceResult =
 // routes/today/buildToday.ts). Copied verbatim from the build plan §C7.
 
 /** Spec 2026-10-23-today-checklist-design 3 (mirrors app/src/routes/today.ts):
- *  `identify` (split from needs_you_now) and `tours_to_book` are new.
- *  `unreplied` has no producer left; plan task S5.6 removes it from this
- *  union together with its last reader (Today.tsx). */
+ *  `identify` (split from needs_you_now) and `tours_to_book` are new; the
+ *  unread-thread group is gone (known contacts' unread threads live in the
+ *  Inbox only, spec 4). */
 export type TodayGroup =
   | 'needs_you_now'
   | 'identify'
   | 'tours_to_book'
   | 'tours_today'
   | 'follow_ups'
-  | 'ai_suggestions'
-  | 'unreplied';
+  | 'ai_suggestions';
 export interface TodayItem {
   group: TodayGroup;
   refType: 'placement' | 'contact' | 'conversation' | 'tour';
@@ -2221,7 +2220,7 @@ export interface UnmatchedEmailUpdatedEvent {
 // --- Conversation fact extraction (AI review UI) -----------------------------
 // The pending-review record the extraction pipeline writes (one per contact +
 // target). The dashboard reads these to render AutoBadges / SuggestionChips and
-// the Today "AI suggestions to review" group. Wire shape mirrors the server's
+// the Today "AI suggestions for N contacts" line. Wire shape mirrors the server's
 // SuggestionItem (app/src/repos/extractionRepo.ts) verbatim.
 
 /** Provenance stamp written onto a contact field when its value came from (or was

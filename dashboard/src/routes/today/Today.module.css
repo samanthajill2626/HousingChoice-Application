@@ -488,3 +488,91 @@
   color: var(--c-text-muted);
   font-size: var(--fs-sm);
 }
+
+/* The fallback's one line (spec 2.5): some sections cannot load right now. */
+.notice {
+  margin: 0 0 var(--sp-4);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface-2);
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+
+/* --- At a glance (spec 2026-10-23 2.4) ------------------------------------- */
+
+/* Below a dashed divider: reference only, never part of the checklist. */
+.glance {
+  margin-top: var(--sp-6);
+  padding-top: var(--sp-5);
+  border-top: 2px dashed var(--c-border-strong);
+}
+
+/* Tours today: compact rows (time - tenant - property), not cards. */
+.compactItem {
+  margin: 0;
+}
+
+.compactRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-1);
+  border-bottom: 1px solid var(--c-divider);
+  color: inherit;
+  font-size: var(--fs-sm);
+  text-decoration: none;
+}
+
+.compactRow:hover .who {
+  text-decoration: underline;
+}
+
+.compactRow:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
+.compactTime {
+  flex: 0 0 5rem;
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+  white-space: nowrap;
+}
+
+/* The AI suggestions line: one full-width button, collapsed by default. */
+.aiToggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  width: 100%;
+  min-height: 2.75rem;
+  padding: var(--sp-2) var(--sp-4);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface-2);
+  color: var(--c-text);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  text-align: left;
+  cursor: pointer;
+}
+
+.aiToggle:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
+.aiChevron {
+  flex: 0 0 auto;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+}
+
+.aiBody {
+  margin-top: var(--sp-2);
+}

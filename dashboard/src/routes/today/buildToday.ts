@@ -47,9 +47,6 @@ const GROUP_ORDER: Record<TodayItem['group'], number> = {
   tours_today: 3,
   follow_ups: 4,
   ai_suggestions: 5,
-  // No producer is left (spec 2026-10-23 4). Plan task S5.6 deletes this key
-  // with the group itself, once Today.tsx no longer reads it.
-  unreplied: 6,
 };
 
 /** Deadline types that route to follow_ups rather than needs_you_now. */

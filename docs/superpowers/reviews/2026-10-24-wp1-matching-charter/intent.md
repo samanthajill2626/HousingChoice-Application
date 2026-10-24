@@ -107,3 +107,32 @@ quality Sam trusts, then her review of it, then the two views.
 - Testing API key from Sam: on Cameron's list; needed before B2.
 - Assumed: the AI call stays on Anthropic (A1 section 6 and 8 price it on
   Sonnet 5 and bill Sam's account) unless the model question changes it.
+
+## Decisions, round 2 (Cameron, 2026-10-24)
+
+- D-model: a regular LLM is the ranker. "JEV" was a reranking/relevance
+  scorer idea; Cameron: "It sounds like this is really used more for RAG
+  situations than what we're talking about ... if a regular LLM is still the
+  way to go here, then that's fine." Amendment pricing is NOT a constraint
+  at charter level: "we're still talking about the top level here. We can
+  deal with the last parts of that afterward."
+- D-pool-status: SEARCHING ONLY. "the matching that we're doing
+  automatically needs to be just the people that are in the right category,
+  which is, in this case, searching." Onboarding tenants lack the
+  information; WP2 automates hello -> onboarded -> searching. (The Matching
+  page blast rules include onboarding only because a human is in the loop.)
+- D-declined: a "not interested" send outcome does NOT remove a tenant from
+  the pool; it changes the ranking. Nuance comes from extraction: "have the
+  AI extraction tool pull that information out of the conversation where it
+  says ... marked as not interested, but maybe they could be convinced. That
+  would bump them back up in the rankings." No "maybe" button (Sam asked;
+  Cameron declined - it would conflate the outcome).
+- D-missing-info: the ranker must be able to say it lacks information for a
+  candidate (example: property without rent or payment standard vs a tenant
+  with "$300 a month to cover my part"), rather than guess. How (flags vs
+  the model asking for more via tools) is the call-shape brainstorm.
+- Call shape is a LARGER design question, not listwise vs pointwise only:
+  "turn-based ... score a bunch and then maybe a few more ... some type of
+  rebalancing"; the model asking for more information; flagging unsure
+  candidates.
+- Still open: the go for a read-only prod count to size the pools.

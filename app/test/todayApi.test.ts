@@ -2,20 +2,24 @@
 // Runs on the shared in-memory world (the harness placements/conversations/contacts
 // fakes), authed via the real sealed session cookie next to the origin secret.
 //
-// Coverage: the four groups (needs_you_now / tours_today / unreplied /
-// follow_ups), urgency thresholds + most-urgent-first ordering, attention →
-// needs_you_now with attention:true, de-dupe across groups (a placement both
-// attention AND due appears once), the UTC "today" date basis for tours_today,
-// who/why hydration (incl. a missing contact degrading to the id, not a 500),
-// a deterministic total order (same seed → same order), and the empty envelope.
+// Coverage: the groups (needs_you_now / identify / tours_to_book / tours_today /
+// follow_ups / ai_suggestions - spec 2026-10-23-today-checklist-design.md; the
+// Unreplied group is gone), quiet shares and the section-failure posture,
+// urgency thresholds + most-urgent-first ordering, attention -> needs_you_now
+// with attention:true, de-dupe across groups (a placement both attention AND
+// due appears once), the UTC "today" date basis for tours_today, who/why
+// hydration (incl. a missing contact degrading to the id, not a 500), a
+// deterministic total order (same seed -> same order), and the empty envelope.
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Express } from 'express';
 import request from 'supertest';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
-import type { PlacementDeadlineType, PlacementItem } from '../src/repos/placementsRepo.js';
-import type { ContactItem } from '../src/repos/contactsRepo.js';
+import { TERMINAL_STAGES, type PlacementDeadlineType, type PlacementItem } from '../src/repos/placementsRepo.js';
+import { IncompleteBatchReadError, type ContactItem } from '../src/repos/contactsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
+import type { ListingSendItem } from '../src/repos/listingSendsRepo.js';
+import { PLACEMENT_STAGES } from '../src/lib/statusModel.js';
 import { GROUP_TEXT_STATUS, type ConversationItem } from '../src/repos/conversationsRepo.js';
 import { unreadFlagFor } from './helpers/unreadIndexFake.js';
 import {
@@ -184,6 +188,7 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(body.items).toEqual([]);
     expect(body.relayCloseNags).toEqual([]);
     expect(body.toursToBook).toBe('ok');
+    expect(body.quietShares).toEqual({ status: 'ok', properties: [], truncated: false });
     expect(typeof body.generatedAt).toBe('string');
     expect(new Date(body.generatedAt).toISOString()).toBe(body.generatedAt);
   });
@@ -1740,12 +1745,12 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(warned[0]).toMatchObject({ group: 'contacts:triage', found: 0 });
   });
 
-  it('the envelope is { items, relayCloseNags, toursToBook, generatedAt } with an ISO generatedAt when items exist', async () => {
+  it('the envelope is { items, relayCloseNags, quietShares, toursToBook, generatedAt } with an ISO generatedAt when items exist', async () => {
     seedTenant('t-env', 'En', 'Velope');
     await seedTour({ tourId: 'tour-env', tenantId: 't-env', scheduledAt: todayNoonIso() });
     const res = await authedGet('/api/today');
     const body = res.body as TodayResponse;
-    expect(Object.keys(body).sort()).toEqual(['generatedAt', 'items', 'relayCloseNags', 'toursToBook']);
+    expect(Object.keys(body).sort()).toEqual(['generatedAt', 'items', 'quietShares', 'relayCloseNags', 'toursToBook']);
     expect(new Date(body.generatedAt).toISOString()).toBe(body.generatedAt);
     expect(body.items.length).toBeGreaterThan(0);
   });
@@ -2487,6 +2492,248 @@ describe('today action-queue API (BE6/C7)', () => {
 
       const groups = (await getItems()).map((i) => i.group);
       expect(groups).toEqual(['needs_you_now', 'identify', 'tours_to_book', 'tours_today', 'follow_ups', 'ai_suggestions']);
+    });
+  });
+
+  // --- Today checklist (spec 2026-10-23 6, 2.5; plan PR30): Quiet shares ----
+  describe('Quiet shares on Today (today-checklist 6)', () => {
+    const DAY_MS = 86_400_000;
+    const HOUR_MS = 3_600_000;
+    const OAK = { line1: '12 Oak St', city: 'Atlanta', state: 'GA', zip: '30303' };
+    const ago = (ms: number): string => new Date(Date.now() - ms).toISOString();
+    const seedUnit = (unitId: string, over: Partial<UnitItem> = {}): void => {
+      world.units.set(unitId, { unitId, landlordId: 'c-ll', status: 'available', ...over });
+    };
+    // Eligible by default (a phone, a live status); first name "Quinn" so a
+    // WARN that leaked a name would be caught.
+    const seedRecipient = (contactId: string, phone: string, over: Record<string, unknown> = {}): ContactItem => {
+      const contact = { contactId, type: 'tenant', status: 'searching', firstName: 'Quinn', lastName: contactId, phone, ...over } as ContactItem;
+      world.contacts.push(contact);
+      return contact;
+    };
+    const seedSend = (unitId: string, contactId: string, sentAt: string, over: Partial<ListingSendItem> = {}): void => {
+      world.listingSends.push({ unitId, contactId, sentAt, via: 'individual', counted: true, created_at: sentAt, updated_at: sentAt, ...over });
+    };
+    const contactOf = (contactId: string): ContactItem => world.contacts.find((c) => c.contactId === contactId)!;
+    const getBody = async (): Promise<TodayResponse> => {
+      const res = await authedGet('/api/today');
+      expect(res.status).toBe(200);
+      return res.body as TodayResponse;
+    };
+    const EMPTY = { status: 'ok', properties: [], truncated: false };
+
+    it('quietShares groups by property in spec order; the contacts batch is read CONSISTENTLY', async () => {
+      seedUnit('u-a', { address: OAK });
+      seedUnit('u-b');
+      const c1Sent = ago(6 * DAY_MS);
+      const c2Heard = ago(3 * DAY_MS);
+      const c4Sent = ago(7 * DAY_MS);
+      seedRecipient('c-1', '+15550600001');
+      seedSend('u-a', 'c-1', c1Sent);
+      seedRecipient('c-2', '+15550600002', { last_heard_from_at: c2Heard });
+      seedSend('u-a', 'c-2', ago(5 * DAY_MS));
+      // Waiting on the Follow up tab (2 days, over its 24h) but not quiet here.
+      seedRecipient('c-3', '+15550600003');
+      seedSend('u-b', 'c-3', ago(2 * DAY_MS));
+      seedRecipient('c-4', '+15550600004', { type: 'partner', status: 'active', role: 'Caseworker' });
+      seedSend('u-b', 'c-4', c4Sent);
+
+      const body = await getBody();
+
+      expect(body.quietShares).toEqual({
+        status: 'ok',
+        truncated: false,
+        properties: [
+          {
+            unitId: 'u-b',
+            unitLabel: 'u-b',
+            people: [{ contactId: 'c-4', name: 'Quinn c-4', type: 'partner', role: 'Caseworker', state: 'no_reply', quietSince: c4Sent }],
+          },
+          {
+            unitId: 'u-a',
+            unitLabel: '12 Oak St, Atlanta, GA 30303',
+            people: [
+              { contactId: 'c-2', name: 'Quinn c-2', type: 'tenant', state: 'replied', quietSince: c2Heard },
+              { contactId: 'c-1', name: 'Quinn c-1', type: 'tenant', state: 'no_reply', quietSince: c1Sent },
+            ],
+          },
+        ],
+      });
+      // Spec 6.1 / PR30: a refetch fired by a stamp's event must see the
+      // stamp - the ONE contacts batch is consistent. Each recorded call is
+      // { contactIds, opts? } (S1.3; PR60, PR82), so the options are read
+      // off `.opts`.
+      expect(world.recipientDisplayCalls).toHaveLength(1);
+      expect(world.recipientDisplayCalls[0]?.opts).toMatchObject({ requireComplete: true, consistentRead: true });
+    });
+
+    it('staff outreach restarts the clock: last_reached_out_at later than the send holds the person back until the quiet resumes', async () => {
+      seedUnit('u-a');
+      seedRecipient('c-1', '+15550610001', { last_reached_out_at: ago(4 * DAY_MS) });
+      seedSend('u-a', 'c-1', ago(10 * DAY_MS));
+      expect((await getBody()).quietShares).toEqual(EMPTY);
+
+      // Quiet continues past 5 days since that outreach (a fixture stands in
+      // for the clock): the person is back, with the outreach as the clock and
+      // the state still no_reply.
+      const reached = ago(6 * DAY_MS);
+      contactOf('c-1').last_reached_out_at = reached;
+      expect((await getBody()).quietShares).toEqual({
+        status: 'ok',
+        truncated: false,
+        properties: [
+          { unitId: 'u-a', unitLabel: 'u-a', people: [{ contactId: 'c-1', name: 'Quinn c-1', type: 'tenant', state: 'no_reply', quietSince: reached }] },
+        ],
+      });
+    });
+
+    it('a second share does not restart the first: each property keeps its own clock; the person is listed once', async () => {
+      seedUnit('u-a');
+      seedUnit('u-b');
+      seedRecipient('c-1', '+15550620001');
+      seedSend('u-a', 'c-1', ago(6 * DAY_MS));
+      seedSend('u-b', 'c-1', ago(1 * DAY_MS + HOUR_MS));
+
+      const quiet = (await getBody()).quietShares;
+
+      expect(quiet).toMatchObject({ status: 'ok', properties: [{ unitId: 'u-a', people: [{ contactId: 'c-1' }] }] });
+      expect(quiet.status === 'ok' && quiet.properties.map((p) => p.unitId)).toEqual(['u-a']);
+    });
+
+    const dropOffs: Array<[string, () => void | Promise<void>]> = [
+      ['they reply (last_heard_from_at moves)', () => { contactOf('c-1').last_heard_from_at = ago(HOUR_MS); }],
+      ['staff reach out (last_reached_out_at moves)', () => { contactOf('c-1').last_reached_out_at = ago(HOUR_MS); }],
+      ['a tour is created for them on that property', async () => {
+        await world.toursRepo.create({ tenantId: 'c-1', unitId: 'u-a', tourType: 'self_guided' });
+      }],
+      ['staff mark them Not interested', () => { world.listingSends[0]!.declined = { at: ago(HOUR_MS), by: 'staff' }; }],
+      ['the send passes 14 days old', () => { world.listingSends[0]!.sentAt = ago(15 * DAY_MS); }],
+      ['they opt out', () => { contactOf('c-1').sms_opt_out = true; }],
+      ['they are marked Inactive', () => { contactOf('c-1').status = 'inactive'; }],
+      ['they are deleted', () => { contactOf('c-1').deleted_at = ago(HOUR_MS); }],
+      ['the property stops being available', () => { world.units.get('u-a')!.status = 'on_hold'; }],
+    ];
+    for (const [label, change] of dropOffs) {
+      it(`a quiet person drops off when ${label}`, async () => {
+        seedUnit('u-a');
+        seedRecipient('c-1', '+15550630001');
+        seedSend('u-a', 'c-1', ago(6 * DAY_MS));
+        expect((await getBody()).quietShares).toMatchObject({ status: 'ok', properties: [{ unitId: 'u-a', people: [{ contactId: 'c-1' }] }] });
+
+        await change();
+
+        expect((await getBody()).quietShares).toEqual(EMPTY);
+      });
+    }
+
+    it('more than 100 available properties sets truncated (the Follow up flag)', async () => {
+      for (let i = 0; i <= 100; i += 1) seedUnit(`u-${String(i).padStart(3, '0')}`);
+      expect((await getBody()).quietShares).toEqual({ ...EMPTY, truncated: true });
+    });
+
+    // Spec 2.5: ANY throw in the quiet-shares computation makes ONLY that
+    // section unavailable; the route answers 200 and the WARN names no one.
+    const seedWholePage = async (): Promise<void> => {
+      seedUnit('u-a');
+      seedRecipient('c-1', '+15550650001');
+      seedSend('u-a', 'c-1', ago(6 * DAY_MS));
+      seedTenant('t-req', 'Rita', 'Request');
+      await seedTour({ tourId: 'tour-req', tenantId: 't-req', unitId: 'u-a' });
+      world.contacts.push({ contactId: 'c-unk', type: 'unknown', status: 'needs_review', phone: '+15550650002' });
+    };
+    const quietFailures: Array<[string, () => void]> = [
+      ['the units walk', () => { vi.spyOn(world.unitsRepo, 'listByStatus').mockRejectedValue(new Error('throttled')); }],
+      ['a listing-sends read', () => { vi.spyOn(world.listingSendsRepo, 'listByUnit').mockRejectedValue(new Error('throttled')); }],
+      ['a per-unit tours read', () => { vi.spyOn(world.toursRepo, 'listByUnit').mockRejectedValue(new Error('throttled')); }],
+      ['the contacts batch', () => {
+        vi.spyOn(world.contactsRepo, 'getRecipientDisplaysByIds').mockRejectedValue(new IncompleteBatchReadError(1, 1));
+      }],
+    ];
+    for (const [label, breakIt] of quietFailures) {
+      it(`a throw from ${label} makes ONLY Quiet shares unavailable: 200, the rest intact, a WARN without names`, async () => {
+        await seedWholePage();
+        breakIt();
+
+        const body = await getBody();
+
+        expect(body.quietShares).toEqual({ status: 'unavailable' });
+        expect(body.toursToBook).toBe('ok');
+        expect(body.items.map((i) => [i.group, i.refId])).toEqual([
+          ['identify', 'c-unk'],
+          ['tours_to_book', 'tour-req'],
+        ]);
+        expect(harness.capture.atLevel(40).filter((l) => l['section'] === 'quiet_shares')).toHaveLength(1);
+        const warns = JSON.stringify(harness.capture.atLevel(40));
+        expect(warns).not.toContain('Quinn');
+        expect(warns).not.toContain('Rita');
+      });
+    }
+
+    it('a throw from the tours read makes ONLY Tours to book unavailable; Quiet shares is still computed', async () => {
+      await seedWholePage();
+      vi.spyOn(world.toursRepo, 'listByStatus').mockRejectedValue(new Error('throttled'));
+
+      const body = await getBody();
+
+      expect(body.toursToBook).toBe('unavailable');
+      expect(body.quietShares).toMatchObject({ status: 'ok', properties: [{ unitId: 'u-a', people: [{ contactId: 'c-1' }] }] });
+      expect(body.items.map((i) => [i.group, i.refId])).toEqual([['identify', 'c-unk']]);
+    });
+
+    // WI7 (plan section 3): the read budget of ONE Today load in the harness,
+    // recorded for the spec 6.5 cost note and the S7 docs/issues entry.
+    it('WI7: the read budget of one Today load (three properties, two with recent shares, one requested and one today tour)', async () => {
+      seedUnit('u-1');
+      seedUnit('u-2');
+      seedUnit('u-3');
+      seedRecipient('c-1', '+15550640001');
+      seedSend('u-1', 'c-1', ago(6 * DAY_MS));
+      seedRecipient('c-2', '+15550640002');
+      seedSend('u-2', 'c-2', ago(6 * DAY_MS));
+      seedTenant('t-3', 'Tess', 'Tour');
+      await seedTour({ tourId: 'tour-req', tenantId: 't-3', unitId: 'u-1' });
+      await seedTour({ tourId: 'tour-now', tenantId: 't-3', unitId: 'u-1', scheduledAt: todayNoonIso() });
+      const spies = {
+        // Reads Today made before this mission.
+        deadlinesDue: vi.spyOn(world.placementDeadlinesRepo, 'listDue'),
+        placementsByStage: vi.spyOn(world.placementsRepo, 'listByStage'),
+        toursByRange: vi.spyOn(world.toursRepo, 'listByScheduledRange'),
+        relayOptOut: vi.spyOn(world.conversationsRepo, 'listRelayOptOutAttention'),
+        unreadPages: vi.spyOn(world.conversationsRepo, 'queryUnreadPage'),
+        triagePages: vi.spyOn(world.contactsRepo, 'listByType'),
+        aiPending: vi.spyOn(world.extractionRepo, 'listPending'),
+        relayGroups: vi.spyOn(world.conversationsRepo, 'listRelayGroups'),
+        // New with the Today checklist (S4).
+        toursRequested: vi.spyOn(world.toursRepo, 'listByStatus'),
+        unitLabels: vi.spyOn(world.unitsRepo, 'getById'),
+        unitsWalk: vi.spyOn(world.unitsRepo, 'listByStatus'),
+        sendsByUnit: vi.spyOn(world.listingSendsRepo, 'listByUnit'),
+        toursByUnit: vi.spyOn(world.toursRepo, 'listByUnit'),
+        recipientBatch: vi.spyOn(world.contactsRepo, 'getRecipientDisplaysByIds'),
+      };
+
+      await getBody();
+
+      const counts = Object.fromEntries(Object.entries(spies).map(([name, spy]) => [name, spy.mock.calls.length]));
+      expect(counts).toEqual({
+        deadlinesDue: 1,
+        placementsByStage: PLACEMENT_STAGES.filter((s) => !TERMINAL_STAGES.has(s)).length,
+        toursByRange: 1,
+        relayOptOut: 1,
+        unreadPages: 1,
+        triagePages: 1,
+        aiPending: 1,
+        relayGroups: 1,
+        toursRequested: 1,
+        // Both tours sit on u-1: one memoized label read.
+        unitLabels: 1,
+        unitsWalk: 1,
+        // Every kept available property is read; only those with a recent
+        // share pay the tours read.
+        sendsByUnit: 3,
+        toursByUnit: 2,
+        recipientBatch: 1,
+      });
     });
   });
 });

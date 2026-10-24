@@ -1,7 +1,8 @@
 // Email-channel B3 - the Today NON-REGRESSION pin (plan Task B3 / spec
 // Decision 4 / invariant item 12): unmatched_email rows CANNOT reach Today's
 // inputs. today.ts aggregates over conversations / contacts / placements /
-// placementDeadlines / tours / ai_extraction - it has NO unmatched-email dep,
+// placementDeadlines / tours / units / listing_sends / ai_extraction - it has
+// NO unmatched-email dep,
 // and this test pins that structurally: build the REAL Today route over REAL
 // repos on a shared DynamoDB Local prefix, capture its output, then flood the
 // SAME prefix's unmatched_email table with rows in every status (+ a blocklist
@@ -27,6 +28,7 @@ import { createPlacementsRepo } from '../src/repos/placementsRepo.js';
 import { createPlacementDeadlinesRepo } from '../src/repos/placementDeadlinesRepo.js';
 import { createToursRepo } from '../src/repos/toursRepo.js';
 import { createUnitsRepo } from '../src/repos/unitsRepo.js';
+import { createListingSendsRepo } from '../src/repos/listingSendsRepo.js';
 import { createExtractionRepo } from '../src/repos/extractionRepo.js';
 import { createUnmatchedEmailRepo } from '../src/repos/unmatchedEmailRepo.js';
 import { createTodayRouter } from '../src/routes/today.js';
@@ -60,6 +62,7 @@ const TODAY_TABLES = [
   'placementDeadlines',
   'tours',
   'units',
+  'listing_sends',
   'ai_extraction',
   'unmatched_email',
 ] as const;
@@ -103,6 +106,8 @@ describe.skipIf(!reachable)('Today non-regression: unmatched_email rows never re
       // Today checklist: the tour-row labels read units. Injected on the
       // suite's prefix - the router's default would read the UNPREFIXED table.
       unitsRepo: createUnitsRepo(repoDeps),
+      // Quiet shares: the Follow up core walks units and listing sends.
+      listingSendsRepo: createListingSendsRepo(repoDeps),
       extractionRepo: createExtractionRepo(repoDeps),
     }),
   );
@@ -139,6 +144,11 @@ describe.skipIf(!reachable)('Today non-regression: unmatched_email rows never re
       phone: '+15550003333',
     });
     await tours.create({ tenantId: tenant.contactId, unitId: 'unit-nonregression', tourType: 'self_guided' });
+    // WL-8: one AVAILABLE unit on THIS prefix with no sends (a separate id, so
+    // the tour above keeps an unlabeled unit). The Follow up core then really
+    // reads listing_sends here, so a mis-wired listing-sends repo goes red;
+    // quiet shares stays empty and 'ok'.
+    await createUnitsRepo(repoDeps).create({ unitId: 'unit-nonregression-avail', landlordId: 'c-ll', status: 'available' });
   }, 120_000);
 
   afterAll(async () => {
@@ -159,6 +169,8 @@ describe.skipIf(!reachable)('Today non-regression: unmatched_email rows never re
       before.body.items.map((i: { group: string }) => i.group).sort(),
     ).toEqual(['identify', 'tours_to_book']);
     expect(before.body.toursToBook).toBe('ok');
+    // 'ok' (not 'unavailable') proves the core's reads hit THIS prefix's tables.
+    expect(before.body.quietShares).toEqual({ status: 'ok', properties: [], truncated: false });
 
     // Flood the side-door: one row per status the ingestion can write, plus a
     // route-transition status and a blocklist pointer - ALL invisible to Today.
@@ -176,5 +188,6 @@ describe.skipIf(!reachable)('Today non-regression: unmatched_email rows never re
     expect(after.body.items).toEqual(before.body.items);
     expect(after.body.relayCloseNags).toEqual(before.body.relayCloseNags);
     expect(after.body.toursToBook).toBe(before.body.toursToBook);
+    expect(after.body.quietShares).toEqual(before.body.quietShares);
   });
 });

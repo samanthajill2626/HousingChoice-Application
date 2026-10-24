@@ -4,11 +4,14 @@
 // (behind requireAuth via the /api mount in app.ts).
 //
 // The frontend (B1) imports the C7 wire shapes AND ships a client-side FALLBACK
-// that assembles the SAME shape from /api/placements + /api/conversations — so the
-// grouping/ordering rules here MUST match the spec the fallback follows
-// (documentation: docs/superpowers/specs/2026-06-16-new-dashboard-design.md →
-// "Today action queue", and the contract in
-// docs/superpowers/plans/2026-06-16-new-dashboard-build.md → C7).
+// (dashboard/src/routes/today/buildToday.ts, run only when this route 404s)
+// that assembles the same item shape from /api/placements + /api/conversations.
+// The grouping/ordering rules here follow
+// docs/superpowers/specs/2026-10-23-today-checklist-design.md (tracker #31),
+// which SUPERSEDES the "Today action queue" grouping rules of
+// docs/superpowers/specs/2026-06-16-new-dashboard-design.md; the C7 contract is
+// docs/superpowers/plans/2026-06-16-new-dashboard-build.md (C7). The fallback
+// assembles no tours_to_book and no quiet shares (spec 3.1).
 //
 // "Today" date basis (tours_today only): the BACKEND IS TIMEZONE-AGNOSTIC. The
 // only calendar-day input is which day's tours to fold in; every other group is
@@ -27,15 +30,22 @@
 // operator's browser). A richer date-navigable queue is a separate, frontend-
 // driven contract question (not built here).
 //
-// Every repo read is a bounded GSI Query (never a Scan): placementDeadlines
+// Every list read but one is a bounded Query (never a Scan): placementDeadlines
 // listDue (one byDueAt query for ALL due deadlines), placements listByStage (per
-// non-terminal stage — attention + derived-stuck), tours listByScheduledRange,
+// non-terminal stage - attention + derived-stuck), tours listByScheduledRange,
 // listRelayOptOutAttention over the sparse byRelayOptOut index (the relay
 // opt-out attention items - 2026-08-18, it used to walk the open partition),
-// queryUnreadPage over the sparse byUnread index (the unread sections -
-// inbox-unread-index), listByType (the unknown/needs_review triage partition),
-// and listRelayGroups('open') (byRelayStatus - the D5 relay close-nags). Each
-// fetch is capped and a log.warn fires if a cap is hit (no silent truncation).
+// queryUnreadPage over the sparse byUnread index (the Identify rows from unread
+// unknown_1to1 threads - inbox-unread-index), listByType (the
+// unknown/needs_review triage partition), listRelayGroups('open')
+// (byRelayStatus - the D5 relay close-nags), and the Follow up core for Quiet
+// shares (services/followUps.ts: the units byStatus walk, per-property
+// listing-sends and tours Queries, one contacts BatchGet). Unit labels are
+// memoized point reads. Capped reads log.warn when a cap is hit (no silent
+// truncation). The one exception is Tours to book: tours
+// listByStatus('requested') over the byStatus GSI pages the whole requested
+// partition - uncapped by design (spec 2026-10-23 5.4; prod 13) - with no cap,
+// no WARN and no row dropped.
 //
 // PII (doc §9): responses carry who/why to the authed client; LOG LINES are
 // counts/IDs only.
@@ -78,6 +88,9 @@ import {
   type UnitsRepo,
 } from '../repos/unitsRepo.js';
 import { formatAddress } from '../lib/address.js';
+import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingSendsRepo.js';
+import { collectWaitingFollowUps } from '../services/followUps.js';
+import { buildQuietShares } from '../services/quietShares.js';
 import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRepo.js';
 import { GROUP_DETECTION_ORIGIN } from '../services/groupMembers.js';
 import { isMemberSuppressed } from '../services/relayAnnouncements.js';
@@ -162,9 +175,21 @@ export interface QuietShareProperty {
   people: QuietSharePerson[];
 }
 
+/** Quiet shares as the response carries it (spec 2026-10-23 3, 2.5). */
+export type TodayQuietShares =
+  | {
+      status: 'ok';
+      properties: QuietShareProperty[];
+      /** The Follow up core's flag: more than 100 available properties exist. */
+      truncated: boolean;
+    }
+  | { status: 'unavailable' };
+
 export interface TodayResponse {
   items: TodayItem[];
   relayCloseNags: RelayCloseNagItem[];
+  /** Quiet shares (spec 2026-10-23 6); 'unavailable' when its computation threw. */
+  quietShares: TodayQuietShares;
   /**
    * Tours to book (spec 2026-10-23 3, 5.4): whether the tours_to_book group was
    * computed. 'unavailable' when its read threw - the dashboard shows the
@@ -188,6 +213,8 @@ export interface TodayRouterDeps {
    * the available properties.
    */
   unitsRepo?: UnitsRepo;
+  /** Today checklist (spec 6): the listing-send record the Quiet shares core reads. */
+  listingSendsRepo?: ListingSendsRepo;
   /** Pending AI suggestions (conversation-fact-extraction) -> the ai_suggestions group. */
   extractionRepo?: ExtractionRepo;
   /**
@@ -394,6 +421,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
+  const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
   const extraction = deps.extractionRepo ?? createExtractionRepo({ logger: deps.logger });
   /** Raw byUnread rows ONE /api/today request may scan (spec 4.3's budget). */
   const unreadWalkBudget = deps.unreadWalkLimit ?? UNREAD_WALK_LIMIT;
@@ -1181,6 +1209,41 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       }
     }
 
+    // --- quiet shares (spec 2026-10-23 6, plan PR30) -------------------------
+    // The Follow up tab's waiting rows - collectWaitingFollowUps, the SAME core
+    // GET /api/broadcasts/follow-ups projects - with the quiet rule on top
+    // (services/quietShares.ts). The ONE contacts batch is CONSISTENT here
+    // (spec 6.1): a refetch fired by a staff-outreach stamp's contact.updated
+    // must see the stamp. The units byStatus walk and the per-property tours
+    // byUnit reads are GSI Queries and cannot be consistent (plan WI8, PR90): a
+    // just-written tour can lag by index replication until the next refetch.
+    // Listing sends is a base-table Query read WITHOUT ConsistentRead (worklist
+    // WL-12), so the Not interested drop-off (no event; the remount refetch)
+    // can read the pre-decline row once - the same residue class.
+    // Its OWN try/catch (spec 2.5): a throw in the walk, a per-unit read or the
+    // contacts batch makes only this section unavailable; the WARN carries the
+    // section and the error, never a name; the route still answers 200.
+    // COST (spec 6.5, plan WI7): the units byStatus walk (capped at 100
+    // properties), a listing-sends Query per property, a tours Query per
+    // property with a share in the last 14 days (10-way concurrency), one
+    // contacts BatchGet - every load, no cache (a docs/issues entry tracks it).
+    let quietShares: TodayQuietShares;
+    try {
+      const waiting = await collectWaitingFollowUps(
+        { units, listingSends, tours, contacts, log, now },
+        { consistentRead: true },
+      );
+      const built = buildQuietShares(waiting.rows, now);
+      quietShares = {
+        status: 'ok',
+        properties: built.properties,
+        truncated: waiting.truncated,
+      };
+    } catch (err) {
+      quietShares = { status: 'unavailable' };
+      log.warn({ err, section: 'quiet_shares' }, 'today: quiet shares could not be read - section unavailable');
+    }
+
     // --- Deterministic total order, most-urgent first ------------------------
     // needs_you_now: by `at` ascending (overdue/attention=now sort first, then
     // soon-due), tie-break by refId. Same comparator family for the others
@@ -1228,11 +1291,19 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         follow_ups: followUps.length,
         ai_suggestions: aiSuggestions.length,
         relay_close_nags: relayCloseNags.length,
+        quiet_shares_status: quietShares.status,
+        quiet_share_properties: quietShares.status === 'ok' ? quietShares.properties.length : 0,
       },
       'today queue assembled',
     );
 
-    const body: TodayResponse = { items, relayCloseNags, toursToBook: toursToBookStatus, generatedAt: nowIso };
+    const body: TodayResponse = {
+      items,
+      relayCloseNags,
+      quietShares,
+      toursToBook: toursToBookStatus,
+      generatedAt: nowIso,
+    };
     res.json(body);
   });
 

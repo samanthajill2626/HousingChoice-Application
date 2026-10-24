@@ -1303,6 +1303,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       // Today checklist (spec 2026-10-23 3, 6): the SAME units repo the
       // sub-routers above share - tour-row labels and the Quiet shares walk.
       unitsRepo: units,
+      // ... and the listing-send record the Quiet shares core reads (spec 6).
+      listingSendsRepo: listingSends,
       // conversation-fact-extraction (T9): the ai_suggestions group reads pending
       // suggestions from the SAME store the review API + PATCH clear-hook share.
       extractionRepo: extraction,

@@ -81,7 +81,8 @@ describe('POST /api/conversations/:conversationId/messages', () => {
       tsMsgId: '2026-06-12T10:00:00.000Z#SMfake-1',
       status: 'queued',
     });
-    expect(calls).toEqual([{ conversationId: 'conv-1', body: 'hello', automated: false }]);
+    // today-checklist W1 (PR10): the staff send marks itself staff outreach.
+    expect(calls).toEqual([{ conversationId: 'conv-1', body: 'hello', automated: false, staffOutreach: true }]);
   });
 
   it('400s when neither body nor mediaUrls is usable', async () => {
@@ -405,6 +406,19 @@ describe('POST /api/conversations/:conversationId/messages (attachmentKeys)', ()
     expect(calls.slice(1).every((c) => c.body === undefined)).toBe(true);
   });
 
+  it('today-checklist W1 (PR10): only the FIRST batch carries staffOutreach, so a split send stamps once', async () => {
+    const sizes = [58_101, 929_757, 76_934, 918_527, 923_368, 73_092, 89_528];
+    const key = (i: number): string => `uploads/deadbee${i}`;
+    const { app, calls } = makeMmsApp(
+      Object.fromEntries(sizes.map((size, i) => [key(i), { contentType: 'image/jpeg', size }])),
+    );
+    const res = await send(app, { body: 'here are the photos', attachmentKeys: sizes.map((_, i) => key(i)) });
+    expect(res.status).toBe(201);
+    expect(calls.length).toBeGreaterThan(1);
+    expect(calls[0]?.staffOutreach).toBe(true);
+    expect(calls.slice(1).every((c) => !('staffOutreach' in c))).toBe(true);
+  });
+
   it('400s unsupported_attachment_type when the stored type is not allowlisted', async () => {
     const { app, calls } = makeMmsApp({
       'uploads/cafe': { contentType: 'application/zip', size: 10 },
@@ -715,6 +729,10 @@ describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', 
         retryOf: '2026-06-12T09:00:00.000Z#SMorig',
         // retry-send-adoption R7: a root row is its own chain's root.
         retryRoot: '2026-06-12T09:00:00.000Z#SMorig',
+        // today-checklist W2 (PR11, PR104): a staff Retry of a text that is
+        // neither a share, automated nor system copy stamps - and carries no
+        // systemCopy marker (this exact toEqual pins its absence).
+        staffOutreach: true,
       },
     ]);
   });
@@ -866,6 +884,10 @@ describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', 
         retryOf: '2026-06-12T09:00:00.000Z#SMorig',
         retryRoot: '2026-06-12T09:00:00.000Z#SMorig',
         recipient: real,
+        // today-checklist W2 (PR11, PR104): a staff Retry of a text that is
+        // neither a share, automated nor system copy stamps - and carries no
+        // systemCopy marker (this exact toEqual pins its absence).
+        staffOutreach: true,
       },
     ]);
   });
@@ -1261,6 +1283,53 @@ describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', 
     expect(plain.calls[0]).not.toHaveProperty('broadcastId');
   });
 
+  it('today-checklist W2 (PR11, PR104): a Retry passes staffOutreach, EXCEPT a retry of a share text, an automated row or a system-copy row; the latter two pass systemCopy', async () => {
+    const share = makeRetryApp({ ...FAILED_ORIGINAL, broadcast_id: 'b-1' });
+    expect((await press(share.app)).status).toBe(201);
+    expect(share.calls[0]).toMatchObject({ broadcastId: 'b-1' });
+    expect(share.calls[0]).not.toHaveProperty('staffOutreach');
+    expect(share.calls[0]).not.toHaveProperty('systemCopy');
+
+    // A failed automated text (missed-call, welcome, reminder, nudge) retried
+    // by staff is still the system's copy: no stamp, and the new row is
+    // marked so a Retry of IT is judged by the first send.
+    const automated = makeRetryApp({ ...FAILED_ORIGINAL, automated: true });
+    expect((await press(automated.app)).status).toBe(201);
+    expect(automated.calls[0]).not.toHaveProperty('staffOutreach');
+    expect(automated.calls[0]).toMatchObject({ automated: false, systemCopy: true });
+
+    // A reminder / nudge Send-now row (stored automated: false, system_copy:
+    // true): no stamp, and the marker carries on.
+    const sendNow = makeRetryApp({ ...FAILED_ORIGINAL, automated: false, system_copy: true });
+    expect((await press(sendNow.app)).status).toBe(201);
+    expect(sendNow.calls[0]).not.toHaveProperty('staffOutreach');
+    expect(sendNow.calls[0]?.systemCopy).toBe(true);
+
+    // A Retry of a manual retry of an automated text: that retry row is
+    // stored automated: false WITH the marker it inherited - no stamp (PR104
+    // closes PR100's residue).
+    const retryOfRetry = makeRetryApp({
+      ...FAILED_ORIGINAL,
+      automated: false,
+      system_copy: true,
+      retry_of: '2026-06-12T08:00:00.000Z#SMauto',
+      // The stored root, so the route needs no parent read (retryChain.ts).
+      retry_root: '2026-06-12T08:00:00.000Z#SMauto',
+    });
+    expect((await press(retryOfRetry.app)).status).toBe(201);
+    expect(retryOfRetry.calls[0]).not.toHaveProperty('staffOutreach');
+    expect(retryOfRetry.calls[0]?.systemCopy).toBe(true);
+
+    // A plain staff text (no automated flag, or automated: false, no marker)
+    // still stamps and writes no marker.
+    for (const original of [FAILED_ORIGINAL, { ...FAILED_ORIGINAL, automated: false }]) {
+      const plain = makeRetryApp(original);
+      expect((await press(plain.app)).status).toBe(201);
+      expect(plain.calls[0]?.staffOutreach).toBe(true);
+      expect(plain.calls[0]).not.toHaveProperty('systemCopy');
+    }
+  });
+
   it('retry-send-adoption R7: a pre-deploy pressed row (retry_of, no retry_root) walks retry_of for the root', async () => {
     const root: MessageItem = {
       ...FAILED_ORIGINAL,
@@ -1649,5 +1718,127 @@ describe('GET /api/messages/:providerSid/media/:idx', () => {
     expect(res.headers['content-disposition']).toBe(
       "inline; filename=\"bud_get.mp4\"; filename*=UTF-8''bud%C3%A9get.mp4",
     );
+  });
+});
+
+// today-checklist spec 7.3 (W1, W2) through the harness's DEFAULT send
+// service: since PR9 the /api router hands its OWN contacts repo to the send
+// service it builds, so a real staff send moves the world's
+// last_reached_out_at and emits ONE contact.updated, after its
+// conversation.updated. (Before PR9 the default service built a second, real
+// contacts repo and the world never saw the stamp.)
+describe('staff outreach through the default send service (today-checklist W1/W2, PR9-PR11)', () => {
+  const PHONE = '+15550100001';
+
+  async function seedThread(world: FakeWorld): Promise<string> {
+    const conversation = await world.conversationsRepo.createOrGetByParticipantPhone(PHONE, 'tenant_1to1');
+    world.contacts.push({ contactId: 'c-1', type: 'tenant', phone: PHONE, consent_method: 'inbound_text' });
+    return conversation.conversationId;
+  }
+  const contactUpdates = (world: FakeWorld) =>
+    world.emitted.filter((e) => e.event === 'contact.updated').map((e) => e.payload);
+  // [PR94] The /api router's DEFAULT send service has no injected adapter, so
+  // under the harness it sends through the console driver and world.sent stays
+  // empty. The send's observable is the persisted outbound row.
+  const outboundRows = (world: FakeWorld, conversationId: string) =>
+    world.messages.filter((m) => m.conversationId === conversationId && m.direction === 'outbound');
+  const providerTsOf = (m: { tsMsgId: string }): string => m.tsMsgId.split('#')[0]!;
+  const post = (app: ReturnType<typeof makeWebhookHarness>['app'], path: string, body: object) =>
+    request(app).post(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE).send(body);
+
+  it('a staff text stamps the thread contact at the provider instant and emits ONE contact.updated, last', async () => {
+    const { app, world } = makeWebhookHarness();
+    const conversationId = await seedThread(world);
+
+    const res = await post(app, `/api/conversations/${conversationId}/messages`, { body: 'checking in' });
+
+    expect(res.status).toBe(201);
+    const rows = outboundRows(world, conversationId);
+    expect(rows).toHaveLength(1);
+    const sentAt = providerTsOf(rows[0]!);
+    expect(world.reachedOutTouches).toEqual([{ contactId: 'c-1', at: sentAt, outcome: 'written' }]);
+    expect(world.contacts.find((c) => c.contactId === 'c-1')?.last_reached_out_at).toBe(sentAt);
+    expect(contactUpdates(world)).toEqual([{ contactId: 'c-1' }]);
+    const names = world.emitted.map((e) => e.event);
+    expect(names.lastIndexOf('contact.updated')).toBeGreaterThan(names.lastIndexOf('conversation.updated'));
+    // last_heard_from_at never moves on outbound (spec 7.1).
+    expect(world.heardFromTouches).toEqual([]);
+  });
+
+  it('a multi-batch MMS stamps and emits ONCE - on the first batch only (PR10)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const conversationId = await seedThread(world);
+    const sizes = [58_101, 929_757, 76_934, 918_527, 923_368, 73_092, 89_528];
+    const key = (i: number): string => `uploads/deadbee${i}`;
+    sizes.forEach((size, i) => world.mediaObjects.set(key(i), { body: Buffer.alloc(size), contentType: 'image/jpeg' }));
+
+    const res = await post(app, `/api/conversations/${conversationId}/messages`, {
+      body: 'here are the photos',
+      attachmentKeys: sizes.map((_, i) => key(i)),
+    });
+
+    expect(res.status).toBe(201);
+    const rows = outboundRows(world, conversationId);
+    expect(rows.length).toBeGreaterThan(1);
+    const first = rows.map(providerTsOf).sort()[0];
+    expect(world.reachedOutTouches.map((t) => t.at)).toEqual([first]);
+    expect(contactUpdates(world)).toEqual([{ contactId: 'c-1' }]);
+  });
+
+  it('a staff Retry of a failed text stamps; a Retry of a share text, an automated row or a system-copy row does not (PR11, PR104)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const conversationId = await seedThread(world);
+    const failedRow = (
+      providerSid: string,
+      agoMs: number,
+      extra: { broadcastId?: string; automated?: boolean; systemCopy?: boolean } = {},
+    ) => ({
+      conversationId,
+      providerSid,
+      providerTs: new Date(Date.now() - agoMs).toISOString(),
+      type: 'sms' as const,
+      direction: 'outbound' as const,
+      author: 'teammate' as const,
+      body: `failed ${providerSid}`,
+      deliveryStatus: 'undelivered' as const,
+      errorCode: '30003',
+      ...extra,
+    });
+    const plainFail = await world.messagesRepo.append(failedRow('SMplainfail', 60_000));
+    await world.messagesRepo.append(failedRow('SMsharefail', 50_000, { broadcastId: 'b-1' }));
+    // A failed automated text (the missed-call auto text shape).
+    const autoFail = await world.messagesRepo.append(failedRow('SMautofail', 40_000, { automated: true }));
+    // PR104: a pre-existing failed Send-now row (automated: false,
+    // system_copy: true), seeded through the fake's append, which maps the
+    // marker like the real repo (PR106).
+    const sendNowFail = await world.messagesRepo.append(
+      failedRow('SMsendnowfail', 30_000, { automated: false, systemCopy: true }),
+    );
+    const retry = (sid: string) => post(app, `/api/conversations/${conversationId}/messages/${sid}/retry`, {});
+    // The row the Retry route actually wrote (PR106): the new row naming the
+    // pressed row in retry_of.
+    const retryRowOf = (pressedTsMsgId: string) => world.messages.find((m) => m.retry_of === pressedTsMsgId);
+
+    expect((await retry('SMsharefail')).status).toBe(201);
+    expect(world.reachedOutTouches).toEqual([]);
+    expect(contactUpdates(world)).toEqual([]);
+
+    expect((await retry('SMautofail')).status).toBe(201);
+    expect(world.reachedOutTouches).toEqual([]);
+    expect(contactUpdates(world)).toEqual([]);
+    // PR104/PR106: the Retry's own row inherits the marker, still a person's send.
+    expect(retryRowOf(autoFail.tsMsgId)).toMatchObject({ system_copy: true, automated: false });
+
+    expect((await retry('SMsendnowfail')).status).toBe(201);
+    expect(world.reachedOutTouches).toEqual([]);
+    expect(contactUpdates(world)).toEqual([]);
+    expect(retryRowOf(sendNowFail.tsMsgId)).toMatchObject({ system_copy: true, automated: false });
+
+    expect((await retry('SMplainfail')).status).toBe(201);
+    expect(world.reachedOutTouches.map((t) => t.contactId)).toEqual(['c-1']);
+    expect(contactUpdates(world)).toEqual([{ contactId: 'c-1' }]);
+    // A plain staff Retry writes no marker (PR104/PR106).
+    expect(retryRowOf(plainFail.tsMsgId)).toBeDefined();
+    expect(retryRowOf(plainFail.tsMsgId)).not.toHaveProperty('system_copy');
   });
 });

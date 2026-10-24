@@ -182,7 +182,8 @@ describe('the OTHER branches are untouched', () => {
     const { app, groupCalls, oneToOneCalls } = makeApp({ conversation: ONE_TO_ONE });
     const res = await post(app, 'conv-1', { body: 'hello' });
     expect(res.status).toBe(201);
-    expect(oneToOneCalls).toEqual([{ conversationId: 'conv-1', body: 'hello', automated: false }]);
+    // today-checklist W1 (PR10): the staff send marks itself staff outreach.
+    expect(oneToOneCalls).toEqual([{ conversationId: 'conv-1', body: 'hello', automated: false, staffOutreach: true }]);
     expect(groupCalls).toEqual([]);
   });
 

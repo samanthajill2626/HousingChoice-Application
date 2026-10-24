@@ -266,6 +266,23 @@ describe('broadcast.send (M1.8a)', () => {
     expect((updates.at(-1)!.payload as { status: string }).status).toBe('sent');
   });
 
+  // today-checklist spec 7.2: a share starts its own clock - it never moves
+  // last_reached_out_at, even through the REAL send wrapper over the world's
+  // recording contacts fake.
+  it('today-checklist: a share send never stamps last_reached_out_at', async () => {
+    const alice = seedTenant(world, { contactId: 'c-alice', firstName: 'Alice', phone: '+15550100001' });
+    seedUnit(world);
+    seedBroadcast(world, [alice]);
+    wireHandler(world, logger);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(1);
+    expect(world.reachedOutTouches).toEqual([]);
+    expect(world.emitted.filter((e) => e.event === 'contact.updated')).toEqual([]);
+  });
+
   it('writes a units# broadcast_sent audit row with the recipient count on completion', async () => {
     const alice = seedTenant(world, { contactId: 'c-alice', firstName: 'Alice', phone: '+15550100001' });
     const bob = seedTenant(world, { contactId: 'c-bob', phone: '+15550100002' });

@@ -691,6 +691,13 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   const adapter = deps.adapter ?? createMessagingAdapter({ config, logger: deps.logger });
   const events = deps.events ?? appEvents;
   const sseHeartbeatMs = deps.sseHeartbeatMs ?? SSE_HEARTBEAT_MS;
+  // ONE contacts repo for every send path in this router: the 1:1 send
+  // service (its opt-out / deleted / consent gates and, since the
+  // today-checklist spec 7.3, the W1/W2 staff-outreach stamp), the email path
+  // and the group reply path. Built BEFORE the send service so the service
+  // reads the router's repo instead of default-constructing a second one; an
+  // injected fake wins through `??`, as for every repo above.
+  const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const sendMessage =
     deps.sendMessageService ??
     createSendMessageService({
@@ -698,6 +705,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       logger: deps.logger,
       conversationsRepo: conversations,
       messagesRepo: messages,
+      contactsRepo: contacts,
       auditRepo: audit,
       events,
     });
@@ -705,8 +713,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // (the sendMessage precedent lives in this router, not index.ts) so the
   // production composition root needs no change; it builds its own EmailAdapter
   // from config. The email send route also resolves the recipient contact by
-  // address, so a contacts repo is shared with it.
-  const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
+  // address, so it shares the contacts repo built above.
   // Native group texting (S5): the group reply path. Default-constructed here
   // for the same reason sendMessage is - the composition root needs no change -
   // and it builds its own Conversations adapter from config. It takes the SAME
@@ -1569,6 +1576,10 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
           ...(outboundMediaUrls !== undefined && { mediaUrls: outboundMediaUrls }),
           ...(batchAttachments.length > 0 && { attachments: batchAttachments }),
           automated: false,
+          // today-checklist W1 (spec 7.3, PR10): a staff text is staff
+          // outreach. The FIRST batch only, so a photo drop split across
+          // several messages stamps and emits once.
+          ...(i === 0 && { staffOutreach: true as const }),
         });
         if (i === 0) first = outcome;
       } catch (err) {
@@ -1886,6 +1897,20 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
         ...(original.broadcast_id !== undefined && { broadcastId: original.broadcast_id }),
         // retry-send-window D14: the recorded recipient, when it still exists.
         ...(recipient !== undefined && { recipient }),
+        // today-checklist PR104 (spec r8 7.3): a Retry of a row whose copy is
+        // the system's - automated, or itself system copy (a Send now, or an
+        // earlier Retry of one) - is marked system copy, so a Retry of THIS
+        // row is judged by the first send.
+        ...((original.automated === true || original.system_copy === true) && {
+          systemCopy: true as const,
+        }),
+        // today-checklist W2 (spec r8 7.3, PR11, PR104): a staff Retry is staff
+        // outreach - EXCEPT a retry of a share text (broadcast_id: shares never
+        // move last_reached_out_at, spec 7.2), of an AUTOMATED row, or of a
+        // SYSTEM-COPY row (a reminder / nudge Send now, or a Retry of one).
+        ...(original.broadcast_id === undefined &&
+          original.automated !== true &&
+          original.system_copy !== true && { staffOutreach: true as const }),
       });
       res.status(201).json(outcome);
     } catch (err) {

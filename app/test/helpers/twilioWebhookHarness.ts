@@ -5644,10 +5644,13 @@ export interface HarnessOptions {
   transcodeGate?: Semaphore;
   /**
    * Inject the /api router's send service (quiet-hours send-now, Task 6).
-   * The api router otherwise DEFAULT-constructs one, which resolves its own
-   * contacts repo against real DynamoDB - fine for suites that never drive an
-   * outbound send, useless for the ones that do. Pass a spy to assert what the
-   * route sent (body/author/automated) with no provider and no network.
+   * The api router otherwise DEFAULT-constructs one over the router's own
+   * repos. Since today-checklist S2.2 (PR9) that includes the router's
+   * contacts repo - here world.contactsRepo - so the default service's
+   * deleted / opt-out / consent gates and its staff-outreach stamp judge
+   * world.contacts (it no longer builds a second contacts repo against real
+   * DynamoDB). Pass a spy to assert what the route sent
+   * (body/author/automated) with no provider and no network.
    */
   sendMessageService?: SendMessageService;
   /**

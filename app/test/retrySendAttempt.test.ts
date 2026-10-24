@@ -1074,6 +1074,17 @@ describe('messaging.retrySend on the send-attempt record (retry-send-adoption T4
     ]);
   });
 
+  // today-checklist spec 7.2: the automatic retry is a machine resend of a
+  // staff text that already counted - no stamp, even through the REAL wrapper.
+  it('today-checklist: a successful automatic retry never stamps last_reached_out_at', async () => {
+    wire();
+    const row = await seedRetried('SMnostamp1');
+    await run(row);
+    expect(world.sent).toHaveLength(1);
+    expect(world.reachedOutTouches).toEqual([]);
+    expect(world.emitted.filter((e) => e.event === 'contact.updated')).toEqual([]);
+  });
+
   it('7b a record-phase fence LOST after a recorded send is a WARN, never sent_unrecorded: the row exists, the takeover reconcile repairs', async () => {
     wire();
     const row = await seedRetried('SMroot1');

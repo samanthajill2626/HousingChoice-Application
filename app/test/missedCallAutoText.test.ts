@@ -169,6 +169,14 @@ describe('call.missedAutoText (M1.9b)', () => {
     expect(world.sent).toHaveLength(1);
   });
 
+  it('today-checklist spec 7.2: the missed-call auto text never stamps last_reached_out_at (automated)', async () => {
+    seedCallerContact(world, { type: 'unknown', status: 'needs_review' });
+    await enqueueImmediate(MISSED_CALL_AUTOTEXT_JOB, { callSid: CALL_SID, conversationId: CONV_ID });
+    await queueAdapter.settle();
+    expect(world.sent).toHaveLength(1);
+    expect(world.reachedOutTouches).toEqual([]);
+  });
+
   it('gate: tenant with the full intake profile - skips', async () => {
     seedCallerContact(world, {
       type: 'tenant',

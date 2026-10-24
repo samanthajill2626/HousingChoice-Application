@@ -858,6 +858,10 @@ export async function forceSendNudge(
       // Human force-send: bypasses manual mode + the breaker (and IS subject to
       // the JIT consent gate pre-checked above).
       automated: false,
+      // today-checklist PR104 (spec r8 7.3): a person picked the time, but the
+      // copy is the nudge's - never staff outreach, and a later staff Retry of
+      // this row does not count either.
+      systemCopy: true,
     });
     log.info(
       {

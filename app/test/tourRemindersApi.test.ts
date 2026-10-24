@@ -1742,6 +1742,10 @@ describe('POST /api/tours/:tourId/reminders/:reminderId/send-now', () => {
     expect(spy.sent).toHaveLength(1);
     expect(spy.sent[0]!.conversationId).toBe('conv-sendnow-1');
     expect(spy.sent[0]!.automated).toBe(false);
+    // today-checklist PR104: a person pressed send, but the copy is the
+    // reminder - marked system copy, and never staff outreach.
+    expect(spy.sent[0]!.systemCopy).toBe(true);
+    expect(spy.sent[0]).not.toHaveProperty('staffOutreach');
 
     // Who clicked is recorded on the tour's trail.
     const ev = world.auditEvents.find((e) => e.event_type === 'reminder_force_sent');
@@ -1752,6 +1756,28 @@ describe('POST /api/tours/:tourId/reminders/:reminderId/send-now', () => {
       kind: 'day_before',
       actor: TEST_SESSION_USER.userId,
     });
+  });
+
+  // today-checklist spec 7.2: staff pick only the time; the copy is the
+  // automated reminder, so Send now never moves last_reached_out_at. Driven
+  // through the /api router's REAL default send service (no spy), which since
+  // PR9 reads the world's recording contacts fake.
+  it('today-checklist: Send now through the real default send service never stamps last_reached_out_at', async () => {
+    const { app, world } = makeWebhookHarness();
+    const { tourId, reminderId } = await seedSendNowTour(world);
+
+    const outboundBefore = world.messages.filter((m) => m.direction === 'outbound');
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(200);
+    // [PR94] the default service sends via the console driver under the
+    // harness, so the proof the send happened is the persisted outbound row.
+    const written = world.messages.filter((m) => m.direction === 'outbound' && !outboundBefore.includes(m));
+    expect(written).toHaveLength(1);
+    // [PR104, PR106] the row Send now actually wrote carries the marker and
+    // stays a person's send.
+    expect(written[0]).toMatchObject({ system_copy: true, automated: false });
+    expect(world.reachedOutTouches).toEqual([]);
   });
 
   // S7 T7.8, the send-now half. Same `.find(...)!` shape, same fix, one
@@ -2667,5 +2693,35 @@ describe('name-read FAILURE on the tour-reminder route surfaces (spec 6.3b)', ()
     }
     expect(bodies[0]).toContain('Dana will be headed');
     expect(bodies[1]).toContain('Lee will be headed');
+  });
+});
+
+// today-checklist spec 7.2 (C8): the reminder poll is automated. Its fixture
+// drives a spy, so the case asserts at the input seam - no staffOutreach, the
+// ONLY stamp trigger (sendMessage.test.ts proves it) - and on the world.
+describe('today-checklist: the tour reminder poll never asks for a staff-outreach stamp', () => {
+  it('a poll send carries no staffOutreach and moves no last_reached_out_at', async () => {
+    const spy = makeSendSpy();
+    const { world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const deps = pollDepsFrom(world, spy.service);
+    const tourId = await seedQuietTour(world, 'nostamp', '+15550720009');
+    Object.assign(
+      world.contacts.find((c) => c.contactId === 'contact-quiet-nostamp')!,
+      { consent_method: 'inbound_text' },
+    );
+    seedReminder(world, {
+      reminderId: 'rem-nostamp',
+      tourId,
+      kind: 'day_before',
+      dueAt: '2098-12-09T15:00:00.000Z',
+    });
+
+    await runDueTourReminders('2098-12-09T15:00:01.000Z', deps);
+
+    expect(spy.sent).toHaveLength(1);
+    expect(spy.sent[0]).not.toHaveProperty('staffOutreach');
+    // PR104: the poll send is automated: true, so it carries no marker.
+    expect(spy.sent[0]).not.toHaveProperty('systemCopy');
+    expect(world.reachedOutTouches).toEqual([]);
   });
 });

@@ -24,10 +24,11 @@ import type {
 } from '../src/services/sendMessage.js';
 import { TEST_SESSION_COOKIE, TEST_SESSION_USER } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
-import { MANUAL_ONLY_NUDGE_KINDS, NUDGE_RUNGS } from '../src/jobs/placementNudges.js';
+import { MANUAL_ONLY_NUDGE_KINDS, NUDGE_RUNGS, runDuePlacementNudges } from '../src/jobs/placementNudges.js';
 import type { PlacementStage } from '../src/lib/statusModel.js';
 import {
   isoHoursFromNow,
+  quietOffSettingsRepo,
   quietWindowAroundNow,
   quietWindowAwayFromNow,
 } from './helpers/settingsStub.js';
@@ -681,6 +682,10 @@ describe('POST /api/placements/:placementId/nudges/:nudgeId/send-now', () => {
     expect(spy.sent[0]!.conversationId).toBe('conv-nudge-sendnow-1');
     expect(spy.sent[0]!.body).toBe(resolveMessage('nudge.receipt_check'));
     expect(spy.sent[0]!.automated).toBe(false);
+    // today-checklist PR104: the copy is the nudge - marked system copy, and
+    // never staff outreach.
+    expect(spy.sent[0]!.systemCopy).toBe(true);
+    expect(spy.sent[0]).not.toHaveProperty('staffOutreach');
 
     const ev = world.auditEvents.find((e) => e.event_type === 'nudge_force_sent');
     expect(ev?.entityKey).toBe(`placements#${placementId}`);
@@ -690,6 +695,49 @@ describe('POST /api/placements/:placementId/nudges/:nudgeId/send-now', () => {
       kind: 'receipt_check',
       actor: TEST_SESSION_USER.userId,
     });
+  });
+
+  // today-checklist spec 7.2: a nudge's copy is the automated nudge, so
+  // neither Send now nor the poll moves last_reached_out_at.
+  it('today-checklist: Send now through the real default send service never stamps last_reached_out_at', async () => {
+    const { app, world } = makeWebhookHarness();
+    const { placementId, nudgeId } = await seedSendNowNudge(world);
+
+    const outboundBefore = world.messages.filter((m) => m.direction === 'outbound');
+    const res = await authed(app).post(`/api/placements/${placementId}/nudges/${nudgeId}/send-now`);
+
+    expect(res.status).toBe(200);
+    // [PR94] persisted outbound row, not world.sent (console driver).
+    const written = world.messages.filter((m) => m.direction === 'outbound' && !outboundBefore.includes(m));
+    expect(written).toHaveLength(1);
+    // [PR104, PR106] the row Send now actually wrote carries the marker.
+    expect(written[0]).toMatchObject({ system_copy: true, automated: false });
+    expect(world.reachedOutTouches).toEqual([]);
+  });
+
+  it('today-checklist (C8): the nudge poll never asks for a staff-outreach stamp', async () => {
+    const spy = makeSendSpy();
+    const { world } = makeWebhookHarness({ sendMessageService: spy.service });
+    await seedSendNowNudge(world);
+
+    await runDuePlacementNudges(new Date().toISOString(), {
+      placementNudgesRepo: world.placementNudgesRepo,
+      placementsRepo: world.placementsRepo,
+      contactsRepo: world.contactsRepo,
+      unitsRepo: world.unitsRepo,
+      conversationsRepo: world.conversationsRepo,
+      sendMessageService: spy.service,
+      settingsRepo: quietOffSettingsRepo(),
+      // Every nudge kind is held back by default (founder decision
+      // 2026-08-18); an empty set lets the poll send so its input can be read.
+      manualOnlyKinds: new Set(),
+    });
+
+    expect(spy.sent).toHaveLength(1);
+    expect(spy.sent[0]).not.toHaveProperty('staffOutreach');
+    // PR104: the poll send is automated: true, so it carries no marker.
+    expect(spy.sent[0]).not.toHaveProperty('systemCopy');
+    expect(world.reachedOutTouches).toEqual([]);
   });
 
   it('409s nudge_not_pending with the honest current view when the rung already fired', async () => {

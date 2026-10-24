@@ -64,6 +64,14 @@ describe('POST /public/housing-fair — intake + auto welcome text', () => {
     );
   });
 
+  it('today-checklist spec 7.2: the welcome text never stamps last_reached_out_at (automated)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const res = await request(app).post(FAIR).set('x-origin-verify', SECRET).send(signupBody());
+    expect(res.status).toBe(200);
+    expect(world.sent).toHaveLength(1);
+    expect(world.reachedOutTouches).toEqual([]);
+  });
+
   it('is idempotent on a repeat phone: NO second contact, NO second welcome text (no SMS spam)', async () => {
     const { app, world } = makeWebhookHarness();
     await request(app).post(FAIR).set('x-origin-verify', SECRET).send(signupBody());

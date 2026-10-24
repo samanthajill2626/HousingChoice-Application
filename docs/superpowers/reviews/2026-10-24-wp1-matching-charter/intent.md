@@ -230,3 +230,35 @@ quality Sam trusts, then her review of it, then the two views.
   unit; 10 of 22 live available lack a voucher size list; 29 searching
   tenants carry voucher size 10 (ask Sam); `matches` table (tenantId,
   unitId, byUnit, TTL) exists everywhere, unused.
+
+## Decisions, round 7 (Cameron, 2026-10-24)
+
+- D-pair-score: ONE score per tenant-property pair, shared by both
+  directions: "that way we don't have to duplicate any of the work ... if
+  we go in the opposite direction, that data is already there and can get
+  fed into the model to rank everybody else, if that anchor/tenant data
+  hasn't changed."
+- D-score: 0 to 100 shown as a match percentage, 0 bad, 100 good. Bands
+  computed in code (Strong 80+, Good 60+, Possible 40+, Weak below 40 as
+  the starting values; tunable without a prompt change).
+- D-reasons: reasons are PHRASES or single words ("stairs"), not
+  sentences; up to three for and three against, each tagged with its
+  source input. Missing information is a SEPARATE list from reasons
+  (Cameron: "I agree with your differentiation").
+- Priority: Cameron leans deterministic sort but expects pushback from
+  Sam; floated deterministic base PLUS a marginal model input; asked to be
+  talked out of it. Planner position (this turn): deterministic only, with
+  a configurable STRENGTH (within band / one band up / always first) so
+  Sam's pushback is answered by a setting, not by the model. See the
+  message of 2026-10-24 for the two reasons. Pending Cameron's call.
+
+## Questions for Sam (running list)
+
+- Priority strength default: within band, one band up, or always first?
+  And confirm that the flag is about filling a property first, not fit.
+- Voucher size "10" on 29 searching tenants - a code, or data errors?
+- Will she fill voucher sizes (10 of 22 live available lack them), rent
+  and the payment standard on properties? Does she fill the Payment
+  standard field today, and where does she get the number?
+- Hard exclusion wording in A1 vs the soft demotion built: a tenant who
+  fails a requirement still appears, at the bottom, with the reason.

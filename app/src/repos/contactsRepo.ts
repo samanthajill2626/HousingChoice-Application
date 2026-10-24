@@ -776,8 +776,16 @@ export interface ContactsRepo {
    * requireComplete: throw IncompleteBatchReadError on an unread key (an
    * OUTCOME read - the outcome-serving routes, spec D12); a genuinely missing
    * contact is still just absent.
+   * consistentRead: BatchGetItem's ConsistentRead on every request of the
+   * walk, exactly as getManyByIds; absent = eventually consistent. Only
+   * Today's quiet-shares read asks for it (today-checklist spec 6.1), so a
+   * refetch fired by a stamp's event sees the stamp; the Follow up tab and
+   * the recipients routes keep the default.
    */
-  getRecipientDisplaysByIds(contactIds: string[], opts?: { requireComplete?: boolean }): Promise<Map<string, RecipientDisplay>>;
+  getRecipientDisplaysByIds(
+    contactIds: string[],
+    opts?: { requireComplete?: boolean; consistentRead?: boolean },
+  ): Promise<Map<string, RecipientDisplay>>;
   /**
    * Batch-read WHOLE contacts by primary key - the `getById` fan-out killer for
    * callers that read attributes outside the display projection (roster
@@ -1389,6 +1397,7 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
       return batchGetByIds<RecipientDisplay>(contactIds, {
         projection: RECIPIENT_PROJECTION,
         requireComplete: opts?.requireComplete,
+        consistentRead: opts?.consistentRead,
       });
     },
 

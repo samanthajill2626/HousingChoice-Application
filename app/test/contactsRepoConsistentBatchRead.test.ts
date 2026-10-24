@@ -106,3 +106,38 @@ describe('contactsRepo.getManyByIds - consistentRead (primary-contact-integrity 
     for (const request of requests) expect(entryOf(request)).not.toHaveProperty('ConsistentRead');
   });
 });
+
+// today-checklist spec 6.1 (plan ruling PR3): Today's quiet-shares read asks
+// the RECIPIENT projection for a consistent batch, so the refetch a stamp's
+// event triggers sees the stamp. The same walk, so the same every-request
+// rule; the projection rides along unchanged.
+describe('contactsRepo.getRecipientDisplaysByIds - consistentRead (today-checklist PR3)', () => {
+  it('asked for it: ConsistentRead true beside the recipient projection, on every request', async () => {
+    const { doc, requests } = stubDoc(1);
+    const contacts = makeRepo(doc);
+    const ids = Array.from({ length: 150 }, (_, i) => `c-${String(i).padStart(3, '0')}`);
+
+    const found = await contacts.getRecipientDisplaysByIds(ids, { requireComplete: true, consistentRead: true });
+
+    expect(found.size).toBe(150);
+    // Chunk 1 (one key withheld), its retry of that key, then chunk 2.
+    expect(requests.map((request) => entryOf(request)?.Keys?.length)).toEqual([100, 1, 50]);
+    for (const request of requests) {
+      expect(entryOf(request)).toMatchObject({
+        ConsistentRead: true,
+        ProjectionExpression: expect.stringContaining('#lastReachedOutAt'),
+      });
+    }
+  });
+
+  it('(PIN) consistentRead false or absent: no ConsistentRead at all', async () => {
+    const { doc, requests } = stubDoc();
+    const contacts = makeRepo(doc);
+
+    await contacts.getRecipientDisplaysByIds(['c-1']);
+    await contacts.getRecipientDisplaysByIds(['c-1'], { requireComplete: true, consistentRead: false });
+
+    expect(requests).toHaveLength(2);
+    for (const request of requests) expect(entryOf(request)).not.toHaveProperty('ConsistentRead');
+  });
+});

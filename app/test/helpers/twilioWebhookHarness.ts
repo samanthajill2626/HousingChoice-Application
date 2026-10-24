@@ -538,6 +538,15 @@ export interface FakeWorld {
    *  the outbound twin of heardFromTouches. Writer tests read stamps here. A
    *  test that replaces world.contactsRepo.touchLastReachedOut bypasses it. */
   reachedOutTouches: { contactId: string; at: string; outcome: 'written' | 'skipped' | 'failed' }[];
+  /** Every contactsRepo.getRecipientDisplaysByIds call, in order
+   *  (today-checklist PR7): the ids and the options exactly as passed (`opts`
+   *  absent when the caller passed none). The fake IGNORES the options - in
+   *  memory every read is complete and consistent - so a test of WHICH read a
+   *  caller asked for (Today's consistentRead) reads it here. */
+  recipientDisplayCalls: {
+    contactIds: string[];
+    opts?: { requireComplete?: boolean; consistentRead?: boolean };
+  }[];
 }
 
 /** One pair's ledger balance in the fake world. See crossCheckBalances. */
@@ -574,6 +583,7 @@ export function createFakeWorld(): FakeWorld {
   const touches: FakeWorld['touches'] = [];
   const heardFromTouches: FakeWorld['heardFromTouches'] = [];
   const reachedOutTouches: FakeWorld['reachedOutTouches'] = [];
+  const recipientDisplayCalls: FakeWorld['recipientDisplayCalls'] = [];
   const contactCreates: string[] = [];
   const unreadIncrements: string[] = [];
   const unreadResets: string[] = [];
@@ -2300,7 +2310,11 @@ export function createFakeWorld(): FakeWorld {
           .map((contact) => [contact.contactId, projectDisplay(contact)] as const),
       );
     },
-    async getRecipientDisplaysByIds(contactIds) {
+    // The real signature (`requireComplete`, `consistentRead`), both IGNORED
+    // here (every in-memory read is complete and consistent); each call is
+    // recorded in world.recipientDisplayCalls so a test can read the options.
+    async getRecipientDisplaysByIds(contactIds, opts) {
+      recipientDisplayCalls.push({ contactIds: [...contactIds], ...(opts !== undefined && { opts: { ...opts } }) });
       const wanted = new Set(contactIds);
       return new Map(
         contacts
@@ -5507,6 +5521,7 @@ export function createFakeWorld(): FakeWorld {
     crossCheckBalances,
     heardFromTouches,
     reachedOutTouches,
+    recipientDisplayCalls,
     groupRailEnqueuer,
   };
 }

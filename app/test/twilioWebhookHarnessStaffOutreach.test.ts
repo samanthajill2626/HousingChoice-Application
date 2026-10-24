@@ -47,3 +47,25 @@ describe('harness contactsRepo.touchLastReachedOut (PR7)', () => {
     expect(createFakeWorld().reachedOutTouches).toEqual([]);
   });
 });
+
+describe('harness contactsRepo.getRecipientDisplaysByIds records its options (PR7)', () => {
+  it('records the ids and the options exactly as passed; the answer ignores them', async () => {
+    const world = createFakeWorld();
+    seedTenant(world, 'c-1', { last_reached_out_at: '2026-10-20T10:00:00.000Z' });
+
+    const plain = await world.contactsRepo.getRecipientDisplaysByIds(['c-1']);
+    const consistent = await world.contactsRepo.getRecipientDisplaysByIds(['c-1', 'c-2'], {
+      requireComplete: true,
+      consistentRead: true,
+    });
+
+    expect(world.recipientDisplayCalls).toEqual([
+      { contactIds: ['c-1'] },
+      { contactIds: ['c-1', 'c-2'], opts: { requireComplete: true, consistentRead: true } },
+    ]);
+    // In memory every read is complete and consistent: same answer either way.
+    expect(consistent.get('c-1')).toEqual(plain.get('c-1'));
+    expect(consistent.get('c-1')?.last_reached_out_at).toBe('2026-10-20T10:00:00.000Z');
+    expect(consistent.has('c-2')).toBe(false);
+  });
+});

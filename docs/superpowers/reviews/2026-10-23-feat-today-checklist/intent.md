@@ -2,20 +2,23 @@
 
 ## STATE (replace on every move)
 
-- Phase: LAUNCH GATE REVISION. Cameron picked AUTO with 55-minute checks
-  and a compaction first, after two revisions (2026-10-24, quoted below):
-  no heading counts; a Retry or Send now of anything automated from its
-  first send never counts. Spec r8 written; plan rulings PR102-PR105 and
-  their write-through next, then one review round of the delta (reviewer A
-  continued, round 3 of 4), then COMPACTION GATE B, then AUTO dispatch.
+- Phase: COMPACTION GATE B, then AUTO DISPATCH. Spec r8 (@13b8af90) and plan
+  v4 FINAL @12d8ab5d (rulings PR1-PR108; plan review closed after 4 rounds,
+  26 findings, no reject; adjudications in design-review/plan-adjudications.md).
+  Mission block: `mission-block.md` beside this file (spec r8 / plan v4).
 - Worktree `W:\tmp\today-checklist`, branch `feat/today-checklist`, cut from
   main @970a29b9. Nothing built; docs only.
-- Launch mode: AUTO (Cameron, 2026-10-24). Watchdog checkpoints every 55
-  minutes (his words: "go auto with 55-minute checks").
-- NEXT STEP: after the delta review closes, gate B (register --show,
-  watcher, offer /compact), then dispatch abt:build-orchestrator in the
-  background with `mission-block.md` verbatim (updated for r8/plan v4), arm
-  the watchdog at 3300 s and the mirror.
+- Launch mode: AUTO (Cameron, 2026-10-24), watchdog every 55 minutes
+  ("go auto with 55-minute checks"), compaction before dispatch (offered at
+  gate B; he asked for it).
+- NEXT STEP (after the compaction, or at once if he skips): dispatch the
+  agent `abt:build-orchestrator` with `run_in_background: true`, prompt =
+  the full text of `mission-block.md` verbatim; then arm the watchdog
+  (ScheduleWakeup / the skill's watchdog at 3300 s, re-armed each wake;
+  each wake reads the orchestrator's ledger
+  `W:\tmp\today-checklist\.superpowers\sdd\progress.md` and reports a
+  bold "Checkpoint:" status) and start the live mirror per the skill. Then
+  STATE moves to SUPERVISING with the orchestrator's agent id.
 
 ## What Cameron asked for (verbatim, with dates)
 

@@ -10,7 +10,8 @@
 - Spec review: 4 rounds -
   `docs/superpowers/reviews/2026-10-23-feat-today-checklist/design-review/adjudications.md`.
 - Status: PLAN v1 (2026-10-24). Sections 0-4 are BINDING and written by the
-  planner; slice sections 5-11 (S1-S7) are opus section drafts assembled verbatim.
+  planner; slice sections 5-11 (S1-S7) are opus section drafts assembled
+  verbatim; section 12 (S8) is the planner's.
   Section 4 (planner rulings PR1-PR40) wins over any slice text it
   contradicts. "Plan section N" always means this file's top-level sections.
 
@@ -33,7 +34,7 @@
 - Every new/touched line in code, comments, tests, copy and docs is ASCII.
   Check: `tr -d '\11\12\15\40-\176' < FILE | wc -c` prints 0 for a new file;
   for a pre-existing file that already carries non-ASCII (`routes/today.ts`
-  holds `'Stuck — needs a check'` and a header arrow; many dashboard files
+  holds an em dash in its STUCK_WHY string and a header arrow; many dashboard files
   carry em dashes), only ADDED lines must be ASCII:
   `git diff -U0 -- FILE | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c`
   prints 0. Never "fix" a pre-existing non-ASCII string a test pins.

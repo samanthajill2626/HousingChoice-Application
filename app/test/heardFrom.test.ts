@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   attributeInbound,
   normalizeInstant,
+  oneToOneThreadContactId,
   repoLookup,
   type HeardFromLookup,
   type HeardFromRow,
@@ -232,5 +233,53 @@ describe('repoLookup', () => {
     expect(await lookup.byEmail('a@b.test')).toEqual({ contactId: 'c-repo-e' });
     expect(contacts.findByPhone).toHaveBeenCalledTimes(1);
     expect(contacts.findByEmail).toHaveBeenCalledTimes(1);
+  });
+});
+
+// today-checklist W8 (PR14, C2): the ONE-TO-ONE half of the attribution rule,
+// shared with the dev fixtures' outbound twin. A multi-party thread names no
+// single contact.
+describe('oneToOneThreadContactId', () => {
+  const makeLookup = () => ({
+    byPhone: vi.fn((p: string) => (p === '+15550100005' ? { contactId: 'c-phone' } : undefined)),
+    byEmail: vi.fn((e: string) => (e === 'e@x.test' ? { contactId: 'c-email' } : undefined)),
+  });
+
+  it('names the first roster contact, else the phone holder, else the email holder', async () => {
+    expect(
+      await oneToOneThreadContactId(
+        {
+          type: 'tenant_1to1',
+          participants: [
+            { contactId: '', phone: '+15550100009' },
+            { contactId: 'c-t', phone: '+15550100001' },
+          ],
+        },
+        makeLookup(),
+      ),
+    ).toBe('c-t');
+    expect(await oneToOneThreadContactId({ type: 'tenant_1to1', participant_phone: '+15550100005' }, makeLookup())).toBe(
+      'c-phone',
+    );
+    expect(await oneToOneThreadContactId({ type: 'unknown_1to1', participant_email: 'e@x.test' }, makeLookup())).toBe(
+      'c-email',
+    );
+    expect(
+      await oneToOneThreadContactId({ type: 'tenant_1to1', participant_phone: '+15550100099' }, makeLookup()),
+    ).toBeUndefined();
+  });
+
+  it('a relay group or a group text names nobody and reads no repo', async () => {
+    const lookup = makeLookup();
+    expect(
+      await oneToOneThreadContactId(
+        { type: 'relay_group', participants: [{ contactId: 'c-r', phone: '+15550100002' }], participant_phone: '+15550109000' },
+        lookup,
+      ),
+    ).toBeUndefined();
+    expect(
+      await oneToOneThreadContactId({ type: 'group_text', participants: [{ contactId: 'c-g', phone: '+15550100003' }] }, lookup),
+    ).toBeUndefined();
+    expect(lookup.byPhone).not.toHaveBeenCalled();
   });
 });

@@ -91,6 +91,20 @@ export async function attributeInbound(
   //    it - keyed on email_new_address, never on author 'unknown' (which a
   //    verified stub or team-member sender also gets).
   if (row.type === 'email' && row.email_new_address === true) return undefined;
+  return oneToOneThreadContactId(thread, lookup);
+}
+
+/** The ONE contact a ONE-TO-ONE thread belongs to: its first roster contact,
+ *  else the contact holding its phone, else the contact holding its email.
+ *  undefined for a multi-party thread (relay_group, group_text), which names
+ *  no single contact. Step 3 of attributeInbound, shared with the outbound
+ *  twin of the dev fixtures (routes/dev.ts touchFixtureReachedOut,
+ *  today-checklist W8). */
+export async function oneToOneThreadContactId(
+  thread: HeardFromThread,
+  lookup: HeardFromLookup,
+): Promise<string | undefined> {
+  if (GROUP_THREAD_TYPES.has(thread.type)) return undefined;
   const participant = (thread.participants ?? []).find((p) => nonEmpty(p.contactId));
   if (participant !== undefined) return participant.contactId;
   if (nonEmpty(thread.participant_phone)) {

@@ -47,6 +47,7 @@ import {
 } from '../repos/messagesRepo.js';
 import { createSettingsRepo } from '../repos/settingsRepo.js';
 import { createSendMessageService } from '../services/sendMessage.js';
+import { recordStaffOutreach } from '../services/staffOutreach.js';
 import { runDueTourReminders, type RunDueTourRemindersDeps } from '../jobs/tourReminders.js';
 import { createPlacementNudgesRepo } from '../repos/placementNudgesRepo.js';
 import {
@@ -69,7 +70,7 @@ import { createPoolNumbersService } from '../services/poolNumbers.js';
 import { enqueueImmediate } from '../jobs/jobs.js';
 import { RELAY_INTRO_JOB } from '../jobs/relayFanOut.js';
 import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRepo.js';
-import { attributeInbound, repoLookup, type HeardFromRow } from '../lib/heardFrom.js';
+import { attributeInbound, oneToOneThreadContactId, repoLookup, type HeardFromRow } from '../lib/heardFrom.js';
 import { createAiRunsRepo } from '../repos/aiRunsRepo.js';
 import { createAuditRepo } from '../repos/auditRepo.js';
 import { createExtractionDriver } from '../adapters/extraction.js';
@@ -154,10 +155,11 @@ export interface DevRouterDeps {
    *  fresh pair, 409 { error: 'send_exists' } when the pair already has a row) -
    *  injected in tests (the world fake); defaults to the real listing-sends repo. */
   listingSendsRepo?: ListingSendsRepo;
-  /** Repos for the last-heard-from touch in the two inbound fixture seams
-   *  (spec 5.1 / 14.2) - injected in tests; default to the real repos. */
+  /** Repos for the last-heard-from touch in the two fixture seams (spec 5.1 /
+   *  14.2) and its outbound twin, the last-reached-out stamp (today-checklist
+   *  W8) - injected in tests; default to the real repos. */
   heardFromRepos?: {
-    contactsRepo: Pick<ContactsRepo, 'findByPhone' | 'findByEmail' | 'touchLastHeardFrom'>;
+    contactsRepo: Pick<ContactsRepo, 'findByPhone' | 'findByEmail' | 'touchLastHeardFrom' | 'touchLastReachedOut'>;
     conversationsRepo: Pick<ConversationsRepo, 'getById'>;
   };
   /** Repos for the transcript and message fixture APPENDS - injected in tests;
@@ -844,6 +846,36 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       );
     }
   };
+  // W8 (today-checklist spec 7.3, PR14): the OUTBOUND twin. A fixture row
+  // planted outbound stands for a staff send or call, so it stamps
+  // last_reached_out_at on the one-to-one thread's contact at the row's own
+  // instant, the way the live staff writers do, and emits contact.updated on
+  // the module bus when written. Gated on the direction alone: the transcript
+  // seam's author is 'unknown' either way. A multi-party thread names no single
+  // contact and stamps nobody. Best-effort, like its twin.
+  const touchFixtureReachedOut = async (
+    row: Pick<MessageItem, 'direction'>,
+    persisted: { conversationId: string; tsMsgId: string },
+  ): Promise<void> => {
+    if (row.direction !== 'outbound') return;
+    try {
+      const { contactsRepo, conversationsRepo } = heardFromDeps();
+      const thread = await conversationsRepo.getById(persisted.conversationId);
+      const contactId =
+        thread === undefined ? undefined : await oneToOneThreadContactId(thread, repoLookup(contactsRepo));
+      if (contactId === undefined) return;
+      const written = await recordStaffOutreach(
+        { contacts: contactsRepo, log },
+        [{ contactId, at: splitTsMsgId(persisted.tsMsgId).providerTs }],
+      );
+      if (written.includes(contactId)) appEvents.emit('contact.updated', { contactId });
+    } catch (err) {
+      log.error(
+        { err, conversationId: persisted.conversationId },
+        'last_reached_out stamp failed - fixture planted, last_reached_out stale',
+      );
+    }
+  };
   router.post('/__dev/voice/transcript-fixture', json(), async (req, res) => {
     const body = (req.body ?? {}) as {
       conversationId?: unknown;
@@ -915,6 +947,7 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       ...(roles !== undefined && { transcriptChannelRoles: roles }),
     });
     await touchFixtureHeardFrom({ direction, type: 'call' }, appended);
+    await touchFixtureReachedOut({ direction }, appended);
     // 2) Join sentences into the stored verbatim transcript (T1 role-aware join).
     const text = joinViSentences(sentences, roles);
     // 3) Stamp transcript + transcript_status='completed' atomically.
@@ -1146,6 +1179,7 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
         },
         appended,
       );
+      await touchFixtureReachedOut({ direction }, appended);
       log.info(
         { conversationId, tsMsgId: appended.tsMsgId, direction, createdAt, callbackAddressable: true },
         'dev extraction message-fixture planted',
@@ -1176,6 +1210,7 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     }, declaration) as MessageItem;
     await doc.send(new PutCommand({ TableName: tableName('messages'), Item: item }));
     await touchFixtureHeardFrom(item, item);
+    await touchFixtureReachedOut(item, item);
     log.info(
       { conversationId, tsMsgId: item.tsMsgId, direction, createdAt },
       'dev extraction message-fixture planted',

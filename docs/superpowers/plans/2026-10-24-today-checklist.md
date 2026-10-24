@@ -14,7 +14,7 @@
   verbatim, with every ruling PR41-PR93 that changes a step applied into
   the slice text and marked `[PRnn]` at the changed step (PR83); section 12
   (S8) is the planner's.
-  Section 4 (planner rulings PR1-PR93) wins over any slice text it
+  Section 4 (planner rulings PR1-PR96) wins over any slice text it
   contradicts. "Plan section N" always means this file's top-level sections.
 
 ## 0. Ground rules for this plan
@@ -727,6 +727,21 @@ where it differs from these, these win.
   entry notes it. PR70 is amended: the backfill counts reconcile RELAY-LEG
   adoptions only; there is no one-to-one reconcile adoption (`adoptRetry`
   rows are machine retries and are excluded).
+
+### Ruling write-through rulings (record: `design-review/plan-r1-amendments.md`)
+
+- PR94 The /api router's default send service is built with no adapter
+  (`api.ts` ~694-703), so under the harness it sends through the console
+  driver and `world.sent` / `world.sentDetails` stay empty for /api sends.
+  No adapter is wired in (that would re-route every harness /api send).
+  S2.2's route-level cases (1f, 1k, 1m) prove the send by the persisted
+  outbound row in `world.messages` (providerTs = the tsMsgId before its
+  first `#`); the slice text is amended. Job and public-route cases that
+  already use the world adapter keep their `world.sent` checks.
+- PR95 PR89's two terminals go in the ERROR terminal group of
+  `e2e/performance/routes.ts` (the precedent "Couldn't load our number.").
+- PR96 PR86 makes PR24's `isDeleted as isUnitDeleted` alias unnecessary:
+  `today.ts` imports no units `isDeleted` (an unused import fails gate 5).
 
 ## 5. S1 - The signal: last_reached_out_at, touchLastReachedOut, recordStaffOutreach
 
@@ -3591,6 +3606,12 @@ describe('staff outreach through the default send service (today-checklist W1/W2
   }
   const contactUpdates = (world: FakeWorld) =>
     world.emitted.filter((e) => e.event === 'contact.updated').map((e) => e.payload);
+  // [PR94] The /api router's DEFAULT send service has no injected adapter, so
+  // under the harness it sends through the console driver and world.sent stays
+  // empty. The send's observable is the persisted outbound row.
+  const outboundRows = (world: FakeWorld, conversationId: string) =>
+    world.messages.filter((m) => m.conversationId === conversationId && m.direction === 'outbound');
+  const providerTsOf = (m: { tsMsgId: string }): string => m.tsMsgId.split('#')[0]!;
   const post = (app: ReturnType<typeof makeWebhookHarness>['app'], path: string, body: object) =>
     request(app).post(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE).send(body);
 
@@ -3601,7 +3622,9 @@ describe('staff outreach through the default send service (today-checklist W1/W2
     const res = await post(app, `/api/conversations/${conversationId}/messages`, { body: 'checking in' });
 
     expect(res.status).toBe(201);
-    const sentAt = world.sentDetails[0]!.providerTs;
+    const rows = outboundRows(world, conversationId);
+    expect(rows).toHaveLength(1);
+    const sentAt = providerTsOf(rows[0]!);
     expect(world.reachedOutTouches).toEqual([{ contactId: 'c-1', at: sentAt, outcome: 'written' }]);
     expect(world.contacts.find((c) => c.contactId === 'c-1')?.last_reached_out_at).toBe(sentAt);
     expect(contactUpdates(world)).toEqual([{ contactId: 'c-1' }]);
@@ -3624,8 +3647,10 @@ describe('staff outreach through the default send service (today-checklist W1/W2
     });
 
     expect(res.status).toBe(201);
-    expect(world.sent.length).toBeGreaterThan(1);
-    expect(world.reachedOutTouches.map((t) => t.at)).toEqual([world.sentDetails[0]!.providerTs]);
+    const rows = outboundRows(world, conversationId);
+    expect(rows.length).toBeGreaterThan(1);
+    const first = rows.map(providerTsOf).sort()[0];
+    expect(world.reachedOutTouches.map((t) => t.at)).toEqual([first]);
     expect(contactUpdates(world)).toEqual([{ contactId: 'c-1' }]);
   });
 
@@ -3780,10 +3805,13 @@ new:
     const { app, world } = makeWebhookHarness();
     const { tourId, reminderId } = await seedSendNowTour(world);
 
+    const outboundBefore = world.messages.filter((m) => m.direction === 'outbound').length;
     const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
 
     expect(res.status).toBe(200);
-    expect(world.sent).toHaveLength(1);
+    // [PR94] the default service sends via the console driver under the
+    // harness, so the proof the send happened is the persisted outbound row.
+    expect(world.messages.filter((m) => m.direction === 'outbound').length).toBe(outboundBefore + 1);
     expect(world.reachedOutTouches).toEqual([]);
   });
 
@@ -3868,10 +3896,12 @@ new:
     const { app, world } = makeWebhookHarness();
     const { placementId, nudgeId } = await seedSendNowNudge(world);
 
+    const outboundBefore = world.messages.filter((m) => m.direction === 'outbound').length;
     const res = await authed(app).post(`/api/placements/${placementId}/nudges/${nudgeId}/send-now`);
 
     expect(res.status).toBe(200);
-    expect(world.sent).toHaveLength(1);
+    // [PR94] persisted outbound row, not world.sent (console driver).
+    expect(world.messages.filter((m) => m.direction === 'outbound').length).toBe(outboundBefore + 1);
     expect(world.reachedOutTouches).toEqual([]);
   });
 

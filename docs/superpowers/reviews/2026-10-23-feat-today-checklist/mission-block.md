@@ -3,9 +3,9 @@
 Worktree: W:\tmp\today-checklist  Branch: feat/today-checklist  (cut from main @970a29b9)
 Profile: W:\tmp\today-checklist\.claude\feature-mission.profile.md (thin Claude adapter; shared rules in AGENTS.md and documentation/FEATURE-DEVELOPMENT-WORKFLOW.md)
 Spec: docs/superpowers/specs/2026-10-23-today-checklist-design.md (r8)
-Plan: docs/superpowers/plans/2026-10-24-today-checklist.md (v4; sections 0-4 binding, rulings PR1-PR106 win over slice text)
+Plan: docs/superpowers/plans/2026-10-24-today-checklist.md (v4; sections 0-4 binding, rulings PR1-PR108 win over slice text)
 Records: docs/superpowers/reviews/2026-10-23-feat-today-checklist/ (slice reports under slices/, committed as produced)
-Design review: spec R4 (adjudications design-review/adjudications.md), plan R3 (design-review/plan-adjudications.md)   [REQUIRED]
+Design review: spec R4 (adjudications design-review/adjudications.md), plan R4 (design-review/plan-adjudications.md)   [REQUIRED]
 
 Work map:
 - S1 the signal: last_reached_out_at field, touchLastReachedOut, getRecipientDisplaysByIds consistentRead, recordStaffOutreach, conversationsRepo.getByIdConsistent, fakes

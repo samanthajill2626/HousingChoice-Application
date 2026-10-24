@@ -1,7 +1,7 @@
 # Implementation plan - Today as the daily checklist (tracker #31)
 
 - Spec (the contract - read it in full before Task S1.1):
-  `docs/superpowers/specs/2026-10-23-today-checklist-design.md` (r7; r6 APPROVED
+  `docs/superpowers/specs/2026-10-23-today-checklist-design.md` (r8; r6 APPROVED
   by Cameron 2026-10-24 with the backfill added). "Spec N.N" means its
   numbered sections; writers are W1-W8 (spec 7.3).
 - Branch `feat/today-checklist`, worktree `W:\tmp\today-checklist`, cut from
@@ -9,12 +9,12 @@
   `docs/superpowers/reviews/2026-10-23-feat-today-checklist/`.
 - Spec review: 4 rounds -
   `docs/superpowers/reviews/2026-10-23-feat-today-checklist/design-review/adjudications.md`.
-- Status: PLAN v3 FINAL (2026-10-24), plan review CLOSED after 2 rounds (round 2 terminal, precision only). Sections 0-4 are BINDING and written by the
+- Status: PLAN v4 (2026-10-24): v3 FINAL plus Cameron's launch-gate revisions (PR102-PR105, spec r8). Sections 0-4 are BINDING and written by the
   planner; slice sections 5-11 (S1-S7) are opus section drafts assembled
   verbatim, with every ruling PR41-PR93 that changes a step applied into
   the slice text and marked `[PRnn]` at the changed step (PR83); section 12
   (S8) is the planner's.
-  Section 4 (planner rulings PR1-PR101) wins over any slice text it
+  Section 4 (planner rulings PR1-PR105) wins over any slice text it
   contradicts. "Plan section N" always means this file's top-level sections.
 
 ## 0. Ground rules for this plan
@@ -762,6 +762,49 @@ where it differs from these, these win.
 - PR101 (R2-5) The S4.1 mutation check changes only the call's argument
   list and keeps the destructuring, so its red run fails on the
   consistentRead assertion.
+
+### Launch-gate rulings (Cameron, 2026-10-24; spec r8)
+
+- PR102 PR64 is REVERSED. Section headings carry NO count. The 2026-08-03
+  "no bare counts" pins (`Today.test.tsx` ~167-168) stay exactly as they
+  are. The "Show all N" / "Show all N properties" button names the count;
+  the list accessible name stays the heading text. Every slice step, test
+  and e2e selector that renders, asserts or selects a heading count is
+  amended (S5, S7).
+- PR103 The quiet-shares wire drops `people`: `quietShares` is
+  `{ status: 'ok'; properties; truncated } | { status: 'unavailable' }`;
+  `buildQuietShares` returns `{ properties }`; the distinct-people count and
+  its tests are removed (S4, S5, S7). A person on two properties still has
+  a row under each.
+- PR104 New message-row marker `system_copy` (spec r8 7.3).
+  `MessageItem` (`app/src/repos/messagesRepo.ts`) gains
+  `system_copy?: boolean` with a doc comment; the append input gains the
+  matching optional field, mapped the way the repo maps its other optional
+  booleans (verify the append mapping in the code). `SendMessageInput` gains
+  `systemCopy?: true` (doc: "set by tour reminder / nudge Send now and by a
+  staff Retry of automated or system-copy copy; changes no gating"), which
+  the service persists on the row. Writers: `forceSendReminder`
+  (`jobs/tourReminders.ts` ~1998) and `forceSendNudge`
+  (`jobs/placementNudges.ts` ~854) pass `systemCopy: true`; the Retry route
+  (`api.ts` ~1872) passes `systemCopy: true` when
+  `original.automated === true || original.system_copy === true`. W2 passes
+  `staffOutreach: true` only when `original.broadcast_id === undefined &&
+  original.automated !== true && original.system_copy !== true` - this
+  replaces PR91's live gate, and PR100's live residue is CLOSED (a Retry of
+  a Retry inherits the marker). Tests (S2): each Send now writes
+  `system_copy: true` and still stamps nothing; a Retry of a Send-now row
+  does not stamp and writes `system_copy: true`; a Retry of a manual retry
+  of an automated text does not stamp; a Retry of a plain staff text still
+  stamps and writes no marker; the automated poll sends write no marker
+  (they are `automated: true`). No reader other than W2 and the backfill
+  reads the marker.
+- PR105 Backfill (S6, spec r8 7.5): a row with `system_copy: true` never
+  counts; a manual retry (`retry_of`) is excluded when its retried row OR
+  its chain root (`retry_root`) is in the thread's window and is
+  automated, system copy, or matches the PR38 Send-now body rules; one whose
+  retried row and root are both outside the window counts and is reported
+  as residue. This replaces PR91's backfill rule and PR100's backfill
+  residue. Tests cover each case and the report counter.
 
 ## 5. S1 - The signal: last_reached_out_at, touchLastReachedOut, recordStaffOutreach
 

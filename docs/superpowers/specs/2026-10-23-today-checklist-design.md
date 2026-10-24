@@ -1,6 +1,6 @@
 # Today as the daily checklist - design (tracker #31)
 
-Status: DRAFT r3 (after design review round 2). Branch `feat/today-checklist`,
+Status: r4, design review CLOSED (round 3 terminal); awaiting the human spec gate. Branch `feat/today-checklist`,
 cut from `main` @970a29b9. Tracker: HousingChoice Improvements Tracker item #31
 (Oct 16 meeting with Sam, Oct 18 and Oct 23 decisions). Mockups shared with
 Sam (Design canvas https://claude.ai/artifact/673Q7i9fjQ7zWAH1XydJ5v); Sam
@@ -333,9 +333,12 @@ waiting rows together with each row's recipient (the projection it already
 reads, now including `last_reached_out_at`), and the existing Follow up
 projection on top of it. The Follow up route's output stays byte-for-byte the
 same; Today applies the rule above to the core's rows. One contacts read, not
-two. Today's call passes `consistentRead: true` to that contacts batch
-(`getRecipientDisplaysByIds` already supports it), so a refetch triggered by a
-stamp's event sees the stamp; the Follow up tab keeps its current read.
+two. Today's call passes `consistentRead: true` to that contacts batch, so a
+refetch triggered by a stamp's event sees the stamp; the Follow up tab keeps
+its current read. `getRecipientDisplaysByIds` takes only `requireComplete`
+today, so this is an interface change: the option is added there (the
+underlying batch walk already supports ConsistentRead), passed through
+`FollowUpsDeps`, and added to the test fakes.
 
 A person drops off when any of these happens:
 
@@ -448,7 +451,17 @@ combined field is stored.
   email or call emits `contact.updated` for its contact when its stamp was
   written; a relay or group post emits nothing per member and instead ONE
   `conversation.updated` for the thread after its fan-out loop finishes, when
-  any member's stamp was written. Today subscribes to both. This bounds the
+  any member's stamp was written. That event's payload is built from a FRESH,
+  consistent read of the thread at emit time, never from the job's
+  start-of-run snapshot: two dashboard consumers set `unread_count` straight
+  from the event (`ThreadUnreadToggle.tsx`, `ContactDetail.tsx`), so a stale
+  payload would mark a reply that arrived mid-fan-out as read. It does not
+  call `touchLastActivity`. `jobs/relayFanOut.ts` has no event bus today; it
+  gains one through the existing worker-to-API bridge (`eventBridge.ts`).
+  Where a writer already emits `conversation.updated` AFTER its stamp point,
+  it adds no event: W5 (`groupSend.ts`) stamps BEFORE its existing emit. W7
+  (`sendRelayAnnouncement`) emits before its member loop, so it takes the
+  same after-loop fresh-read event as W4. Today subscribes to both. This bounds the
   extra events at one per staff send (not one per relay leg); the
   `ContactUpdatedEvent` doc comment (`app/src/lib/events.ts`) is updated to
   name this new emitter. Every client that hears `contact.updated` (Today,
@@ -549,7 +562,9 @@ Edge rules:
   emits exactly one post-stamp event (7.3); each no-stamp writer (including a
   Retry of a share text, a 30003 relay retry rung and non-intro announcements)
   has a test that it does not move it. The W6 stamp is asserted to run after
-  the TwiML is sent.
+  the TwiML is sent, through a seam the test can await (supertest resolves
+  when the response ends, so an immediate assertion would race the
+  post-response work).
   The PATCH and create parsers refuse the field.
 - Dashboard: section order, help lines, the 5-row limit and Show all / Show
   fewer, quiet-shares property lines (first open, others folded, choices kept

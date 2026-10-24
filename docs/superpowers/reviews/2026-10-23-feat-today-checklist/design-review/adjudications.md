@@ -76,3 +76,20 @@ prod count and the "Requested N days ago" text justify it.
 | R2-12 fallback shows two section errors it never tried | ACCEPT | 2.5: one "Some sections can't load right now." line on the fallback. |
 
 Round 2 changed decisions (read mode, event mechanism), so round 3 runs.
+
+## Round 3 (spec r3 @2f58ebcb -> r4), reviewer A continued - TERMINAL
+
+| Finding | Verdict | What changed / why |
+|---|---|---|
+| R3-1 the worker's after-loop conversation.updated must come from a fresh consistent read (consumers set unread_count from it); relayFanOut has no event bus; no touchLastActivity | ACCEPT | 7.3 states all three. Precision of the r3 mechanism, not a new decision. |
+| R3-2 getRecipientDisplaysByIds has no consistentRead option today | ACCEPT | 6.1 corrected: an interface change + FollowUpsDeps pass-through + fakes. |
+| R3-3 W5/W7 stamp timing relative to existing emits | ACCEPT | 7.3: W5 stamps before its existing emit; W7 takes the after-loop fresh-read event. |
+| R3-4 W6 post-response stamp needs an awaitable test seam | ACCEPT | Section 9. |
+
+No finding changed what gets built (the reviewer agreed: "this round can be
+terminal"), so the review STOPS here after 3 rounds.
+
+Totals: round 1 37 findings (A 18, B 19, overlapping), round 2 12, round 3 4.
+One REJECT in total (A3/B10 Tours to book unbounded), conceded by reviewer A in
+round 2. Two findings went to Cameron as decisions (shares do not restart the
+clock; Identify unknown-only).

@@ -2,17 +2,19 @@
 
 ## STATE (replace on every move)
 
-- Phase: DESIGN. Spec gate PASSED 2026-10-24 (spec r5 @28d33501). Design review
-  closed after round 3; a round 4 review of the added backfill section (7.5)
-  is in flight (reviewer A continued, writing `design-review/spec-r4-reviewer-a.md`).
-- Worktree `W:\tmp\today-checklist`, branch `feat/today-checklist`, cut from
+- Phase: DESIGN complete. Spec gate PASSED 2026-10-24; spec r6 @a38bbe7d
+  (`docs/superpowers/specs/2026-10-23-today-checklist-design.md`). Design
+  review closed (rounds 1-3 on the spec, round 4 on the added backfill 7.5;
+  adjudications in `design-review/adjudications.md`).
+- Worktree `W:	mp	oday-checklist`, branch `feat/today-checklist`, cut from
   main @970a29b9. Nothing built; docs only.
-- Launch mode: not chosen yet.
-- NEXT STEP: adjudicate round 4 (fold into 7.5, commit), then compaction gate
-  A, then write the implementation plan at
-  `docs/superpowers/plans/2026-10-24-today-checklist.md` and run its
-  adversarial review (2 opus reviewers round 1), then the mission block and
-  launch gate.
+- Launch mode: not chosen yet. Nothing in flight.
+- NEXT STEP: write the implementation plan at
+  `docs/superpowers/plans/2026-10-24-today-checklist.md` (TDD, zero-context
+  builder; enumerate every writer W1-W8, every no-stamp writer, every reader of
+  the old Today groups/headings, the backfill), run its adversarial review (2
+  opus reviewers round 1, spec + plan + repo), then the mission block and the
+  launch gate (AskUserQuestion: AUTO / MANUAL / Revise).
 
 ## What Cameron asked for (verbatim, with dates)
 

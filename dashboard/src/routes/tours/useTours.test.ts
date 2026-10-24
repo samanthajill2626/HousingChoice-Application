@@ -29,7 +29,6 @@ import {
   pastToursDateRange,
   selectPastTours,
   selectOffRangeTours,
-  TODAY_PAST_TOURS_CAP,
   useClosedTours,
   usePastTours,
   useTours,
@@ -316,13 +315,11 @@ describe('isOffRangePastTour (the split selectOffRangeTours keeps)', () => {
   });
 });
 
-// Today lists the Past tab's rows as they are, no-shows included (spec 9.4) -
-// useTodayPastTours.test.tsx pins that end to end. What is left here is the cap.
-describe('TODAY_PAST_TOURS_CAP (the Today page, Sam item 18)', () => {
-  it('caps Today at five rows', () => {
-    expect(TODAY_PAST_TOURS_CAP).toBe(5);
-  });
-});
+// Today lists the Past tab's rows, no-shows included (spec 9.4), every one of
+// them labeled and in Today's own order (spec 2026-10-23-today-checklist 5.3);
+// useTodayPastTours.test.tsx pins that end to end. TODAY_PAST_TOURS_CAP is
+// gone (plan WI10): the Today section shows 5 rows with Show all
+// (TODAY_SECTION_LIMIT, pinned in today/TodaySection.test.tsx).
 
 describe('pastState', () => {
   const base = { tourId: 't', tenantId: 'c', unitId: 'u', tourType: 'self_guided' } as const;

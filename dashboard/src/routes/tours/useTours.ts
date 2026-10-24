@@ -262,14 +262,6 @@ export function selectOffRangeTours(tours: Tour[], now: Date = new Date()): Tour
     });
 }
 
-/** How many past tours the Today page lists before it points at the Past tab.
- *  Today lists the Past tab's own rows as they are (Cameron 2026-09-30, Sam's
- *  item 18), in the Past tab's order, no-shows included: a no-show now closes
- *  on its own two weeks after its last mark, so it no longer sits on the home
- *  page for the whole window (spec 9.4). Never re-deriving the rows keeps one
- *  rule - change the Past tab and Today follows. */
-export const TODAY_PAST_TOURS_CAP = 5;
-
 /** The plain-words state chip for a Past row (spec 4.3). Any other status
  *  falls back to its label so a mis-selected row is never blank. */
 export function pastState(tour: Tour): string {

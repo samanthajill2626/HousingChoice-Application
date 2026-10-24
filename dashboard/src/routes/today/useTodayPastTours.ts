@@ -1,23 +1,29 @@
 // useTodayPastTours - the Today page's "Past tours needing an outcome" section
-// (Sam's item 18, Cameron 2026-09-30). It REUSES the Tours page's Past tab: the
-// same loader (usePastTours - the same two reads over the same window) and the
-// Past tab's selected rows as they are, no-shows included - a no-show now
-// closes on its own two weeks after its last mark (spec 9.4), so it no longer
-// sits here for the whole window. Nothing here decides which tour is "past";
-// change the Past tab's rule and Today follows.
+// (Sam's item 18, Cameron 2026-09-30; ordered and labeled per spec
+// 2026-10-23-today-checklist-design 5.3). It REUSES the Tours page's Past tab:
+// the same loader (usePastTours - the same two reads over the same window) and
+// the Past tab's selected rows, no-shows included - a no-show closes on its
+// own two weeks after its last mark (tour spec 9.4). Nothing here decides
+// which tour is "past"; change the Past tab's rule and Today follows.
 //
 // What it adds for the home page:
-// - Names for the rows it shows. The Past tab loads EVERY contact and property
-//   to label its rows - too heavy for the landing page - so this point-reads
-//   only the tenants and properties of the rows it lists.
+// - Names for EVERY Past row, so "Show all N" counts the rows Today actually
+//   qualifies (spec 5.3; the page shows the first 5; no heading count). The
+//   Past tab loads every contact and property to label its rows - too heavy
+//   for the landing page - so this point-reads only the listed tenants and
+//   properties, all at once (one round trip).
 // - Soft-deleted tenants are skipped, as on every other Today row (the server
-//   queue's rule). The walk continues past them, so the section still fills to
-//   the cap. A failed lookup is NOT a deletion: the row stays, labeled by id
-//   (the Past tab's fallback).
+//   queue's rule). A failed lookup is NOT a deletion: the row stays, labeled
+//   by id (the Past tab's fallback).
+// - Today's order (spec 5.3): the range read's rows OLDEST scheduledAt first
+//   (ties by tourId), so the oldest tours do not wait for the two-week
+//   auto-close; then the off-range rows (undated, or dated after today) in
+//   the loader's own order, last. The split is the Past tab's own rule
+//   (isOffRangePastTour). The Past tab's order is unchanged.
 // - Live refresh: a tour.updated event (a status or outcome PATCH, a
-//   conversion, the auto-close sweep, a reopen) reloads the rows, debounced;
-//   addresses already looked up are reused (tenants are re-read, for their
-//   delete state), and a failed reload keeps the rows and says so
+//   conversion, the auto-close sweep, a reopen, a create) reloads the rows,
+//   debounced; addresses already looked up are reused (tenants are re-read,
+//   for their delete state), and a failed reload keeps the rows and says so
 //   (reloadFailed).
 // - Failure isolation: a failed load is this section's error, never the page's.
 import { useEffect, useRef, useState } from 'react';
@@ -30,7 +36,7 @@ import {
   type UnitItem,
 } from '../../api/index.js';
 import { contactDisplayName, formatAddress } from '../contact/format.js';
-import { TODAY_PAST_TOURS_CAP, usePastTours } from '../tours/useTours.js';
+import { isOffRangePastTour, usePastTours } from '../tours/useTours.js';
 
 export interface TodayPastTourRow {
   tour: Tour;
@@ -45,12 +51,12 @@ export interface TodayPastToursState {
    *  hidden meanwhile); 'error' only when the first load failed - a failed
    *  reload keeps the rows on screen. */
   status: 'idle' | 'ready' | 'error';
-  /** Up to TODAY_PAST_TOURS_CAP rows, in the Past tab's order. */
+  /** Every Past row whose tenant is not soft-deleted, labeled, in Today's
+   *  order (orderForToday). The page shows the first 5 with Show all. */
   rows: TodayPastTourRow[];
   /** How many rows the Past tab lists - the "See all N on the Past tab" count,
    *  so the link names what the click lands on. It includes what Today leaves
-   *  out (a deleted tenant's tours), so it can exceed rows.length even when
-   *  Today lists everything it qualifies. */
+   *  out (a deleted tenant's tours), so it can exceed rows.length. */
   total: number;
   /** The last live reload failed; the rows on screen may be stale (the Past
    *  tab's reloadFailed, passed through). Never true unless status is ready. */
@@ -100,47 +106,53 @@ function cachedLookup<T>(
   };
 }
 
-/** Walk `tours` in order and label the first TODAY_PAST_TOURS_CAP whose tenant
- *  is not soft-deleted. Tenants are read in parallel a batch at a time (one
- *  batch when nobody is deleted); each batch's properties are requested at the
- *  same moment, so labeling costs one round trip, not two. Every lookup is
- *  best-effort: a failure resolves to undefined, so this never rejects (an
- *  aborted pass resolves to [] and is discarded by the caller). */
+/** Label every Past row whose tenant is not soft-deleted, keeping the given
+ *  order. Every tenant and property read starts at once (the property reads
+ *  beside the tenant reads, so labeling costs one round trip; a deleted
+ *  tenant's property read is wasted, rarely). Every lookup is best-effort: a
+ *  failure resolves to undefined, so this never rejects (an aborted pass
+ *  resolves to [] and is discarded by the caller). */
 async function labelRows(tours: Tour[], signal: AbortSignal, cache: LabelCache): Promise<TodayPastTourRow[]> {
   // A fresh map per pass: tenants are only de-duplicated within this pass.
   const contactOf = cachedLookup(new Map<string, Contact>(), getContact, signal);
   const unitOf = cachedLookup(cache.units, getUnit, signal);
 
-  const kept: { tour: Tour; contact: Contact | undefined }[] = [];
-  let next = 0;
-  while (kept.length < TODAY_PAST_TOURS_CAP && next < tours.length) {
-    const batch = tours.slice(next, next + (TODAY_PAST_TOURS_CAP - kept.length));
-    next += batch.length;
-    // Start the batch's property reads now; a deleted tenant's is wasted, rarely.
-    for (const t of batch) void unitOf(t.unitId);
-    const found = await Promise.all(batch.map((t) => contactOf(t.tenantId)));
-    if (signal.aborted) return [];
-    batch.forEach((tour, i) => {
-      const contact = found[i];
-      if (contact !== undefined && isDeletedContact(contact)) return;
-      kept.push({ tour, contact });
-    });
-  }
-
-  const unitList = await Promise.all(kept.map((k) => unitOf(k.tour.unitId)));
+  const unitsPending = Promise.all(tours.map((t) => unitOf(t.unitId)));
+  const contacts = await Promise.all(tours.map((t) => contactOf(t.tenantId)));
+  const units = await unitsPending;
   if (signal.aborted) return [];
 
-  return kept.map(({ tour, contact }, i) => {
-    const unit = unitList[i];
-    return {
+  const rows: TodayPastTourRow[] = [];
+  tours.forEach((tour, i) => {
+    const contact = contacts[i];
+    if (contact !== undefined && isDeletedContact(contact)) return;
+    const unit = units[i];
+    rows.push({
       tour,
       tenant:
         contact !== undefined
           ? contactDisplayName(contact.firstName, contact.lastName, contact.phone)
           : tour.tenantId,
       property: unit !== undefined ? formatAddress(unit.address) || tour.unitId : tour.unitId,
-    };
+    });
   });
+  return rows;
+}
+
+/** Today's order for the labeled Past rows (spec 5.3): the in-range rows (the
+ *  range read's) by OLDEST scheduledAt first, ties by tourId; then the
+ *  off-range rows (isOffRangePastTour - the Past tab's own split) in the order
+ *  given, last. Pure; never mutates its input. */
+export function orderForToday(rows: readonly TodayPastTourRow[], now: Date = new Date()): TodayPastTourRow[] {
+  const inRange = rows.filter((r) => !isOffRangePastTour(r.tour, now));
+  const offRange = rows.filter((r) => isOffRangePastTour(r.tour, now));
+  inRange.sort((a, b) => {
+    const aAt = a.tour.scheduledAt ?? '';
+    const bAt = b.tour.scheduledAt ?? '';
+    if (aAt !== bAt) return aAt < bAt ? -1 : 1;
+    return a.tour.tourId < b.tour.tourId ? -1 : a.tour.tourId > b.tour.tourId ? 1 : 0;
+  });
+  return [...inRange, ...offRange];
 }
 
 export function useTodayPastTours(): TodayPastToursState {
@@ -160,7 +172,7 @@ export function useTodayPastTours(): TodayPastToursState {
     // rows on screen until this lands.
     void labelRows(past, controller.signal, cacheRef.current).then((rows) => {
       if (controller.signal.aborted) return;
-      setLabeled({ rows, total: pastCount });
+      setLabeled({ rows: orderForToday(rows, new Date()), total: pastCount });
     });
     return () => controller.abort();
   }, [pastStatus, past, pastCount]);

@@ -1,11 +1,13 @@
-// useTodayPastTours - the Today page's past-tours section (Sam's item 18).
-// The fetch and the selection are the Past tab's own (usePastTours), so these
-// tests drive the api barrel's getTours and pin what Today adds: every Past
-// row, no-shows included (a no-show now closes on its own two weeks after its
-// last mark), a cap of five with the full count, the Past order, point-read
-// names, a soft-deleted tenant skipped (the walk continues past it), a failed
-// lookup kept under its id, a first-load failure isolated to the section, and
-// a tour.updated event reloading the rows.
+// useTodayPastTours - the Today page's past-tours section (Sam's item 18;
+// spec 2026-10-23-today-checklist-design 5.3). The fetch and the selection are
+// the Past tab's own (usePastTours), so these tests drive the api barrel's
+// getTours and pin what Today adds: every Past row, no-shows included (a
+// no-show closes on its own two weeks after its last mark), EVERY row labeled
+// (no cap - the page shows 5 with Show all) with the Past tab's count, Today's
+// order (in-range rows oldest first, then the off-range rows in the loader's
+// order), point-read names, a soft-deleted tenant skipped, a failed lookup
+// kept under its id, a first-load failure isolated to the section, and a
+// tour.updated event reloading the rows.
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Contact, Tour, UnitItem } from '../../api/index.js';
@@ -50,10 +52,11 @@ function tour(tourId: string, n: number, over: Partial<Tour> = {}): Tour {
   } as Tour;
 }
 
-/** The range read returns `range`; the status=toured read returns nothing. */
-function serveTours(range: Tour[]): void {
+/** The range read returns `range`; the status=toured read returns `toured`
+ *  (nothing by default). */
+function serveTours(range: Tour[], toured: Tour[] = []): void {
   getTours.mockImplementation((params: { status?: string }) =>
-    Promise.resolve(params.status === 'toured' ? [] : range),
+    Promise.resolve(params.status === 'toured' ? toured : range),
   );
 }
 
@@ -75,46 +78,67 @@ afterEach(() => {
 });
 
 describe('useTodayPastTours', () => {
-  it('lists the Past rows - no-shows included - most recent first, with names and addresses', async () => {
+  it('lists the Past rows - no-shows included - OLDEST first, with names and addresses', async () => {
     serveTours([
-      tour('old', 5),
-      tour('ns', 2, { status: 'no_show' }),
       tour('new', 1, { status: 'scheduled' }),
+      tour('ns', 2, { status: 'no_show' }),
+      tour('old', 5),
     ]);
     const { result } = renderHook(() => useTodayPastTours());
     await waitFor(() => expect(result.current.status).toBe('ready'));
-    // The no-show sits in its date order: Today lists the Past tab's rows as
-    // they are (spec 9.4).
-    expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['new', 'ns', 'old']);
+    // Spec 2026-10-23 5.3 reverses the Sep 29 "most recent first" ruling: the
+    // oldest tour leads, so it does not wait for the two-week auto-close. The
+    // no-show sits in its date order (Today lists the Past tab's rows, 9.4).
+    expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['old', 'ns', 'new']);
     // The "See all N" count is the Past tab's, which is all three here.
     expect(result.current.total).toBe(3);
-    expect(result.current.rows[0]).toMatchObject({ tenant: 'Name c-new Tenant', property: 'u-new Main St' });
+    expect(result.current.rows[0]).toMatchObject({ tenant: 'Name c-old Tenant', property: 'u-old Main St' });
     // The no-show is a listed row, so its tenant and property are looked up too.
     expect(result.current.rows[1]).toMatchObject({ tenant: 'Name c-ns Tenant', property: 'u-ns Main St' });
     expect(getContact).toHaveBeenCalledWith('c-ns', expect.anything());
   });
 
-  it('shows at most five rows and reports the Past tab count for "See all N"', async () => {
+  it('labels EVERY Past row (no cap) and reports the Past tab count', async () => {
+    // RE-WRITTEN (was "shows at most five rows"): spec 5.3 - "Show all N"
+    // counts the rows Today qualifies (the heading carries no count, PR102),
+    // so every row is labeled; the page shows 5 of them (TodaySection).
     serveTours(Array.from({ length: 7 }, (_, i) => tour(`t${i}`, i + 1)));
     const { result } = renderHook(() => useTodayPastTours());
     await waitFor(() => expect(result.current.status).toBe('ready'));
-    expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['t0', 't1', 't2', 't3', 't4']);
+    // t6 is seven days old, t0 one day old: oldest first.
+    expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['t6', 't5', 't4', 't3', 't2', 't1', 't0']);
     expect(result.current.total).toBe(7);
-    // Five tenants and five properties, not seven.
-    expect(getContact).toHaveBeenCalledTimes(5);
-    expect(getUnit).toHaveBeenCalledTimes(5);
+    // Seven tenants and seven properties, in one round trip.
+    expect(getContact).toHaveBeenCalledTimes(7);
+    expect(getUnit).toHaveBeenCalledTimes(7);
   });
 
-  it('skips a soft-deleted tenant and keeps walking to fill the section', async () => {
+  it('skips a soft-deleted tenant', async () => {
     serveTours(Array.from({ length: 7 }, (_, i) => tour(`t${i}`, i + 1)));
     getContact.mockImplementation((id: string) =>
       Promise.resolve(contactFor(id, id === 'c-t1' ? { deleted_at: '2026-09-01T00:00:00Z' } : {})),
     );
     const { result } = renderHook(() => useTodayPastTours());
     await waitFor(() => expect(result.current.status).toBe('ready'));
-    expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['t0', 't2', 't3', 't4', 't5']);
+    expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['t6', 't5', 't4', 't3', 't2', 't0']);
     // The count is the Past tab's (it lists the deleted tenant's tour).
     expect(result.current.total).toBe(7);
+  });
+
+  it('orders in-range rows oldest first (ties by tourId), then the off-range rows in the loader order', async () => {
+    serveTours(
+      [tour('a', 1), tour('c', 3), tour('b', 3)],
+      [
+        // Off-range (spec 4.2a): undated toured tours. The loader lists them
+        // most recently touched first; Today keeps that order, LAST.
+        tour('u-old', 0, { scheduledAt: undefined, updatedAt: daysAgo(4) }),
+        tour('u-new', 0, { scheduledAt: undefined, updatedAt: daysAgo(1) }),
+      ],
+    );
+    const { result } = renderHook(() => useTodayPastTours());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['b', 'c', 'a', 'u-new', 'u-old']);
+    expect(result.current.total).toBe(5);
   });
 
   it('keeps a row whose lookups fail, labeled by id (a failure is not a deletion)', async () => {
@@ -212,7 +236,8 @@ describe('useTodayPastTours - round-2 review fixes', () => {
     act(() => {
       lastHandlers.onTourUpdated?.({ tourId: 'c', status: 'toured' });
     });
-    await waitFor(() => expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['c', 'a', 'b']));
+    // Today's order: oldest first (b is three days old, c one).
+    await waitFor(() => expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['b', 'a', 'c']));
     // Addresses: only c's is new. Tenants: all three re-read (delete state).
     expect(getUnit).toHaveBeenCalledTimes(3);
     expect(getContact).toHaveBeenCalledTimes(5);

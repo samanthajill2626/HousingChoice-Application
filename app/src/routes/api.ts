@@ -1300,6 +1300,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       placementDeadlinesRepo: placementDeadlines,
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       ...(deps.toursRepo !== undefined && { toursRepo: deps.toursRepo }),
+      // Today checklist (spec 2026-10-23 3, 6): the SAME units repo the
+      // sub-routers above share - tour-row labels and the Quiet shares walk.
+      unitsRepo: units,
       // conversation-fact-extraction (T9): the ai_suggestions group reads pending
       // suggestions from the SAME store the review API + PATCH clear-hook share.
       extractionRepo: extraction,

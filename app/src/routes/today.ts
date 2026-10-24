@@ -73,6 +73,11 @@ import {
   createToursRepo,
   type ToursRepo,
 } from '../repos/toursRepo.js';
+import {
+  createUnitsRepo,
+  type UnitsRepo,
+} from '../repos/unitsRepo.js';
+import { formatAddress } from '../lib/address.js';
 import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRepo.js';
 import { GROUP_DETECTION_ORIGIN } from '../services/groupMembers.js';
 import { isMemberSuppressed } from '../services/relayAnnouncements.js';
@@ -104,6 +109,13 @@ export interface TodayItem {
   urgency?: string;
   tag?: string;
   attention?: boolean;
+  /**
+   * Tour rows only (spec 2026-10-23-today-checklist-design.md 3), ISO:
+   * tours_today = the tour's scheduledAt; tours_to_book = its createdAt.
+   */
+  at?: string;
+  /** Tour rows only: the property, formatAddress(unit.address) || unitId. */
+  unitLabel?: string;
 }
 
 /**
@@ -164,6 +176,12 @@ export interface TodayRouterDeps {
   conversationsRepo?: ConversationsRepo;
   contactsRepo?: ContactsRepo;
   toursRepo?: ToursRepo;
+  /**
+   * Today checklist (spec 2026-10-23-today-checklist-design.md 3, 6): memoized
+   * point reads label the tour rows (unitLabel), and the Quiet shares core walks
+   * the available properties.
+   */
+  unitsRepo?: UnitsRepo;
   /** Pending AI suggestions (conversation-fact-extraction) -> the ai_suggestions group. */
   extractionRepo?: ExtractionRepo;
   /**
@@ -337,6 +355,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
+  const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const extraction = deps.extractionRepo ?? createExtractionRepo({ logger: deps.logger });
   /** Raw byUnread rows ONE /api/today request may scan (spec 4.3's budget). */
   const unreadWalkBudget = deps.unreadWalkLimit ?? UNREAD_WALK_LIMIT;
@@ -423,6 +442,32 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       }
       placementCache.set(placementId, placement);
       return placement;
+    };
+
+    // Unit labels for the tour rows (spec 2026-10-23 3, plan PR25 as amended
+    // by PR86): a per-request memoized point read, modeled on the placement
+    // cache above. formatAddress(unit.address) || unitId - the Follow up tab's
+    // formatter - for ANY unit the read returns, soft-deleted or not (its
+    // address is intact). A failed LABEL is never a failure (spec 2.5): only a
+    // throw or an absent item logs one WARN with the unitId and the row shows
+    // the unitId. The memo makes that WARN once per unit per request.
+    const unitLabelCache = new Map<string, string>();
+    const unitLabelOf = async (unitId: string): Promise<string> => {
+      const cached = unitLabelCache.get(unitId);
+      if (cached !== undefined) return cached;
+      let label = unitId;
+      try {
+        const unit = await units.getById(unitId);
+        if (unit === undefined) {
+          log.warn({ unitId }, 'today: unit label lookup found no unit - showing the unitId');
+        } else {
+          label = formatAddress(unit.address) || unitId;
+        }
+      } catch (err) {
+        log.warn({ err, unitId }, 'today: unit label lookup failed (best-effort) - showing the unitId');
+      }
+      unitLabelCache.set(unitId, label);
+      return label;
     };
 
     /**
@@ -579,6 +624,8 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         if (!TOURS_TODAY_STATUSES.has(t.status)) continue; // skip non-active statuses
         if (await isDeletedContact(t.tenantId)) continue; // deleted tenant → off the boards
         const who = (await resolveContactLabel(t.tenantId)) ?? t.tenantId;
+        const unitLabel = await unitLabelOf(t.unitId);
+        const scheduledMs = typeof t.scheduledAt === 'string' ? Date.parse(t.scheduledAt) : Number.NaN;
         const item: TodayItem = {
           group: 'tours_today',
           refType: 'tour',
@@ -586,9 +633,12 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
           who,
           why: 'Tour today',
           tag: 'Tour',
+          ...(typeof t.scheduledAt === 'string' && { at: t.scheduledAt }),
+          unitLabel,
         };
-        // Tours all share "today" — order them by tenant name then refId (stable).
-        toursToday.push({ item, at: now });
+        // Spec 2026-10-23 2.4 / PR29: by time, then tenant name, then refId
+        // (the sort below). The range read yields dated tours only.
+        toursToday.push({ item, at: Number.isNaN(scheduledMs) ? Number.POSITIVE_INFINITY : scheduledMs });
       }
     }
 
@@ -1094,17 +1144,12 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       return a.item.refId < b.item.refId ? -1 : a.item.refId > b.item.refId ? 1 : 0;
     };
     needsYouNow.sort(byUrgency);
-    toursToday.sort((a, b) =>
-      a.item.who !== b.item.who
-        ? a.item.who < b.item.who
-          ? -1
-          : 1
-        : a.item.refId < b.item.refId
-          ? -1
-          : a.item.refId > b.item.refId
-            ? 1
-            : 0,
-    );
+    // tours_today: by time, then tenant name, then refId (spec 2026-10-23 2.4).
+    toursToday.sort((a, b) => {
+      if (a.at !== b.at) return a.at - b.at;
+      if (a.item.who !== b.item.who) return a.item.who < b.item.who ? -1 : 1;
+      return a.item.refId < b.item.refId ? -1 : a.item.refId > b.item.refId ? 1 : 0;
+    });
     unreplied.sort(byUrgency);
     followUps.sort(byUrgency);
     // AI-suggestion rows share "now" ordering - tie-break by refId for a stable order.

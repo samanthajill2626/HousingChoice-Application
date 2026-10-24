@@ -8,13 +8,14 @@
 // attention AND due appears once), the UTC "today" date basis for tours_today,
 // who/why hydration (incl. a missing contact degrading to the id, not a 500),
 // a deterministic total order (same seed → same order), and the empty envelope.
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Express } from 'express';
 import request from 'supertest';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import type { PlacementDeadlineType, PlacementItem } from '../src/repos/placementsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
+import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { GROUP_TEXT_STATUS, type ConversationItem } from '../src/repos/conversationsRepo.js';
 import { unreadFlagFor } from './helpers/unreadIndexFake.js';
 import {
@@ -114,12 +115,17 @@ describe('today action-queue API (BE6/C7)', () => {
     tenantId: string;
     scheduledAt?: string;
     status?: string;
+    /** Default 'unit-1' - a unit no test seeds, so its label is the unitId. */
+    unitId?: string;
+    /** The harness create stamps now when absent (tours_to_book order/age). */
+    createdAt?: string;
   }): Promise<void> => {
     await world.toursRepo.create({
       tourId: t.tourId,
       tenantId: t.tenantId,
-      unitId: 'unit-1',
+      unitId: t.unitId ?? 'unit-1',
       tourType: 'self_guided',
+      ...(t.createdAt !== undefined ? { createdAt: t.createdAt } : {}),
       ...(t.scheduledAt !== undefined ? { scheduledAt: t.scheduledAt } : {}),
       ...(t.status !== undefined ? { status: t.status } : {}),
     } as Parameters<typeof world.toursRepo.create>[0]);
@@ -2070,6 +2076,105 @@ describe('today action-queue API (BE6/C7)', () => {
       const body = res.body as TodayResponse;
       const nag = body.relayCloseNags.find((n) => n.conversationId === 'relay-nag');
       expect(nag?.memberNames).toEqual(['Nadia Nag', '(555) 010-0012']);
+    });
+  });
+
+  // --- Today checklist (spec 2026-10-23-today-checklist-design.md 2.4, 3;
+  // plan PR25 / PR29): tour rows carry their time and their property --------
+  describe('tour rows carry at and unitLabel (today-checklist)', () => {
+    const OAK = { line1: '12 Oak St', city: 'Atlanta', state: 'GA', zip: '30303' };
+    const OAK_LABEL = '12 Oak St, Atlanta, GA 30303';
+    const seedUnit = (unitId: string, over: Partial<UnitItem> = {}): void => {
+      world.units.set(unitId, { unitId, landlordId: 'c-ll', status: 'available', ...over });
+    };
+    const labelWarns = () =>
+      harness.capture.atLevel(40).filter((l) => String(l['msg'] ?? '').includes('unit label'));
+
+    it('tours_today rows carry at = scheduledAt and the unit label, ordered by time, then tenant, then tourId', async () => {
+      seedUnit('u-oak', { address: OAK });
+      seedTenant('t-amy', 'Amy', 'Able');
+      seedTenant('t-bea', 'Bea', 'Bold');
+      const nine = `${todayYmd()}T09:00:00.000Z`;
+      const three = `${todayYmd()}T15:00:00.000Z`;
+      await seedTour({ tourId: 'tour-3', tenantId: 't-amy', unitId: 'u-oak', scheduledAt: three });
+      await seedTour({ tourId: 'tour-2', tenantId: 't-bea', unitId: 'u-oak', scheduledAt: nine });
+      await seedTour({ tourId: 'tour-5', tenantId: 't-amy', unitId: 'u-oak', scheduledAt: nine });
+      await seedTour({ tourId: 'tour-4', tenantId: 't-amy', unitId: 'u-oak', scheduledAt: nine });
+
+      const tours = (await getItems()).filter((i) => i.group === 'tours_today');
+
+      // The old order was tenant name first (tour-3, tour-4, tour-5, tour-2).
+      expect(tours.map((i) => i.refId)).toEqual(['tour-4', 'tour-5', 'tour-2', 'tour-3']);
+      expect(tours[0]).toEqual({
+        group: 'tours_today',
+        refType: 'tour',
+        refId: 'tour-4',
+        who: 'Amy Able',
+        why: 'Tour today',
+        tag: 'Tour',
+        at: nine,
+        unitLabel: OAK_LABEL,
+      });
+      expect(tours[3]).toMatchObject({ at: three, unitLabel: OAK_LABEL });
+    });
+
+    // PR86: a soft-deleted unit is still a present item with its address -
+    // the label is the address and nothing WARNs. Only an ABSENT unit (or a
+    // throw, below) degrades to the unitId, with ONE WARN per unit per request.
+    it('a soft-deleted unit still shows its address, with no WARN (PR86)', async () => {
+      seedUnit('u-del', { address: OAK, deleted_at: '2026-10-01T00:00:00.000Z' });
+      seedTenant('t-amy', 'Amy', 'Able');
+      await seedTour({ tourId: 'tour-d', tenantId: 't-amy', unitId: 'u-del', scheduledAt: todayNoonIso() });
+
+      const tours = (await getItems()).filter((i) => i.group === 'tours_today');
+
+      expect(tours.map((i) => [i.refId, i.unitLabel])).toEqual([['tour-d', OAK_LABEL]]);
+      expect(labelWarns()).toEqual([]);
+    });
+
+    it('an absent unit labels the row with its unitId and WARNs once per unit - never a 500 (PR86)', async () => {
+      seedTenant('t-amy', 'Amy', 'Able');
+      await seedTour({ tourId: 'tour-g1', tenantId: 't-amy', unitId: 'u-gone', scheduledAt: todayNoonIso() });
+      await seedTour({ tourId: 'tour-g2', tenantId: 't-amy', unitId: 'u-gone', scheduledAt: todayNoonIso() });
+
+      const tours = (await getItems()).filter((i) => i.group === 'tours_today');
+
+      expect(tours.map((i) => [i.refId, i.unitLabel])).toEqual([
+        ['tour-g1', 'u-gone'],
+        ['tour-g2', 'u-gone'],
+      ]);
+      expect(labelWarns()).toHaveLength(1);
+      expect(labelWarns()[0]).toMatchObject({ unitId: 'u-gone' });
+      expect(JSON.stringify(labelWarns())).not.toContain('Amy');
+    });
+
+    it('a unit read that THROWS degrades to the unitId and WARNs with the unitId - the route still answers 200', async () => {
+      seedUnit('u-oak', { address: OAK });
+      seedTenant('t-amy', 'Amy', 'Able');
+      await seedTour({ tourId: 'tour-oak', tenantId: 't-amy', unitId: 'u-oak', scheduledAt: todayNoonIso() });
+      vi.spyOn(world.unitsRepo, 'getById').mockRejectedValue(new Error('throttled'));
+
+      const res = await authedGet('/api/today');
+
+      expect(res.status).toBe(200);
+      const row = (res.body as TodayResponse).items.find((i) => i.refId === 'tour-oak');
+      expect(row?.unitLabel).toBe('u-oak');
+      expect(labelWarns()).toHaveLength(1);
+      expect(labelWarns()[0]).toMatchObject({ unitId: 'u-oak' });
+      expect(JSON.stringify(labelWarns())).not.toContain('Amy');
+    });
+
+    it('labels are memoized per request: one unit read per distinct unit', async () => {
+      seedUnit('u-oak', { address: OAK });
+      seedTenant('t-amy', 'Amy', 'Able');
+      for (const tourId of ['tour-m1', 'tour-m2', 'tour-m3']) {
+        await seedTour({ tourId, tenantId: 't-amy', unitId: 'u-oak', scheduledAt: todayNoonIso() });
+      }
+      const spy = vi.spyOn(world.unitsRepo, 'getById');
+
+      await getItems();
+
+      expect(spy.mock.calls.map((c) => c[0])).toEqual(['u-oak']);
     });
   });
 });

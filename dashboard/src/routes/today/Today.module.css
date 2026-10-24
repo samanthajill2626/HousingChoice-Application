@@ -236,6 +236,46 @@
   font-size: var(--fs-sm);
 }
 
+/* --- Shared section frame (TodaySection, spec 2026-10-23 2.1) ------------- */
+
+/* The VA help line under a checklist heading (spec 2.2). */
+.help {
+  margin: calc(-1 * var(--sp-1)) 0 var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+/* Under a list: the Show all / Show fewer button and, beside it, the Past
+ * tours section's link to the Past tab. */
+.listFooter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.showAll {
+  min-height: 2.25rem;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  color: var(--c-brand);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+}
+
+.showAll:hover {
+  border-color: var(--c-border-strong);
+}
+
+.showAll:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
 /* Tight content pane (phones, and the narrow pane just above the nav breakpoint):
  * stack the text block over the chips so the name + reason get a full line each
  * and the chips wrap onto their own line instead of overflowing or crushing the

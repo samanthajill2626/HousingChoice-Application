@@ -61,9 +61,23 @@ test.describe('Email triage - unmatched, quarantine, and inert HTML', () => {
     ).toBeVisible({ timeout: 15_000 });
     await expect(page.getByText(/stranger\.caller/)).toHaveCount(0);
 
-    // (b) Nothing shows up in Today either.
+    // (b) Nothing shows up in Today either. Server truth first (tracker #31,
+    //     WL-21: every Today section now shows 5 rows, so a DOM absence alone
+    //     cannot see a row past the fifth): after the page's own Today fetch
+    //     has landed, no GET /api/today item names the sender. Then the page.
+    const todayLoaded = page.waitForResponse(
+      (r) => new URL(r.url()).pathname === '/api/today' && r.status() === 200,
+    );
     await page.goto(`${NEXT}/`);
+    await todayLoaded;
     await expectTodayReady(page, { timeout: 15_000 });
+    const todayRes = await page.request.get(`${NEXT}/api/today`);
+    expect(todayRes.status(), await todayRes.text()).toBe(200);
+    const { items: todayItems } = (await todayRes.json()) as { items: Array<{ who: string; why: string }> };
+    expect(
+      todayItems.filter((i) => /stranger\.caller/.test(`${i.who} ${i.why}`)),
+      JSON.stringify(todayItems),
+    ).toEqual([]);
     await expect(page.getByText(/stranger\.caller/)).toHaveCount(0);
 
     // (c) The row IS in the Unmatched tab.

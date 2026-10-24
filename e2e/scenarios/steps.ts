@@ -43,7 +43,7 @@ import { composeTourReminderBody } from '../../app/src/messages/tourCopy.js';
 // drag the AWS SDK into the e2e bundle. toursModel.ts has zero imports.
 import type { TourContactNames } from '../../app/src/messages/tourCopy.js';
 import type { TourType } from '../../app/src/lib/toursModel.js';
-import { expectTodayReady } from '../support/today.js';
+import { expectTodayReady, showAllIn } from '../support/today.js';
 
 // Read the resolved dashboard URL from the env (set by playwright.config.ts at
 // config load from the lane resolver). Fall back to the lane-0 dev default so
@@ -3084,7 +3084,10 @@ export class Scenario {
     return step('App: the overdue RTA deadline surfaces on the Today board', async () => {
       await this.page.goto(`${NEXT}/`);
       await expectTodayReady(this.page);
-      const needs = this.page.getByRole('list', { name: 'Needs you now' });
+      // Every Today section shows 5 rows (tracker #31) and needs_you_now sorts
+      // by deadline, so on this no-reseed lane expand first (WL-21).
+      await showAllIn(this.page, 'Needs you now');
+      const needs = this.page.getByRole('list', { name: 'Needs you now', exact: true });
       const row = needs.locator(`a[href="/placements/${id}"]`);
       await expect(row).toBeVisible({ timeout: 10_000 });
       await expect(row.getByText('RTA window closing')).toBeVisible();
@@ -3096,13 +3099,31 @@ export class Scenario {
   /**
    * [App] The placement no longer surfaces ANYWHERE on the Today board — after the
    * late submit the rta_window is cleared and the destination's stuck_placement
-   * deadline is far-future, so no due-clock row remains. Waits for the board's
-   * /api/today fetch to resolve first (so a still-loading spinner can't false-pass
-   * the absence), then asserts the placement link is gone.
+   * deadline is far-future, so no due-clock row remains. Server truth first (no
+   * GET /api/today item points at the placement), then waits for the board's
+   * /api/today fetch to resolve (so a still-loading spinner can't false-pass the
+   * absence) and asserts the placement link is gone.
    */
   expectPlacementGoneFromBoard(): Promise<void> {
     const id = this.requireActivePlacementId();
     return step('App: the placement no longer surfaces on the Today board', async () => {
+      // Server truth first (tracker #31, WL-21): every Today section now shows
+      // 5 rows, so a page-wide DOM absence alone cannot see a row past the
+      // fifth. No GET /api/today item of any group may point at this
+      // placement; a non-200 throws, so a failed read can never pass.
+      await expect
+        .poll(
+          async () => {
+            const res = await this.page.request.get(`${NEXT}/api/today`);
+            if (res.status() !== 200) throw new Error(`GET /api/today: ${res.status()} ${await res.text()}`);
+            const { items } = (await res.json()) as {
+              items: Array<{ group: string; refType: string; refId: string }>;
+            };
+            return items.filter((i) => i.refType === 'placement' && i.refId === id).map((i) => i.group);
+          },
+          { timeout: 10_000, message: `placement ${id} still has a Today row` },
+        )
+        .toEqual([]);
       const [resp] = await Promise.all([
         this.page.waitForResponse((r) => /\/api\/today(\?|$)/.test(r.url())),
         this.page.goto(`${NEXT}/`),
@@ -3150,7 +3171,10 @@ export class Scenario {
     return step('App: the voucher deadline surfaces on the Today board', async () => {
       await this.page.goto(`${NEXT}/`);
       await expectTodayReady(this.page);
-      const needs = this.page.getByRole('list', { name: 'Needs you now' });
+      // Every Today section shows 5 rows (tracker #31) and needs_you_now sorts
+      // by deadline, so on this no-reseed lane expand first (WL-21).
+      await showAllIn(this.page, 'Needs you now');
+      const needs = this.page.getByRole('list', { name: 'Needs you now', exact: true });
       const row = needs.locator(`a[href="/placements/${id}"]`);
       await expect(row).toBeVisible({ timeout: 10_000 });
       await expect(row.getByText('Voucher expiring')).toBeVisible();
@@ -3176,7 +3200,8 @@ export class Scenario {
   }
 
   /**
-   * [App] The DERIVED stuck flag renders in Today's Follow-ups: a row for THIS
+   * [App] The DERIVED stuck flag renders in Today's Placements section (the
+   * follow_ups group, headed "Follow-ups due" until tracker #31): a row for THIS
    * placement (scoped by its /placements/:id link) reading "Stuck — needs a check".
    * Load-bearing for the coexistence fix — the stuck row appears REGARDLESS of a
    * pending hard clock (the same placement may sit in needs_you_now via a due
@@ -3184,11 +3209,14 @@ export class Scenario {
    */
   expectPlacementStuckInFollowUps(): Promise<void> {
     const id = this.requireActivePlacementId();
-    return step('App: the placement shows as Stuck in Follow-ups (derived)', async () => {
+    return step('App: the placement shows as Stuck in Placements (derived)', async () => {
       await this.page.goto(`${NEXT}/`);
       await expectTodayReady(this.page);
-      const followUps = this.page.getByRole('list', { name: 'Follow-ups due' });
-      const row = followUps.locator(`a[href="/placements/${id}"]`);
+      // Every Today section shows 5 rows (tracker #31): expand first so a row
+      // past the fifth on a shared lane is reachable.
+      await showAllIn(this.page, 'Placements');
+      const placements = this.page.getByRole('list', { name: 'Placements', exact: true });
+      const row = placements.locator(`a[href="/placements/${id}"]`);
       await expect(row).toBeVisible({ timeout: 10_000 });
       await expect(row.getByText('Stuck — needs a check')).toBeVisible();
     });

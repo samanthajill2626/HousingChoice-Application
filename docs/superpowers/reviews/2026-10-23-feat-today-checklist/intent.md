@@ -2,23 +2,23 @@
 
 ## STATE (replace on every move)
 
-- Phase: COMPACTION GATE B, then AUTO DISPATCH. Spec r8 (@13b8af90) and plan
-  v4 FINAL @12d8ab5d (rulings PR1-PR108; plan review closed after 4 rounds,
-  26 findings, no reject; adjudications in design-review/plan-adjudications.md).
-  Mission block: `mission-block.md` beside this file (spec r8 / plan v4).
-- Worktree `W:\tmp\today-checklist`, branch `feat/today-checklist`, cut from
-  main @970a29b9. Nothing built; docs only.
-- Launch mode: AUTO (Cameron, 2026-10-24), watchdog every 55 minutes
-  ("go auto with 55-minute checks"), compaction before dispatch (offered at
-  gate B; he asked for it).
-- NEXT STEP (after the compaction, or at once if he skips): dispatch the
-  agent `abt:build-orchestrator` with `run_in_background: true`, prompt =
-  the full text of `mission-block.md` verbatim; then arm the watchdog
-  (ScheduleWakeup / the skill's watchdog at 3300 s, re-armed each wake;
-  each wake reads the orchestrator's ledger
-  `W:\tmp\today-checklist\.superpowers\sdd\progress.md` and reports a
-  bold "Checkpoint:" status) and start the live mirror per the skill. Then
-  STATE moves to SUPERVISING with the orchestrator's agent id.
+- Phase: SUPERVISING. abt:build-orchestrator dispatched 2026-10-24 ~19:34 UTC
+  in AUTO (background) with `mission-block.md` verbatim @fd00c81f (spec r8,
+  plan v4 FINAL, rulings PR1-PR108, plan review R4). Orchestrator agent id
+  a0d7116a9bbb938e6 (SendMessage target).
+- Worktree `W:	mp	oday-checklist`, branch `feat/today-checklist`, cut from
+  main @970a29b9.
+- Launch mode: AUTO (Cameron, 2026-10-24), watchdog checkpoints every 55
+  minutes (3300 s; stall exit at 25 min quiet), re-armed at every wake;
+  each wake reads `W:	mp	oday-checklist\.superpowers\sdd\progress.md`
+  and reports a bold "Checkpoint:" line. Mirror: transcript-tail.mjs ->
+  `.superpowers/sdd/live.log`.
+- Failure budget: 0 consumed of 2.
+- NEXT STEP: on each watchdog wake, branch on its line (TERMINAL / STALL /
+  CHECKPOINT) per the skill; on DONE, run the handback review (re-ground in
+  the full replay, gates myself on a quiet tree, spec-conformance + plan-blind
+  reviewers on opus, live QA, verdict). Then tracker #31 update, the
+  backfill obligation for Cameron, and `register-session --off`.
 
 ## What Cameron asked for (verbatim, with dates)
 

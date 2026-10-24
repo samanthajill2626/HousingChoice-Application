@@ -290,3 +290,17 @@ quality Sam trusts, then her review of it, then the two views.
   (ranked tenants); B3 = Send property from a tenant (ranked properties).
 - Pair rows: Cameron did not follow the storage explanation; shown with a
   worked example in the message of 2026-10-24; pending his read.
+
+## Decisions, round 10 (Cameron, 2026-10-24)
+
+- D-record: pair rows ADOPTED ("We do want pairs"). The confusion was the
+  word "matches table": the planner meant the DynamoDB table `matches`;
+  Cameron read the Matching page's on-screen table. GLOSSARY TRAP for the
+  charter: "Matching" = the feature/page; "ranking" = the ranked list for
+  one anchor; "match" = one pair's score (the match %); the DynamoDB
+  table is only ever "the matches store" in prose, never "the matches
+  table" near UI text.
+- Cameron confirms the two send surfaces are the property record and the
+  tenant record ("those are the two pages that I think we'll be able to
+  send this from"). Open: where the ranked list is displayed (next
+  question).

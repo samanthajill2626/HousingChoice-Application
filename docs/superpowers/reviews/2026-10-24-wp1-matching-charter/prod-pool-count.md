@@ -95,3 +95,10 @@ with no searching tenant.
 - 121 searching tenants match no live available property as recorded; 45
   of them have a blank voucher size or authority and can never match a
   property that lists either.
+
+Correction (same day): `matches` IS in the code's table spec
+(app/src/lib/tables.ts: hash tenantId, range unitId, GSI byUnit, TTL
+expires_at, "volatile engine output; bulk-regenerated") - a Phase 0 design
+for pairwise match rows that no repository writes yet. It exists in every
+environment, so a per-pair ranking record needs no new infrastructure if
+it fits that shape.

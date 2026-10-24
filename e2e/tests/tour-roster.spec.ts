@@ -70,9 +70,10 @@ const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  // `exact` on purpose: the home page also renders an <h2>Tours today</h2> the
-  // moment any tour is scheduled for the current day, and a substring 'Today'
-  // matches both (docs/issues/today-heading-selector-ambiguity.md).
+  // `exact` on purpose: the home page also renders an <h3>Tours today</h3> (under
+  // "At a glance" since tracker #31) the moment any tour is scheduled for the
+  // current day, and a substring 'Today' matches both
+  // (docs/issues/today-heading-selector-ambiguity.md).
   await expectTodayReady(page);
 }
 

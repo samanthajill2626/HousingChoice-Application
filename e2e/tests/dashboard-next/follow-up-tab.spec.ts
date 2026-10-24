@@ -1,6 +1,14 @@
 import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import { APP_NUMBER, registerParty, sendAsParty } from '../../fixtures/fakeTwilio.js';
 import { reseed } from '../../fixtures/reseed.js';
+import {
+  createTenant,
+  createUnitViaApi,
+  daysAgo,
+  escapeRegExp,
+  heardAt,
+  plantListedSend,
+} from '../../support/followUpFixtures.js';
 import { expectTodayReady } from '../../support/today.js';
 
 // The Follow up tab (spec 2026-10-12 section 8 (6), 5.6, 14.4): a listed send
@@ -17,86 +25,12 @@ import { expectTodayReady } from '../../support/today.js';
 // the row link's name and properties-available-view.spec.ts matches by regex.)
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
-const DAY = 86_400_000;
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
 async function devLogin(page: Page): Promise<void> {
   const res = await page.request.post(`${NEXT}/auth/dev-login`, { data: { email: 'va@example.com' } });
   expect(res.ok(), `dev-login failed: ${res.status()} ${await res.text()}`).toBeTruthy();
   await page.goto(`${NEXT}/`);
   await expectTodayReady(page);
-}
-
-/** A consented, run-unique tenant (consent so a send reaches them). */
-async function createTenant(
-  api: APIRequestContext,
-  firstName: string,
-  voucherSize = 2,
-): Promise<{ contactId: string; firstName: string; name: string; phone: string }> {
-  // The house idiom (matching-entry-points.spec.ts): 7 random digits.
-  const phone = `+1555${Math.floor(Math.random() * 9000000 + 1000000)}`;
-  const lastName = 'Followtest';
-  const res = await api.post(`${NEXT}/api/contacts`, {
-    data: { type: 'tenant', firstName, lastName, phone, voucherSize },
-  });
-  expect(res.status(), await res.text()).toBe(201);
-  const contactId = ((await res.json()) as { contact: { contactId: string } }).contact.contactId;
-  const consent = await api.patch(`${NEXT}/api/contacts/${contactId}`, {
-    data: { consent_method: 'verbal_in_person', consent_at: new Date().toISOString() },
-  });
-  expect(consent.ok(), await consent.text()).toBeTruthy();
-  return { contactId, firstName, name: `${firstName} ${lastName}`, phone };
-}
-
-async function heardAt(api: APIRequestContext, contactId: string): Promise<string | undefined> {
-  const res = await api.get(`${NEXT}/api/contacts/${contactId}`);
-  expect(res.ok(), await res.text()).toBeTruthy();
-  return ((await res.json()) as { contact: { last_heard_from_at?: string } }).contact.last_heard_from_at;
-}
-
-/** An Available 2-BR property; `tourType` set = the Interested ROUTE mode. */
-async function createUnitViaApi(
-  api: APIRequestContext,
-  stamp: string,
-  tourType?: 'self_guided' | 'landlord_led' | 'pm_team',
-): Promise<{ unitId: string; line1: string }> {
-  const line1 = `${stamp}${Math.floor(Math.random() * 90) + 10} Heardfrom Ave`;
-  const res = await api.post(`${NEXT}/api/units`, {
-    data: {
-      landlordId: 'contact-landlord-0001',
-      beds: 2,
-      accepted_authorities: ['Atlanta Housing Authority'],
-      address: { line1, city: 'Atlanta', state: 'GA', zip: '30314' },
-      rent_min: 1500,
-      rent_max: 1600,
-    },
-  });
-  expect(res.ok(), await res.text()).toBeTruthy();
-  const unitId = ((await res.json()) as { unit: { unitId: string } }).unit.unitId;
-  if (tourType !== undefined) {
-    const typed = await api.patch(`${NEXT}/api/units/${unitId}`, { data: { tour_type: tourType } });
-    expect(typed.ok(), await typed.text()).toBeTruthy();
-  }
-  const flip = await api.patch(`${NEXT}/api/units/${unitId}/listing-status`, {
-    data: { toStatus: 'available', source: 'manual' },
-  });
-  expect(flip.ok(), await flip.text()).toBeTruthy();
-  return { unitId, line1 };
-}
-
-/** A COUNTED, listed send with the given sentAt and NO broadcast behind it
- *  (S7's hermetic seam). */
-async function plantListedSend(api: APIRequestContext, unitId: string, contactId: string, sentAt: string): Promise<void> {
-  const res = await api.post(`${NEXT}/__dev/listing-send-fixture`, { data: { unitId, contactId, sentAt } });
-  expect(res.status(), await res.text()).toBe(201);
-}
-
-/** A sentAt n days back, padded a minute so floor() cannot read n-1. */
-function daysAgo(n: number): string {
-  return new Date(Date.now() - n * DAY - 60_000).toISOString();
 }
 
 interface FollowUpWire {

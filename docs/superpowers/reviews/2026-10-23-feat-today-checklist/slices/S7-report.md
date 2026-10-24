@@ -159,4 +159,57 @@ Lane note: the run left `e2e/.artifacts/session.pid` and `lane.json`
 (lane 12, ports 10201/10211/10221/10231) behind with the launcher (pid
 55264) already dead and no listener on the four ports; `npm run e2e:stop`
 answered "no running session found; retained state is stale or absent -
-nothing to stop" and removed both files.
+nothing to stop" and removed both files. Every later run in this slice left
+the same two stale files (always lane 12, launcher dead, ports free); each
+was cleared the same way before the next run.
+
+## S7.2 - today-checklist.spec.ts, the shared helpers, the selector rows
+
+As planned, with these differences (each a worklist item or a
+strengthening; nothing weakened):
+
+- WL-20: `openWatchingToday` also waits for the tab's first
+  `GET /api/today` (registered before `goto`, awaited after the event
+  stream opens), and test 4 asserts the positive control
+  `todayList(today, 'Placements')` visible (lean placement-0001 is always a
+  derived stuck row: stage_entered_at 2026-06-01 at
+  `app/src/lib/seed/lean.ts:465`, the 10-day awaiting_inspection threshold
+  at `app/src/lib/statusModel.ts:387`) BEFORE
+  the empty Tours to book and the two creates. RED B below fails
+  deterministically with it.
+- WL-16: `e2e/support/selectors.md:18` and the `e2e/support/today.ts`
+  module header now say `Tours today` is an `<h3>` under the `At a glance`
+  `<h2>` (an `<h2>` before tracker #31); the substring-trap advice is
+  unchanged. The comment-only `<h2>Tours today</h2>` in
+  `e2e/tests/tour-roster.spec.ts:73` is fixed in this commit too (comment
+  only); tours-page's go with S7.10.
+- `expectNoAiSuggestionFor` (support/today.ts) gains one gate the plan's
+  text lacks: after the page's `/api/today` response lands it waits for the
+  Today page spinner inside `<main>` (`role="status"`, name `Loading`,
+  `dashboard/src/ui/Spinner.tsx:20`) to be gone, so the "line absent" branch
+  cannot pass on a page that has not drawn the queue yet (the spinner is
+  mounted before the fetch goes out, so its absence after the response
+  means the response was rendered).
+- `followUpFixtures.ts` keeps `plantListedSend`'s one-line signature exactly
+  as `follow-up-tab.spec.ts:92` had it (the plan's text wraps it); the
+  bodies are byte-for-byte the moved ones.
+- selectors.md's three new Today rows carry the as-built accessible names
+  (the property line's `<unitLabel>, <summary>` aria-label, the person
+  link's `<name>, <quiet text>`, the AI line's aria-hidden Show/Hide word,
+  `Show all N properties`, and the scope-to-the-section note for two
+  sections both reading `Show all 6`).
+
+Typecheck `npm run typecheck -w @housingchoice/e2e`: exit 0. eslint on the
+five touched e2e .ts files: exit 0, no output.
+
+## RED evidence (S7.2)
+
+| Tag | Files / grep | Exit | Result line | Notes |
+|---|---|---|---|---|
+| s72-green1 | today-checklist + follow-up-tab | 0 | `6 passed (21.7s)` | green on arrival (S1-S6 built) |
+| s72-redA | today-checklist, `--grep "staff text"` | 1 | `1 failed` | `app/src/routes/api.ts:1589` (`...(i === 0 && { staffOutreach: true as const })`) deleted; failed at the server-truth poll (`today-checklist.spec.ts:463`): "the staff text never took the person off Quiet shares", received both contactIds after 15 s. Restored with `git checkout -- app/src/routes/api.ts` (status clean) |
+| s72-redB | today-checklist, `--grep "requested tours appear live"` (WL-21) | 1 | `1 failed` (no passed line) | the POST /api/tours emit at `app/src/routes/tours.ts:421` commented out; failed at `await expect(list.getByRole('link')).toHaveCount(2)` (:503), received 0 (33 polls, 15 s). Restored with `git checkout -- app/src/routes/tours.ts` (status clean) |
+| s72-green2 | today-checklist + follow-up-tab | 0 | `6 passed (20.2s)` | the restored tree |
+
+Artifacts of both REDs: `.superpowers/s7/s72-redA-artifacts/`,
+`.superpowers/s7/s72-redB-artifacts/`.

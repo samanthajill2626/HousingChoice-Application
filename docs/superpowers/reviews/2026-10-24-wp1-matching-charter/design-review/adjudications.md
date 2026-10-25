@@ -456,3 +456,32 @@ inside a cap-eligible key never counts as failed.
 
 Round 6 totals: 9 findings, 9 ACCEPT. Decisions changed: yes (R6-1, R6-3,
 R6-5, R6-8). Round 7 continues reviewer B.
+
+## Round 7 (reviewer B continued; report r7-reviewer-b.md, 6 findings)
+
+Verified before ruling: extractionRepo.ts:76-80, 169-192 (attempts
+counted, backoff, park).
+
+R7-1 [DECISION] Dismiss cannot restore the cap; any VA can press it.
+ACCEPT option (a): Dismiss is display-only - it hides the banner, the cap
+stays suppressed for that field, admin only, audited with the text at
+that moment. A field Sam believes lawful is made to read lawfully by
+editing its text. Fits Cameron 2026-10-25: an unlawful requirement "is
+something for Sam, where we need to know that that's not appropriate".
+R7-2 [DECISION] Unlimited poll takeover. ACCEPT. One automatic takeover,
+then failed with a message a new press clears; attempts on the record.
+R7-3 Expired running jobs not findable. ACCEPT. Running records stay in
+the poll's key family, sorted by lease expiry.
+R7-4 Unlawful-flag record home. ACCEPT. A record in the AI runs table
+under a per-property key family; it closes on read when the flagged
+field's text hash no longer matches (no unit-writer dependency); B4 shows
+it on the property page.
+R7-5 Matching facts list races and bounds. ACCEPT. Conditional writes on
+a version attribute; a bounded list; the suppression list beside it on
+the contact.
+R7-6 Switch off after B4. ACCEPT. With AI_RANKING_ENABLED off the
+composer shows the pool unscored in its deterministic order with no Rank
+button; the ranking poll starts only when the switch is on.
+
+Round 7 totals: 6 findings, 6 ACCEPT. Decisions changed: yes (R7-1,
+R7-2), both narrow. Round 8, the last allowed, continues reviewer B.

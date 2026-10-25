@@ -46,7 +46,9 @@ disability facts never extracted; fair-housing test failure blocks
 production enablement). ROUND 6 DONE: 9 accepted, 4 decisions (carried trace and the named
 AGENTS.md exception; property-level unlawful flags staff resolve; reaction
 text under the never-extracted list; roles: Rank for admin+va, Rankings
-page admin only - planner default). Round 7 continues reviewer B. Round 5 was both reviewers continued (A and B, outputs
+page admin only - planner default). ROUND 7 DONE: 6 accepted, 2 narrow decisions (Dismiss display-only and
+admin-only; one automatic takeover then failed). Round 8 - LAST - goes to
+reviewer B. Round 7 continued reviewer B. Round 5 was both reviewers continued (A and B, outputs
 design-review/r5-reviewer-a.md, r5-reviewer-b.md); later rounds continue
 the better one; stop when a round changes no decision; hard cap round 8,
 then the spec gate with the five planner defaults (staff notes off; no

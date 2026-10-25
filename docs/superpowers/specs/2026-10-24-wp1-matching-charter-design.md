@@ -2,7 +2,7 @@
 
 Date: 2026-10-24
 Status: DRAFT charter. Whole-spec re-read 2026-10-25 folded in; design
-review rounds 1 to 6 folded in (records: design-review/adjudications.md);
+review rounds 1 to 7 folded in (records: design-review/adjudications.md);
 then the remaining review rounds and Cameron's spec gate.
 Mission: Amendment No. 1 Work Package 1 (signed; Cameron 2026-10-20, Sam
 2026-10-21). 52 contracted hours.
@@ -314,7 +314,10 @@ in two ways:
   facts other than the stated accessibility need and an assistance
   animal. The same list governs the text of every extracted reaction
   (section 6.3), and B1's test covers reactions too. Facts are stored as a
-  list on the tenant contact (the flexible document; no new table). B1 tests the list: synthetic
+  bounded list on the tenant contact (the flexible document; no new
+  table), with the suppression list beside it; writes are conditional on
+  a version attribute so extraction and Sam's remove control never
+  overwrite each other. B1 tests the list: synthetic
   conversations stating each excluded kind of fact, run on the testing
   key, must write no fact of an excluded kind (household size and tenant
   portion remain allowed). A failure blocks turning the matching facts on
@@ -408,13 +411,19 @@ against an assistance animal; it suppresses the cap for that pair and
 asks for no record change. Only an unlawful flag ever asks Sam to change a
 record.
 
-An unlawful flag becomes a PROPERTY-level record (field, the model's
-reason, the run that raised it), shown on the property record and in the
-composer, open until staff resolve it: removing the text closes it, and
-Dismiss ("this is lawful") closes it and keeps that field from being
-flagged again until its text changes. While a flag is open, that field
-caps no pair of that property, including pairs where the model missed it:
-a false flag costs a cap, never a tenant.
+An unlawful flag becomes a PROPERTY-level record (field, a hash of the
+field's text, the model's reason, the run that raised it), kept in the AI
+runs table under a per-property key family and shown on the property
+record (B4) and in the composer. It closes on read as soon as the field's
+text no longer matches the hash, so no unit writer has to know about it.
+While it is open, that field caps no pair of that property, including
+pairs where the model missed it: a false flag costs a cap, never a
+tenant. Dismiss is DISPLAY-ONLY: it hides the banner, the cap stays
+suppressed, and only an admin can press it, audited with the text at that
+moment. A requirement Sam believes lawful is made to read lawfully by
+editing its text, which closes the flag; the model is never told to apply
+a requirement it judged unlawful (Cameron 2026-10-25: an unlawful
+requirement "is something for Sam").
 
 The guarantee is tested, not only stated: before Sam's acceptance pass,
 B2 runs a counterfactual check on the testing key over SYNTHETIC pairs
@@ -585,8 +594,10 @@ and sends. This is a named exception to AGENTS.md's "all job traffic
 goes through jobs.enqueue()", on the extraction precedent and for that
 reason. A poll tick starts a fresh context (pollLoop.ts:54-77), so the
 queued record carries the Rank request's correlation id and traceparent,
-and the poll restores both before it runs the job. Queued records carry
-a byEntity key family (lib/tables.ts:645-655) that the poll queries;
+and the poll restores both before it runs the job. Queued and running
+records carry a byEntity key family (lib/tables.ts:645-655) that the poll
+queries, running ones sorted by lease expiry so an expired lease is
+found;
 pickup waits up to the shared poll interval (config.ts:608-612), which
 the queued record's expiry allows for.
 
@@ -598,7 +609,10 @@ which case it is refused with "a ranking is running". A queued record
 expires on its own short timer if no poller takes it. The poll loop
 claims a queued record with a lease it renews while running; an expired
 lease means the job died, and the poll itself takes the record over
-with a new generation and re-runs it, with no new press needed. The job
+with a new generation and re-runs it ONCE, enough to cover a redeploy;
+a second expiry marks it failed with a message that a new press clears.
+The attempt count is on the record, as extraction counts and parks
+(extractionRepo.ts:76-80, 169-192). The job
 checks its generation before every model call and every write and exits
 quietly if it has been superseded. It never throws on a model, batch or
 organization-list failure: it records the failure on the record and
@@ -624,6 +638,10 @@ ranking-job record lives in the AI runs table in its own key family with
 a TTL of at least `RANKING_MAX_AGE_DAYS` (its failed-batch list must outlive
 the matches it flags), and the run listing and run-detail readers (routes/aiRuns.ts:
 139-140, 228-249) never return it.
+With `AI_RANKING_ENABLED` off, the ranking poll does not start and the
+composer shows the pool unscored, in its deterministic order, with no
+Rank button.
+
 Background or scheduled ranking is out of WP1 (A1 excludes it); the engine
 is one function so a scheduled caller (WP3 era) would be configuration,
 not a redesign. One ranking job is in flight per anchor at a time

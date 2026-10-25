@@ -11,14 +11,12 @@ cut from main @970a29b9. Docs only.
 
 ## STATE
 
-If you are reading this after a compaction: DO NOTHING until Cameron says
-go. Cameron (2026-10-24): "I don't want you to replay all the messages or
-continue. I want to do that once I give you the go-ahead." On his go:
-re-invoke the Skill abt:feature-mission with the argument "RESUME WP1
-charter", read this file and the pool-count record, run the replay
-(command in the feature-mission skill, output
-W:/tmp/wp1-matching-charter/.superpowers/sdd/conversation.md) and READ
-ALL OF IT, report back in one line, then continue below.
+If you are reading this after a compaction: re-invoke the Skill
+abt:feature-mission with the argument "RESUME WP1 charter", read this file
+and the pool-count record, run the replay (command in the feature-mission
+skill, output W:/tmp/wp1-matching-charter/.superpowers/sdd/conversation.md)
+and READ ALL OF IT, report back in one line, then continue below. (Cameron
+gave his go on 2026-10-25; the earlier wait-for-go rule is spent.)
 
 Phase: SPEC WRITTEN and sent to Cameron for his WHOLE-SPEC RE-READ
 (2026-10-24) - docs/superpowers/specs/2026-10-24-wp1-matching-charter-
@@ -29,15 +27,17 @@ in flight. Worktree W:/tmp/wp1-matching-charter, branch
 feat/wp1-matching-charter from main 970a29b9; the shared checkout stays
 on main.
 
-Planner's own re-read notes (message of 2026-10-24, not yet edits): pair
-scores are calibrated in different company per direction (say so
-explicitly near 7.2/10.3?); a review should keep the reviewed score and
-rubric version (B2 detail); B2 hours are tight, the Rankings page could
-move to B3; 6.1 'tenant address as city/zip only' is a planner instinct
-not a decision; properties have no staleness rule (asymmetry, by design).
+WHOLE-SPEC RE-READ DONE (2026-10-25, Cameron: "do the full reread of the spec
+now"): whole-spec-reread.md in this folder - 7 decisions for Cameron (A1
+fair housing, A2 Not interested no longer forced to Weak, A3 time-varying
+inputs and fingerprints, A4 reviews survive re-score and TTL, A5 matching
+facts live not suggested, A6 anchor eligibility, A7 tenant address whole),
+3 efficiency items, 9 precision edits. Awaiting his calls; nothing folded
+into the spec yet. (Supersedes the five planner notes of 2026-10-24, all
+carried into that file.)
 
-NEXT STEP after his go: take Cameron's re-read changes (if any), fold
-them into the spec, commit. Then the ADVERSARIAL DOCUMENT REVIEW: round 1
+NEXT STEP: fold Cameron's calls on whole-spec-reread.md into the spec,
+commit. Then the ADVERSARIAL DOCUMENT REVIEW: round 1
 = two independent Opus reviewers in parallel, same brief
 (W:/AI Projects/claude-plugins/abt/skills/feature-mission/design-review-briefs.md),
 spec + repo only, blind to this file and the brainstorm; adjudicate every

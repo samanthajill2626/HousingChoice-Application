@@ -17,7 +17,10 @@
 //      leaves the other person;
 //   4. Tours to book: two requested tours appear on an OPEN Today page live
 //      (the tour.updated create emit), oldest request first, and booking one
-//      on the tour page removes it live.
+//      on the tour page removes it live;
+//   5. phone width (FW5-1, the self-QA's 380 x 800): a long name shows in
+//      full - it wraps inside its row, never cut at the card's edge - on a
+//      Quiet shares person row, a Tours to book row and a Tours today row.
 //
 // STATE. The lean world seeds no listing sends, tours or unknown contacts,
 // so every Identify, Tours to book and Quiet shares row is this spec's own.
@@ -56,6 +59,10 @@ import { NARROW_360, WIDE_RESTORE, expectNoHorizontalOverflow } from '../../supp
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 /** The lean world's one placement (app/src/lib/seed/lean.ts IDS.placement). */
 const LEAN_PLACEMENT = 'placement-0001';
+/** The phone the self-QA measured the cut names on (FW5 scope): its pane is
+ *  inside the Today rows' narrow layout, `@container (max-width: 560px)`. */
+const PHONE_380 = { width: 380, height: 800 } as const;
+const NARROW_PANE_MAX = 560;
 
 /** Every accessible name and copy string this spec uses (spec 2, 2.2, 5.4,
  *  6.2, 6.3). If an as-built name differs, change it HERE only. */
@@ -65,6 +72,9 @@ const UI = {
   toursToBook: 'Tours to book',
   quietShares: 'Quiet shares',
   placements: 'Placements',
+  toursToday: 'Tours today',
+  /** A Tours today row's accessible name starts so (Today.tsx CompactTourRow). */
+  tourFor: (name: string): string => `Tour for ${name} at `,
   identifyHelp:
     "We don't know yet who these are. Call each one; after about a week with no contact, mark them Inactive.",
   toursToBookHelp: 'Said yes to a property; the tour has no date yet. Oldest first.',
@@ -187,6 +197,22 @@ async function requestTour(api: APIRequestContext, tenantId: string, unitId: str
   return tour.tourId;
 }
 
+/** POST /api/tours WITH a scheduledAt at noon on the local day: a Tours today
+ *  row under At a glance. The page takes "today" from the browser's clock,
+ *  on this machine's timezone as this Date is; noon stays inside that day at
+ *  any hour of the run, and the route takes a past instant as well. */
+async function scheduleTourToday(api: APIRequestContext, tenantId: string, unitId: string): Promise<string> {
+  const noon = new Date();
+  noon.setHours(12, 0, 0, 0);
+  const res = await api.post(`${NEXT}/api/tours`, {
+    data: { tenantId, unitId, tourType: 'self_guided', scheduledAt: noon.toISOString() },
+  });
+  expect(res.status(), await res.text()).toBe(201);
+  const { tour } = (await res.json()) as { tour: { tourId: string; status: string } };
+  expect(tour.status).toBe('scheduled');
+  return tour.tourId;
+}
+
 /** An (unknown, needs_review) contact: the triage partition's Identify row. */
 async function createUnknownContact(api: APIRequestContext, firstName: string): Promise<string> {
   const phone = `+1555${Math.floor(Math.random() * 9000000 + 1000000)}`;
@@ -251,6 +277,32 @@ function quietLine(page: Page, line1: string): Locator {
 
 function peopleOn(page: Page, unitLabel: string): Locator {
   return page.getByRole('list', { name: UI.peopleWaitingOn(unitLabel), exact: true });
+}
+
+/** FW5-1: a Today row shows its WHOLE name. A row card is `overflow: hidden`,
+ *  so a name running past its edge is cut off with no ellipsis; a Tours today
+ *  compact row clips nothing, so there a long name runs past instead.
+ *  Geometry only (selectors.md "Narrow viewport"): the name's own box is not
+ *  cut (scrollWidth within clientWidth), it ends inside its row, and nothing
+ *  in the row runs past the row's sides (the row's own scrollWidth within its
+ *  clientWidth: the content a hidden overflow cuts, or that a row which clips
+ *  nothing lets run out). Soft, so one run reports every row. */
+async function expectWholeName(row: Locator, name: string, where: string): Promise<void> {
+  const label = row.getByText(name, { exact: true });
+  await expect(label, `${where}: the name`).toBeVisible();
+  const g = await label.evaluate((el) => {
+    const card = el.closest('a');
+    if (card === null) throw new Error('the name is not inside a row link');
+    return {
+      cut: el.scrollWidth - el.clientWidth,
+      pastRowEdge: el.getBoundingClientRect().right - card.getBoundingClientRect().right,
+      rowOverflow: card.scrollWidth - card.clientWidth,
+    };
+  });
+  const seen = `${where} ${JSON.stringify(g)}`;
+  expect.soft(g.cut, `${seen}: the name is cut inside its own box`).toBeLessThanOrEqual(1);
+  expect.soft(g.pastRowEdge, `${seen}: the name runs past its row's right edge`).toBeLessThanOrEqual(1);
+  expect.soft(g.rowOverflow, `${seen}: the row's content runs past its sides`).toBeLessThanOrEqual(1);
 }
 
 /** A Date's LOCAL components as a datetime-local value (steps.ts idiom). */
@@ -537,5 +589,56 @@ test.describe('Today - the daily checklist (tracker #31)', () => {
     await expect(list.locator(`a[href="/tours/${firstTour}"]`)).toHaveCount(0);
     await expectNotReloaded(today);
     await today.close();
+  });
+
+  test('phone width: a long name shows in full on a Quiet shares row, a Tours to book row and a Tours today row', async ({
+    page,
+  }) => {
+    test.slow(); // a reseed each side, a property, three tenants, a share and two tours
+    await devLogin(page);
+    const api = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+    const { unitId, line1 } = await createUnitViaApi(api, stamp, 'self_guided');
+    // The self-QA's worst-case names (FW5 scope), each wider than a row at
+    // this width, the run-unique stamp on the first name.
+    const quiet = await createTenant(api, `Maximiliana-Josephine${stamp}`, 2, 'Van Der Berghe-Castellanos');
+    await plantListedSend(api, unitId, quiet.contactId, daysAgo(6)); // No reply in 6 days
+    const booker = await createTenant(api, `Bartholomew-Alexander${stamp}`, 2, 'Featherstonehaugh-Montgomery');
+    await requestTour(api, booker.contactId, unitId); // Tours to book
+    const visitor = await createTenant(api, `Wilhelmina-Evangeline${stamp}`, 2, 'Ashbourne-Delacroix-Whitfield');
+    await scheduleTourToday(api, visitor.contactId, unitId); // At a glance: Tours today
+
+    await page.setViewportSize(PHONE_380);
+    await page.goto(`${NEXT}/`);
+    await expectTodayReady(page);
+    const rows: Array<[string, Locator, string]> = [
+      [
+        'a Quiet shares person row',
+        peopleOn(page, unitLabelOf(line1)).getByRole('link', { name: new RegExp(`^${escapeRegExp(quiet.name)}, `) }),
+        quiet.name,
+      ],
+      [
+        'a Tours to book row',
+        todayList(page, UI.toursToBook).getByRole('link', { name: new RegExp(`^${escapeRegExp(booker.name)}`) }),
+        booker.name,
+      ],
+      [
+        'a Tours today row',
+        todayList(page, UI.toursToday).getByRole('link', {
+          name: new RegExp(`^${escapeRegExp(UI.tourFor(visitor.name))}`),
+        }),
+        visitor.name,
+      ],
+    ];
+    for (const [where, row] of rows) await expect(row, where).toBeVisible();
+    // The pin's premise (the today-past-tours.spec.ts idiom): the pane is
+    // inside the narrow layout, so a changed shell fails HERE, loudly, instead
+    // of quietly measuring the wide one.
+    const pane = Math.round((await todayList(page, UI.toursToBook).boundingBox())?.width ?? 0);
+    expect(pane, 'the Today pane width at a 380px window').toBeGreaterThan(0);
+    expect(pane, 'the Today pane width at a 380px window').toBeLessThanOrEqual(NARROW_PANE_MAX);
+    for (const [where, row, name] of rows) await expectWholeName(row, name, `${where} at 380px`);
+    await expectNoHorizontalOverflow(page, 'Today with long names at 380px');
+    await page.setViewportSize(WIDE_RESTORE);
   });
 });

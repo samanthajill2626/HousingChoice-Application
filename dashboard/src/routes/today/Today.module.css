@@ -299,6 +299,17 @@
     overflow: visible;
     text-overflow: clip;
   }
+  /* The name wraps too, so a long one shows in full: on one line it ran past
+   * the card's edge, where .row's overflow:hidden cut it with no ellipsis
+   * (FW5-1). flex-shrink lets it narrow to its line where its parent is a ROW
+   * flex container (a Tours today compact row, which clips nothing, so there
+   * the name ran out of the card and scrolled the page sideways); `anywhere`
+   * breaks a single word too long for the line. */
+  .who {
+    flex-shrink: 1;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
   .meta {
     flex: 1 1 100%;
     flex-wrap: wrap;

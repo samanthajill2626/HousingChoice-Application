@@ -15,15 +15,17 @@ export function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** A consented, run-unique tenant (consent so a send reaches them). */
+/** A consented, run-unique tenant (consent so a send reaches them). The last
+ *  name is Followtest unless a caller needs its own (Today's long-name
+ *  geometry pin, FW5-1). */
 export async function createTenant(
   api: APIRequestContext,
   firstName: string,
   voucherSize = 2,
+  lastName = 'Followtest',
 ): Promise<{ contactId: string; firstName: string; name: string; phone: string }> {
   // The house idiom (matching-entry-points.spec.ts): 7 random digits.
   const phone = `+1555${Math.floor(Math.random() * 9000000 + 1000000)}`;
-  const lastName = 'Followtest';
   const res = await api.post(`${NEXT}/api/contacts`, {
     data: { type: 'tenant', firstName, lastName, phone, voucherSize },
   });

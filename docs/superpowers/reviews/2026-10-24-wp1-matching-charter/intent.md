@@ -33,8 +33,10 @@ merged to 28 findings in design-review/adjudications.md; 26 accepted, 3
 partly rejected; folded into the spec. Planner defaults awaiting Cameron
 at the gate: M5 anonymized examples, M7 no auto-decline in WP1, M8 B4
 keeps hand-picks/tour-hold default/old drafts/partner flow, M10 the B2
-counterfactual fair-housing check, M22 staff notes off the card. Round 2
-goes to reviewer A (continued via SendMessage) with the re-review charge.
+counterfactual fair-housing check, M22 staff notes off the card. ROUND 2 DONE: 22 findings, all accepted and folded; new planner defaults:
+ranked rows start unchecked (R2-2), examples written from scratch with no
+export (R2-13/14, replaces M5), notes off the card. Round 3 goes to
+reviewer A (SendMessage) with the re-review charge.
 
 NEXT STEP: the ADVERSARIAL DOCUMENT REVIEW: round 1
 = two independent Opus reviewers in parallel, same brief

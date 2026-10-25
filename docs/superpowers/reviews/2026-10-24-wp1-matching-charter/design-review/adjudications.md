@@ -212,3 +212,61 @@ third partial), 0 DEFER. Decisions changed: yes (M1, M2, M5, M6, M7, M8,
 M10, M15, M20, M21, M23, M27), so round 2 runs. Reviewer A continues
 (more distinct accepted findings that changed decisions: M1, M5, M6, M7,
 M8, M15 first-found).
+
+## Round 2 (reviewer A continued; report r2-reviewer-a.md, 22 findings)
+
+Verified before ruling: prompt.ts:107-111 and apply.ts:713-735 (noteLines
+into `notes`); blastAudienceRules.ts:178-182 (D5 checks every eligible
+row); lib/eventBridge.ts:1-11 (best-effort bridge, GET reconciles);
+audienceResolution.ts:77, 235 (consent a per-candidate flag by design);
+import/apply.ts:1151 (import stamps created_at).
+
+R2-1 `notes` unclassified (A1). ACCEPT. `notes` excluded from the card;
+matching facts are the ranker's channel. Decision changed: yes.
+R2-2 Selection default undecided (A2). ACCEPT, planner default: ranked
+rows start unchecked; hand-picks start checked; the tour-hold rule becomes
+a chip and a confirm. Decision changed: yes (replaces part of M8).
+R2-3 The cap can enforce an unlawful requirement (A3). ACCEPT. A key caps
+only when it is a recorded requirement on that property's card and not in
+the same call's fairHousingFlags; the counterfactual covers the cap.
+Decision changed: yes.
+R2-4 fairHousingFlags per call (A4). ACCEPT. Per candidate, merged across
+batches by property and key.
+R2-5 Authority fail-open (A5). ACCEPT. Unmapped authorities are a gap
+shown to Sam; an unreadable org list fails the ranking.
+R2-6 Flyer share and legacy rows (A6). ACCEPT. History tells a flyer
+sign-up from a send and falls back to sentAt.
+R2-7 Reaction storage protocol (A7, C5). ACCEPT. Only sent pairs get
+reactions (others become matching facts); the writer joins `shares_op`
+and the repo header; kinds interested / maybe / hard_no / question so a
+WP3 hard_no maps onto DeclineRecord; tenant rows only.
+R2-8 Anchor sendability; consent reversal (A8). ACCEPT. The anchor banner
+covers not sendable; missing consent goes back to a per-candidate flag
+(reverses that part of M2), opt-out, unreachable, no phone and deleted
+stay pool rules. Decision changed: yes.
+R2-9 created_at fallback and imports (A9). ACCEPT. Import-created
+contacts do not use the fallback; never-heard bucket is "never".
+R2-10 Section 17 misses size, authority, sendability (A10). ACCEPT.
+R2-11 Never-extracted list untested (A11). ACCEPT. B1 tests it with
+synthetic conversations on the testing key.
+R2-12 SSE is a hint (B1). ACCEPT. Matches persisted per batch; the event
+says only anchor and batch; the composer re-reads by GET with polling.
+Decision changed: yes (architecture detail).
+R2-13 Data-boundary slogans (B2) and R2-14 contest M5 (C4). ACCEPT. No
+export; examples written from scratch after reading reviews in the app;
+the counterfactual runs on synthetic pairs only. Decision changed: yes
+(M5 default replaced; still for Cameron).
+R2-15 Old drafts vs removed filter UI (B3). ACCEPT. Old filter drafts keep
+their filter UI until sent or deleted.
+R2-16 Rate limit knob (B4). ACCEPT. Rank gets its own knob.
+R2-17 Run-detail route (B5). ACCEPT. Refuses ranking runs by kind.
+R2-18 13.5 wording (B6). ACCEPT.
+R2-19 Examples version (B7). ACCEPT. Stored and in the version rule.
+R2-20 Capped pair and the priority tie (B8). ACCEPT. No priority
+treatment at all.
+R2-21 Landlord matching facts do not exist (B9). ACCEPT. Removed.
+R2-22 Concessions on M10, M21, M28 (C). Noted. ACCEPT the testing-key
+account spend limit as Cameron's enforcement (A1 L304-305).
+
+Round 2 totals: 22 findings, 22 ACCEPT, 0 REJECT, 0 DEFER. Decisions
+changed: yes (R2-1, R2-2, R2-3, R2-8, R2-12, R2-13), so round 3 runs.

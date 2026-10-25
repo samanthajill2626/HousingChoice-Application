@@ -10,7 +10,8 @@
 //     except follow_up, which is a follow-up) OR an `attention` flag. Ordered
 //     most-urgent first (overdue/soonest deadline, then attention rows).
 //   identify     - every unknown_1to1 conversation (the fallback's own rule and
-//     copy, unchanged), in the same section the server's identify rows use.
+//     copy, unchanged), in the same section the server's identify rows use;
+//     ONE row per contact, the first thread winning (code review R2-3).
 //   tours_today  - a Tour entity scheduled on the operator's local day.
 //   follow_ups   - a placement whose next_deadline_type is follow_up.
 // There is no unread-thread group (spec 4: known contacts' unread threads live
@@ -251,6 +252,14 @@ export function buildTodayFromSources(
     });
   }
 
+  // ONE Identify row per contact (code review R2-3; the server's rule since
+  // fix wave 1): a contact with a phone thread and an email thread arrives
+  // here twice, and both rows would share one React key and count twice in
+  // "Show all N". Keyed by the row's refId - the contact, or for a thread with
+  // no contact id its phone - so the first thread in this fallback's own order
+  // wins.
+  const identifyRefIds = new Set<string>();
+
   for (const conv of conversations) {
     // NATIVE GROUP TEXTS ARE EXCLUDED FROM TODAY ENTIRELY (spec 11: v1 treats
     // them as inbox + thread-view only). An INTAKE filter, not a per-branch one,
@@ -267,11 +276,14 @@ export function buildTodayFromSources(
       // record), NOT /conversations/:id (an unrouted placeholder). It rides the
       // `needs` array with a null sort key; the final GROUP_ORDER sort lifts it
       // into its own group, keeping its order.
+      const refId = contactRefId(conv);
+      if (identifyRefIds.has(refId)) continue;
+      identifyRefIds.add(refId);
       needs.push({
         item: {
           group: 'identify',
           refType: 'contact',
-          refId: contactRefId(conv),
+          refId,
           who: conversationWho(conv),
           why: 'New inbound — untriaged',
           tag: 'Contact - Unknown',

@@ -160,6 +160,36 @@ describe('buildTodayFromSources', () => {
     expect(unk?.refId).toBe('unknown?phone=%2B14040100007');
   });
 
+  // Code review R2-3 (fix wave 2): one Identify row per CONTACT, as on the
+  // server (FW1-2). A contact with a phone thread and an email thread was
+  // listed twice under one React key, and "Show all N" counted them twice.
+  // The first thread in the fallback's own order wins; its copy is unchanged.
+  it('one unknown contact with a phone thread and an email thread is ONE identify row; the first thread wins', () => {
+    const phone = convOf({
+      conversationId: 'unk-phone',
+      type: 'unknown_1to1',
+      participant_phone: '+14040100007',
+      participants: [{ contactId: 'ct-1', phone: '+14040100007' }],
+      unread_count: 1,
+    });
+    // An email thread carries no participant_phone; its roster phone is ''.
+    const email = convOf({
+      conversationId: 'unk-email',
+      type: 'unknown_1to1',
+      participant_phone: undefined,
+      participants: [{ contactId: 'ct-1', phone: '' }],
+      unread_count: 1,
+      participant_display_name: 'Dee Mail',
+    });
+    const identifyOf = (conversations: ConversationSummary[]): Array<[string, string]> =>
+      buildTodayFromSources([], conversations, NOW)
+        .filter((i) => i.group === 'identify')
+        .map((i) => [`${i.refType}:${i.refId}`, i.who]);
+
+    expect(identifyOf([phone, email])).toEqual([['contact:ct-1', '(404) 010-0007']]);
+    expect(identifyOf([email, phone])).toEqual([['contact:ct-1', 'Dee Mail']]);
+  });
+
   it('puts a Tour entity scheduled today in tours_today (linking the tour, not a placement)', () => {
     const items = buildTodayFromSources([], [], NOW, [
       tourOf({ tourId: 'tour-1', scheduledAt: at(2 * HOUR) }),

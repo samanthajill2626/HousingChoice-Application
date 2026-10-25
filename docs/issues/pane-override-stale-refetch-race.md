@@ -34,6 +34,16 @@ tenant/landlord state and refetch it on their own SSE (useTour.ts:115-122 on
 Both triggers that emit `tour.updated` here (the send's own status change, "Open
 group text") are on the same screen, so the window is easy to hit.
 
+A newer trigger on the contact page itself (tracker #31, today-checklist spec
+7.3 W1 / W3 / W6; planner review ADV-5): every staff text, email or outbound
+call sent from the contact page now emits `contact.updated`, and the page
+re-reads the open contact on it (`dashboard/src/routes/contact/useContact.ts`
+~75), so it re-reads the contact after each of its own sends - a re-read still
+in flight when the operator then adds or edits an email address in
+`EmailManager` can land with the pre-change contact and clear the pane's
+override (`ContactCommsPane.tsx:109`), reverting the email channel gate until
+the next refetch.
+
 Impact is display-only and self-healing: the next refetch carries the real row,
 and every send is re-checked server-side (the just-in-time consent gate returns
 409 `contact_no_consent` regardless of what the composer thinks). Nothing is

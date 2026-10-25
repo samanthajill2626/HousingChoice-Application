@@ -37,6 +37,17 @@ row dropped (worklist WL-11; the `app/src/routes/today.ts` header says so).
 The `requested` status is never auto-closed, so the partition grows with
 every undecided request (prod 13 at design time).
 
+Two details make a load cost more than its reads (planner review ADV-7).
+`useToday` aborts its in-flight GET on each new debounced refetch
+(`fetchNow`, `dashboard/src/routes/today/useToday.ts`), but the server keeps
+computing the aborted load - the route never checks for a closed request - so
+under a steady event stream the server pays for loads no client reads. And
+Tours to book's per-row reads are awaited one row at a time in the
+`tours_to_book` loop (`app/src/routes/today.ts`): the tenant (one memoized
+read serves its delete check and its label), then the unit label, before the
+next row - so the section's time grows with the requested partition, and a
+slower Today widens the window in which the next refetch aborts it.
+
 Measured in the test harness by the build (S4 report, watch item WI7,
 `docs/superpowers/reviews/2026-10-23-feat-today-checklist/slices/S4-report.md`;
 the committed read-count case in `app/test/todayApi.test.ts`): one Today

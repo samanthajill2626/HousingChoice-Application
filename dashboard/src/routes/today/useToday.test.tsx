@@ -187,7 +187,7 @@ describe('useToday', () => {
     expect(getToday).toHaveBeenCalledTimes(2);
   });
 
-  it('refetches when a contact.updated event arrives (a contact marked Inactive leaves Needs you now)', async () => {
+  it('refetches when a contact.updated event arrives (a contact marked Inactive leaves Identify these contacts)', async () => {
     // unknown-inactive spec D2 / AR3: a header status change writes no
     // thread, so no conversation.updated arrives for it.
     getToday.mockResolvedValue(TODAY);

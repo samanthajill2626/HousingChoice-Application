@@ -334,3 +334,164 @@ test saw 1 AI row (well inside the opened list's five).
   `lane.json` behind with the launcher already dead and the ports free;
   `npm run e2e:stop` cleared them each time ("retained state is stale or
   absent"). Worth knowing for S7.15's session work.
+
+## Part two (S7b): S7.11-S7.15, S7.17
+
+Second S7 implementer, from 1ea8c74f. Line numbers below are at the commit
+named in each item.
+
+### The orchestrator's one-line fix (before any e2e run)
+
+- 1d9598d2: `dashboard/src/routes/today/useToday.test.tsx:190` retitled
+  "refetches when a contact.updated event arrives (a contact marked Inactive
+  leaves Identify these contacts)" - title only, assertions unchanged.
+  `cd dashboard; npx vitest run src/routes/today/useToday.test.tsx`: exit 0,
+  12 passed. eslint on the file: exit 0, no output.
+
+### S7.11 - perf TODAY_TERMINAL and its pin (09125b8c)
+
+- RED (`npm run test -w @housingchoice/e2e -- performance/routes.test.ts`):
+  exit 1, `1 failed | 29 passed`, "Today terminal copy" at the first
+  `toEqual` (received `['list', 'Group texts to close', 'exact']` first).
+- GREEN with `performance/collect.test.ts`: exit 0, `2 passed` files, `70
+  passed` tests. e2e typecheck exit 0; eslint on the three files exit 0.
+- Re-cited (as built): the `'/'` terminal to
+  `Today.tsx:47-52,145-153,448-463; QuietShares.tsx:25,159-167` (the six
+  labels, UnavailableSection, the queue error / fallback line / All caught
+  up block; the Quiet shares label and its unavailable alert); the `'/'`
+  endpoint base to `useToday.ts:61-114` (loadToday),
+  `useTodayPastTours.ts:74-178` (the label cache, labelRows, orderForToday
+  and the labeling effect) and `useTours.ts:296-342` (usePastTours);
+  WL-21: `CONTRACT_SOURCE_LEDGER.background.today` to `useToday.ts:52,167-201`
+  (REFETCH_DEBOUNCE_MS and the scheduleRefetch + useEventStream block), with
+  the exact pin at `e2e/performance/collect.test.ts:371` - which went RED on
+  the ledger change alone (`1 failed | 39 passed`) before the pin moved.
+- Deviation (one line, same file): `CONTRACT_SOURCES.today`
+  (`e2e/performance/routes.ts:130`) carried the same stale
+  `useToday.ts:41-74` citation of the getToday loader as the endpoint base;
+  it is re-cited to `useToday.ts:61-114` with it. Nothing reads that export
+  (grep), so no test moves.
+
+### S7.12 - the ContactUpdatedEvent doc comment (fa7e821f)
+
+- Every name the comment cites exists (plan S7.12 step 1 greps): the
+  `staffOutreach` option (`sendMessage.ts:409`, `api.ts:1589`, `:1920`),
+  `recordStaffOutreach` / `contact.updated` in `sendEmailMessage.ts:489`,
+  `:552`, `stampOutboundDial` / `afterResponse` (`voice.ts:1366`, `:1799`),
+  `touchFixtureReachedOut` (`dev.ts:856`), the inbound emits
+  (`inboundEmail.ts:840`, `voice.ts:863`, `:1154`, `:1255`).
+- As-built name differs from the plan's text: the relay after-loop event is
+  built by ONE shared helper, `stampRelayOutreach`
+  (`services/relayAnnouncements.ts:194`), which both `jobs/relayFanOut.ts`
+  (`:1697`) and the edited-intro loop (`relayAnnouncements.ts:458`) call; it
+  does the `getByIdConsistent` read. The comment names it.
+- Root `npm run typecheck` (bare): exit 0. eslint on events.ts: exit 0. Added
+  lines ASCII 0.
+
+### S7.13 - GLOSSARY and STATUS-MODEL (6a72ac48)
+
+- RED greps as planned (no entry; Unreplied counts 4 and 2). GREEN: the three
+  entries at `documentation/GLOSSARY.md:739,758,775`; Unreplied only in the
+  two removal statements (`:706`, `:785`); "Needs you now" only in the At a
+  glance checklist list (`:781`); added lines ASCII 0.
+- Deviations (accuracy; each a plan sentence the tree contradicts):
+  - GLOSSARY Inactive: the plan's closing "so Inactive changes nothing else
+    on Today" is false - an Inactive contact is never waiting on a reply
+    (`isEligibleRecipient`), so it also leaves Quiet shares (spec 6.1
+    drop-offs). Written as "so on Today Inactive changes only that and
+    **Quiet shares** ...".
+  - STATUS-MODEL 5b: the same sentence is scoped to unread texts, with
+    "(its Quiet shares section follows point 1: an Inactive contact is never
+    on it)".
+  - GLOSSARY last reached out: adds spec r8 7.2's rule that a staff Send now
+    or Retry of an automated send does not count either (the plan's text
+    predates PR104).
+  - GLOSSARY Quiet shares / last reached out: the term's " - " moved onto
+    the entry's first line (the plan wrapped it to the start of the second
+    line, which Markdown renders as a nested bullet), one long line
+    rewrapped. Text unchanged.
+
+### S7.14 - the 2026-06-16 note, issues, the cost issue (d81ec6b3)
+
+- `<L1>` = `app/src/routes/today.ts:961` (the owner test), `<L2>` =
+  `dashboard/src/routes/today/buildToday.ts:263` (the fallback's
+  unknown_1to1 branch).
+- WL-21: `imported-unknown-threads-surface-as-unknown-on-today.md` retitled
+  to its remaining problem ("An imported contact's one-to-one thread stays
+  unknown_1to1 whatever the contact's type; only the 404 fallback Today still
+  lists a reply on it, under Identify these contacts"), stays open;
+  `fact-extraction-spec-vacuous-today-absence-checks.md` RESOLVED
+  (`status: resolved`, `resolved: 2026-10-24`, `updated`, refs to the helper
+  and its call sites, a Resolution paragraph naming `expectNoAiSuggestionFor`
+  at `e2e/support/today.ts:121` and its calls at
+  `conversation-fact-extraction.spec.ts:365,405` and `caseworkers.spec.ts:550`).
+- The cost issue cites the S4 WI7 counts object and formula, the PR92
+  unread pages, WL-11 (the uncapped requested-tours read) and WL-12 (listing
+  sends read WITHOUT ConsistentRead, the Not interested residue); it also
+  notes that `listingSends.listByUnit` pages a property's WHOLE send history
+  before the 14-day filter (`listingSendsRepo.ts:473-483`,
+  `followUps.ts:178-181`).
+- public-signup-abuse-hardening: the plan's update text plus "(not when that
+  contact is Inactive)" for the unknown-phone case (spec 5.2).
+- `npm run issues`, three runs (INDEX.md gitignored, `git check-ignore`
+  prints it; never staged): before S7.14 `439 open, 213 closed, 652 total`;
+  after the new issue `440 open, 213 closed, 653 total` (open +1, no warning;
+  `INDEX.md:159` is `| low | improvement | open | [today-quiet-shares-read-cost]...`);
+  after the resolve `439 open, 214 closed, 653 total`, no warning. Deviation
+  from WL-21's wording: with WL-21's own resolve in the same task the FINAL
+  open total is unchanged (one opened, one resolved); the +1 is shown by the
+  middle run.
+
+## Backfill lane rehearsal (WI12, S7.15)
+
+- Lane 13, prefix hc-local-13-, database hclane13, ports
+  10301/10311/10321/10331, booted at d81ec6b3 (= HEAD; the ping's
+  `appCommit`), `"dev":true`; reseeded LEAN before the runs (`npm run
+  e2e:reseed` exit 0). Ready wait per WL-19: `grep -q '^\[e2e-session\] ready '`
+  on the session log. No `npm run db:start` (hc-dynamodb-local was up).
+- Why lane 13, not this worktree's preferred 12: a read-only-looking
+  `node e2e/support/lane.mjs` I ran two minutes before the boot RESERVES the
+  lane it prints (240 s grace, `e2e/support/laneLease.mjs`
+  `RESERVE_GRACE_MS`), so the launcher walked to 13. Harmless (13 is leased
+  to this worktree; the lane-13 tables already existed from an earlier run,
+  were reconciled, reseeded, and dropped by `e2e:stop`), but do not use the
+  lane CLI as a probe.
+- PR78 guard proven BEFORE the lane booted, on three probe copies of the
+  helper that differ from it by one inserted line each (gitignored,
+  `.superpowers/s7/lane-reached-out.probe-*.ts`): a live-stack prefix
+  `hc-local-` -> `refusing: endpoint host localhost / prefix hc-local- is
+  not localhost or 127.0.0.1 with hc-local-12-`, exit 1; an AWS endpoint ->
+  `refusing: endpoint host dynamodb.us-east-1.amazonaws.com / ...`, exit 1;
+  a table prefix outside the lane -> `refusing: table hc-local-contacts is
+  not under hc-local-12-`, exit 1 - none printed the target line that
+  follows the guard, so no command was sent. The real helper refuses lane
+  `0`, lane `abc` and mode `delete` with its usage line, exit 2.
+- Staff sends: two W1 1:1 texts (POST /api/conversations/:id/messages, 201
+  each) to contactIds contact-b6fde9b9-5e6d-4856-afb0-9775d00d015a (A) and
+  contact-9c5c5379-c2c3-4bf7-9037-6c26d33b396d (B); live stamps V_A
+  2026-10-25T00:17:53.000Z, V_B 2026-10-25T00:17:53.000Z (each the row's
+  providerTs). B's stamp removed with the lane-only helper to stand for a
+  pre-deploy contact (plan S7 C6): `"last_reached_out_at":null`.
+- Dry run (exit 0): start `endpoint "DynamoDB Local http://localhost:8000
+  database hclane13 (e2e lane 13)"`, `prefix "hc-local-13-"`, `apply false`;
+  done `(DRY RUN - nothing written)`: conversationsWalked 6, pointerRows 2,
+  messagesRead 2, remindersInWindow 0, counted text 2 (email, call,
+  relay_team_slot, group_text_slot, edited_intro_slot all 0), every
+  rowsSkipped counter 0, reminderBodyTimeMatched 0, retryOriginOutsideWindow
+  0, unparseableInstants 0, planned 2, written 0, skipped 0, failed 0. The
+  lean seed's outbound rows (2026-06) sit below the key floor and are never
+  read.
+- Apply 1 (exit 0): planned 2, written 1, skipped 1, failed 0. Apply 2 (exit
+  0): planned 2, written 0, skipped 2, failed 0.
+- After: A 2026-10-25T00:17:53.000Z (= V_A), B 2026-10-25T00:17:53.000Z (=
+  V_B): the backfill computed the instant the live writer stamps (PR9 and
+  PR38 agree). No name, phone or body in any of the three run logs (grep 0).
+- Ended per WL-22: `npm run e2e:stop` exit 0 ("stopped session launcher
+  21348 (+ children)", "dropped lane 13 tables (hc-local-13-*)", "released
+  lane 13 lease"); session.pid and lane.json gone; ports 10301/10311/10321/
+  10331 free; launcher and child pids gone. Then this section was committed.
+  Nothing else to report.
+
+## S7.16
+
+S7.16: orchestrator-owned (Phase 5)

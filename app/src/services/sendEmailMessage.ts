@@ -481,13 +481,6 @@ export function createSendEmailMessageService(deps: SendEmailServiceDeps = {}): 
       throw err;
     }
 
-    // today-checklist W3 (spec 7.3, PR12): SES accepted the mail - staff reached
-    // the addressed contact. Stamped at the row's own instant (nowIso, the
-    // providerTs it was appended under). recordStaffOutreach never throws (a
-    // failed stamp is its own ERROR line), so it can never mark this sent mail
-    // failed or rethrow (M2). Its contact.updated follows the sent emit below.
-    const reachedOut = await recordStaffOutreach({ contacts, log }, [{ contactId, at: nowIso }]);
-
     // ---- POST-SEND bookkeeping (the mail is already at SES). Each step is
     // independently log-and-continue: it NEVER marks the message failed and NEVER
     // rethrows. The route still returns a 'sent' outcome even if a step failed.
@@ -547,8 +540,16 @@ export function createSendEmailMessageService(deps: SendEmailServiceDeps = {}): 
       );
     }
 
-    // W3: ONE contact.updated, the last event of the send, only when the stamp
-    // above was written.
+    // (e) today-checklist W3 (spec 7.3, PR12): SES accepted the mail - staff
+    // reached the addressed contact. Stamped at the row's own instant (nowIso,
+    // the providerTs it was appended under) and LAST, after every step above,
+    // so the extra write never widens the window before the SES-id alias in
+    // (a) that lets delivery, bounce and complaint events find this row
+    // (planner review ADV-4). recordStaffOutreach never throws (a failed stamp
+    // is its own ERROR line), so it can never mark this sent mail failed or
+    // rethrow (M2). Then ONE contact.updated, the last event of the send, only
+    // when the stamp was written.
+    const reachedOut = await recordStaffOutreach({ contacts, log }, [{ contactId, at: nowIso }]);
     if (reachedOut.includes(contactId)) events.emit('contact.updated', { contactId });
 
     log.info(

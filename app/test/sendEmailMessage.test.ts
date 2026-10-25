@@ -534,6 +534,57 @@ describe('sendEmailMessage - W3 staff-outreach stamp (today-checklist)', () => {
     expect(names.at(-1)).toBe('contact.updated');
   });
 
+  // Planner review ADV-4: the stamp is the LAST post-send step, so it never
+  // sits between SES acceptance and the SES-id alias that lets delivery,
+  // bounce and complaint events find this row (or any other bookkeeping
+  // write); its contact.updated still comes after it, as the last event.
+  it('stamps at the END of the post-send bookkeeping: after the SES-id alias, queued->sent, the parked-event apply, the lastSeen bump and the sent emit', async () => {
+    const f = makeFakes();
+    const out = await f.service(input());
+    expect(out.status).toBe('sent');
+    expect(f.touchLastReachedOut).toHaveBeenCalledTimes(1);
+    const stamp = f.touchLastReachedOut.mock.invocationCallOrder[0]!;
+    const orderOfEmit = (pick: (c: unknown[]) => boolean): number => {
+      const i = f.emit.mock.calls.findIndex(pick);
+      expect(i).toBeGreaterThanOrEqual(0);
+      return f.emit.mock.invocationCallOrder[i]!;
+    };
+    // (a) the alias, (b) queued->sent, (c) the parked events, (d) lastSeen
+    // and the sent emit's inbox touch - each before the stamp.
+    expect(f.recordProviderSidAlias.mock.invocationCallOrder[0]).toBeLessThan(stamp);
+    expect(f.updateDeliveryStatus).toHaveBeenCalledWith(expect.any(String), 'sent');
+    expect(f.updateDeliveryStatus.mock.invocationCallOrder[0]).toBeLessThan(stamp);
+    expect(f.parked.mock.invocationCallOrder[0]).toBeLessThan(stamp);
+    expect(f.touchEmailLastSeen.mock.invocationCallOrder[0]).toBeLessThan(stamp);
+    expect(f.touchLastActivity.mock.invocationCallOrder[0]).toBeLessThan(stamp);
+    expect(
+      orderOfEmit(
+        (c) => c[0] === 'message.persisted' && (c[1] as { deliveryStatus?: string }).deliveryStatus === 'sent',
+      ),
+    ).toBeLessThan(stamp);
+    expect(orderOfEmit((c) => c[0] === 'conversation.updated')).toBeLessThan(stamp);
+    // ...and its ONE contact.updated after it, the send's last event.
+    expect(orderOfEmit((c) => c[0] === 'contact.updated')).toBeGreaterThan(stamp);
+    expect(f.emit.mock.calls.map((c) => c[0]).at(-1)).toBe('contact.updated');
+  });
+
+  it('every post-send bookkeeping step failing still stamps, and contact.updated is still the one last event (M2)', async () => {
+    const f = makeFakes();
+    f.recordProviderSidAlias.mockRejectedValueOnce(new Error('alias boom'));
+    f.updateDeliveryStatus.mockRejectedValueOnce(new Error('status boom'));
+    f.parked.mockRejectedValueOnce(new Error('parked boom'));
+    f.touchEmailLastSeen.mockRejectedValueOnce(new Error('lastSeen boom'));
+    f.touchLastActivity.mockRejectedValueOnce(new Error('touch boom'));
+    const out = await f.service(input()); // resolves (no rethrow)
+    expect(out.status).toBe('sent');
+    const statuses = f.updateDeliveryStatus.mock.calls.map((c) => (c as unknown[])[1]);
+    expect(statuses).not.toContain('failed');
+    expect(f.touchLastReachedOut).toHaveBeenCalledTimes(1);
+    expect(f.touchLastReachedOut).toHaveBeenCalledWith('c1', NOW);
+    expect(contactUpdates(f)).toEqual([['contact.updated', { contactId: 'c1' }]]);
+    expect(f.emit.mock.calls.map((c) => c[0]).at(-1)).toBe('contact.updated');
+  });
+
   it('a send the adapter rejects stamps nothing and emits no contact.updated', async () => {
     const send = vi.fn(async () => {
       throw new Error('SES boom');

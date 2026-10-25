@@ -54,6 +54,14 @@ business-clock deadlines + `attention` escalation flags + untriaged inbounds),
 **Tours today**, **Unreplied**, **Follow-ups due**. Fed by `CaseItem.next_deadline_*`,
 `CaseItem.attention`, unread conversations, and missed calls.
 
+> **Superseded grouping (2026-10-24).** The groups above are no longer
+> Today's. `docs/superpowers/specs/2026-10-23-today-checklist-design.md`
+> (tracker #31) supersedes them: the checklist Needs you now, Identify these
+> contacts, Past tours needing an outcome, Tours to book, Quiet shares, Relay
+> groups to close and Placements (the former "Follow-ups due"), then "At a
+> glance" (Tours today, AI suggestions as one collapsed line); Unreplied is
+> removed. `app/src/routes/today.ts` follows that spec.
+
 ## Tenant detail — LOCKED (for now)
 
 **Layout:** comms-LEFT, file-RIGHT (reversed-C). This page + the Inbox are the two

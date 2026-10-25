@@ -6,6 +6,7 @@ severity: med
 status: open
 area: app
 created: 2026-10-21
+updated: 2026-10-24
 refs: app/src/routes/public.ts:690-747, app/src/repos/activityEventsRepo.ts:136-154, app/src/repos/activityEventsRepo.ts:214-245, app/src/app.ts:185-191, app/src/routes/public.ts:198-211, app/src/routes/public.ts:253-260, app/src/routes/public.ts:760-777, app/src/jobs/rosterActions.ts:236-237, app/src/jobs/rosterActions.ts:261-304, app/src/routes/public.ts:541-578, app/src/routes/public.ts:637, app/src/routes/today.ts:784-840, dashboard/src/routes/listing/listingFormat.ts:352, app/test/publicSignupLeads.test.ts:750-761, dashboard/src/routes/contact/Timeline.module.css:467-471, app/src/services/shareLedger.ts:50, app/src/services/shareLedger.ts:205-224, app/src/jobs/broadcastFanOut.ts:1270, app/src/services/shareAttemptOutcome.ts:188, app/scripts/repair-share-outcomes.ts, app/src/routes/today.ts:182, app/src/routes/today.ts:704-754, app/src/lib/config.ts:1008-1014, app/src/routes/units.ts:1495-1520, app/src/services/followUps.ts:141-161
 ---
 
@@ -153,6 +154,18 @@ contact, the pin, the unread mark, the Today row and the Sent to row all still
 land (round 3, `R3-review.md` finding 2). Bounding it takes the new-contacts
 ceiling under Suggested fix. A per-phone limit cannot bound it either, since
 each made-up phone is used once.
+
+**Update (2026-10-24, tracker #31, `feat/today-checklist`).** Today no longer
+has an Unreplied section, and its unread pass keeps only `unknown_1to1`
+threads, BEFORE the 100-row cap (spec
+`docs/superpowers/specs/2026-10-23-today-checklist-design.md` section 4). A
+made-up-phone sign-up creates a tenant with a `tenant_1to1` thread, so it no
+longer adds a Today row or takes a cap slot: the "Today row under Unreplied"
+under "New phones" no longer lands, and the crowd-out below no longer
+applies to tenants. A sign-up from a live unknown contact's phone still
+marks an unknown thread unread, which Today lists under Identify these
+contacts (not when that contact is Inactive). The inbox noise, the pin and
+the Sent to row are unchanged, so this issue stays open.
 
 **Today crowd-out** (planner review P1, `P1-adversarial.md` M2, in
 `docs/superpowers/reviews/2026-10-21-flyer-leads/planner-review/`). Those

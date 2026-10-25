@@ -1,12 +1,13 @@
 ---
 id: imported-unknown-threads-surface-as-unknown-on-today
-title: A reply on an imported contact's unknown_1to1 thread shows on Today as a new unknown contact, whatever the contact's type
+title: An imported contact's one-to-one thread stays unknown_1to1 whatever the contact's type; only the 404 fallback Today still lists a reply on it, under Identify these contacts
 type: bug
 severity: low
 status: open
 area: app/today
 created: 2026-10-08
-refs: app/src/lib/import/apply.ts:1227, app/src/routes/today.ts:784, dashboard/src/routes/today/buildToday.ts:287, app/src/routes/contacts.ts:1543, app/src/routes/contacts.ts:1916, dashboard/src/routes/contact/ContactEditForm.tsx:306
+updated: 2026-10-24
+refs: app/src/lib/import/apply.ts:1227, app/src/routes/today.ts:961, dashboard/src/routes/today/buildToday.ts:263, app/src/routes/contacts.ts:1543, app/src/routes/contacts.ts:1916, dashboard/src/routes/contact/ContactEditForm.tsx:306
 ---
 
 **Problem.** The importer mints every imported one-to-one thread as
@@ -34,3 +35,16 @@ participant contact is typed tenant, landlord or partner (the
 re-type them once with a script (to `conversationTypeFor(contact)`, skipping
 threads another live contact shares), or make the importer mint the
 contact's type for a typed contact going forward - or both.
+
+**Update (2026-10-24, tracker #31, `feat/today-checklist`).** Today no longer
+shows these rows. Its unread pass keeps an `unknown_1to1` thread only when the
+thread's owner contact is type `unknown` and not Inactive (spec
+`docs/superpowers/specs/2026-10-23-today-checklist-design.md` 5.2;
+`app/src/routes/today.ts:961`), so a reply on an imported tenant's,
+landlord's or partner's unknown thread stays in the inbox, where it belongs.
+Still open: the threads themselves stay `unknown_1to1` (the importer and the
+same-type PATCH behavior above are unchanged), and the dashboard's fallback
+Today (`dashboard/src/routes/today/buildToday.ts:263`, used only when GET
+/api/today answers 404) still lists every unread `unknown_1to1` thread, now
+under Identify these contacts. The suggested fix (measure, then re-type or
+mint the right type) still applies.

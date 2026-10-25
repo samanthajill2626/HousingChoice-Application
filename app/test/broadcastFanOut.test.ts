@@ -283,6 +283,26 @@ describe('broadcast.send (M1.8a)', () => {
     expect(world.emitted.filter((e) => e.event === 'contact.updated')).toEqual([]);
   });
 
+  // today-checklist (fix wave 1, FW1-3; spec 7.3 no-stamp table: "including
+  // broadcasts with no property"): a broadcast with no unitId is a share all
+  // the same - here a dashboard one, which goes out as a person's send
+  // (automated false) through the same real wrapper.
+  it('today-checklist: a broadcast with NO property never stamps last_reached_out_at either', async () => {
+    const alice = seedTenant(world, { contactId: 'c-alice', firstName: 'Alice', phone: '+15550100001' });
+    seedBroadcast(world, [alice], { unitId: undefined, body_template: 'Hello there', created_via: 'dashboard' });
+    wireHandler(world, logger);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(1);
+    expect(world.messages.filter((m) => m.direction === 'outbound')).toEqual([
+      expect.objectContaining({ broadcast_id: 'bcast-1', automated: false, body: 'Hello there' }),
+    ]);
+    expect(world.reachedOutTouches).toEqual([]);
+    expect(world.emitted.filter((e) => e.event === 'contact.updated')).toEqual([]);
+  });
+
   it('writes a units# broadcast_sent audit row with the recipient count on completion', async () => {
     const alice = seedTenant(world, { contactId: 'c-alice', firstName: 'Alice', phone: '+15550100001' });
     const bob = seedTenant(world, { contactId: 'c-bob', phone: '+15550100002' });

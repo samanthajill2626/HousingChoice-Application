@@ -148,6 +148,30 @@ describe.skipIf(!reachable)('seedAll profile contract (throwaway prefix)', () =>
     expect(hastaff.Item).not.toHaveProperty('last_heard_from_at');
   });
 
+  /** Every item of one table under the throwaway prefix (paged). */
+  const scanAll = async (base: string): Promise<Record<string, unknown>[]> => {
+    const items: Record<string, unknown>[] = [];
+    let startKey: Record<string, unknown> | undefined;
+    do {
+      const page = await doc.send(new ScanCommand({ TableName: tn(base, prefix), ExclusiveStartKey: startKey }));
+      items.push(...((page.Items ?? []) as Record<string, unknown>[]));
+      startKey = page.LastEvaluatedKey as Record<string, unknown> | undefined;
+    } while (startKey !== undefined);
+    return items;
+  };
+  const reachedOutIds = (contacts: Record<string, unknown>[]): unknown[] =>
+    contacts.filter((c) => 'last_reached_out_at' in c).map((c) => c['contactId']);
+
+  // today-checklist (fix wave 1, FW1-3; spec 7.3 no-stamp table): the reseed
+  // never writes last_reached_out_at - only a real staff send does, so a test
+  // that needs the field drives that send (spec 9).
+  it('lean seedAll writes no last_reached_out_at on any contact (spec 7.3)', async () => {
+    await seedAll(endpoint, 'lean', namespace);
+    const contacts = await scanAll('contacts');
+    expect(contacts.length).toBeGreaterThanOrEqual((SEED['contacts'] ?? []).length);
+    expect(reachedOutIds(contacts)).toEqual([]);
+  });
+
   it('full ⊇ lean: full profile count is >= lean count', async () => {
     // Run a second seedAll with full profile — items already written are
     // idempotently overwritten; stubs currently add nothing extra, so counts
@@ -167,5 +191,17 @@ describe.skipIf(!reachable)('seedAll profile contract (throwaway prefix)', () =>
     // - it passes alone in seconds, and serializing the suite instead costs
     // every future run. The DDL hooks above are left at 120s deliberately: they
     // create and drop tables rather than seeding through the write lock.
+  }, 240_000);
+
+  // today-checklist (fix wave 1, FW1-3; spec 7.3): the FULL reseed (lean +
+  // cast + matrix + the live rows) writes no last_reached_out_at either. Its
+  // own seed, so it never depends on the case above; the same budget, for the
+  // same contention reason.
+  it('full seedAll writes no last_reached_out_at on any contact (spec 7.3)', async () => {
+    await seedAll(endpoint, 'full', namespace);
+    const contacts = await scanAll('contacts');
+    // The full world is really there (a cast contact), not just the lean one.
+    expect(contacts.some((c) => c['contactId'] === 'contact-cast-unknown-texter')).toBe(true);
+    expect(reachedOutIds(contacts)).toEqual([]);
   }, 240_000);
 });

@@ -11,7 +11,7 @@
 // Self-skipping like the other integration suites: without DynamoDB Local at
 // DYNAMODB_ENDPOINT the suite is skipped so `npm test` stays green offline.
 import { randomUUID } from 'node:crypto';
-import { GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
@@ -146,6 +146,30 @@ describe.skipIf(!reachable)('import:apply', () => {
     const again = await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
     expect(again.lastHeardFromStamps.written).toBe(0);
     expect(again.lastHeardFromStamps.skipped).toBe(again.lastHeardFromStamps.planned);
+  });
+
+  // today-checklist (fix wave 1, FW1-3; spec 7.3 no-stamp table): the Quo
+  // importer writes historical outbound texts (and calls) with no staff /
+  // automated split, and they never move last_reached_out_at - only a live
+  // staff send does (Quo rows are older than the backfill window anyway).
+  it('never stamps last_reached_out_at, though it writes outbound staff texts (spec 7.3)', async () => {
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+    const scanAll = async (base: string): Promise<Record<string, unknown>[]> => {
+      const items: Record<string, unknown>[] = [];
+      let startKey: Record<string, unknown> | undefined;
+      do {
+        const page = await doc.send(new ScanCommand({ TableName: table(base), ExclusiveStartKey: startKey }));
+        items.push(...((page.Items ?? []) as Record<string, unknown>[]));
+        startKey = page.LastEvaluatedKey as Record<string, unknown> | undefined;
+      } while (startKey !== undefined);
+      return items;
+    };
+    const messages = await scanAll('messages');
+    expect(messages.some((m) => m['direction'] === 'outbound' && m['type'] === 'sms' && m['author'] === 'staff')).toBe(true);
+    expect(messages.some((m) => m['type'] === 'call')).toBe(true);
+    const contacts = await scanAll('contacts');
+    expect(contacts.length).toBeGreaterThan(0);
+    expect(contacts.filter((c) => 'last_reached_out_at' in c).map((c) => c['contactId'])).toEqual([]);
   });
 
   it('writes the name fields the app actually renders from', async () => {

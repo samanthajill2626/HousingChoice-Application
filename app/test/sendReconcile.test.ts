@@ -454,6 +454,34 @@ describe('send.reconcile (spec D11-D16)', () => {
       expect(slotOf(t.contactId)!.carrierSentAt).toBeUndefined();
     });
 
+    // today-checklist (fix wave 1, FW1-3; spec 7.3 no-stamp table, spec 9): the
+    // reconcile's SHARE adoption records a share text that already went out. A
+    // share never moves last_reached_out_at (spec 7.2) - not even a dashboard
+    // share, which adopts as a person's send (automated false). Beside the
+    // relay-leg and retry adoption pins below.
+    const shareAdoptions: Array<[string, Partial<BroadcastItem>, boolean]> = [
+      ['a dashboard share (adopted as a person\'s send)', { created_via: 'dashboard' }, false],
+      ['an automated share', {}, true],
+    ];
+    it.each(shareAdoptions)('2h %s: the adoption never stamps last_reached_out_at (PIN)', async (_label, overrides, automated) => {
+      register();
+      const t = seedTenant();
+      seedBroadcast([t.contactId], overrides);
+      const at = await reconciling(bOwner(t.contactId), factsFor(t.phone!));
+      plant({ providerSid: 'SMorphan-share', providerStatus: 'delivered', sentAt: new Date().toISOString() });
+
+      await runCheck(payloadOf(bOwner(t.contactId), at));
+
+      expect(world.messages.find((m) => m.provider_sid === 'SMorphan-share')).toMatchObject({
+        broadcast_id: 'bcast-1',
+        automated,
+        recipient_contact_id: t.contactId,
+      });
+      expect(await recordOf(bOwner(t.contactId))).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMorphan-share' });
+      expect(world.reachedOutTouches).toEqual([]);
+      expect(world.emitted.filter((e) => e.event === 'contact.updated')).toHaveLength(0);
+    });
+
     it('3 an undelivered 30005 adopts as failed with its code, flags the contact, and writes no milestone or listing-send (D15)', async () => {
       register();
       const t = seedTenant();

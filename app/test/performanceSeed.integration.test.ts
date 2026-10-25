@@ -348,6 +348,29 @@ describe.skipIf(!reachable)('performance seed against DynamoDB Local', () => {
     expect(second).toEqual(first);
   }, 180_000);
 
+  // today-checklist (fix wave 1, FW1-3; spec 7.3 no-stamp table): the
+  // performance seed - its lean base and every generated contact - carries no
+  // last_reached_out_at, though the generated threads hold outbound staff
+  // texts; only a real staff send writes the field.
+  it('writes no last_reached_out_at on any contact (spec 7.3)', async () => {
+    await resetPerformanceData({ config: configB, input, anchor });
+    const scanAll = async (base: string): Promise<Record<string, unknown>[]> => {
+      const items: Record<string, unknown>[] = [];
+      let startKey: Record<string, unknown> | undefined;
+      do {
+        const page = await doc.send(new ScanCommand({ TableName: nsB.tableNameFor(base), ExclusiveStartKey: startKey }));
+        items.push(...((page.Items ?? []) as Record<string, unknown>[]));
+        startKey = page.LastEvaluatedKey as Record<string, unknown> | undefined;
+      } while (startKey !== undefined);
+      return items;
+    };
+    const messages = await scanAll('messages');
+    expect(messages.some((m) => m['direction'] === 'outbound' && m['author'] === 'teammate')).toBe(true);
+    const contacts = await scanAll('contacts');
+    expect(contacts.some((c) => c['contactId'] === 'perf-contact-00001')).toBe(true);
+    expect(contacts.filter((c) => 'last_reached_out_at' in c).map((c) => c['contactId'])).toEqual([]);
+  }, 180_000);
+
   it('returns the full maximum generated relay-group share without truncation', async () => {
     const maximumRelayInput = {
       contacts: 0,

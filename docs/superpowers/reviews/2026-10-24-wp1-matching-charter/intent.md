@@ -35,8 +35,10 @@ at the gate: M5 anonymized examples, M7 no auto-decline in WP1, M8 B4
 keeps hand-picks/tour-hold default/old drafts/partner flow, M10 the B2
 counterfactual fair-housing check, M22 staff notes off the card. ROUND 2 DONE: 22 findings, all accepted and folded; new planner defaults:
 ranked rows start unchecked (R2-2), examples written from scratch with no
-export (R2-13/14, replaces M5), notes off the card. Round 3 goes to
-reviewer A (SendMessage) with the re-review charge.
+export (R2-13/14, replaces M5), notes off the card. ROUND 3 DONE: 7 accepted (accommodation vs unlawful flags, job
+at-least-once rules, import predicate, four precision edits). Round 4 -
+the LAST allowed - goes to reviewer A; if it still changes a decision,
+stop and put the open findings to Cameron.
 
 NEXT STEP: the ADVERSARIAL DOCUMENT REVIEW: round 1
 = two independent Opus reviewers in parallel, same brief

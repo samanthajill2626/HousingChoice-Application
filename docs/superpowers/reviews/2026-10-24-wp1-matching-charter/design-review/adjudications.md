@@ -270,3 +270,36 @@ account spend limit as Cameron's enforcement (A1 L304-305).
 
 Round 2 totals: 22 findings, 22 ACCEPT, 0 REJECT, 0 DEFER. Decisions
 changed: yes (R2-1, R2-2, R2-3, R2-8, R2-12, R2-13), so round 3 runs.
+
+## Round 3 (reviewer A continued; report r3-reviewer-a.md, 7 findings)
+
+Verified before ruling: sqsJobConsumer.ts:11-17 (throw = redelivery up to
+5, then DLQ page), infra/modules/jobs/main.tf:36 (120 s visibility),
+import/apply.ts:1146-1159 (imported_from on every touched contact).
+
+R3-1 Accommodation vs unlawful requirement (finding 1). ACCEPT. Two flag
+kinds: unlawful (any requirement key or free-text field on the property
+card; remove from the record) and accommodation (lawful rule that does not
+apply to this tenant, e.g. No pets against an assistance animal; suppresses
+the cap, asks for no record change). The counterfactual set includes an
+assistance-animal pair. Decision changed: yes.
+R3-2 Job semantics under at-least-once delivery (finding 2). ACCEPT. The
+handler never throws on model, batch or org-list failure; a run claim
+makes redelivery idempotent; batches in parallel with a per-call timeout
+under the visibility timeout; job status is a ranking-job record in the AI
+runs table under the ranking keys, read for join and polling. Decision
+changed: yes (mechanism).
+R3-3 Import predicate (finding 3). ACCEPT. Any contact with imported_from
+skips the created_at fallback; the staff-added-then-matched miss is an
+accepted error, stated.
+R3-4 Capped pair display (finding 4). ACCEPT. Sorts last within Weak;
+row reads "requirement not met".
+R3-5 Reaction row condition (finding 5). ACCEPT. A listed row with a
+counted send share.
+R3-6 Select all (finding 6). ACCEPT. Checks every ranked row except
+capped and tour-held rows.
+R3-7 Never-extracted test (finding 7). ACCEPT. Asserts no fact of an
+excluded kind.
+
+Round 3 totals: 7 findings, 7 ACCEPT. Decisions changed: yes (R3-1,
+R3-2), so round 4, the last allowed, runs.

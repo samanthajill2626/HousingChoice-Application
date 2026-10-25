@@ -38,7 +38,12 @@ ranked rows start unchecked (R2-2), examples written from scratch with no
 export (R2-13/14, replaces M5), notes off the card. ROUNDS 1-4 DONE, cap reached (design-review/adjudications.md). Cameron
 2026-10-25: "Because this is so large, let's keep going with the
 adversarial reviewers. Let's do another max of 4 rounds." Phase now:
-REVIEW ROUNDS 5-8. Round 5 = both reviewers continued (A and B, outputs
+REVIEW ROUNDS 5-8. ROUND 5 DONE: 23 findings (A 7, B 16), 20 rulings all
+accepted, 6 decisions changed (ranking off the SQS queue onto its own poll
+loop like extraction; credit/income in any field, cap-eligible keys;
+unlawful flags property-wide; claim generation and queued expiry;
+disability facts never extracted; fair-housing test failure blocks
+production enablement). Round 6 continues reviewer B. Round 5 was both reviewers continued (A and B, outputs
 design-review/r5-reviewer-a.md, r5-reviewer-b.md); later rounds continue
 the better one; stop when a round changes no decision; hard cap round 8,
 then the spec gate with the five planner defaults (staff notes off; no

@@ -2,7 +2,7 @@
 
 Date: 2026-10-24
 Status: DRAFT charter. Whole-spec re-read 2026-10-25 folded in; design
-review rounds 1 to 4 folded in (records: design-review/adjudications.md);
+review rounds 1 to 5 folded in (records: design-review/adjudications.md);
 then the remaining review rounds and Cameron's spec gate.
 Mission: Amendment No. 1 Work Package 1 (signed; Cameron 2026-10-20, Sam
 2026-10-21). 52 contracted hours.
@@ -126,8 +126,10 @@ cannot be matched by rules at all, and a demoted pair with a reason is
 reviewable where an excluded one is invisible.
 
 The only deterministic parts are: the pool (section 5), the completeness
-pass (section 7.3), band thresholds and priority (sections 8 and 9), and
-tie order (section 9.2). None of them is a fit judgment.
+pass (section 7.3), band thresholds and priority (sections 8 and 9), the
+Weak cap applied from the model's own report (section 7.4), the selection
+defaults (section 13.1), and tie order (section 9.2). None of them is a
+fit judgment.
 
 ## 5. D2 - The pool: eligibility only
 
@@ -141,7 +143,7 @@ Property anchor (candidates are tenants):
   still reaches an onboarding tenant by hand-adding them (section 13.1).
 - Sendable: not opted out, not unreachable, has a phone, not
   soft-deleted: the pre-exclusions the audience resolver applies today
-  (audienceResolution.ts:189-193). A candidate who can never be texted is
+  (audienceResolution.ts:196-199). A candidate who can never be texted is
   never ranked or paid for. Missing SMS consent is NOT a pool rule: as
   today it is a per-candidate flag (audienceResolution.ts:77), shown as
   "consent not recorded" so staff can fix it, and the fan-out still
@@ -157,8 +159,10 @@ Property anchor (candidates are tenants):
   prefill does (dashboard/src/routes/broadcasts/authorityPrefill.ts); the
   tenant's authority must equal one mapped canonical name. A property
   with no recorded authority takes every authority. A property whose
-  recorded authorities do not map is, as today, not limited by authority,
-  and the gap is shown to Sam (section 7.3). If the organization list
+  recorded authorities do not map is, as today, not limited by authority;
+  one where only some map is limited to the mapped ones, as today
+  (authorityPrefill.ts:21-31); either way the gap is shown to Sam
+  (section 7.3). If the organization list
   cannot be read, the ranking fails with a message; it never runs
   unlimited.
 - Recency: heard from within the pool window (section 9.1), 90 days by
@@ -197,8 +201,10 @@ weigh.
 
 ### 6.1 Definition by exclusion
 
-Each card is the record projected through ONE exclusion list. No field is
-read until it is classified: the slice spec for B2 writes the list as
+Each card is the record projected through ONE classification. No field is
+read until it is classified, and at runtime the card function drops every
+stored key that is not classified (legacy and tombstoned attributes
+included), so it is an allowlist built from the classified set: the slice spec for B2 writes the list as
 code, one function per card, with a test that fails when a record field is
 neither included nor excluded, so every new field is a decision rather
 than drift. Excluded:
@@ -253,8 +259,8 @@ pair true. The two composer views may DISPLAY different things; the
 model's input never differs by direction.
 
 Landlord card switch (`RANKING_LANDLORD_CARD`, default off): when on, the
-property card also carries the landlord-of-record's recorded requirements,
-and notes, labeled as the landlord's defaults (landlord matching facts do
+property card also carries the landlord-of-record's recorded requirements
+(except credit and income, section 6.1) and notes, labeled as the landlord's defaults (landlord matching facts do
 not exist until landlord extraction is built); where the
 property records its own value, the property's value wins (requirements
 reach a property only by staff "Apply", a copy). Built in B2; turned on
@@ -304,10 +310,15 @@ in two ways:
   matter to matching this person with a home. Cameron: "we can't think of
   all of the pieces of information that might be relevant." Never
   extracted: race, color, religion, sex, national origin, familial facts
-  beyond household size, income and credit. B1 tests the list: synthetic
+  beyond household size, income and credit, and disability or medical
+  facts other than the stated accessibility need and an assistance
+  animal. B1 tests the list: synthetic
   conversations stating each excluded kind of fact, run on the testing
   key, must write no fact of an excluded kind (household size and tenant
-  portion remain allowed).
+  portion remain allowed). A failure blocks turning the matching facts on
+  in production until it passes or Cameron decides.
+- B1 also builds the facts' display on the tenant record, the remove
+  control and its suppression record.
 - One reading per send: the tenant's reaction to the specific property
   named, written to the pair history (section 6.3).
 
@@ -319,7 +330,10 @@ extraction demotes for an unknown speaker (apply.ts:159, 318-319) is not
 written either. Written facts show on the tenant record with the message
 they came from; Sam can remove a wrong one, and a removed fact suppresses
 later facts with the same label and value after trimming and ignoring
-case (a reworded fact may return). The landlord-side counterpart is filed,
+case (a reworded fact may return). Facts are keyed by label, value and
+source message and reactions by source message and kind, so an
+extraction retry that re-applies the same window (apply.ts:725-735)
+writes nothing new. The landlord-side counterpart is filed,
 not built: docs/issues/landlord-conversation-extraction-to-property.md.
 
 ## 7. D4 - The ranker
@@ -368,12 +382,15 @@ pair); that mixed provenance is accepted.
 
 Fair housing: the rubric states that protected characteristics (race,
 color, religion, sex, national origin, familial status, disability) never
-lower a score. The one use of disability is a tenant's own stated
-accessibility need matched to the property. Names stay on the cards
+lower a score. Disability enters only for the tenant's benefit: their own
+stated accessibility need matched to the property, and an accommodation
+(below) that lifts a requirement. Credit or income content in ANY field
+(qualifications, notes, deposit notes, application process, custom
+fields) is disregarded and never reported failed (A1). Names stay on the cards
 (Cameron 2026-10-25); the pool (section 5) uses no protected
 characteristic. A landlord or property requirement that is unacceptable
 under fair housing (for example "no kids", which discriminates on
-familial status) is NOT applied and is never trained against: the model is
+familial status) is NOT applied: the model is
 told to disregard it and to report it, and the composer shows Sam a flag
 naming that requirement as one to remove from the record (section 7.4).
 
@@ -389,10 +406,12 @@ record.
 The guarantee is tested, not only stated: before Sam's acceptance pass,
 B2 runs a counterfactual check on the testing key over SYNTHETIC pairs
 (made-up tenants and properties, never real records), swapping name,
-address and household facts and including an assistance-animal tenant
-against a No pets property; scores and the Weak cap (section 7.4) are
-compared against a tolerance B2 sets, and the result is a mission record. Planner default,
-for Cameron at the gate.
+address and household facts (an address swapped only for one equivalent
+for the tenant's stated area, so a fit change cannot pass for a proxy)
+and including an assistance-animal tenant against a No pets property; scores and the Weak cap (section 7.4) are
+compared against a tolerance B2 sets, and the result is a mission record.
+A failure blocks turning ranking on in production until it passes or
+Cameron decides. Planner default, for Cameron at the gate.
 
 The rubric version is stored on every match and run. Worked examples are
 a separate versioned file. A person writes them from scratch, informed by
@@ -428,9 +447,12 @@ band, priority, tie order and chips are otherwise computed in code from
 the score.
 
 A pair is capped at Weak in code, whatever its score, when its
-`failedRequirements` holds a key that is a recorded requirement on that
-property's card AND is not in the same pair's `fairHousingFlags`; a key
-failing either test is ignored, so the cap can never enforce a
+`failedRequirements` holds a CAP-ELIGIBLE key (no_evictions_on_program,
+evictions_notes, qualifications, no_pets, pets; requirements.ts:69-108)
+that is a recorded requirement on that property's card, is not in the
+same pair's accommodation flags, and is not flagged unlawful on ANY pair
+of that property (an unlawful flag is property-wide); a key failing any
+test is ignored. Move-in costs, touring, credit and income never cap, so the cap can never enforce a
 requirement the rubric disregards. A capped pair gets no priority
 treatment at all (section 9.2), sorts last within Weak, and its row reads
 "requirement not met" beside the score. This
@@ -441,8 +463,9 @@ compare free text itself (tenant pets and evictions are free text).
 record in code, since ids are not on the cards. A candidate the model did
 not return, returned twice or under an unknown handle, and every candidate
 of a failed batch (API error, refusal, truncation) gets NO new match: an
-existing match is left untouched and flagged out of date, and a candidate
-with no match shows "not scored - retry". The next Update re-scores the
+existing match is left untouched and flagged out of date (the read joins
+the anchor's last ranking-job record, which lists its failed batches),
+and a candidate with no match shows "not scored - retry". The next Update re-scores the
 whole pool. A default or guessed score is never written.
 
 ## 8. D5 - What a match is
@@ -468,12 +491,13 @@ Three roles:
   tenants heard from within `RANKING_POOL_WINDOW_DAYS` (default 90) are
   in the pool; the composer toggle shows the rest.
 - Model input, in BOTH directions (one card per record, section 6.2): a
-  recency BUCKET (this week, this month, one to three months, older), not
-  the timestamp. Only the bucket is fingerprinted, so a new text from a
-  tenant never makes their matches out of date; crossing into another
-  bucket does (Cameron 2026-10-25).
+  recency BUCKET (this week, this month, one to three months, older,
+  never), not the timestamp. Only the bucket is fingerprinted, so a text
+  that adds nothing to the record never makes a match out of date;
+  crossing into another bucket does (Cameron 2026-10-25).
 - Tie order (property anchor only): equal scores order by most recently
-  heard from.
+  heard from, falling back to created_at for a tenant admitted on that
+  fallback.
 
 Later (not WP1, WP3 era): outreach to tenants approaching the window
 ("still looking?"); a reply refreshes last heard from, silence moves them
@@ -536,36 +560,48 @@ infrastructure).
 ### 10.2 On demand, never on open
 
 A ranking is computed when a human presses Rank (or Update) in the
-composer. Opening a page reads stored rows and makes no model call. Rank
-enqueues a job (`jobs.enqueue`). Each batch's matches are persisted as it
-finishes; a server-sent event says only "anchor, batch n done" (never
-scores: the stream reaches every dashboard), and the composer re-reads by
-GET, polling as a fallback, because the worker-to-app bridge is
-best-effort by design (lib/eventBridge.ts:1-11). So the 30-second
-CloudFront origin timeout (infra/modules/cloudfront/main.tf:114) never
-applies to a model call. Rank gets its own per-user rate-limit knob,
-parsed fail-fast like the existing cost-route knobs
-(app/src/lib/config.ts:1021-1040).
+composer. Opening a page reads stored rows and makes no model call.
 
-The job follows the queue's at-least-once rules (sqsJobConsumer.ts:11-17;
-120-second visibility timeout, infra/modules/jobs/main.tf:36). Its handler
-never throws on a model, batch or organization-list failure: it records
-the failure and finishes, so nothing is redelivered and re-paid. The APP
-makes the claim, as one conditional write of the anchor's ranking-job
-record before it enqueues: the write succeeds only when no live job holds
-the anchor, and a press that loses the write joins the job that won. The
-claim carries a lease that the job renews while it runs; an expired lease
-means the job died (a crash or a redeploy is not a throw), so a
-redelivery or the next press may take over. Its batches run in parallel
-with a per-call timeout that keeps the job under the visibility timeout.
-Status: queued, running, done, failed with a message; polling stops on
-done or failed. The record lives in the AI runs table in its own key
-family with a TTL, and the run listing and run-detail readers
-(routes/aiRuns.ts:139-140, 228-249) never return it.
+Where it runs: ranking runs the way extraction does, on its OWN worker
+poll loop over due ranking-job records (the extraction precedent,
+worker.ts:436-466), never on the SQS jobs queue. That consumer awaits a
+whole receive batch before it receives again (sqsJobConsumer.ts:126-129),
+so a one-to-two-minute ranking there would hold up group-text fan-out
+and sends. The poll carries its own correlation and trace context, as
+the extraction poll does.
+
+The claim: pressing Rank makes the app write the anchor's ranking-job
+record as queued, one conditional write that succeeds only when no live
+job holds the anchor, carrying a new claim generation; a press that loses
+the write joins the job that won, unless its window setting differs, in
+which case it is refused with "a ranking is running". A queued record
+expires on its own short timer if no poller takes it. The poll loop
+claims a queued record with a lease it renews while running; an expired
+lease means the job died, and the record can be taken over. The job
+checks its generation before every model call and every write and exits
+quietly if it has been superseded. It never throws on a model, batch or
+organization-list failure: it records the failure on the record and
+finishes. Its batches run in parallel with a per-call timeout. Status:
+queued, running, done, failed with a message, and the list of failed
+batches.
+
+Results: each batch's matches are persisted as it finishes; a server-sent
+event says only "anchor, batch n done" (never scores: the stream reaches
+every dashboard), and the composer re-reads by GET, polling as a
+fallback, because the worker-to-app bridge is best-effort by design
+(lib/eventBridge.ts:1-11). After done, it reads the run's matches by key
+from the base table, never through the eventually consistent byUnit
+index. So the 30-second CloudFront origin timeout
+(infra/modules/cloudfront/main.tf:114) never applies to a model call.
+Rank gets its own per-user rate-limit knob, parsed fail-fast like the
+existing cost-route knobs (app/src/lib/config.ts:1021-1040). The
+ranking-job record lives in the AI runs table in its own key family with
+a TTL, and the run listing and run-detail readers (routes/aiRuns.ts:
+139-140, 228-249) never return it.
 Background or scheduled ranking is out of WP1 (A1 excludes it); the engine
 is one function so a scheduled caller (WP3 era) would be configuration,
-not a redesign. One ranking job is in flight per anchor at a time: a
-second press while one runs joins that job rather than paying twice.
+not a redesign. One ranking job is in flight per anchor at a time
+(the claim above).
 
 ### 10.3 Fingerprints and what "out of date" means
 
@@ -592,8 +628,9 @@ every pair fresh. There is no per-candidate re-score and no insertion call
 What changes a fingerprint, and what does not: the cards as defined in
 section 6 (recency only as its bucket); on the pair history (section 6.3),
 the declined record, a tour, or an extracted reaction. A new send ALONE
-does not make a match out of date, and neither does a new text: the
-derived outcome is never fingerprinted. The Already sent and outcome
+does not make a match out of date, and neither does a text that adds
+nothing to the record: the derived outcome is never fingerprinted. A text
+that extraction turns into a field, fact or reaction does, correctly. The Already sent and outcome
 chips are derived on read and show at once.
 
 Sam decides whether to update; an out-of-date list is still shown.
@@ -655,7 +692,7 @@ the property half.
 - The Matching navigation entry stays and first asks which record to start
   from.
 - Any record can be the anchor (section 5); a banner says when it is not
-  searching or not available. Ranking is never blocked; sending a
+  searching, not sendable or not available. Ranking is never blocked; sending a
   non-available property stays refused by the existing guard.
 - The Send entries already exist ("Send a property to this tenant",
   TenantFile.tsx:320; the property page's send, ListingDetail.tsx:438).
@@ -759,9 +796,9 @@ reply yet / Interested / Not interested) remain where they are today.
 | Slice | Owns | Hours |
 |---|---|---|
 | B1 Ranking inputs | Tenant fields area preference, maximum tenant portion, accessibility need, preferences and constraints on the record and edit form; `priority` boolean on the unit, its edit-form control and record display; extraction schema widened (fixed fields, matching facts list written live above a confidence floor with the never-extracted list, per-send reaction stored on the listing_sends row; the never-extracted test). Ships to production first. | 6-8 |
-| B2 Ranking engine | Pool in both directions with the window and the sendability fences; cards by exclusion list with the landlord switch and the card fingerprint helpers; completeness pass; stage-one call as a job with server-sent results, rubric, examples, structured output; anthropic/fake/console drivers; matches with the out-of-date, age and version rules and the one-button whole-pool re-score; the lean seed row replaced; review records and the in-app review list; failedRequirements cap and per-candidate fair-housing flags; the counterfactual fair-housing check on synthetic pairs; the Rank rate-limit knob; the job's run claim and status record; run log under its own keys with cost by environment; band and priority policy on read; endpoints: rank, read ranking by anchor, review a pair; the Rankings page. | 21-25 |
-| B3 Send property from a tenant | The ranked row; the composer's tenant anchor; priority-only view; window toggle; completeness banner; Rank/Update; one-step send with the outcome on the pair; agree/disagree; Send property action on the tenant record. | 9-11 |
-| B4 Send property from a property | The composer's property anchor; ranked tenants replacing the filter-only audience, rows unchecked by default, with hand-picks, the tour-hold chip, old filter drafts and the partner flow kept (section 13.1); already-sent No reply filter chip; pick one, a few or many; the Matching nav entry asking which record to start from; the property page's Send re-pointed; the Similar panel relabeled "similarity". | 11-13 |
+| B2 Ranking engine | Pool in both directions with the window and the sendability fences; cards by exclusion list with the landlord switch and the card fingerprint helpers; completeness pass; stage-one call on its own worker poll loop with persisted batches, an event hint and a GET re-read, rubric, examples, structured output; anthropic/fake/console drivers; matches with the out-of-date, age and version rules and the one-button whole-pool re-score; the lean seed row replaced; review records and the in-app review list; failedRequirements cap and per-candidate fair-housing flags; the counterfactual fair-housing check on synthetic pairs; the Rank rate-limit knob; the ranking-job record with claim generation, lease and failed batches; the cap-eligible key list; run log under its own keys with cost by environment; band and priority policy on read; endpoints: rank, read ranking by anchor, review a pair; the Rankings page. | 21-25 |
+| B3 Send property from a tenant | The ranked row; the composer's tenant anchor; priority-only view; completeness banner; Rank/Update; one-step send with the outcome on the pair; agree/disagree; Send property action on the tenant record. | 9-11 |
+| B4 Send property from a property | The composer's property anchor; ranked tenants replacing the filter-only audience, the window toggle, rows unchecked by default, with hand-picks, the tour-hold chip, old filter drafts and the partner flow kept (section 13.1); already-sent No reply filter chip; pick one, a few or many; the Matching nav entry asking which record to start from; the property page's Send re-pointed; the Similar panel relabeled "similarity". | 11-13 |
 
 Total 47-57 against 52 contracted, Sam's acceptance pass inside it. All
 four bill to WP1.
@@ -839,6 +876,10 @@ Each is a deliberate call, listed so Sam hears all of them (section 16.2).
   property is unread (section 6.2).
 - Each ranking recorded: built as matches overwritten on each press plus
   the run log kept 180 days, and every review kept (sections 10, 11, 12).
+- Scope reaching into WP3: the signed WP3 text reads tenant reactions
+  ("too far") during sharing; B1 builds the per-send reaction reading and
+  the open matching-facts list now and bills them to WP1, because the
+  ranking reads them (section 6.4).
 - "Computed on open" / no background re-rank: built as computed on
   request with stored rankings shown on open (section 10.2). Still no
   background work; one more click, far less spend.
@@ -870,7 +911,8 @@ income used to rank or exclude.
   object all-required with sentinels.
 - Latency: a stage-one batch of 40 is estimated at 25-35 seconds on
   Sonnet; batches run in parallel inside the job (section 10.2) and the
-  composer shows the pool in last-heard-from order while results arrive.
+  composer shows the pool while results arrive (in last-heard-from order
+  on the property anchor).
   B2's plan measures it on the testing key before the UI commits to a
   loading pattern.
 - Server-sent events from the worker are best-effort (section 10.2): B2

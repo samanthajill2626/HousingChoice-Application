@@ -346,3 +346,70 @@ Every REJECT, with its reason:
 - M28 part: a daily spend ceiling on Rank. Rejected as speculative: every
   press is a human click and the Rankings page shows spend; the testing
   key gets an account spend limit instead. Conceded.
+
+## Round 5 (extension authorized by Cameron 2026-10-25; both reviewers continued)
+
+Reports: r5-reviewer-a.md (7 findings: 1 decision, 6 precision),
+r5-reviewer-b.md (16 findings: 7 decision, 9 precision). Verified before
+ruling: sqsJobConsumer.ts:126-129 (the consumer awaits a whole receive
+batch before receiving again); worker.ts:436-466 (extraction runs on its
+own poll loop with DynamoDB state, not the queue); requirements.ts:69-108
+(groups Screening, Pets, Move-in costs, Touring); contactsRepo.ts:362-363
+(landlord req_credit_requirements, req_income_requirements).
+
+R5-1 Ranking on the shared queue blocks every other job (B1). ACCEPT.
+Ranking runs like extraction: its own worker poll loop over due
+ranking-job records, never the SQS jobs queue. Decision changed: yes
+(architecture; supersedes the queue parts of R3-2 and R4-2).
+R5-2 Credit and income by field name only; cap-eligible keys undefined
+(B2). ACCEPT. Rubric: credit or income content in ANY field is disregarded
+and never reported failed. Cap-eligible keys listed: no_evictions_on_program,
+evictions_notes, qualifications, no_pets, pets. Move-in costs, touring,
+credit and income never cap. Decision changed: yes.
+R5-3 An unlawful flag suppresses the cap only on its own pair (A1, B3).
+ACCEPT. Unlawful flags are property-wide: once any pair raises one on a
+field, that field caps no pair of that property. Decision changed: yes.
+R5-4 Lease vs queued time; no fencing (B4). ACCEPT. Reframed by R5-1: the
+app writes a queued record with a claim generation; the poll loop claims
+it with a lease; the job checks its generation before each model call
+and write and exits if superseded; a queued record has its own expiry.
+Decision changed: yes.
+R5-5 Disability and medical facts not on the never-extracted list (B5).
+ACCEPT. Added except the stated accessibility need and an assistance
+animal; the "one use" sentence fixed. Decision changed: yes.
+R5-6 What a fair-housing test failure stops; the address swap (B6).
+ACCEPT, planner default: a failure blocks enabling ranking (or B1's
+matching facts) in production until it passes or Cameron decides; the
+address swap stays within addresses equivalent for the tenant's stated
+area. Decision changed: yes.
+R5-7 Final read through the eventually consistent byUnit index (B7).
+ACCEPT. After done, the composer reads the run's matches by key from the
+base table.
+R5-8 Extraction retries duplicate facts and reactions (B8). ACCEPT.
+Reactions keyed by source message and kind; facts by label, value and
+source message.
+R5-9 Runtime allowlist (B9, contests M19). ACCEPT. The card function
+drops every stored key that is not classified.
+R5-10 Landlord card carries landlord credit and income (A2, B10). ACCEPT.
+R5-11 Matching-facts display and remove control unowned (A3). ACCEPT. B1.
+R5-12 Window toggle belongs to B4 (A4). ACCEPT.
+R5-13 B2 row says "server-sent results" (A5). ACCEPT.
+R5-14 Join ignores the window toggle (A6, B11). ACCEPT. A press with a
+different window setting while a job runs is refused with "a ranking is
+running"; it does not join.
+R5-15 Cross-section mismatches (A7). ACCEPT. Banner list adds not
+sendable; 19's last-heard-from order is property-anchor only; section 4's
+deterministic list names the cap and the selection rules.
+R5-16 The "never" bucket and fallback tie order (B12). ACCEPT.
+R5-17 "A new text never stales" (B13). ACCEPT. "A text that adds nothing
+to the record does not."
+R5-18 Failed batch needs stored state (B14). ACCEPT. The read joins the
+anchor's last job record, which lists failed batches.
+R5-19 Partial authority mapping, citation, "trained against" (B15).
+ACCEPT.
+R5-20 Section 17 omits the WP3-scope reading B1 builds (B16, contests
+M3). ACCEPT. Listed.
+
+Round 5 totals: 23 findings, 20 merged rulings, all ACCEPT. Decisions
+changed: yes (R5-1 to R5-6). Round 6 continues reviewer B (more accepted
+decision findings this round).

@@ -15,7 +15,11 @@
 // section is not rendered. A section the server could not compute shows "We
 // couldn't load <section>." in its place; the client fallback (buildToday,
 // only on a 404) shows one line instead. A failed live refetch keeps the last
-// good load on screen under one "couldn't refresh" note. "All caught up" shows
+// good load on screen under one "couldn't refresh" note. What the viewer
+// expanded, opened or folded lives ABOVE those branches - every list's Show
+// all here, keyed by its label; Quiet shares' choices in its own section,
+// which stays mounted (hidden on the fallback) - so no refetch resets it (spec
+// 6.3, 2.1; code review R2-2). "All caught up" shows
 // only when every checklist section is empty and settled, none failed to load,
 // the last refresh did not fail and the load is not the fallback; At a glance
 // still renders below it. Tokens + CSS Modules;
@@ -35,7 +39,7 @@ import { formatPhoneDisplay } from '../../lib/phone.js';
 import { timeLabel, whenLabel } from '../tours/tourTime.js';
 import { pastState } from '../tours/useTours.js';
 import { QuietSharesSection } from './QuietShares.js';
-import { LimitedList, TodaySection } from './TodaySection.js';
+import { LimitedList, TodaySection, type ListExpansion } from './TodaySection.js';
 import { useToday, type QuietSharesState } from './useToday.js';
 import {
   useTodayPastTours,
@@ -129,15 +133,23 @@ function ItemsSection({
   label,
   help,
   rows,
+  expansion,
 }: {
   label: string;
   help?: string;
   rows: TodayItem[];
+  expansion: ListExpansion;
 }): React.JSX.Element | null {
   if (rows.length === 0) return null;
   return (
     <TodaySection label={label} help={help}>
-      <LimitedList label={label} items={rows} itemKey={rowKey} renderItem={(item) => <Row item={item} />} />
+      <LimitedList
+        label={label}
+        items={rows}
+        itemKey={rowKey}
+        renderItem={(item) => <Row item={item} />}
+        expansion={expansion}
+      />
     </TodaySection>
   );
 }
@@ -281,7 +293,13 @@ function PastTourRow({ row }: { row: TodayPastTourRow }): React.JSX.Element {
  *  tab link, beside the Show all button, carries the Past tab's own count
  *  whenever that tab holds more than Today qualifies (a deleted tenant's
  *  tours). */
-function PastToursSection({ past }: { past: TodayPastToursState }): React.JSX.Element | null {
+function PastToursSection({
+  past,
+  expansion,
+}: {
+  past: TodayPastToursState;
+  expansion: ListExpansion;
+}): React.JSX.Element | null {
   if (past.status === 'idle') return null;
   if (past.status === 'error') {
     return (
@@ -304,6 +322,7 @@ function PastToursSection({ past }: { past: TodayPastToursState }): React.JSX.El
         items={past.rows}
         itemKey={(row) => row.tour.tourId}
         renderItem={(row) => <PastTourRow row={row} />}
+        expansion={expansion}
         footer={
           <Link className={styles.moreLink} to="/tours/past">
             {more ? `See all ${past.total} on the Past tab` : 'Open the Past tab'}
@@ -347,7 +366,15 @@ function CompactTourRow({ item }: { item: TodayItem }): React.JSX.Element {
 /** Below the dashed divider (spec 2.4): Tours today, then the AI suggestions
  *  as ONE collapsed line whose list is not in the accessibility tree until it
  *  is opened. Never part of the checklist; not rendered when both are empty. */
-function AtAGlance({ toursToday, aiSuggestions }: { toursToday: TodayItem[]; aiSuggestions: TodayItem[] }): React.JSX.Element | null {
+function AtAGlance({
+  toursToday,
+  aiSuggestions,
+  expansionOf,
+}: {
+  toursToday: TodayItem[];
+  aiSuggestions: TodayItem[];
+  expansionOf: (label: string) => ListExpansion;
+}): React.JSX.Element | null {
   const [aiOpen, setAiOpen] = useState(false);
   const aiBodyId = useId();
   if (toursToday.length === 0 && aiSuggestions.length === 0) return null;
@@ -362,6 +389,7 @@ function AtAGlance({ toursToday, aiSuggestions }: { toursToday: TodayItem[]; aiS
             items={toursToday}
             itemKey={rowKey}
             renderItem={(item) => <CompactTourRow item={item} />}
+            expansion={expansionOf(TOURS_TODAY_LABEL)}
           />
         </TodaySection>
       ) : null}
@@ -386,6 +414,7 @@ function AtAGlance({ toursToday, aiSuggestions }: { toursToday: TodayItem[]; aiS
                 items={aiSuggestions}
                 itemKey={rowKey}
                 renderItem={(item) => <Row item={item} />}
+                expansion={expansionOf(AI_LABEL)}
               />
             </div>
           ) : null}
@@ -408,6 +437,22 @@ export function Today(): React.JSX.Element {
     refreshFailed = false,
   } = useToday();
   const past = useTodayPastTours();
+  // Every list's Show all, keyed by its label (unique on the page) and held
+  // HERE, not in the list: a live refetch can unmount a list - Tours to book
+  // swapped for its unavailable copy (spec 2.5), a section the fallback does
+  // not assemble (spec 3.1), a section emptied - and the expansion is lost
+  // only on reload (spec 2.1; code review R2-2). Quiet shares keeps its own.
+  const [expandedLists, setExpandedLists] = useState<ReadonlySet<string>>(() => new Set());
+  const expansionOf = (label: string): ListExpansion => ({
+    expanded: expandedLists.has(label),
+    onToggle: () =>
+      setExpandedLists((prev) => {
+        const next = new Set(prev);
+        if (next.has(label)) next.delete(label);
+        else next.add(label);
+        return next;
+      }),
+  });
   const rowsOf = (group: TodayGroup): TodayItem[] => items.filter((i) => i.group === group);
   const needs = rowsOf('needs_you_now');
   const identify = rowsOf('identify');
@@ -478,15 +523,27 @@ export function Today(): React.JSX.Element {
           {/* The checklist (spec 2, sections 1-7). The sections after past
            *  tours are NOT held until it settles (tried and reverted, review
            *  round 4): core content must not wait on best-effort name lookups. */}
-          <ItemsSection label={NEEDS_LABEL} rows={needs} />
-          <ItemsSection label={IDENTIFY_LABEL} help={IDENTIFY_HELP} rows={identify} />
-          <PastToursSection past={past} />
+          <ItemsSection label={NEEDS_LABEL} rows={needs} expansion={expansionOf(NEEDS_LABEL)} />
+          <ItemsSection
+            label={IDENTIFY_LABEL}
+            help={IDENTIFY_HELP}
+            rows={identify}
+            expansion={expansionOf(IDENTIFY_LABEL)}
+          />
+          <PastToursSection past={past} expansion={expansionOf(PAST_TOURS_LABEL)} />
           {toursToBookStatus === 'unavailable' && !fallback ? (
             <UnavailableSection label={TOURS_TO_BOOK_LABEL} what="tours to book" />
           ) : (
-            <ItemsSection label={TOURS_TO_BOOK_LABEL} help={TOURS_TO_BOOK_HELP} rows={toursToBook} />
+            <ItemsSection
+              label={TOURS_TO_BOOK_LABEL}
+              help={TOURS_TO_BOOK_HELP}
+              rows={toursToBook}
+              expansion={expansionOf(TOURS_TO_BOOK_LABEL)}
+            />
           )}
-          {fallback ? null : <QuietSharesSection quiet={quietShares} now={generatedAt} />}
+          {/* Always mounted: on the fallback it renders nothing (spec 3.1) but
+           *  keeps its seed and the viewer's choices (code review R2-2). */}
+          <QuietSharesSection quiet={quietShares} now={generatedAt} hidden={fallback} />
           {relayCloseNags.length > 0 ? (
             <TodaySection label={RELAY_LABEL}>
               <LimitedList
@@ -496,12 +553,13 @@ export function Today(): React.JSX.Element {
                 renderItem={(nag) => (
                   <RelayCloseNagRow nag={nag} onDone={() => dismissNag(nag.conversationId)} />
                 )}
+                expansion={expansionOf(RELAY_LABEL)}
               />
             </TodaySection>
           ) : null}
-          <ItemsSection label={PLACEMENTS_LABEL} rows={placements} />
+          <ItemsSection label={PLACEMENTS_LABEL} rows={placements} expansion={expansionOf(PLACEMENTS_LABEL)} />
 
-          <AtAGlance toursToday={toursToday} aiSuggestions={aiSuggestions} />
+          <AtAGlance toursToday={toursToday} aiSuggestions={aiSuggestions} expansionOf={expansionOf} />
         </>
       ) : null}
     </div>

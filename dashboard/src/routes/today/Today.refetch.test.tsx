@@ -13,12 +13,19 @@ import { ApiError, type TodayItem, type TodayResponse } from '../../api/index.js
 import type { TodayPastToursState } from './useTodayPastTours.js';
 
 const getToday = vi.fn();
+// The client fallback's three reads (a 404 from GET /api/today, spec 3.1).
+const getAllPlacements = vi.fn();
+const getAllConversations = vi.fn();
+const getTours = vi.fn();
 let handlers: { onConversationUpdated?: () => void } = {};
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
     ...actual,
     getToday: (...a: unknown[]) => getToday(...a),
+    getAllPlacements: (...a: unknown[]) => getAllPlacements(...a),
+    getAllConversations: (...a: unknown[]) => getAllConversations(...a),
+    getTours: (...a: unknown[]) => getTours(...a),
     useEventStream: (h: typeof handlers) => {
       handlers = h;
     },
@@ -106,6 +113,10 @@ const propertyLine = (unitLabel: string): HTMLElement =>
 beforeEach(() => {
   getToday.mockReset();
   getToday.mockResolvedValue(LOADED);
+  // The fallback, when a case triggers it, assembles from nothing.
+  getAllPlacements.mockReset().mockResolvedValue([]);
+  getAllConversations.mockReset().mockResolvedValue([]);
+  getTours.mockReset().mockResolvedValue([]);
   handlers = {};
 });
 afterEach(() => {
@@ -176,5 +187,153 @@ describe('Today across a failed live refetch (fix wave 1)', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent("We couldn't load your queue. Please try again.");
     expect(screen.queryByText(NOTE)).not.toBeInTheDocument();
     expect(screen.queryByRole('heading', { level: 2 })).not.toBeInTheDocument();
+  });
+});
+
+// Fix wave 2 (FW2-2; code review R2-2, its probes made permanent): a live
+// refetch the route ANSWERS can still drop a section - Tours to book or Quiet
+// shares unavailable (spec 2.5), or a 404 and the client fallback (spec 3.1),
+// which shows neither. The per-viewer state must outlive that load too (spec
+// 6.3, 2.1): the next good load shows what the viewer expanded, opened and
+// folded.
+
+/** Seven Tours to book rows (Show all 7), seven quiet-share properties ("Show
+ *  all 7 properties") and six relay groups to close (Show all 6). */
+const MANY: TodayResponse = {
+  generatedAt: GENERATED_AT,
+  items: Array.from({ length: 7 }, (_, i) =>
+    row('tours_to_book', `b${i}`, { refType: 'tour', urgency: 'Requested 3 days ago' }),
+  ),
+  relayCloseNags: Array.from({ length: 6 }, (_, i) => ({
+    conversationId: `g${i}`,
+    poolNumber: `+1555019000${i}`,
+    memberNames: [`Member ${i}`],
+    ownerType: null,
+    nagDueAt: '2026-07-01T00:00:00Z',
+  })),
+  quietShares: {
+    status: 'ok',
+    truncated: false,
+    properties: Array.from({ length: 7 }, (_, i) => ({
+      unitId: `p${i}`,
+      unitLabel: `${i + 1} Pine St`,
+      people: [{ contactId: `qp${i}`, name: `Person ${i}`, type: 'tenant', state: 'no_reply', quietSince: SIX_DAYS_AGO }],
+    })),
+  },
+  toursToBook: 'ok',
+};
+
+const FALLBACK_LINE = "Some sections can't load right now.";
+
+/** The <section> a heading heads. */
+function sectionOf(headingName: string): HTMLElement {
+  const section = screen.getByRole('heading', { name: headingName }).closest('section');
+  if (section === null) throw new Error(`no section for ${headingName}`);
+  return section;
+}
+
+/** One live refetch is answered by `drop` (a load that shows `shows`), then
+ *  the next by the default load again. Waits on `shows` and then on its
+ *  absence, so it cannot pass on a missed refetch; `during` runs while the
+ *  dropped load is on screen. */
+async function dropThenRecover(drop: () => void, shows: string, during?: () => void): Promise<void> {
+  drop();
+  handlers.onConversationUpdated?.();
+  expect(await screen.findByText(shows)).toBeInTheDocument();
+  during?.();
+  handlers.onConversationUpdated?.();
+  await waitFor(() => expect(screen.queryByText(shows)).not.toBeInTheDocument());
+  expect(getToday).toHaveBeenCalledTimes(3);
+}
+
+const quietLines = (): HTMLElement[] =>
+  within(screen.getByRole('list', { name: 'Quiet shares' })).getAllByRole('button', { name: / Pine St, / });
+
+describe('Today across a live refetch that drops a section (fix wave 2)', () => {
+  it('Tours to book: a Show all expansion survives one refetch where the section was unavailable (spec 2.1, 2.5)', async () => {
+    const user = userEvent.setup();
+    getToday.mockResolvedValue(MANY);
+    renderPage();
+    await screen.findByRole('heading', { name: 'Tours to book' });
+    await user.click(within(sectionOf('Tours to book')).getByRole('button', { name: 'Show all 7' }));
+    expect(within(screen.getByRole('list', { name: 'Tours to book' })).getAllByRole('listitem')).toHaveLength(7);
+
+    await dropThenRecover(
+      () =>
+        getToday.mockResolvedValueOnce({
+          ...MANY,
+          items: MANY.items.filter((i) => i.group !== 'tours_to_book'),
+          toursToBook: 'unavailable',
+        }),
+      "We couldn't load tours to book.",
+    );
+
+    expect(within(screen.getByRole('list', { name: 'Tours to book' })).getAllByRole('listitem')).toHaveLength(7);
+    expect(within(sectionOf('Tours to book')).getByRole('button', { name: 'Show fewer' })).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    );
+  });
+
+  it('Quiet shares: "Show all 7 properties" survives one refetch where the section was unavailable (spec 2.1, 6.3)', async () => {
+    const user = userEvent.setup();
+    getToday.mockResolvedValue(MANY);
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: 'Show all 7 properties' }));
+    expect(quietLines()).toHaveLength(7);
+
+    await dropThenRecover(
+      () => getToday.mockResolvedValueOnce({ ...MANY, quietShares: { status: 'unavailable' } }),
+      "We couldn't load quiet shares.",
+    );
+
+    expect(quietLines()).toHaveLength(7);
+    expect(within(sectionOf('Quiet shares')).getByRole('button', { name: 'Show fewer' })).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    );
+  });
+
+  it('Quiet shares: open/folded choices survive one FALLBACK refetch (a 404), which shows no section and no alert (spec 6.3, 3.1)', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByRole('heading', { name: 'Quiet shares' });
+    expect(propertyLine('12 Oak St')).toHaveAttribute('aria-expanded', 'true'); // seeded open
+    await user.click(propertyLine('12 Oak St')); // fold the seeded one
+    await user.click(propertyLine('9 Elm Ave')); // open the second
+
+    await dropThenRecover(
+      () => getToday.mockRejectedValueOnce(new ApiError(404, 'not_found', 'Not found')),
+      FALLBACK_LINE,
+      () => {
+        // The fallback's own posture is unchanged: one line, no Quiet shares,
+        // no per-section alert.
+        expect(screen.queryByRole('heading', { name: 'Quiet shares' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      },
+    );
+
+    expect(propertyLine('12 Oak St')).toHaveAttribute('aria-expanded', 'false');
+    expect(propertyLine('9 Elm Ave')).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('list', { name: 'People waiting on 9 Elm Ave' })).toBeInTheDocument();
+  });
+
+  it('Show all expansions survive one FALLBACK refetch: Tours to book, Quiet shares, Relay groups to close (spec 2.1, 3.1)', async () => {
+    const user = userEvent.setup();
+    getToday.mockResolvedValue(MANY);
+    renderPage();
+    await screen.findByRole('heading', { name: 'Tours to book' });
+    await user.click(within(sectionOf('Tours to book')).getByRole('button', { name: 'Show all 7' }));
+    await user.click(within(sectionOf('Quiet shares')).getByRole('button', { name: 'Show all 7 properties' }));
+    await user.click(within(sectionOf('Relay groups to close')).getByRole('button', { name: 'Show all 6' }));
+
+    await dropThenRecover(() => getToday.mockRejectedValueOnce(new ApiError(404, 'not_found', 'Not found')), FALLBACK_LINE);
+
+    expect(within(screen.getByRole('list', { name: 'Tours to book' })).getAllByRole('listitem')).toHaveLength(7);
+    expect(quietLines()).toHaveLength(7);
+    expect(within(screen.getByRole('list', { name: 'Relay groups to close' })).getAllByRole('listitem')).toHaveLength(6);
+    for (const heading of ['Tours to book', 'Quiet shares', 'Relay groups to close']) {
+      expect(within(sectionOf(heading)).getByRole('button', { name: 'Show fewer' })).toHaveAttribute('aria-expanded', 'true');
+    }
   });
 });

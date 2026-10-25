@@ -11,6 +11,9 @@
 // only. The 5-line limit counts PROPERTY lines ("Show all N properties"); an
 // open property shows all its people. The heading carries no count (spec r8
 // 2.1, plan PR102) and the wire carries no distinct-people count (PR103).
+// The seed, the choices and Show all live in this component, which Today
+// keeps MOUNTED - hidden on the client fallback rather than removed - so an
+// unavailable or fallback refetch cannot reset them (code review R2-2).
 //
 // No Interested / Not interested here (spec 6.2): a person row opens the
 // contact page, where the decision is made with the conversation in view.
@@ -139,13 +142,20 @@ export interface QuietSharesSectionProps {
    *  server applied the 2- and 5-day rule at, so N never reads below it - and
    *  a value, not Date.now(), so render stays pure. */
   now: string;
+  /** The client fallback (spec 3.1): no section at all - not even the
+   *  unavailable copy - while the component stays mounted, so the seed, the
+   *  choices and Show all outlive the fallback load (code review R2-2). */
+  hidden?: boolean;
 }
 
-export function QuietSharesSection({ quiet, now }: QuietSharesSectionProps): React.JSX.Element | null {
-  const properties = quiet.status === 'ok' ? quiet.properties : NO_PROPERTIES;
+export function QuietSharesSection({ quiet, now, hidden = false }: QuietSharesSectionProps): React.JSX.Element | null {
+  const properties = !hidden && quiet.status === 'ok' ? quiet.properties : NO_PROPERTIES;
   // unitId -> open, for this mount (page state only, spec 6.3).
   const [openByUnit, setOpenByUnit] = useState<ReadonlyMap<string, boolean>>(() => new Map());
   const [seeded, setSeeded] = useState(false);
+  // "Show all N properties", held here rather than in the list: the
+  // unavailable branch below renders no list (spec 2.1, code review R2-2).
+  const [expanded, setExpanded] = useState(false);
   const first = properties[0];
   if (!seeded && first !== undefined) {
     // Seed ONCE, the first time properties arrive: the first property open,
@@ -156,6 +166,7 @@ export function QuietSharesSection({ quiet, now }: QuietSharesSectionProps): Rea
     setOpenByUnit(new Map([[first.unitId, true]]));
   }
 
+  if (hidden) return null;
   if (quiet.status === 'unavailable') {
     return (
       <TodaySection label={QUIET_SHARES_LABEL}>
@@ -182,6 +193,7 @@ export function QuietSharesSection({ quiet, now }: QuietSharesSectionProps): Rea
         items={properties}
         itemKey={(p) => p.unitId}
         noun="properties"
+        expansion={{ expanded, onToggle: () => setExpanded((open) => !open) }}
         renderItem={(p) => (
           <PropertyLine
             property={p}

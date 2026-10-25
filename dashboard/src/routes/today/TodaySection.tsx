@@ -12,7 +12,11 @@
 // expands the list in place and then reads "Show fewer" (aria-expanded,
 // aria-controls = the list). Expansion is per-viewer page state only: lost
 // on reload, never stored. Every checklist section, Tours today, the opened
-// AI suggestions line and the Quiet shares property lines use it.
+// AI suggestions line and the Quiet shares property lines use it. On Today
+// the expansion is held by a parent that outlives the list (the `expansion`
+// prop): a live refetch can unmount a list - a section unavailable, the
+// client fallback, a section emptied - and the choice must survive it (code
+// review R2-2).
 import { Fragment, useId, useState } from 'react';
 import styles from './Today.module.css';
 
@@ -40,6 +44,12 @@ export function TodaySection({ label, help, level = 2, children }: TodaySectionP
   );
 }
 
+/** A list's "Show all" state, held by a parent (a controlled LimitedList). */
+export interface ListExpansion {
+  expanded: boolean;
+  onToggle: () => void;
+}
+
 export interface LimitedListProps<T> {
   /** The list's accessible name: the section's heading text. */
   label: string;
@@ -51,6 +61,9 @@ export interface LimitedListProps<T> {
   noun?: string;
   /** Rendered beside the Show all button (the Past tab link). */
   footer?: React.ReactNode;
+  /** The Show all state from a parent that outlives this list; without it
+   *  the list keeps its own, which its unmount loses. */
+  expansion?: ListExpansion;
 }
 
 export function LimitedList<T>({
@@ -60,9 +73,12 @@ export function LimitedList<T>({
   renderItem,
   noun,
   footer,
+  expansion,
 }: LimitedListProps<T>): React.JSX.Element {
   const listId = useId();
-  const [expanded, setExpanded] = useState(false);
+  const [ownExpanded, setOwnExpanded] = useState(false);
+  const expanded = expansion?.expanded ?? ownExpanded;
+  const toggle = expansion?.onToggle ?? (() => setOwnExpanded((open) => !open));
   const overflows = items.length > TODAY_SECTION_LIMIT;
   const shown = overflows && !expanded ? items.slice(0, TODAY_SECTION_LIMIT) : items;
   const showAll = noun !== undefined ? `Show all ${items.length} ${noun}` : `Show all ${items.length}`;
@@ -81,7 +97,7 @@ export function LimitedList<T>({
               className={styles.showAll}
               aria-expanded={expanded}
               aria-controls={listId}
-              onClick={() => setExpanded((open) => !open)}
+              onClick={toggle}
             >
               {expanded ? 'Show fewer' : showAll}
             </button>

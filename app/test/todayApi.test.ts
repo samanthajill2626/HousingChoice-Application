@@ -838,6 +838,159 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(ident.map((i) => `${i.refType}:${i.refId}`)).toEqual(['contact:c-mail']);
   });
 
+  // Fix wave 2 (FW2-1; code review R2-1). FW1-2's de-dupe kept the unread
+  // pass's row and SKIPPED the triage row, so the person's ONE row could read
+  // a blank `who` (an email thread with no display name, an unnamed contact)
+  // or sort LAST (the unread pass could not read the owner: +Infinity). The
+  // triage pass now MERGES into that row instead (spec 5.2: who + "New
+  // unknown contact", oldest contact first). These pin `who` AND order.
+  describe('one Identify row per person, merged (fix wave 2, R2-1)', () => {
+    /** The unread pass's point read of `contactId` fails ONCE; getContact
+     *  memoizes the failure as undefined, so the owner stays unresolved for
+     *  the whole request. Returns the failed-read count, a positive control. */
+    const failOwnerReadOnce = (contactId: string): (() => number) => {
+      let failed = 0;
+      const real = world.contactsRepo.getById.bind(world.contactsRepo);
+      world.contactsRepo.getById = async (id) => {
+        if (id === contactId && failed === 0) {
+          failed += 1;
+          throw new Error('ProvisionedThroughputExceededException');
+        }
+        return real(id);
+      };
+      return () => failed;
+    };
+    const seedUnreadEmailThread = (o: {
+      conversationId: string;
+      contactId: string;
+      email: string;
+      offset: number;
+      displayName?: string;
+    }): void => {
+      seedConversation({
+        conversationId: o.conversationId,
+        participant_email: o.email,
+        ...(o.displayName !== undefined && { participant_display_name: o.displayName }),
+        status: 'open',
+        last_activity_at: iso(o.offset),
+        type: 'unknown_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-200_000),
+        unread_count: 1,
+        participants: [{ contactId: o.contactId, phone: '' }],
+      } as ConversationItem);
+    };
+    /** A newer unknown contact, triage partition only - the order reference. */
+    const seedNewt = (): void => {
+      world.contacts.push({
+        contactId: 'c-new',
+        type: 'unknown',
+        status: 'needs_review',
+        firstName: 'Newt',
+        phone: '+15550390002',
+        created_at: '2026-06-01T10:00:00.000Z',
+      });
+    };
+
+    it("the one row of a contact whose NEWEST unread thread is its email thread names the person (the contact's phone)", async () => {
+      // FW1-2's fixture: no name on the contact, a phone thread named 'Dee
+      // Dupe', and a NEWER email thread with no display name - the kept one.
+      world.contacts.push({ contactId: 'c-dupe', type: 'unknown', status: 'needs_review', phone: '+15550108888' });
+      seedConversation({
+        conversationId: 'conv-dupe-phone',
+        participant_phone: '+15550108888',
+        participant_display_name: 'Dee Dupe',
+        status: 'open',
+        last_activity_at: iso(-60_000),
+        type: 'unknown_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-200_000),
+        unread_count: 1,
+        participants: [{ contactId: 'c-dupe', phone: '+15550108888' }],
+      } as ConversationItem);
+      seedUnreadEmailThread({ conversationId: 'conv-dupe-email', contactId: 'c-dupe', email: 'dee@example.test', offset: -50_000 });
+
+      const ident = (await getItems()).filter((i) => i.group === 'identify');
+
+      // Everything but `who` is the kept (unread) row's, unchanged.
+      expect(ident).toEqual([
+        { group: 'identify', refType: 'contact', refId: 'c-dupe', who: '(555) 010-8888', why: 'New unknown contact', attention: true },
+      ]);
+    });
+
+    it('the oldest contact stays FIRST, by its name, when the unread pass could not read its owner (an email thread)', async () => {
+      world.contacts.push({
+        contactId: 'c-old',
+        type: 'unknown',
+        status: 'needs_review',
+        firstName: 'Olda',
+        email: 'olda@example.test',
+        created_at: '2026-01-01T10:00:00.000Z',
+      });
+      seedUnreadEmailThread({ conversationId: 'conv-old-email', contactId: 'c-old', email: 'olda@example.test', offset: -50_000 });
+      seedNewt();
+      const failedReads = failOwnerReadOnce('c-old');
+
+      const ident = (await getItems()).filter((i) => i.group === 'identify');
+
+      expect(failedReads()).toBe(1);
+      expect(ident.map((i) => [i.refId, i.who])).toEqual([
+        ['c-old', 'Olda'],
+        ['c-new', 'Newt'],
+      ]);
+    });
+
+    it('...and when that unread thread is a PHONE thread: the merge runs before the phone de-dupe', async () => {
+      world.contacts.push({
+        contactId: 'c-old',
+        type: 'unknown',
+        status: 'needs_review',
+        firstName: 'Olda',
+        phone: '+15550390001',
+        created_at: '2026-01-01T10:00:00.000Z',
+      });
+      seedUnknownThread({ conversationId: 'conv-old-phone', contactId: 'c-old', phone: '+15550390001', offset: -50_000 });
+      seedNewt();
+      const failedReads = failOwnerReadOnce('c-old');
+
+      const ident = (await getItems()).filter((i) => i.group === 'identify');
+
+      expect(failedReads()).toBe(1);
+      expect(ident.map((i) => [i.refId, i.who])).toEqual([
+        ['c-old', 'Olda'],
+        ['c-new', 'Newt'],
+      ]);
+    });
+
+    it("an unresolved owner with NO name keeps the thread's display name (what a successful read shows) and still ranks by created_at", async () => {
+      world.contacts.push({
+        contactId: 'c-mae',
+        type: 'unknown',
+        status: 'needs_review',
+        email: 'mae@example.test',
+        phone: '+15550390003',
+        created_at: '2026-01-01T10:00:00.000Z',
+      });
+      seedUnreadEmailThread({
+        conversationId: 'conv-mae-email',
+        contactId: 'c-mae',
+        email: 'mae@example.test',
+        offset: -50_000,
+        displayName: 'Mae Mid',
+      });
+      seedNewt();
+      const failedReads = failOwnerReadOnce('c-mae');
+
+      const ident = (await getItems()).filter((i) => i.group === 'identify');
+
+      expect(failedReads()).toBe(1);
+      expect(ident.map((i) => [i.refId, i.who])).toEqual([
+        ['c-mae', 'Mae Mid'],
+        ['c-new', 'Newt'],
+      ]);
+    });
+  });
+
   it('a duplicate thread does NOT consume one of the TODAY_UNREAD_CAP slots', async () => {
     // The cap is 100. Seed 99 single-thread contacts plus ONE contact owning two
     // unread threads: 101 index rows, 100 distinct people. Deduping only at emit

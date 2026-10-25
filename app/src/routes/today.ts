@@ -779,12 +779,14 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     // needs_review contact, and the triage pass de-dupes the SAME person to one
     // item, preferring the conversation (the actionable target).
     const emittedUnknownPhones = new Set<string>();
-    // ...and the contactIds the unread pass emitted, beside the phones (fix
-    // wave 1, code review R1A-1): when the kept thread is an EMAIL thread it
-    // has no participant_phone, so the phone set alone let the triage pass
+    // ...and the rows the unread pass emitted, by contactId, beside the phones
+    // (fix wave 1, code review R1A-1): when the kept thread is an EMAIL thread
+    // it has no participant_phone, so the phone set alone let the triage pass
     // emit the same contact a second time - one person, two rows under one
-    // React key (spec 5.2: one row per person).
-    const emittedIdentifyContactIds = new Set<string>();
+    // React key (spec 5.2: one row per person). The triage pass MERGES into
+    // the row it finds here rather than skipping it (fix wave 2, R2-1; see
+    // mergeIdentifyRow).
+    const emittedIdentifyRows = new Map<string, EmittedIdentifyRow>();
     {
       // ONE row per opted-out member (fix wave 1, code review R1A-1): a member
       // opted out of two open relay groups is one person to look at, and the
@@ -878,7 +880,8 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     // 0` gate this pass used to apply itself.
     //
     // ORDER MATTERS: this runs BEFORE the contacts-triage pass below, which
-    // consumes the `emittedUnknownPhones` written here.
+    // consumes the `emittedUnknownPhones` and `emittedIdentifyRows` written
+    // here.
     {
       const walkState: UnreadWalkState = { scanExhausted: false, scanned: 0 };
       const unreadOneToOne: ConversationItem[] = [];
@@ -1031,8 +1034,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         if (typeof conv.participant_phone === 'string') {
           emittedUnknownPhones.add(conv.participant_phone);
         }
-        emittedIdentifyContactIds.add(contactId);
-        identify.push({
+        const row: Ranked = {
           item: {
             group: 'identify',
             refType: 'contact',
@@ -1041,9 +1043,12 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
             why: 'New unknown contact',
             attention: true,
           },
-          // Oldest contact first (spec 5.2); an unresolved owner sorts last.
+          // Oldest contact first (spec 5.2); an unresolved owner sorts last
+          // unless the triage pass below reads the contact (mergeIdentifyRow).
           at: createdAtRank(owner),
-        });
+        };
+        identify.push(row);
+        emittedIdentifyRows.set(contactId, { row, ownerResolved: owner !== undefined });
       }
     }
 
@@ -1128,16 +1133,25 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         // partition anyway; a real unknown caller who TEXTED still surfaces
         // through the conversation-row source above.
         if (contact.origin === GROUP_DETECTION_ORIGIN) continue;
+        // ONE ROW PER PERSON, MERGED (fix wave 1, code review R1A-1; fix wave
+        // 2, R2-1): the unread pass already emitted THIS contact - its kept
+        // thread may be an email thread, which records no phone, so the phone
+        // test below cannot see it. Keep that one row (it carries the unread)
+        // but fill what this read knows better: a blank or unresolved `who`,
+        // and the created_at rank of an owner the unread pass could not read.
+        // It runs BEFORE the phone test so a PHONE-thread row whose owner read
+        // failed is ranked too.
+        const kept = emittedIdentifyRows.get(contact.contactId);
+        if (kept !== undefined) {
+          mergeIdentifyRow(kept, contact);
+          continue;
+        }
         // De-dupe by phone: if this person already emitted an unknown_1to1
         // conversation row above, skip the contact (prefer the conversation —
         // it carries the unread and is the actionable triage target). A
         // needs_review contact with NO matching emitted conversation still
         // emits its own row.
         if (typeof contact.phone === 'string' && emittedUnknownPhones.has(contact.phone)) continue;
-        // ...and by identity: the unread pass already emitted THIS contact
-        // (its kept thread may be an email thread, which records no phone -
-        // fix wave 1, code review R1A-1).
-        if (emittedIdentifyContactIds.has(contact.contactId)) continue;
         const who =
           nameFromContact(contact) ?? formatPhoneForDisplay(contact.phone) ?? contact.contactId;
         identify.push({
@@ -1349,6 +1363,39 @@ function whoOfConversation(conv: ConversationItem, contact: ContactItem | undefi
     return conv.participant_display_name;
   }
   return formatPhoneForDisplay(conv.participant_phone) ?? '';
+}
+
+/** An Identify row the unread pass emitted, and whether that pass could read
+ *  the row's owner contact (getContact degrades a failed read to undefined). */
+interface EmittedIdentifyRow {
+  row: Ranked;
+  ownerResolved: boolean;
+}
+
+/**
+ * Fold the triage pass's read of a contact into the ONE Identify row the
+ * unread pass already emitted for it (fix wave 2, code review R2-1; the
+ * de-dupe itself is FW1-2's). Only `who` and the rank can change - the refId,
+ * the link, `why` and `attention` stay the unread row's.
+ *  - who: an unresolved owner left the row on the thread's own snapshot
+ *    (whoOfConversation without the contact), so the contact's name - what a
+ *    successful read shows - wins; a thread-derived label is otherwise kept.
+ *    A row still blank (an email thread with no display name, an unnamed
+ *    contact) takes the triage row's label: the name, else the formatted
+ *    phone, else the id (spec 5.2: who + "New unknown contact").
+ *  - rank: an unresolved owner ranked the row LAST (+Infinity); the contact's
+ *    created_at puts it back in order (spec 5.2: oldest contact first). The
+ *    sort runs after both passes, so updating the entry is enough.
+ */
+function mergeIdentifyRow(kept: EmittedIdentifyRow, contact: ContactItem): void {
+  const { row } = kept;
+  const liveName = kept.ownerResolved ? undefined : nameFromContact(contact);
+  const who = liveName ?? row.item.who;
+  row.item.who =
+    who.length > 0
+      ? who
+      : (nameFromContact(contact) ?? formatPhoneForDisplay(contact.phone) ?? contact.contactId);
+  if (row.at === Number.POSITIVE_INFINITY) row.at = createdAtRank(contact);
 }
 
 /** A 1:1 thread's external contact id (its single participant), or undefined when

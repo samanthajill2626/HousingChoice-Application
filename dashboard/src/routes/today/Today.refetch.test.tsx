@@ -336,4 +336,31 @@ describe('Today across a live refetch that drops a section (fix wave 2)', () => 
       expect(within(sectionOf(heading)).getByRole('button', { name: 'Show fewer' })).toHaveAttribute('aria-expanded', 'true');
     }
   });
+
+  // Fix wave 3 (FW3-2; code review R3-3): a viewer CLOSING the AI line drops
+  // its Show all (Today.test.tsx); a live refetch does not, even one that
+  // unmounts the line - the fallback lists no AI suggestions (spec 2.1, 3.1).
+  it("the open AI line's Show all survives one FALLBACK refetch that hides the line (spec 2.1, 3.1)", async () => {
+    const user = userEvent.setup();
+    getToday.mockResolvedValue({
+      ...EMPTY,
+      items: Array.from({ length: 7 }, (_, i) => row('ai_suggestions', `a${i}`, { refType: 'contact' })),
+    });
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: 'AI suggestions for 7 contacts' }));
+    await user.click(screen.getByRole('button', { name: 'Show all 7' }));
+    expect(within(screen.getByRole('list', { name: 'AI suggestions' })).getAllByRole('listitem')).toHaveLength(7);
+
+    await dropThenRecover(
+      () => getToday.mockRejectedValueOnce(new ApiError(404, 'not_found', 'Not found')),
+      FALLBACK_LINE,
+      () => {
+        expect(screen.queryByRole('button', { name: /^AI suggestions for/ })).not.toBeInTheDocument();
+      },
+    );
+
+    expect(screen.getByRole('button', { name: 'AI suggestions for 7 contacts' })).toHaveAttribute('aria-expanded', 'true');
+    expect(within(screen.getByRole('list', { name: 'AI suggestions' })).getAllByRole('listitem')).toHaveLength(7);
+    expect(screen.getByRole('button', { name: 'Show fewer' })).toHaveAttribute('aria-expanded', 'true');
+  });
 });

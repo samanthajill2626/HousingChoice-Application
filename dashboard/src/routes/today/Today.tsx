@@ -370,15 +370,19 @@ function CompactTourRow({ item }: { item: TodayItem }): React.JSX.Element {
 
 /** Below the dashed divider (spec 2.4): Tours today, then the AI suggestions
  *  as ONE collapsed line whose list is not in the accessibility tree until it
- *  is opened. Never part of the checklist; not rendered when both are empty. */
+ *  is opened. Each opening starts at the list's first 5 rows: closing the line
+ *  drops its Show all (code review R3-3), which a live refetch never does.
+ *  Never part of the checklist; not rendered when both are empty. */
 function AtAGlance({
   toursToday,
   aiSuggestions,
   expansionOf,
+  collapseList,
 }: {
   toursToday: TodayItem[];
   aiSuggestions: TodayItem[];
   expansionOf: (label: string) => ListExpansion;
+  collapseList: (label: string) => void;
 }): React.JSX.Element | null {
   const [aiOpen, setAiOpen] = useState(false);
   const aiBodyId = useId();
@@ -405,7 +409,10 @@ function AtAGlance({
             className={styles.aiToggle}
             aria-expanded={aiOpen}
             aria-controls={aiOpen ? aiBodyId : undefined}
-            onClick={() => setAiOpen((open) => !open)}
+            onClick={() => {
+              if (aiOpen) collapseList(AI_LABEL);
+              setAiOpen((open) => !open);
+            }}
           >
             <span>{aiLine}</span>
             <span className={styles.aiChevron} aria-hidden="true">
@@ -446,7 +453,8 @@ export function Today(): React.JSX.Element {
   // HERE, not in the list: a live refetch can unmount a list - Tours to book
   // swapped for its unavailable copy (spec 2.5), a section the fallback does
   // not assemble (spec 3.1), a section emptied - and the expansion is lost
-  // only on reload (spec 2.1; code review R2-2). Quiet shares keeps its own.
+  // only on reload (spec 2.1; code review R2-2), or by the viewer closing the
+  // AI line (collapseList). Quiet shares keeps its own.
   const [expandedLists, setExpandedLists] = useState<ReadonlySet<string>>(() => new Set());
   const expansionOf = (label: string): ListExpansion => ({
     expanded: expandedLists.has(label),
@@ -458,6 +466,16 @@ export function Today(): React.JSX.Element {
         return next;
       }),
   });
+  // A viewer action folds a list back to its first 5: closing the AI line
+  // (spec 2.4: each opening starts there; code review R3-3). No refetch calls
+  // it.
+  const collapseList = (label: string): void =>
+    setExpandedLists((prev) => {
+      if (!prev.has(label)) return prev;
+      const next = new Set(prev);
+      next.delete(label);
+      return next;
+    });
   const rowsOf = (group: TodayGroup): TodayItem[] => items.filter((i) => i.group === group);
   const needs = rowsOf('needs_you_now');
   const identify = rowsOf('identify');
@@ -571,7 +589,12 @@ export function Today(): React.JSX.Element {
           ) : null}
           <ItemsSection label={PLACEMENTS_LABEL} rows={placements} expansion={expansionOf(PLACEMENTS_LABEL)} />
 
-          <AtAGlance toursToday={toursToday} aiSuggestions={aiSuggestions} expansionOf={expansionOf} />
+          <AtAGlance
+            toursToday={toursToday}
+            aiSuggestions={aiSuggestions}
+            expansionOf={expansionOf}
+            collapseList={collapseList}
+          />
         </>
       ) : null}
     </div>

@@ -927,6 +927,34 @@ describe('Today - a failed past-tours reload after an empty load (fix wave 3)', 
   });
 });
 
+// Fix wave 3 (FW3-2; code review R3-3): each OPENING of the AI line starts at
+// its first 5 rows with "Show all N" (spec 2.4). Closing the line is a viewer
+// action, not a live refetch, so it drops the line's Show all; a refetch keeps
+// it (Today.refetch.test.tsx).
+describe('Today - re-opening the AI line (fix wave 3)', () => {
+  it('re-opening the AI line shows the first 5 again, as the first open did', async () => {
+    const user = userEvent.setup();
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: Array.from({ length: 7 }, (_, i) => item('ai_suggestions', `a${i}`, { refType: 'contact' })),
+    };
+    renderToday();
+    const line = screen.getByRole('button', { name: 'AI suggestions for 7 contacts' });
+    await user.click(line);
+    expect(within(screen.getByRole('list', { name: 'AI suggestions' })).getAllByRole('listitem')).toHaveLength(5);
+    await user.click(screen.getByRole('button', { name: 'Show all 7' }));
+    expect(within(screen.getByRole('list', { name: 'AI suggestions' })).getAllByRole('listitem')).toHaveLength(7);
+
+    await user.click(line); // close
+    expect(screen.queryByRole('list', { name: 'AI suggestions' })).not.toBeInTheDocument();
+    await user.click(line); // open again
+
+    expect(within(screen.getByRole('list', { name: 'AI suggestions' })).getAllByRole('listitem')).toHaveLength(5);
+    expect(screen.getByRole('button', { name: 'Show all 7' })).toHaveAttribute('aria-expanded', 'false');
+  });
+});
+
 describe('Today - the sections below past tours are never held (round 4)', () => {
   it('the AI suggestions line renders at once while the past-tours section is still loading', () => {
     state = {

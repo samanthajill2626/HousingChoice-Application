@@ -127,7 +127,7 @@ export const CONTRACT_SOURCES = Object.freeze({
   shell: 'dashboard/src/app/AuthContext.tsx:27-48; dashboard/src/app/UnreadContext.tsx:110-292',
   contacts: 'dashboard/src/routes/contacts/useContacts.ts:14-99',
   units: 'dashboard/src/routes/listings/useListings.ts:10-60',
-  today: 'dashboard/src/routes/today/useToday.ts:41-74',
+  today: 'dashboard/src/routes/today/useToday.ts:61-114',
   tours: 'dashboard/src/routes/tours/useTours.ts:48-153',
   placements: 'dashboard/src/routes/placements/usePlacements.ts:50-128,214-225',
   details: 'dashboard/src/routes/contact/ContactDetail.tsx:111-140; dashboard/src/routes/listing/useListing.ts:116-193',
@@ -393,13 +393,26 @@ const L = {
   settings: locator('heading', 'Settings'),
 };
 
+// Today (tracker #31, spec docs/superpowers/specs/2026-10-23-today-checklist-design.md
+// 2): the seven CHECKLIST lists, in page order, are the populated terminal.
+// The At a glance parts (Tours today, the collapsed AI suggestions line) are
+// deliberately NOT: "All caught up" renders WITH At a glance below it (spec
+// 2.3), so listing them would read a done page as contradictory_terminal. The
+// ERROR group (plan PR89) also holds the per-section "We couldn't load
+// <section>." alerts (contains) and the fallback line, so a page whose
+// checklist is empty and a section failed - or the 404 fallback - is a
+// terminal, not an unknown (the "Couldn't load our number." precedent below).
 const TODAY_TERMINAL = terminal(
   [
-    'Group texts to close', 'Needs you now', 'Tours today', 'Unreplied', 'Follow-ups due',
-    'Past tours needing an outcome', 'AI suggestions to review',
+    'Needs you now', 'Identify these contacts', 'Past tours needing an outcome', 'Tours to book',
+    'Quiet shares', 'Relay groups to close', 'Placements',
   ].map((name) => locator('list', name)),
   [locator('text', 'All caught up')],
-  [locator('alert', "We couldn't load your queue", 'contains')],
+  [
+    locator('alert', "We couldn't load your queue", 'contains'),
+    locator('alert', "We couldn't load ", 'contains'),
+    locator('text', "Some sections can't load right now."),
+  ],
 );
 // The Tenants view's Status facet HIDES inactive and placed tenants by default
 // (spec 2026-10-12 5.7), so a world whose every tenant is inactive or placed
@@ -761,7 +774,7 @@ assertRouteRegistry(ROUTES);
 
 export const CONTRACT_SOURCE_LEDGER = Object.freeze({
   endpoints: Object.freeze({
-    '/': { base: 'dashboard/src/routes/today/useToday.ts:41-74; dashboard/src/routes/today/useTodayPastTours.ts:71-163; dashboard/src/routes/tours/useTours.ts:293-340' },
+    '/': { base: 'dashboard/src/routes/today/useToday.ts:61-114; dashboard/src/routes/today/useTodayPastTours.ts:74-178; dashboard/src/routes/tours/useTours.ts:296-342' },
     '/contacts': { base: 'dashboard/src/routes/contacts/useContacts.ts:14-99' },
     '/contacts/tenants': { base: 'dashboard/src/routes/contacts/useContacts.ts:14-99' },
     '/contacts/landlords': { base: 'dashboard/src/routes/contacts/useContacts.ts:14-99' },
@@ -815,7 +828,7 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     placement_person_thread: 'dashboard/src/routes/placements/usePlacementChannels.ts:109-155,189-213,274-333',
   } as const),
   terminals: Object.freeze({
-    '/': 'dashboard/src/routes/today/Today.tsx:36-48,226-261,278-291',
+    '/': 'dashboard/src/routes/today/Today.tsx:47-52,145-153,448-463; dashboard/src/routes/today/QuietShares.tsx:25,159-167',
     '/contacts': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
     '/contacts/tenants': 'dashboard/src/routes/contacts/ContactsList.tsx:352-404',
     '/contacts/landlords': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
@@ -869,7 +882,7 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     tourReminders: 'dashboard/src/routes/tours/RemindersPanel.tsx:188-208',
     placementNudges: 'dashboard/src/routes/placements/usePlacementNudges.ts:96-116',
     unreadShell: 'dashboard/src/app/UnreadContext.tsx:48,168-292',
-    today: 'dashboard/src/routes/today/useToday.ts:39,126-153',
+    today: 'dashboard/src/routes/today/useToday.ts:52,167-201',
     inbox: 'dashboard/src/routes/inbox/useInbox.ts:77,249-266',
     unmatchedEmail: 'dashboard/src/routes/email/useUnmatchedEmail.ts:69,142-158',
     roster: 'dashboard/src/routes/shared/useRoster.ts:98-137',

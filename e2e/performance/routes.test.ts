@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
@@ -868,6 +869,58 @@ describe('representative resolvers', () => {
       api,
       new FakeDom(new Set(['/tours/tour-private']), now),
     )).resolves.toEqual({ kind: 'skip', reason: 'unresolved_branch' });
+  });
+});
+
+describe('Today terminal copy', () => {
+  // Tracker #31 (spec docs/superpowers/specs/2026-10-23-today-checklist-design.md
+  // 2, 2.3, 2.4): the seven CHECKLIST lists are the populated terminal and
+  // "All caught up" the empty one. At a glance (Tours today, the AI line) is
+  // NOT a terminal: "All caught up" renders with At a glance below it, and the
+  // profiler reads populated plus empty as contradictory_terminal
+  // (cli.ts terminalStateFor). The error group holds the queue load error,
+  // the per-section "We couldn't load <section>." alerts (contains) and the
+  // fallback line (PR89), so a page that can only say a section failed is a
+  // terminal, not an unknown. Every name must be a string the Today page
+  // source actually carries.
+  it('waits for the checklist lists or All caught up, never an At a glance part', () => {
+    const today = ROUTES.find((candidate) => candidate.surfaceId === '/')!;
+    expect(today.terminal.populated.map((c) => [c.role, c.name, c.exactness])).toEqual([
+      ['list', 'Needs you now', 'exact'],
+      ['list', 'Identify these contacts', 'exact'],
+      ['list', 'Past tours needing an outcome', 'exact'],
+      ['list', 'Tours to book', 'exact'],
+      ['list', 'Quiet shares', 'exact'],
+      ['list', 'Relay groups to close', 'exact'],
+      ['list', 'Placements', 'exact'],
+    ]);
+    expect(today.terminal.empty.map((c) => [c.role, c.name])).toEqual([['text', 'All caught up']]);
+    expect(today.terminal.error.map((c) => [c.role, c.name, c.exactness])).toEqual([
+      ['alert', "We couldn't load your queue", 'contains'],
+      ['alert', "We couldn't load ", 'contains'],
+      ['text', "Some sections can't load right now.", 'exact'],
+    ]);
+    expect(today.terminal.populatedAlternatives).toHaveLength(7);
+    const dir = fileURLToPath(new URL('../../dashboard/src/routes/today/', import.meta.url));
+    const source = readdirSync(dir)
+      .filter((file) => /\.tsx?$/u.test(file) && !/\.test\.tsx?$/u.test(file))
+      .map((file) => readFileSync(join(dir, file), 'utf8'))
+      .join('\n')
+      // [R2-1] JSX text writes an apostrophe as &apos; (Today.tsx carries
+      // "We couldn&apos;t load your queue"), so decode before comparing.
+      .replace(/&apos;|&#39;/gu, "'");
+    for (const contract of [...today.terminal.populated, ...today.terminal.empty]) {
+      const name = contract.name!;
+      expect(
+        [`'${name}'`, `"${name}"`, `>${name}<`].some((needle) => source.includes(needle)),
+        `the Today page source carries "${name}"`,
+      ).toBe(true);
+    }
+    // The error copy is matched by substring (a template literal builds the
+    // per-section line), so its source check is a substring check too.
+    for (const contract of today.terminal.error) {
+      expect(source.includes(contract.name!), `the Today page source carries "${contract.name!}"`).toBe(true);
+    }
   });
 });
 

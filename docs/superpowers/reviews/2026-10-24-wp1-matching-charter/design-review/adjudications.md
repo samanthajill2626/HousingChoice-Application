@@ -303,3 +303,46 @@ excluded kind.
 
 Round 3 totals: 7 findings, 7 ACCEPT. Decisions changed: yes (R3-1,
 R3-2), so round 4, the last allowed, runs.
+
+## Round 4 (reviewer A continued; report r4-reviewer-a.md, 5 findings)
+
+Verified before ruling: RecipientPreview.tsx:9-19 (Select all re-applies
+checkedByDefault and skips declined), broadcasts.ts:1196-1202 (the
+explicit-selection path never re-excludes already-sent rows).
+
+R4-1 [DECISION] Select all would re-text decliners. ACCEPT. Select all
+checks only what today's default would check, minus capped pairs.
+R4-2 [DECISION] Run claim without a lease; join is a race. ACCEPT. The
+app's one conditional write before enqueue is the claim; a renewed lease;
+an expired lease means the job died and may be taken over.
+R4-3 [PRECISION] Accommodation flags stay per pair; only unlawful flags
+ask for a record change. ACCEPT.
+R4-4 [PRECISION] Reaction condition misses legacy sent rows. ACCEPT.
+sentAt fallback.
+R4-5 [PRECISION] Job record TTL and key family. ACCEPT.
+
+Round 4 totals: 5 findings, 5 ACCEPT. Decisions changed: yes (R4-1, R4-2),
+both defects the round-3 rewrite introduced. HARD CAP REACHED: the loop
+stops here and the open question - close the review on these fixes, or run
+one more round on them - goes to Cameron with the spec gate.
+
+## Totals, rounds 1-4
+
+| Round | Findings | Accept | Reject | Defer | Decisions changed |
+|---|---|---|---|---|---|
+| 1 (A + B, merged) | 28 | 26 (3 partly rejected) | 3 partial | 0 | yes |
+| 2 (A) | 22 | 22 | 0 | 0 | yes |
+| 3 (A) | 7 | 7 | 0 | 0 | yes |
+| 4 (A) | 5 | 5 | 0 | 0 | yes (2, introduced by round 3) |
+
+Every REJECT, with its reason:
+- M10 part: removing names and addresses from the cards. Rejected because
+  Cameron decided to keep them (2026-10-25); the counterfactual check
+  tests the consequence instead. Reviewer A conceded in round 2.
+- M21 part: code comparing requirement text. Rejected because tenant pets
+  and evictions are free text (contactsRepo.ts:332-333), so a code check
+  would be the rule-based scorer A1 and Cameron rejected; the model's own
+  failedRequirements report drives a code cap instead. Conceded.
+- M28 part: a daily spend ceiling on Rank. Rejected as speculative: every
+  press is a human click and the Rankings page shows spend; the testing
+  key gets an account spend limit instead. Conceded.

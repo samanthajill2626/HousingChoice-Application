@@ -2,7 +2,7 @@
 
 Date: 2026-10-24
 Status: DRAFT charter. Whole-spec re-read 2026-10-25 folded in; design
-review rounds 1 to 3 folded in (records: design-review/adjudications.md);
+review rounds 1 to 4 folded in (records: design-review/adjudications.md);
 then the remaining review rounds and Cameron's spec gate.
 Mission: Amendment No. 1 Work Package 1 (signed; Cameron 2026-10-20, Sam
 2026-10-21). 52 contracted hours.
@@ -277,8 +277,10 @@ again.
 
 Extracted reactions live on the existing listing_sends pair row as a list
 (at, kind, text, source message, run id); no new table. Only a pair whose
-listing_sends row is listed with a counted send share (not a pending or
-failed share, not a flyer sign-up alone) gets reactions; a reaction about a
+listing_sends row is listed with a counted send share, or is a legacy row
+with `sentAt` and no shares (the same fallback the pair history uses),
+gets reactions; a pending or failed share or a flyer sign-up alone does
+not; a reaction about a
 property never sent becomes a matching fact instead. The reaction writer
 joins the row's change-token protocol (`shares_op`) and the repo
 header's list of writers. Kinds are interested, maybe, hard_no and
@@ -381,7 +383,8 @@ name any requirement key or any free-text field on the property card
 (notes, lease terms, application process). ACCOMMODATION: a lawful
 requirement that does not apply to THIS tenant, for example No pets
 against an assistance animal; it suppresses the cap for that pair and
-asks for no record change.
+asks for no record change. Only an unlawful flag ever asks Sam to change a
+record.
 
 The guarantee is tested, not only stated: before Sam's acceptance pass,
 B2 runs a counterfactual check on the testing key over SYNTHETIC pairs
@@ -419,7 +422,8 @@ recorded requirements the model judged failed), `fairHousingFlags[]`
 (each `{kind: unlawful | accommodation, field}`, where field is a
 requirement key or a free-text field on the property card, section 7.2;
 per candidate, so a flag names the property whose record holds it, and
-merged across batches by property, kind and field). Code reads those two lists to cap a band and raise a flag;
+unlawful flags merged across batches by property and field; accommodation
+flags stay per pair). Code reads those two lists to cap a band and raise a flag;
 band, priority, tie order and chips are otherwise computed in code from
 the score.
 
@@ -546,13 +550,18 @@ parsed fail-fast like the existing cost-route knobs
 The job follows the queue's at-least-once rules (sqsJobConsumer.ts:11-17;
 120-second visibility timeout, infra/modules/jobs/main.tf:36). Its handler
 never throws on a model, batch or organization-list failure: it records
-the failure and finishes, so nothing is redelivered and re-paid. It claims
-its run, so a duplicate delivery does nothing twice. Its batches run in
-parallel with a per-call timeout that keeps the job under the visibility
-timeout. Its status (queued, running, done, failed with a message) is a
-ranking-job record in the AI runs table under the ranking keys (section
-11); the app reads it before enqueueing to join a job in flight, and
-polling stops on done or failed.
+the failure and finishes, so nothing is redelivered and re-paid. The APP
+makes the claim, as one conditional write of the anchor's ranking-job
+record before it enqueues: the write succeeds only when no live job holds
+the anchor, and a press that loses the write joins the job that won. The
+claim carries a lease that the job renews while it runs; an expired lease
+means the job died (a crash or a redeploy is not a throw), so a
+redelivery or the next press may take over. Its batches run in parallel
+with a per-call timeout that keeps the job under the visibility timeout.
+Status: queued, running, done, failed with a message; polling stops on
+done or failed. The record lives in the AI runs table in its own key
+family with a TTL, and the run listing and run-detail readers
+(routes/aiRuns.ts:139-140, 228-249) never return it.
 Background or scheduled ranking is out of WP1 (A1 excludes it); the engine
 is one function so a scheduled caller (WP3 era) would be configuration,
 not a redesign. One ranking job is in flight per anchor at a time: a
@@ -663,8 +672,13 @@ replace it. What that path carries today, and what happens to each:
   (blastAudienceRules.ts:178-182), which on a ranked pool would text Weak
   and capped pairs with one press. Planner default, for Cameron at the
   gate.
-- Select all checks every ranked row except capped and tour-held rows,
-  which Sam checks one at a time (the tour-held ones with the confirm).
+- Select all checks only the rows today's default would check (consent
+  recorded, not already sent, not Not interested, not tour-held,
+  blastAudienceRules.ts:178-182) and that are not capped; Sam checks
+  everything else one at a time, the tour-held ones with the confirm. The
+  explicit-selection send path never re-excludes already-sent rows
+  (broadcasts.ts:1196-1202), so this default is the guard against
+  re-texting a tenant who declined.
 - Hand-picks and "Add a tenant" stay beside the ranked pool and start
   checked, as today. This is how Sam still sends to an onboarding tenant
   or a partner.

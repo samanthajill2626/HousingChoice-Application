@@ -35,15 +35,16 @@ at the gate: M5 anonymized examples, M7 no auto-decline in WP1, M8 B4
 keeps hand-picks/tour-hold default/old drafts/partner flow, M10 the B2
 counterfactual fair-housing check, M22 staff notes off the card. ROUND 2 DONE: 22 findings, all accepted and folded; new planner defaults:
 ranked rows start unchecked (R2-2), examples written from scratch with no
-export (R2-13/14, replaces M5), notes off the card. ROUND 3 DONE (7 accepted). ROUND 4 DONE (5 accepted, 2 of them
-decisions the round-3 rewrite introduced: Select all, the job claim
-lease). HARD CAP REACHED - review loop stopped. Phase now: CAMERON'S SPEC
-GATE (2026-10-25), with the open question "close the review on the
-round-4 fixes, or one more round", and five planner defaults to confirm:
-staff notes off the card; no auto-decline in WP1; worked examples from
-scratch, no review export; the counterfactual check on synthetic pairs
-plus the never-extracted test; ranked rows start unchecked with the B4
-keep-list. Totals and every REJECT: design-review/adjudications.md end.
+export (R2-13/14, replaces M5), notes off the card. ROUNDS 1-4 DONE, cap reached (design-review/adjudications.md). Cameron
+2026-10-25: "Because this is so large, let's keep going with the
+adversarial reviewers. Let's do another max of 4 rounds." Phase now:
+REVIEW ROUNDS 5-8. Round 5 = both reviewers continued (A and B, outputs
+design-review/r5-reviewer-a.md, r5-reviewer-b.md); later rounds continue
+the better one; stop when a round changes no decision; hard cap round 8,
+then the spec gate with the five planner defaults (staff notes off; no
+auto-decline; examples from scratch, no export; counterfactual on
+synthetic pairs plus the never-extracted test; ranked rows unchecked with
+the B4 keep-list).
 
 NEXT STEP: the ADVERSARIAL DOCUMENT REVIEW: round 1
 = two independent Opus reviewers in parallel, same brief

@@ -190,6 +190,88 @@ describe('buildTodayFromSources', () => {
     expect(identifyOf([email, phone])).toEqual([['contact:ct-1', 'Dee Mail']]);
   });
 
+  // Code review R3-2 (fix wave 3): the pick and the key. A contact's one row
+  // keeps its first thread's place and takes the FIRST label in the
+  // fallback's order (an email thread with no display name has none - the
+  // server's merge rule, in miniature). Only a REAL contact id collapses rows:
+  // a thread with none is keyed by the Unknown list's phone filter - '' for an
+  // email thread - which names no one, so each such thread keeps its own row.
+  const identifyRowsOf = (conversations: ConversationSummary[]): Array<[string, string]> =>
+    buildTodayFromSources([], conversations, NOW)
+      .filter((i) => i.group === 'identify')
+      .map((i) => [i.refId, i.who]);
+
+  it('a contact whose FIRST thread is an email thread with no display name is still named (its phone thread names it)', () => {
+    const blankEmail = convOf({
+      conversationId: 'unk-email',
+      type: 'unknown_1to1',
+      participant_phone: undefined,
+      participants: [{ contactId: 'ct-1', phone: '' }],
+      unread_count: 1,
+    });
+    const phone = convOf({
+      conversationId: 'unk-phone',
+      type: 'unknown_1to1',
+      participant_phone: '+14040100007',
+      participants: [{ contactId: 'ct-1', phone: '+14040100007' }],
+      unread_count: 1,
+    });
+    const namedEmail = convOf({
+      conversationId: 'unk-email-2',
+      type: 'unknown_1to1',
+      participant_phone: undefined,
+      participants: [{ contactId: 'ct-1', phone: '' }],
+      unread_count: 1,
+      participant_display_name: 'Dee Mail',
+    });
+    const other = convOf({
+      conversationId: 'unk-other',
+      type: 'unknown_1to1',
+      participant_phone: '+14040100008',
+      participants: [{ contactId: 'ct-2', phone: '+14040100008' }],
+      unread_count: 1,
+      participant_display_name: 'Bo Phone',
+    });
+
+    expect(identifyRowsOf([blankEmail, phone])).toEqual([['ct-1', '(404) 010-0007']]);
+    // The first label in order wins, and the row keeps the contact's first place.
+    expect(identifyRowsOf([blankEmail, other, phone, namedEmail])).toEqual([
+      ['ct-1', '(404) 010-0007'],
+      ['ct-2', 'Bo Phone'],
+    ]);
+  });
+
+  it('two DIFFERENT people on unlinked email threads (no contact id, no phone) are two rows', () => {
+    const unlinkedEmail = (conversationId: string, name: string): ConversationSummary =>
+      convOf({
+        conversationId,
+        type: 'unknown_1to1',
+        participant_phone: undefined,
+        participants: [],
+        unread_count: 1,
+        participant_display_name: name,
+      });
+    expect(identifyRowsOf([unlinkedEmail('m-ana', 'Ana Mail'), unlinkedEmail('m-bo', 'Bo Mail')]).map(([, who]) => who)).toEqual([
+      'Ana Mail',
+      'Bo Mail',
+    ]);
+    // Nor do two unlinked threads on one phone collapse, as before fix wave 2:
+    // the phone filter is not a contact.
+    const unlinkedPhone = (conversationId: string, name: string): ConversationSummary =>
+      convOf({
+        conversationId,
+        type: 'unknown_1to1',
+        participant_phone: '+14040100009',
+        participants: [],
+        unread_count: 1,
+        participant_display_name: name,
+      });
+    expect(identifyRowsOf([unlinkedPhone('p-cy', 'Cy Phone'), unlinkedPhone('p-di', 'Di Phone')])).toEqual([
+      ['unknown?phone=%2B14040100009', 'Cy Phone'],
+      ['unknown?phone=%2B14040100009', 'Di Phone'],
+    ]);
+  });
+
   it('puts a Tour entity scheduled today in tours_today (linking the tour, not a placement)', () => {
     const items = buildTodayFromSources([], [], NOW, [
       tourOf({ tourId: 'tour-1', scheduledAt: at(2 * HOUR) }),

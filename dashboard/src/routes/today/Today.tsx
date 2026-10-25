@@ -94,6 +94,28 @@ function rowKey(item: TodayItem): string {
   return `${item.refType}:${item.refId}`;
 }
 
+/** Each row's React key in ONE list, from that list's own order: its
+ *  refType:refId, plain for the first row that has it and with an occurrence
+ *  suffix on each repeat - #2 on the second, #3 on the third (a suffix
+ *  already taken moves on) - so no two rows of the list share a key. Two rows
+ *  can link the same place (the fallback's contact-less Identify rows, code
+ *  review R3-2), and a shared key left a row on screen that no load contained
+ *  (code review R4-1). Only the key changes: the row, its refId and its link
+ *  are the wire's (spec 3). Keyed by the row object, which LimitedList shows
+ *  as given. */
+export function rowKeysOf(rows: readonly TodayItem[]): (item: TodayItem) => string {
+  const keys = new Map<TodayItem, string>();
+  const used = new Set<string>();
+  for (const row of rows) {
+    const plain = rowKey(row);
+    let key = plain;
+    for (let n = 2; used.has(key); n += 1) key = `${plain}#${n}`;
+    used.add(key);
+    keys.set(row, key);
+  }
+  return (item) => keys.get(item) ?? rowKey(item);
+}
+
 function Row({ item }: { item: TodayItem }): React.JSX.Element {
   const hasMeta = Boolean(item.urgency) || Boolean(item.tag);
   // A Tours to book row's urgency is its age ("Requested 3 days ago"): plain
@@ -147,7 +169,7 @@ function ItemsSection({
       <LimitedList
         label={label}
         items={rows}
-        itemKey={rowKey}
+        itemKey={rowKeysOf(rows)}
         renderItem={(item) => <Row item={item} />}
         expansion={expansion}
       />
@@ -396,7 +418,7 @@ function AtAGlance({
           <LimitedList
             label={TOURS_TODAY_LABEL}
             items={toursToday}
-            itemKey={rowKey}
+            itemKey={rowKeysOf(toursToday)}
             renderItem={(item) => <CompactTourRow item={item} />}
             expansion={expansionOf(TOURS_TODAY_LABEL)}
           />
@@ -424,7 +446,7 @@ function AtAGlance({
               <LimitedList
                 label={AI_LABEL}
                 items={aiSuggestions}
-                itemKey={rowKey}
+                itemKey={rowKeysOf(aiSuggestions)}
                 renderItem={(item) => <Row item={item} />}
                 expansion={expansionOf(AI_LABEL)}
               />

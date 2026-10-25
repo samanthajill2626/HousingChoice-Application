@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { QuietSharePerson, QuietShareProperty, RelayCloseNag, TodayItem, Tour } from '../../api/index.js';
+import type { ConversationSummary, QuietSharePerson, QuietShareProperty, RelayCloseNag, TodayItem, Tour } from '../../api/index.js';
 import type { QuietSharesState } from './useToday.js';
 import type { TodayPastTourRow, TodayPastToursState } from './useTodayPastTours.js';
 
@@ -52,7 +52,8 @@ vi.mock('../../api/index.js', async () => {
   };
 });
 
-import { Today } from './Today.js';
+import { buildTodayFromSources } from './buildToday.js';
+import { Today, rowKeysOf } from './Today.js';
 
 function todayTree(): React.JSX.Element {
   return (
@@ -970,5 +971,133 @@ describe('Today - the sections below past tours are never held (round 4)', () =>
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
     // But it is not "done" either until past tours settle.
     expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
+  });
+});
+
+// Fix wave 4 (FW4-1; code review R4-1, its ghost-row probes made permanent).
+// The 404 fallback lists every unknown_1to1 thread with no contact id as its
+// own Identify row (code review R3-2), so two rows can link the same place:
+// two unlinked email threads both open the Unknown list with no phone. Each
+// row still needs its own React key, or a refetch that changes the list
+// leaves a row on screen that no load contains.
+describe('Today - fallback Identify rows that link the same place (fix wave 4)', () => {
+  const NOW = new Date(GENERATED_AT);
+
+  /** An unknown_1to1 thread as the fallback reads it: with a contact id it
+   *  links that contact; with none it is an unlinked email thread (no phone),
+   *  which links the Unknown list by an empty phone. */
+  function unknownThread(conversationId: string, name: string, contactId?: string): ConversationSummary {
+    return {
+      conversationId,
+      type: 'unknown_1to1',
+      participant_phone: contactId === undefined ? undefined : '+14040100001',
+      participants: contactId === undefined ? [] : [{ contactId, phone: '+14040100001' }],
+      preview: null,
+      last_activity_at: GENERATED_AT,
+      unread_count: 1,
+      sms_opt_out: false,
+      participant_display_name: name,
+    };
+  }
+
+  const AL = unknownThread('c-al', 'Al Contact', 'ct-al');
+  const XENA = unknownThread('c-xena', 'Xena Mail');
+  const YURI = unknownThread('c-yuri', 'Yuri Mail');
+
+  /** A fallback load whose rows the REAL builder assembles (spec 3.1). */
+  function fallbackLoad(conversations: ConversationSummary[]): typeof state {
+    return {
+      status: 'ready',
+      source: 'fallback',
+      items: buildTodayFromSources([], conversations, NOW),
+      quietShares: { status: 'unavailable' },
+      toursToBookStatus: 'unavailable',
+    };
+  }
+
+  /** The names the Identify list shows, top to bottom (each row's who). */
+  function identifyNames(): string[] {
+    return within(screen.getByRole('list', { name: 'Identify these contacts' }))
+      .getAllByRole('listitem')
+      .map((li) => within(li).getByText(/ (Contact|Mail|Server)$/).textContent ?? '');
+  }
+
+  it('a fallback refetch that drops the first row lists the two unlinked people once each', () => {
+    state = fallbackLoad([AL, XENA, YURI]);
+    const view = renderToday();
+    expect(identifyNames()).toEqual(['Al Contact', 'Xena Mail', 'Yuri Mail']);
+    // The two unlinked rows link the same place, and keep doing so.
+    expect(screen.getAllByRole('link', { name: /Xena Mail|Yuri Mail/ }).map((a) => a.getAttribute('href'))).toEqual([
+      '/contacts/unknown?phone=',
+      '/contacts/unknown?phone=',
+    ]);
+
+    state = fallbackLoad([XENA, YURI]); // Al was identified elsewhere
+    view.rerender(todayTree());
+
+    expect(identifyNames()).toEqual(['Xena Mail', 'Yuri Mail']);
+  });
+
+  it('a recovery from the fallback to the server load leaves no fallback row behind', () => {
+    state = fallbackLoad([AL, XENA, YURI]);
+    const view = renderToday();
+    expect(identifyNames()).toEqual(['Al Contact', 'Xena Mail', 'Yuri Mail']);
+
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [
+        item('identify', 'ct-bea', { refType: 'contact', who: 'Bea Server' }),
+        item('identify', 'ct-cal', { refType: 'contact', who: 'Cal Server' }),
+      ],
+      quietShares: quietOk([]),
+      toursToBookStatus: 'ok',
+    };
+    view.rerender(todayTree());
+
+    expect(identifyNames()).toEqual(['Bea Server', 'Cal Server']);
+  });
+});
+
+// The key derivation behind it (FW4-1): a row's key is refType:refId, and a
+// repeat within ONE list takes an occurrence suffix in that list's order.
+// Nothing about the row itself changes: refId, link, text and order are the
+// wire's (spec 3).
+describe('rowKeysOf - one React key per row of a Today list (fix wave 4)', () => {
+  it('distinct rows keep their plain refType:refId keys', () => {
+    const rows = [
+      item('identify', 'ct-1', { refType: 'contact' }),
+      item('identify', 'ct-2', { refType: 'contact' }),
+      // The same refId under another refType is already another key.
+      item('needs_you_now', 'ct-1'),
+    ];
+    expect(rows.map(rowKeysOf(rows))).toEqual(['contact:ct-1', 'contact:ct-2', 'placement:ct-1']);
+  });
+
+  it('a repeat gets #2, the next #3, in the list order; the rows are untouched', () => {
+    const unlinked = (who: string): TodayItem => item('identify', 'unknown?phone=', { refType: 'contact', who });
+    const x = unlinked('Xena Mail');
+    const y = unlinked('Yuri Mail');
+    const z = unlinked('Zed Mail');
+    const a = item('identify', 'ct-a', { refType: 'contact' });
+    const rows = [x, a, y, z];
+    const before = rows.map((r) => ({ ...r }));
+
+    expect(rows.map(rowKeysOf(rows))).toEqual([
+      'contact:unknown?phone=',
+      'contact:ct-a',
+      'contact:unknown?phone=#2',
+      'contact:unknown?phone=#3',
+    ]);
+    expect(rows).toEqual(before);
+    // Counted from the list's own order: a list without x starts y plain.
+    expect([y, z].map(rowKeysOf([y, z]))).toEqual(['contact:unknown?phone=', 'contact:unknown?phone=#2']);
+    // A suffix another row's refId already reads moves on: keys never meet.
+    const taken = item('identify', 'unknown?phone=#2', { refType: 'contact' });
+    expect([x, taken, y].map(rowKeysOf([x, taken, y]))).toEqual([
+      'contact:unknown?phone=',
+      'contact:unknown?phone=#2',
+      'contact:unknown?phone=#3',
+    ]);
   });
 });

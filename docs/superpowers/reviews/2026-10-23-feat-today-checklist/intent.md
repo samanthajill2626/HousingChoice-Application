@@ -2,28 +2,21 @@
 
 ## STATE (replace on every move)
 
-- Phase: SUPERVISING. abt:build-orchestrator dispatched 2026-10-24 ~19:34 UTC
-  in AUTO (background) with `mission-block.md` verbatim @fd00c81f (spec r8,
-  plan v4 FINAL, rulings PR1-PR108, plan review R4). Orchestrator agent id
-  a0d7116a9bbb938e6 (SendMessage target).
-- Worktree `W:\tmp\today-checklist`, branch `feat/today-checklist`, cut from
-  main @970a29b9.
-- Launch mode: AUTO (Cameron, 2026-10-24), watchdog checkpoints every 55
-  minutes (3300 s; stall exit at 25 min quiet), re-armed at every wake;
-  each wake reads `W:\tmp\today-checklist\.superpowers\sdd\progress.md`
-  and reports a bold "Checkpoint:" line. Mirror: transcript-tail.mjs ->
-  `.superpowers/sdd/live.log`.
-- Failure budget: 0 consumed of 2. Infra: 1 (2026-10-25 ~03:11Z the
-  orchestrator and its R4 reviewer stopped on the weekly usage limit;
-  resumed by SendMessage at 14:00Z on Cameron's "continue", tree clean at
-  5a52e978, R4 re-dispatched fresh).
-- Progress at resume: S1-S7 done, code review R1-R3 with fix waves FW1-FW3
-  done; next R4 (closing re-review of FW3), self-QA S7.16, then S8.
-- NEXT STEP: on each watchdog wake, branch on its line (TERMINAL / STALL /
-  CHECKPOINT) per the skill; on DONE, run the handback review (re-ground in
-  the full replay, gates myself on a quiet tree, spec-conformance + plan-blind
-  reviewers on opus, live QA, verdict). Then tracker #31 update, the
-  backfill obligation for Cameron, and `register-session --off`.
+- Phase: VERDICT DELIVERED - MERGE-READY, UNMERGED (human gate). Code tip
+  8c833d33 gated by the planner (all five gates; eslint = the one
+  pre-existing useTours.ts:128 error); later commits docs only.
+- Worktree `W:\tmp\today-checklist`, branch `feat/today-checklist`, 0 behind
+  main @970a29b9 (fast-forward merge possible).
+- Review: build R1-R5 + FW1-FW5; planner review round 1 (2 reviewers) ->
+  PFW1 (ADV-1, ADV-4, docs); round 2 terminal; filed
+  docs/issues/today-quiet-shares-100-property-cap.md. Records in
+  planner-review/.
+- Nothing in flight: orchestrator, reviewers, watchdog and mirror all done.
+  DynamoDB Local and MinIO restarted clean on Cameron's ask (2026-10-25).
+- NEXT STEP: Cameron merges. Then: tracker #31 update (asked at the
+  verdict), Cameron's post-deploy backfill (dev then prod, dry run first),
+  reload open dashboard tabs after the deploy, `register-session --off`,
+  cleanup only on his go.
 
 ## What Cameron asked for (verbatim, with dates)
 

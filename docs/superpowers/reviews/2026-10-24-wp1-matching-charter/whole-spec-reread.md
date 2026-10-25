@@ -127,3 +127,12 @@ card per record, A6, A7, the fair-housing rubric line with names kept, and
 precision edits C1, C2, C5, C6, C7, C8, C9. Pending his answer: A1 landlord
 note flag, A4 reviews, A5 matching facts, the one-button re-score (which
 decides C3, C4 and efficiency B1), B2 and B3 deferred with efficiency.
+
+## Cameron's closing calls (2026-10-25)
+
+All remaining items settled and folded: A1 fair-housing flag to Sam, A4
+reviews kept and continuous, A5 matching facts live above a confidence
+floor, the one-button whole-pool re-score with the 7-day age rule
+(replaces C3, C4 and efficiency B1), prompt caching left to B2. Efficiency
+B2 (fingerprint helpers to B2) and B3 (Rankings page release valve) are
+left to slice planning, per "we can probably talk about efficiency later".

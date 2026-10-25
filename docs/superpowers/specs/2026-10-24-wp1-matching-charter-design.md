@@ -1,9 +1,9 @@
 # WP1 Matching Charter - design decisions for "Matching tenants and properties"
 
 Date: 2026-10-24
-Status: DRAFT charter. Whole-spec re-read 2026-10-25 partly folded in
-(records: whole-spec-reread.md); then the adversarial document review,
-then Cameron's spec gate.
+Status: DRAFT charter. Whole-spec re-read 2026-10-25 folded in (records:
+whole-spec-reread.md); next the adversarial document review, then
+Cameron's spec gate.
 Mission: Amendment No. 1 Work Package 1 (signed; Cameron 2026-10-20, Sam
 2026-10-21). 52 contracted hours.
 Records: docs/superpowers/reviews/2026-10-24-wp1-matching-charter/
@@ -108,7 +108,9 @@ or a rent above the tenant's stated portion are inputs the model weighs,
 not rules the rubric dictates. A pair marked Not interested stays in the
 pool and is never forced into Weak; the recorded outcome and the extracted
 reaction (a hard no, or "maybe, but show me others first") are both on the
-pair history for the model to read (Cameron 2026-10-25).
+pair history for the model to read (Cameron 2026-10-25). A "maybe" read
+from context weighs only as a slight reason against, and the age rule in
+section 10.3 lets it rise again as time passes.
 
 Why: Cameron 2026-10-24: "the signed contract was a little bit too harsh
 ... I don't think hard rules are ever going to be the answer." The free
@@ -235,9 +237,13 @@ in two ways:
 - One reading per send: the tenant's reaction to the specific property
   named, written to the pair history (section 6.3).
 
-Facts show on the record where Sam can dismiss a wrong one, through the
-existing suggestion flow. The landlord-side counterpart is filed, not
-built: docs/issues/landlord-conversation-extraction-to-property.md.
+Facts are written LIVE: no approval step is added where none exists
+today (Cameron 2026-10-25). A fact below a confidence floor
+(`EXTRACTION_FACT_MIN_CONFIDENCE`, default set in B1) is not written at
+all and never reaches Sam or the ranker. Written facts show on the tenant
+record with the message they came from; Sam can remove a wrong one, and a
+removed fact is not written again. The landlord-side counterpart is filed,
+not built: docs/issues/landlord-conversation-extraction-to-property.md.
 
 ## 7. D4 - The ranker
 
@@ -285,7 +291,12 @@ color, religion, sex, national origin, familial status, disability) never
 lower a score. The one use of disability is a tenant's own stated
 accessibility need matched to the property. Names stay on the cards
 (Cameron 2026-10-25); the pool (section 5) uses no protected
-characteristic.
+characteristic. A landlord or property requirement that is unacceptable
+under fair housing (for example "no kids", which discriminates on
+familial status) is NOT applied and is never trained against: the model is
+told to disregard it and to report it, and the composer shows Sam a flag
+naming that requirement as one to remove from the record. B2 adds the
+report to the output contract (section 7.4).
 
 The rubric version is stored on every match and run. Worked
 examples are a separate versioned file; Sam's reviewed matches (section
@@ -387,14 +398,15 @@ tenantId, range unitId, GSI byUnit for the property side, TTL
 expires_at). Fields: score; for[]; against[]; missing[]; stage (1 now);
 rubricVersion; model; runId; computedAt; anchorSide (which side's call
 produced it, for the run log only); fingerprints: tenantCard, unitCard,
-pairHistory; review (section 12). TTL `RANKING_PAIR_TTL_DAYS` default 180.
+pairHistory; review (section 12). TTL `RANKING_PAIR_TTL_DAYS` default 180. A reviewed match never expires
+(section 12).
 
 Not stored: band, priority effect, chips, sort position - all derived on
 read, so a threshold or setting change needs no re-rank.
 
 Why pair rows: both pages read the same facts; work done from a property's
-page is reused on each of its tenants' pages when fingerprints still
-match; staleness is per pair; Sam's review attaches to the pair; the table
+page is shown on each of its tenants' pages with no new call while it is
+current; staleness is per pair; Sam's review attaches to the pair; the table
 already exists.
 
 ### 10.2 On demand, never on open
@@ -408,20 +420,24 @@ press while one runs joins it rather than paying twice.
 
 ### 10.3 Fingerprints and what "out of date" means
 
-On read, the engine compares each stored row's fingerprints with the
-current cards and history:
+On read, the engine compares each stored match's fingerprints with the
+current cards and pair history, and checks its age:
 
-- Anchor card changed -> the ranking is out of date as a whole; the
-  composer says so and offers a full re-rank.
-- Only some candidates changed (card or pair history) -> those rows are
-  flagged "this candidate's match is out of date"; Update re-scores only
-  them, each by an insertion call (rubric, anchor, the other candidates
-  with their existing scores as context, output for the changed candidate
-  only). A candidate newly in the pool is an insertion; one that left the
-  pool is dropped with no call.
-- Drift guard: a full re-rank is offered instead of insertions when more
-  than `RANKING_INCREMENTAL_LIMIT` (default 10) candidates changed, or the
-  newest full ranking is older than `RANKING_FULL_RERANK_DAYS` (default 7).
+- A card or the pair history changed: that match is flagged "this
+  candidate's match is out of date". When the anchor's own card changed,
+  the ranking as a whole is flagged.
+- Age: a match computed more than `RANKING_MAX_AGE_DAYS` (default 7) ago
+  is flagged out of date even when nothing changed, because elapsed time
+  is itself an input: a "maybe" from three weeks ago must be able to rise
+  (Cameron 2026-10-25).
+- A candidate newly in the pool has no match yet ("not ranked yet"); one
+  that left the pool is not shown.
+
+ONE button. Rank, or Update when anything is flagged, re-scores the WHOLE
+pool of the anchor as one ranking (batched as in section 7.1) and writes
+every pair fresh. There is no per-candidate re-score and no insertion call
+(Cameron 2026-10-25): every score in a ranking is computed together, and
+the cost per press stays inside the A1 budget (section 14).
 
 What changes a fingerprint, and what does not: the cards as defined in
 section 6 (recency only as its bucket); on the pair history, an outcome
@@ -448,12 +464,20 @@ Cameron and Sam watch the A1 section 8 matching budget.
 
 ## 12. D9 - Sam's review
 
-Where she reads a ranking is where she reviews it: each row in the composer
-carries agree / disagree and an optional note, stored on the pair row as
-`review {verdict, note, by, at}`. The Rankings page shows review counts per
-run. Reviewed pairs are the source of new worked examples for the rubric
-(section 7.2); turning a review into an example is a human step in a later
-rubric revision, not an automatic one.
+Capture is continuous: where she reads a ranking is where she reviews it.
+Each row in the composer carries agree / disagree and an optional note. A
+review is kept as a snapshot of what she judged: verdict, note, by, at,
+plus the score, reasons, rubric version and model of the match at that
+moment. It survives a re-score of the pair (the row can show "reviewed at
+62, now 71"), and a reviewed match never expires; unreviewed matches
+expire on the normal TTL (Cameron 2026-10-25). Where the snapshots are
+stored is B2's call; any new table only on Cameron's explicit ask.
+
+The app never reads reviews to score. They are a TRAINING SET that lives
+outside the application data: the Rankings page exports them, and a person
+chooses which become worked examples in the next versioned examples file
+beside the rubric (section 7.2). That is the only path from Sam's reviews
+to the model. The Rankings page also shows review counts per run.
 
 A1 acceptance: Sam opens twenty real tenants and ten real properties in
 production and finds the rankings useful. B3 provides the tenant half, B4
@@ -484,7 +508,8 @@ never run in parallel.
 Band and score, the Priority badge, reasons for and against as chips with
 their source on hover, Missing as its own chip group, outcome chips
 (Already sent with date, No reply, Interested, Not interested, Tour
-pending), the out-of-date warning with its Update button, the select
+pending), the out-of-date warning (the single Update button sits on the composer,
+section 10.3), the select
 control, and agree / disagree.
 
 ### 13.3 History on the rows
@@ -531,6 +556,9 @@ reply yet / Interested / Not interested) remain where they are today.
   cents, worst ~31 cents, a tenant ranking ~3 cents; about 100 property and
   500 tenant rankings a month is ~30 dollars, falling with pair reuse. The
   A1 matching budget lines total 60-100 dollars.
+- Prompt caching: not designed in. With one button the only repeated
+  prompt prefix is between the batches of one large ranking, worth about
+  a cent; B2 may switch it on if a measurement shows it pays.
 - Testing key: a key separate from production on Sam's Anthropic account
   (A1 section 6), needed before B2 calls the model. Cameron's item.
 
@@ -540,8 +568,8 @@ reply yet / Interested / Not interested) remain where they are today.
 
 | Slice | Owns | Hours |
 |---|---|---|
-| B1 Ranking inputs | Tenant fields area preference, maximum tenant portion, accessibility need, preferences and constraints on the record and edit form; `priority` boolean on the unit; extraction schema widened (fixed fields, matching facts list, per-send reaction); card fingerprint helpers. Ships to production first. | 7-9 |
-| B2 Ranking engine | Pool in both directions with the window; cards by exclusion list with the landlord switch; completeness pass; stage-one call, rubric, examples, structured output; anthropic/fake/console drivers; pair rows with reuse, insertion, drift guard; run log with cost; band and priority policy on read; endpoints: rank, read ranking by anchor, review a pair; the Rankings page; GLOSSARY entries. | 20-24 |
+| B1 Ranking inputs | Tenant fields area preference, maximum tenant portion, accessibility need, preferences and constraints on the record and edit form; `priority` boolean on the unit; extraction schema widened (fixed fields, matching facts list written live above a confidence floor, per-send reaction); card fingerprint helpers. Ships to production first. | 7-9 |
+| B2 Ranking engine | Pool in both directions with the window; cards by exclusion list with the landlord switch; completeness pass; stage-one call, rubric, examples, structured output; anthropic/fake/console drivers; pair rows with the out-of-date and age rules and the one-button whole-pool re-score; review snapshots and their export; the fair-housing flag; run log with cost; band and priority policy on read; endpoints: rank, read ranking by anchor, review a pair; the Rankings page; GLOSSARY entries. | 20-24 |
 | B3 Send property from a tenant | The ranked row; the composer's tenant anchor; priority-only view; window toggle; completeness banner; Rank/Update; one-step send with the outcome on the pair; agree/disagree; Send property action on the tenant record. | 9-11 |
 | B4 Send property from a property | The composer's property anchor; ranked tenants replacing the filter-only audience; already-sent-awaiting-reply filter chip; pick one, a few or many; the Matching nav entry asking which record to start from; Send property action on the property record. | 11-13 |
 
@@ -566,7 +594,9 @@ citing this charter and lists which sections it implements.
 Sections 4 (soft rules), 5 (pool), 6.1 (cards by exclusion), 7.1 (staged
 pipeline, stage one listwise, no tools), 8 (score, bands, reasons,
 missing), 9 (priority never a model input; last heard from roles), 10
-(pair rows; on demand; fingerprints), 11 (run log with cost; Rankings
+(pair rows; on demand; fingerprints and the age rule; one button, whole
+pool), 12 (continuous review; reviewed matches kept; training set outside
+the app), 11 (run log with cost; Rankings
 page), 13.1 (one composer, two anchors; Send property on both records),
 14 (model per stage; fake driver), 15.2 (order). A slice that needs one
 changed brings it to Cameron.

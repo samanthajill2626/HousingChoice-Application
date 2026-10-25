@@ -27,15 +27,11 @@ in flight. Worktree W:/tmp/wp1-matching-charter, branch
 feat/wp1-matching-charter from main 970a29b9; the shared checkout stays
 on main.
 
-WHOLE-SPEC RE-READ (2026-10-25): whole-spec-reread.md; Cameron answered
-(round 15 below). Folded into the spec: soft Not interested, recency
-bucket, one card per record, anchor any status, whole address, fair-housing
-rubric line, seven precision edits. PENDING his answer: landlord "no kids"
-note flag, reviews as an outside training set, matching facts live or
-queued, one Update button re-scoring the whole ranking.
+WHOLE-SPEC RE-READ CLOSED (2026-10-25): every item settled and folded
+(rounds 15 and 16 below; whole-spec-reread.md). Phase now: ADVERSARIAL
+DOCUMENT REVIEW of the folded spec.
 
-NEXT STEP: fold Cameron's calls on whole-spec-reread.md into the spec,
-commit. Then the ADVERSARIAL DOCUMENT REVIEW: round 1
+NEXT STEP: the ADVERSARIAL DOCUMENT REVIEW: round 1
 = two independent Opus reviewers in parallel, same brief
 (W:/AI Projects/claude-plugins/abt/skills/feature-mission/design-review-briefs.md),
 spec + repo only, blind to this file and the brainstorm; adjudicate every
@@ -434,3 +430,26 @@ quality Sam trusts, then her review of it, then the two views.
 - Precision edits: "Let's have you include them." Folded, except the two
   that depend on the one-button question (Rank scoring only unmatched
   pairs; the drift-guard source).
+
+## Decisions, round 16 (Cameron, 2026-10-25, closing the re-read)
+
+- Fair housing: a requirement that is "very clearly unacceptable by Fair
+  Housing standards" is "not a thing that we should be trying to train the
+  model against. That's something for Sam" - not applied, flagged to Sam
+  as a requirement to remove.
+- "Weak against" meant a slight reason against, not the Weak band. "I
+  definitely don't want them to be placed in a specific band because they
+  said 'not interested.'"
+- Age rule: "a 7-day rule is fine" - a match older than 7 days is out of
+  date, so a "maybe" can bubble up. Chosen over a time-since-send bucket.
+- Reviews: continuous capture; "If anything is agreed or disagreed with, we
+  don't want an automatic expiration"; unreviewed matches expire normally.
+  Reviews are a training set outside the app (round 15).
+- Matching facts: written live, no approval ("We don't want approval to be
+  shoved into the process where no approval exists today"), with a
+  confidence floor below which a fact is not written at all. Note for B1:
+  today's extraction is mixed - some targets write directly, some become
+  suggestions (app/src/services/extraction/apply.ts:318); matching facts
+  follow the write path.
+- One Update button re-scoring the whole pool; prompt caching left to B2
+  ("let's go with your solution").

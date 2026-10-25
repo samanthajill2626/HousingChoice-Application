@@ -6,7 +6,7 @@ severity: low
 status: open
 area: app/today
 created: 2026-10-24
-refs: app/src/routes/today.ts, app/src/services/followUps.ts, app/src/services/quietShares.ts, app/src/repos/toursRepo.ts, app/src/repos/listingSendsRepo.ts, app/src/lib/unreadFeed.ts, dashboard/src/routes/today/useToday.ts
+refs: app/src/routes/today.ts, app/src/services/followUps.ts, app/src/services/quietShares.ts, app/src/repos/toursRepo.ts, app/src/repos/listingSendsRepo.ts, app/src/lib/unreadFeed.ts, dashboard/src/routes/today/useToday.ts, dashboard/src/routes/today/useTodayPastTours.ts
 ---
 
 **Problem.** Today's Quiet shares section (tracker #31, spec
@@ -63,6 +63,30 @@ minutes) fires whenever the index holds more than that budget. Measured:
 the WI7 load read 1 unread page (`unreadPages: 1`, pages of 100), and the
 S4 byUnread budget case (a walk budget of 2 over five unknown threads)
 read 1 page.
+
+Past tours needing an outcome (spec 5.3) adds client-side reads (code
+review R1A-3, fix wave 1). The section labels EVERY Past row - spec 5.3
+requires it, so "Show all N" counts only the rows Today qualifies (deleted
+tenants excluded) - and so each Today mount point-reads every listed tenant
+(`GET /api/contacts/:id`) and every listed property (`GET /api/units/:id`),
+all in flight at once (`dashboard/src/routes/today/useTodayPastTours.ts`).
+Every `tour.updated` then re-reads every listed tenant, for their delete
+state (properties stay memoized for the page's lifetime; tenants
+deliberately do not), debounced 300 ms. Every tour create now emits
+`tour.updated` (spec 8) - including a requested tour, which can never be a
+Past row - so each Interested click and each tour create re-reads the whole
+tenant list in every open Today tab. The Past window is 90 days
+(`PAST_TAB_DAYS`, `dashboard/src/routes/tours/useTours.ts`) of undecided
+tours, so the cost grows with exactly the backlog the section exists to
+show. Scale: prod held about 23 Past rows at design time (spec 5.3) - about
+23 tenant plus 23 property reads per mount and about 23 tenant reads per
+tour event; the review's probe measured a 60-row Past list at 60 + 60 reads
+per load and 60 per `tour.updated`. Spec 5.3 accepts this cost. If it
+grows: skip the reload for a `tour.updated` whose tour is not on screen and
+is `requested` (it cannot enter Past), or have the server return the Past
+rows already named and filtered for deleted tenants (the Today route
+already memoizes contact reads). Labeling only the shown rows is not an
+option: "Show all N" would then count rows Today does not qualify.
 
 Not a cost, but the same reads (plan PR90, WI8, worklist WL-12): Tours to
 book reads the tours byStatus GSI, and Quiet shares reads the units byStatus

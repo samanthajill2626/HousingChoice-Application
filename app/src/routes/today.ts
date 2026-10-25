@@ -718,6 +718,13 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     // WARN carries the section and the error, never a name, and the route still
     // answers 200. A failed unit LABEL is not a failure - unitLabelOf degrades
     // to the unitId - and getContact never throws.
+    // CONSISTENCY RESIDUE, accepted (plan PR90 / WI8; code review R1A-5): the
+    // byStatus GSI cannot be read consistently, and a create's tour.updated (or
+    // a booking PATCH's) triggers ONE refetch about 300 ms later, which can
+    // still miss the just-created request - or still list a just-booked one,
+    // since the status check below reads the same projected item - until the
+    // next refetch or a reload. No mechanism is added; Quiet shares carries the
+    // same residue on its tours byUnit read (below).
     const toursToBookRows: Ranked[] = [];
     let toursToBookStatus: TodayResponse['toursToBook'] = 'ok';
     try {

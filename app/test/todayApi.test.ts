@@ -2710,6 +2710,11 @@ describe('today action-queue API (BE6/C7)', () => {
       ['they are marked Inactive', () => { contactOf('c-1').status = 'inactive'; }],
       ['they are deleted', () => { contactOf('c-1').deleted_at = ago(HOUR_MS); }],
       ['the property stops being available', () => { world.units.get('u-a')!.status = 'on_hold'; }],
+      // Fix wave 1 (FW1-4; code review R1SC-3): the three spec 6.1 drop-offs
+      // the route table did not pin yet (the shared eligibility rule does).
+      ['they become unreachable (sms_unreachable)', () => { contactOf('c-1').sms_unreachable = true; }],
+      ['they are placed (a tenant whose status is placed)', () => { contactOf('c-1').status = 'placed'; }],
+      ['they have no phone', () => { delete contactOf('c-1').phone; }],
     ];
     for (const [label, change] of dropOffs) {
       it(`a quiet person drops off when ${label}`, async () => {

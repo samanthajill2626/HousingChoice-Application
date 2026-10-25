@@ -607,7 +607,10 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   listed first; `/tours` stays Active) is a server-filtered, server-paged
   list of every tour (`GET /api/tours/list`); its Upcoming / Past are pure
   date splits across every status, unlike the Active tab's Upcoming section
-  and the Past tab (curated work lists).
+  and the Past tab (curated work lists). On Today the same requests are the
+  checklist's "Tours to book" section (tracker #31, 2026-10-24): every
+  `requested` tour, oldest request first, reading "Requested today" or
+  "Requested N days ago", until it is booked, canceled or closed.
 
 - **last heard from** (last-heard-from, 2026-10-12) - the most recent inbound
   text, call or email FROM a contact, in any thread (one-to-one, relay group,
@@ -621,7 +624,8 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   time whatever its outcome; a STOP counts (it is not a consent signal); an
   email from an address on no contact does not count until staff link the
   address. Outbound and automated traffic never move it. Not a conversation's
-  `last_activity_at` (any direction) and not a phone's `lastSeenAt`.
+  `last_activity_at` (any direction) and not a phone's `lastSeenAt`. Its
+  staff-outbound twin is **last reached out** (`last_reached_out_at`).
 
 - **send outcome** (last-heard-from, 2026-10-12) - per property sent to a
   contact: No reply yet / Replied / Interested / Not interested, plus Signed
@@ -696,11 +700,11 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   does not move **last heard from**; a later inbound from the person does,
   so the pair then reads Replied and is back on Follow up once quiet
   (unknown contacts included; never an **Inactive** contact, see **waiting
-  on a reply**). The unread thread also shows on Today: a
-  tenant's, landlord's or partner's under Unreplied as "<name> -
-  Unreplied", an existing unknown contact's under Needs you now as a "New
-  unknown contact" (not when that contact is **Inactive**: its unknown thread
-  shows only in the inbox). When the contact had no thread on that phone, the
+  on a reply**). On Today only an existing unknown contact's unread thread
+  shows, under Identify these contacts as a "New unknown contact" (not when
+  that contact is **Inactive**); a tenant's, landlord's or partner's shows
+  only in the inbox (Today's Unreplied section was removed by tracker #31,
+  2026-10-24). When the contact had no thread on that phone, the
   sign-up creates one with no message, so its inbox row is bold with a
   blank preview and, as the contact's newest conversation, heads that
   contact's row.
@@ -716,26 +720,70 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   section 5b) but stays on the Contacts lists, in
   search and in the inbox, where its texts and calls still show unread and
   its row carries a small muted "Inactive" tag and no "Needs triage" chip.
-  An inbound text or call never moves it back to Needs review. An unknown
-  contact's or team member's unknown threads leave Today's Needs you now
-  when it is marked Inactive (a team member's 1:1 threads are unknown
-  threads too; those unread texts show only in the inbox, while a typed
-  thread it kept from an earlier type - a re-type to unknown or team
-  member, through the API or an import, re-types none of its threads -
-  still feeds Unreplied), and an Inactive unknown contact sorts below the
-  Needs review ones on the inbox Unknown tab and on Contacts > Unknown; an
-  Inactive tenant's or partner's unread text still shows on Today where it
-  would otherwise (under Unreplied, or as a "New unknown contact" row when
-  its thread is still an unknown thread: the importer mints every imported
-  one-to-one thread as one, whatever the contact's type -
-  `docs/issues/imported-unknown-threads-surface-as-unknown-on-today.md` -
-  and a second number's can stay one after the contact is typed).
+  An inbound text or call never moves it back to Needs review. An Inactive
+  unknown contact leaves Today's Identify these contacts (its unread texts
+  show only in the inbox) and sorts below the Needs review ones on the
+  inbox Unknown tab and on Contacts > Unknown. Since tracker #31
+  (2026-10-24) Today shows no other contact's unread texts at all - of any
+  type, Active or Inactive, whatever its thread's type (an imported
+  contact's or a team member's unknown thread included) - so on Today
+  Inactive changes only that and **Quiet shares** (an Inactive contact is
+  never **waiting on a reply**, so never a quiet share).
   Staff set it from the contact page header dropdown or the Edit contact
   details Status field, which offer the same choices for every type; an
   unknown contact has no "Active" (Needs review or Inactive only). NOT a
   landlord's "Parked" (the landlord's own retired status, which needs a
   reason), which none of these rules touch. Full rules:
   [STATUS-MODEL.md](STATUS-MODEL.md) section 5b.
+
+- **Quiet shares** (Today section; today-checklist, 2026-10-24, tracker #31) -
+  the Today checklist section of people a property was sent to who have
+  gone quiet: a send from the last 14 days at Replied that has been quiet
+  for 2 days, or at No reply yet for 5 days (fixed 48-hour and 120-hour
+  durations, not calendar days). The clock starts at the latest of the
+  send, the person's **last heard from** and their **last reached out**, so
+  a message, email or call from either side restarts it; sending another
+  property does not (a share never moves **last reached out**). The
+  candidates are exactly the Follow up tab's **waiting on a reply** rows
+  (`collectWaitingFollowUps`, `app/src/services/followUps.ts`), so every
+  Quiet shares person is also on that tab, whose own 24-hour rule is
+  unchanged. Grouped by property, one expandable line each ("3 people: 1
+  replied, then quiet - 2 never replied"), the first property open on first
+  render; a person row reads "Replied, then quiet N days" or "No reply in N
+  days" and opens the contact page (no Interested / Not interested on
+  Today). The heading carries no count; the 5-row limit counts property
+  lines ("Show all N properties"). Code: `buildQuietShares`
+  (`app/src/services/quietShares.ts`), wire `TodayResponse.quietShares`.
+
+- **last reached out** (`last_reached_out_at`; today-checklist, 2026-10-24) -
+  the latest instant STAFF followed up with a contact: a text, email or
+  call staff sent themselves, in any thread (one-to-one, relay group, native
+  group text; a relay or group post counts for every member it reached; a
+  call counts once the contact's leg is dialed, answered or not). Shares and
+  broadcasts, automated sends (tour reminders, nudges, auto-replies,
+  confirmations, relay system announcements - also when staff press Send
+  now or Retry on one) and machine resends never move it. The outbound
+  twin of **last heard from**, which outbound never moves;
+  "last communication either way" is the later of the two, never a stored
+  field. Forward-only, written ONLY by `contactsRepo.touchLastReachedOut`
+  through `recordStaffOutreach` (`app/src/services/staffOutreach.ts`; the
+  writer table is spec 2026-10-23-today-checklist-design.md section 7.3),
+  refused from clients, seeded once by
+  `app/scripts/backfill-last-reached-out.ts`. Never shown in the UI: it only
+  feeds the **Quiet shares** clock.
+
+- **At a glance** (Today; today-checklist, 2026-10-24) - the lower part of
+  the Today page, below a dashed divider: Tours today (compact rows: the
+  time, the tenant, the property) and the AI suggestions, collapsed to one
+  line ("AI suggestions for N contacts"). Reference only: it never counts
+  toward the checklist, so "All caught up" shows when every section ABOVE
+  the line is empty, with At a glance still rendered below it. The
+  checklist above the line, in order: Needs you now, Identify these
+  contacts, Past tours needing an outcome, Tours to book, **Quiet shares**,
+  Relay groups to close, Placements (the `follow_ups` group, headed
+  "Follow-ups due" before). Every section shows 5 rows, then "Show all N".
+  Today has no Unreplied section: known contacts' replies are the Inbox
+  badge's job.
 
 ---
 

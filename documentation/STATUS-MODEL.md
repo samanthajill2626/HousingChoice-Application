@@ -4,7 +4,7 @@
 > three core entities move through the HousingChoice process. It is **not** a dated
 > spec and must **not** be stamped HISTORICAL — expect tweaks and additions over time.
 > When the model changes, edit this file in place (like its sibling
-> [GLOSSARY.md](GLOSSARY.md)). Last substantive update: **2026-10-23**.
+> [GLOSSARY.md](GLOSSARY.md)). Last substantive update: **2026-10-24**.
 >
 > Naming follows the glossary: the dwelling is a **`unit`** in code/data, shown as
 > **home** to tenants and **property** to landlords/staff. The workflow record is a
@@ -229,8 +229,8 @@ pinned by a mirror test).
 | unknown | Needs review, Inactive |
 
 - **`Needs review`** - the same front door as above. An unknown contact that is
-  Needs review shows on Today's Needs you now as a "New unknown contact" and
-  carries the inbox "Needs triage" chip.
+  Needs review shows on Today's Identify these contacts as a "New unknown
+  contact" and carries the inbox "Needs triage" chip.
 - **`Active`** - a partner or team member staff work with. An unknown contact has
   no `Active` (removed 2026-10-23): it is either waiting for review or set aside.
 - **`Inactive`** - set aside without being deleted. For an unknown contact it is
@@ -279,19 +279,12 @@ Two differences remain, on purpose:
 
 - The Tenants view hides Inactive tenants by default; the other Contacts views have
   no status filter (`docs/issues/contacts-status-filter-tenants-only.md`).
-- An Inactive tenant's or partner's unread text still shows on Today, exactly where
-  it would if the contact were not Inactive: in Unreplied, or as a "New unknown
-  contact" row in Needs you now when its thread is still an unknown thread (the
-  importer mints every imported one-to-one thread as an unknown thread, whatever
-  the contact's type -
-  `docs/issues/imported-unknown-threads-surface-as-unknown-on-today.md` - and a
-  second number's thread can stay one after the contact is typed). An Inactive
-  unknown contact's or team member's unknown threads do NOT show in Needs you now
-  (a team member's 1:1 threads are unknown threads, so the same rule covers them) -
-  those unread texts show only in the inbox. A typed thread such a contact kept
-  from an earlier type still feeds Unreplied: a re-type to unknown or team member
-  (through the API or an import; the Edit contact details picker offers neither)
-  re-types none of the contact's threads.
+- On Today, a Needs review unknown contact's unread texts show in Identify these
+  contacts and an Inactive unknown contact's do NOT - they show only in the
+  inbox. Since tracker #31 (2026-10-24) no other contact's unread text shows on
+  Today at all (any type, Active or Inactive, whatever its thread's type), so
+  Today draws no other line between Inactive and the rest for unread texts (its
+  Quiet shares section follows point 1: an Inactive contact is never on it).
 
 Automatic texts (tour reminders, group text rosters, the missed-call auto-text,
 placement nudges, hand-picked share recipients) check no status for any type, and

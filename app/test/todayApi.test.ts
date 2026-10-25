@@ -780,6 +780,64 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(ident.find((i) => i.refId === 'c-dupe')?.who).toBe('Dee Dupe');
   });
 
+  // Fix wave 1 (FW1-2; code review R1A-1). The triage pass de-duped by PHONE
+  // only, fed by the unread pass's kept thread - so when that thread is an
+  // EMAIL thread (no participant_phone: it is the newest, or the only one) it
+  // recorded nothing and the triage pass emitted the SAME contact again: two
+  // rows under one React key, and "Show all N" counting the person twice. The
+  // triage pass now also skips a contactId the unread pass emitted (spec 5.2:
+  // one row per person). Email threads carry `phone: ''` in their roster, as
+  // conversationsRepo.createOrGetByParticipantEmail writes it.
+  it('an unknown contact whose NEWEST unread thread is its email thread is listed once', async () => {
+    world.contacts.push({ contactId: 'c-dupe', type: 'unknown', status: 'needs_review', phone: '+15550108888' });
+    seedConversation({
+      conversationId: 'conv-dupe-phone',
+      participant_phone: '+15550108888',
+      participant_display_name: 'Dee Dupe',
+      status: 'open',
+      last_activity_at: iso(-60_000),
+      type: 'unknown_1to1',
+      ai_mode: 'auto',
+      created_at: iso(-200_000),
+      unread_count: 1,
+      participants: [{ contactId: 'c-dupe', phone: '+15550108888' }],
+    } as ConversationItem);
+    seedConversation({
+      conversationId: 'conv-dupe-email',
+      participant_email: 'dee@example.test',
+      status: 'open',
+      last_activity_at: iso(-50_000), // NEWER than the phone thread
+      type: 'unknown_1to1',
+      ai_mode: 'auto',
+      created_at: iso(-200_000),
+      unread_count: 1,
+      participants: [{ contactId: 'c-dupe', phone: '' }],
+    } as ConversationItem);
+
+    const ident = (await getItems()).filter((i) => i.group === 'identify');
+
+    expect(ident.map((i) => `${i.refType}:${i.refId}`)).toEqual(['contact:c-dupe']);
+  });
+
+  it('an unknown contact with ONLY an unread email thread is listed once', async () => {
+    world.contacts.push({ contactId: 'c-mail', type: 'unknown', status: 'needs_review', email: 'mae@example.test' });
+    seedConversation({
+      conversationId: 'conv-mail',
+      participant_email: 'mae@example.test',
+      status: 'open',
+      last_activity_at: iso(-50_000),
+      type: 'unknown_1to1',
+      ai_mode: 'auto',
+      created_at: iso(-200_000),
+      unread_count: 1,
+      participants: [{ contactId: 'c-mail', phone: '' }],
+    } as ConversationItem);
+
+    const ident = (await getItems()).filter((i) => i.group === 'identify');
+
+    expect(ident.map((i) => `${i.refType}:${i.refId}`)).toEqual(['contact:c-mail']);
+  });
+
   it('a duplicate thread does NOT consume one of the TODAY_UNREAD_CAP slots', async () => {
     // The cap is 100. Seed 99 single-thread contacts plus ONE contact owning two
     // unread threads: 101 index rows, 100 distinct people. Deduping only at emit
@@ -1320,6 +1378,46 @@ describe('today action-queue API (BE6/C7)', () => {
     const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
     expect(needs.some((i) => i.refId === 'c-del')).toBe(false);
     expect(needs.some((i) => i.refId === 'phone#+15550100000')).toBe(false);
+  });
+
+  // Fix wave 1 (FW1-2; code review R1A-1): ONE row per opted-out member. A
+  // member opted out of two open relay groups emitted a row per group - the
+  // same contact twice in Needs you now under one React key, counted twice by
+  // "Show all N" (the row is pre-existing on main; the 5-row list made it
+  // visible). The pass now emits at most one row per member contactId.
+  it('a member opted out of TWO open relay groups is listed once', async () => {
+    world.contacts.push({
+      contactId: 'c-opt',
+      type: 'tenant',
+      status: 'active',
+      firstName: 'Opted',
+      lastName: 'Twice',
+      phone: '+15550102222',
+      sms_opt_out: true,
+    });
+    for (const [conversationId, pool, offset] of [
+      ['conv-relay-opt-a', '+15550103331', -40_000],
+      ['conv-relay-opt-b', '+15550103332', -30_000],
+    ] as const) {
+      seedConversation({
+        conversationId,
+        participant_phone: pool, // synthetic pool number
+        status: 'open',
+        last_activity_at: iso(offset),
+        type: 'relay_group',
+        ai_mode: 'manual',
+        created_at: iso(-200_000),
+        participants: [{ contactId: 'c-opt', phone: '+15550102222', name: 'Opted Member' }],
+        relay_opted_out_members: {
+          'c-opt': { contactId: 'c-opt', phone: '+15550102222', name: 'Opted Member', at: iso(-20_000) },
+        },
+        relay_optout_flag: 'attention',
+      } as ConversationItem);
+    }
+
+    const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
+
+    expect(needs.map((i) => `${i.refType}:${i.refId}`)).toEqual(['contact:c-opt']);
   });
 
   // THE DEFECT THESE PIN (prod, 2026-08-17/18: 233 WARNs in 24h). This pass

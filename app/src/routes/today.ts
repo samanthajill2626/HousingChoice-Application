@@ -772,7 +772,20 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     // needs_review contact, and the triage pass de-dupes the SAME person to one
     // item, preferring the conversation (the actionable target).
     const emittedUnknownPhones = new Set<string>();
+    // ...and the contactIds the unread pass emitted, beside the phones (fix
+    // wave 1, code review R1A-1): when the kept thread is an EMAIL thread it
+    // has no participant_phone, so the phone set alone let the triage pass
+    // emit the same contact a second time - one person, two rows under one
+    // React key (spec 5.2: one row per person).
+    const emittedIdentifyContactIds = new Set<string>();
     {
+      // ONE row per opted-out member (fix wave 1, code review R1A-1): a member
+      // opted out of two open relay groups is one person to look at, and the
+      // dashboard keys rows by refType:refId. The first group read (newest
+      // activity first) names the row; a later group's entry for the same
+      // member is skipped before its reads. Only EMITTED members are recorded,
+      // so a member a first group did not confirm is still judged by the next.
+      const optOutContactIds = new Set<string>();
       const page = await conversations.listRelayOptOutAttention({ limit: GROUP_FETCH_LIMIT });
       warnIfCapped('relay_optout', page.items.length, GROUP_FETCH_LIMIT);
       for (const conv of page.items) {
@@ -792,6 +805,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
             const memberContactId = entry.contactId;
             // No contactId → we can't link OR live-confirm; skip (honesty rule).
             if (typeof memberContactId !== 'string' || memberContactId.length === 0) continue;
+            if (optOutContactIds.has(memberContactId)) continue; // already listed from another group
             const memberContact = await getContact(memberContactId);
             // Contact gone -> nothing to link or confirm; the annotation is stale,
             // auto-resolve silently (also narrows memberContact for the checks below).
@@ -819,6 +833,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
               formatPhoneForDisplay(entry.phone) ??
               formatPhoneForDisplay(memberContact.phone) ??
               memberContactId;
+            optOutContactIds.add(memberContactId);
             needsYouNow.push({
               item: {
                 group: 'needs_you_now',
@@ -1009,6 +1024,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         if (typeof conv.participant_phone === 'string') {
           emittedUnknownPhones.add(conv.participant_phone);
         }
+        emittedIdentifyContactIds.add(contactId);
         identify.push({
           item: {
             group: 'identify',
@@ -1111,6 +1127,10 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         // needs_review contact with NO matching emitted conversation still
         // emits its own row.
         if (typeof contact.phone === 'string' && emittedUnknownPhones.has(contact.phone)) continue;
+        // ...and by identity: the unread pass already emitted THIS contact
+        // (its kept thread may be an email thread, which records no phone -
+        // fix wave 1, code review R1A-1).
+        if (emittedIdentifyContactIds.has(contact.contactId)) continue;
         const who =
           nameFromContact(contact) ?? formatPhoneForDisplay(contact.phone) ?? contact.contactId;
         identify.push({

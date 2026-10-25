@@ -13,7 +13,12 @@
   each wake reads `W:\tmp\today-checklist\.superpowers\sdd\progress.md`
   and reports a bold "Checkpoint:" line. Mirror: transcript-tail.mjs ->
   `.superpowers/sdd/live.log`.
-- Failure budget: 0 consumed of 2.
+- Failure budget: 0 consumed of 2. Infra: 1 (2026-10-25 ~03:11Z the
+  orchestrator and its R4 reviewer stopped on the weekly usage limit;
+  resumed by SendMessage at 14:00Z on Cameron's "continue", tree clean at
+  5a52e978, R4 re-dispatched fresh).
+- Progress at resume: S1-S7 done, code review R1-R3 with fix waves FW1-FW3
+  done; next R4 (closing re-review of FW3), self-QA S7.16, then S8.
 - NEXT STEP: on each watchdog wake, branch on its line (TERMINAL / STALL /
   CHECKPOINT) per the skill; on DONE, run the handback review (re-ground in
   the full replay, gates myself on a quiet tree, spec-conformance + plan-blind

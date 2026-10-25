@@ -29,7 +29,10 @@ on main.
 
 WHOLE-SPEC RE-READ CLOSED (2026-10-25): every item settled and folded
 (rounds 15 and 16 below; whole-spec-reread.md). Phase now: ADVERSARIAL
-DOCUMENT REVIEW of the folded spec.
+DOCUMENT REVIEW of the folded spec (94951d54). Round 1 IN FLIGHT since
+2026-10-25: two Opus reviewers (general-purpose, background), outputs
+design-review/r1-reviewer-a.md and r1-reviewer-b.md. If they are gone
+after a compaction, check those files; re-dispatch only a missing one.
 
 NEXT STEP: the ADVERSARIAL DOCUMENT REVIEW: round 1
 = two independent Opus reviewers in parallel, same brief

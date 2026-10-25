@@ -121,6 +121,10 @@ and AI suggestions never keep the page from reading as done.
 
 - A section that failed to load is not empty: it shows its own error, and the
   page does not claim "All caught up" (2.5).
+- A truncated Quiet shares read (more than 100 available properties) is not
+  empty either: the section shows its note and the page does not claim "All
+  caught up" (3; planner handback review ADV-1). Tracked:
+  docs/issues/today-quiet-shares-100-property-cap.md.
 - The existing settle rule stays: the message waits for the past-tours section
   to settle so it never flashes above rows about to appear.
 

@@ -311,6 +311,30 @@ export interface UnmatchedEmailUpdatedEvent {
  * that flipped type or carry a name, so an unnamed or threadless contact got
  * no event at all. ID-only - NEVER a name, phone or status value (PII, doc
  * section 9); consumers re-read.
+ *
+ * Staff outreach (tracker #31; spec 2026-10-23-today-checklist-design.md
+ * 7.3; plan PR8): it is ALSO the one live event of a one-to-one staff send
+ * whose `last_reached_out_at` stamp was written - emitted AFTER the send's
+ * own events, and only for a contactId recordStaffOutreach
+ * (services/staffOutreach.ts) returned as written, so Today's Quiet shares
+ * drops the person on the refetch. Emitters: services/sendMessage.ts (a send
+ * carrying the `staffOutreach` option - the 1:1 route's first batch and the
+ * staff Retry of a row that is neither a share, automated nor system copy,
+ * plan PR104), services/sendEmailMessage.ts (after SES accepts),
+ * routes/webhooks/voice.ts stampOutboundDial (the outbound whisper-gate dial,
+ * after the TwiML is sent, handed to `afterResponse`), and routes/dev.ts
+ * touchFixtureReachedOut (the dev fixture seams' outbound rows). Three
+ * INBOUND paths emit it too, right after their `last_heard_from_at` touch
+ * returns 'written', because their conversation.updated fires before that
+ * touch or not at all: services/inboundEmail.ts, the founder-triage inbound
+ * call (an abandoned ring has no Dial summary) and the masked relay call
+ * paths (refused and bridged), both in routes/webhooks/voice.ts. A relay or
+ * group post emits NO contact.updated per member: jobs/relayFanOut.ts (a team
+ * post's legs) and services/relayAnnouncements.ts (a staff-edited intro) each
+ * emit ONE conversation.updated after their member loop, through
+ * stampRelayOutreach (services/relayAnnouncements.ts), built from a fresh
+ * consistent read (conversationsRepo.getByIdConsistent); services/groupSend.ts
+ * stamps BEFORE its existing conversation.updated.
  */
 export interface ContactUpdatedEvent {
   contactId: string;

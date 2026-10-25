@@ -496,6 +496,72 @@ named in each item.
 
 S7.16: orchestrator-owned (Phase 5)
 
+## Live self-QA (S7.16) - run by the orchestrator, 2026-10-25
+
+Two passes on a hermetic e2e session lane, driven through the project
+Playwright MCP (bundled Chromium, VA dev-login), measured in the browser.
+Screenshots under the worktree's gitignored `.playwright-mcp/`.
+
+- Lane checks (both passes): lane 12; ports 10201 / 10211 / 10221 / 10231
+  (none of 8080 / 5174 / 8889 / 5173); tablePrefix `hc-local-12-`;
+  accessKeyId `hclane12`; ping `"dev":true`, appCommit equal to HEAD
+  (pass 1 9913c552, pass 2 e11ec4fe). Ready wait on the anchored
+  `^\[e2e-session\] ready ` line (WL-19). Each lane stopped with
+  `npm run e2e:stop` and its ports proven free.
+- World (lean, plus): two available properties - u1 "...11 Selfqa Ave" and
+  u2 with a worst-case address ("...22 Extraordinarily Long Boulevard
+  Northwest Apartment 1234B"); quiet shares Noreply (u1, sent 6 days ago),
+  Replied (u1, sent 5, inbound 3 days ago), a long-named tenant on u2 (sent
+  5 days ago - D7-3: 5, not 7, so u1 leads); six requested tours (a
+  long-named tenant on u2 first); tours later today (pass 2: one with a long
+  name); one unknown contact; placement-0001 made stuck; pass 2 also six
+  past tours (one long-named).
+- Server truth (GET /api/today): identify 1, tours_to_book 6 oldest first
+  ("Requested today"), tours_today with `at` and `unitLabel`, follow_ups 1
+  (the stuck placement), quiet shares u1 [Replied (replied), Noreply
+  (no_reply)] then u2 [the long-named tenant] - spec 6.1-6.3 order.
+- Desktop 1280 x 900 (`s7-today-desktop.png`): h2 order Identify these
+  contacts, Tours to book, Quiet shares, Placements, then At a glance (h2)
+  with Tours today (h3) - no heading count (PR102); subtitle exact; the
+  three help lines exact; no "All caught up", no Unreplied, no "Follow-ups
+  due". Tours to book: 5 rows + "Show all 6" (aria-expanded false) -> 6 rows
+  + "Show fewer" (true) -> 5. Quiet shares: u1 open ("2 people: 1 replied,
+  then quiet - 1 never replied"), u2 folded ("1 person: 1 never replied");
+  Replied first ("Replied, then quiet 3 days", tag Replied), then "No reply
+  in 6 days" (tag "No reply yet"); person links go to /contacts/<id>; fold
+  and open both work. Tours today: "Tour for <tenant> at <property>,
+  12:54 PM" (local). No AI line (no suggestions). Full width: maxWidth
+  none, page 977 of main 1025. Overflow doc 0 / main 0.
+- Live behavior: a staff text (W1, 201) to Noreply removed that person
+  from Quiet shares in 459 ms with no reload (a window marker survived);
+  the properties re-ordered (u2 now first) and the viewer's choices stayed
+  with their unitIds (u1 open at position 2, u2 folded). FW1-1 at the
+  network boundary: with /api/today refetches aborted (page.route), a tour
+  create's tour.updated showed "We couldn't refresh Today. Reload the page
+  to see the latest." (role alert) and every section stayed; after unroute,
+  a contact.updated (the unknown contact marked Inactive) cleared the note,
+  Tours to book read "Show all 7" and Identify left - no reload. The only
+  console error was the deliberately aborted request.
+- Widths, pass 2 (both quiet-share properties open, Tours to book
+  expanded): 380 / 600 / 1024 / 1280 / 1440 - page and main overflow 0
+  everywhere; no row's content wider than the row; no name past its row.
+  The long address in the long-named Tours to book row truncates with an
+  ellipsis at 1024 (126 px) and 1280 (382 px) by design (wide layout: name
+  in full, reason truncated); none at 1440. Past tours (pass 2): oldest
+  first, 5 rows + "Show all 6" beside "Open the Past tab" (PR67), and at
+  380 after Show all nothing is clipped or overflows.
+- DEFECT found in pass 1, fixed (FW5, 69a01770): at a narrow pane
+  (container <= 560 px) a long NAME was cut at the card edge with no wrap
+  or ellipsis (`.who` nowrap inside `.row` overflow hidden) - Tours to book
+  and Quiet shares person rows (pass 1 at 380: link scrollWidth 464 > 315,
+  416 > 277; `s7-today-380-ttb.png`, `s7-today-380-expanded.png`), and the
+  Tours today compact row ran past its card. Pre-existing CSS, more exposed
+  by the new rows. Pass 2 at HEAD e11ec4fe: the names wrap in full
+  (two lines at 380; one line at 600 and up; `s7-today-380-ttb-after.png`,
+  `s7-today-380-quiet-after.png`, `s7-today-380-glance-after.png`), pinned
+  by an e2e geometry test (today-checklist.spec.ts, FW5-report.md).
+- No other defect found.
+
 ## Closing run and watch items (S7.17)
 
 - Closing run (tag `close`, HEAD 65904980, one cold boot through

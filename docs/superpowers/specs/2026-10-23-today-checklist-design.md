@@ -193,7 +193,7 @@ QuietSharePerson {
 
 A person waiting on two properties has a row under each property. (r8: no
 distinct-people count is sent; headings carry no count.) `truncated` is the Follow up builder's flag (more than 100
-available properties); the dashboard shows "Showing the first 100 properties"
+available properties); the dashboard shows "Only the first 100 available properties were checked." (planner handback review ADV-1: the section shows that note even with no property lines, and a truncated read is never "All caught up")
 under the section when it is true.
 
 ### 3.1 The client-side fallback

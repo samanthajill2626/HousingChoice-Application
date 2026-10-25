@@ -73,16 +73,20 @@ import { QueryCommand, ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk
 import { tableName } from '../src/lib/config.js';
 import { attributeInbound, normalizeInstant, type HeardFromLookup } from '../src/lib/heardFrom.js';
 import { FOLLOW_UP_LOOKBACK_MS } from '../src/lib/listingSendOutcome.js';
-import { logger as defaultLogger, type Logger } from '../src/lib/logger.js';
+import type { Logger } from '../src/lib/logger.js';
 import type { MessageId } from '../src/messages/catalog.js';
 import { resolveMessage } from '../src/messages/resolve.js';
 import { createContactsRepo, type ContactsRepo } from '../src/repos/contactsRepo.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
 import { splitTsMsgId, type MessageItem } from '../src/repos/messagesRepo.js';
 import { isPointerConversation } from './backfill-last-heard-from.js';
+import { createScriptLogger } from './lib/scriptLogger.js';
 import { parseStageArgs, resolveStageClient, type StageClient } from './lib/stageClient.js';
 
 export const SCRIPT_NAME = 'backfill-last-reached-out';
+
+/** Plain-text output for the operator's terminal (lib/scriptLogger.ts); tests inject their own logger. */
+const defaultLogger: Logger = createScriptLogger();
 
 /** The window (spec 7.5): the Follow up candidate horizon. */
 export const WINDOW_MS = FOLLOW_UP_LOOKBACK_MS;

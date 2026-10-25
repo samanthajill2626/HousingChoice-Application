@@ -894,6 +894,39 @@ describe('Today - round-2 review fixes', () => {
   });
 });
 
+// Fix wave 3 (FW3-1; code review R3-1): a failed past-tours RELOAD is the
+// same unknown state as Today's own failed refresh (FW1-1), also when the
+// last good load listed nothing - the section says so and the page does not
+// claim "All caught up" (spec 2.3). Today.pastToursReload.test.tsx drives
+// the same through the real hooks.
+describe('Today - a failed past-tours reload after an empty load (fix wave 3)', () => {
+  const HEADING = 'Past tours needing an outcome';
+  const PAST_NOTE = 'Could not refresh past tours. Reload the page to see the latest.';
+
+  it('withholds All caught up; the section shows its heading and the reload note, with no list', () => {
+    state = { status: 'ready', source: 'server', items: [] };
+    past = { status: 'ready', rows: [], total: 0, reloadFailed: true };
+    renderToday();
+    expect(screen.queryByText('All caught up')).not.toBeInTheDocument();
+    const section = sectionOf(HEADING);
+    expect(within(section).getByRole('alert')).toHaveTextContent(PAST_NOTE);
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(within(section).queryByRole('list')).not.toBeInTheDocument();
+  });
+
+  it('the next good reload that still lists nothing hides the section, and All caught up returns', () => {
+    state = { status: 'ready', source: 'server', items: [] };
+    past = { status: 'ready', rows: [], total: 0, reloadFailed: true };
+    const view = renderToday();
+    expect(screen.queryByText('All caught up')).not.toBeInTheDocument();
+    past = { status: 'ready', rows: [], total: 0, reloadFailed: false };
+    view.rerender(todayTree());
+    expect(screen.queryByRole('heading', { name: HEADING })).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByText('All caught up')).toBeInTheDocument();
+  });
+});
+
 describe('Today - the sections below past tours are never held (round 4)', () => {
   it('the AI suggestions line renders at once while the past-tours section is still loading', () => {
     state = {

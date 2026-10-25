@@ -21,7 +21,8 @@
 // which stays mounted (hidden on the fallback) - so no refetch resets it (spec
 // 6.3, 2.1; code review R2-2). "All caught up" shows
 // only when every checklist section is empty and settled, none failed to load,
-// the last refresh did not fail and the load is not the fallback; At a glance
+// neither the last refresh nor the last past-tours reload failed (code review
+// R3-1) and the load is not the fallback; At a glance
 // still renders below it. Tokens + CSS Modules;
 // full width (no page-level max-width).
 import { useId, useState } from 'react';
@@ -288,8 +289,10 @@ function PastTourRow({ row }: { row: TodayPastTourRow }): React.JSX.Element {
 }
 
 /** The past-tours section. Hidden until its rows (names included) are ready
- *  and whenever there are none; a failed load says so here and leaves the rest
- *  of Today alone. Its count is the rows Today qualifies (spec 5.3); the Past
+ *  and whenever there are none - unless the last reload failed: then whether
+ *  there are none is not known, so the heading and the reload note show (spec
+ *  2.3; code review R3-1). A failed load says so here and leaves the rest of
+ *  Today alone. Its count is the rows Today qualifies (spec 5.3); the Past
  *  tab link, beside the Show all button, carries the Past tab's own count
  *  whenever that tab holds more than Today qualifies (a deleted tenant's
  *  tours). */
@@ -313,22 +316,24 @@ function PastToursSection({
       </TodaySection>
     );
   }
-  if (past.rows.length === 0) return null;
+  if (past.rows.length === 0 && !past.reloadFailed) return null;
   const more = past.total > past.rows.length;
   return (
     <TodaySection label={PAST_TOURS_LABEL}>
-      <LimitedList
-        label={PAST_TOURS_LABEL}
-        items={past.rows}
-        itemKey={(row) => row.tour.tourId}
-        renderItem={(row) => <PastTourRow row={row} />}
-        expansion={expansion}
-        footer={
-          <Link className={styles.moreLink} to="/tours/past">
-            {more ? `See all ${past.total} on the Past tab` : 'Open the Past tab'}
-          </Link>
-        }
-      />
+      {past.rows.length > 0 ? (
+        <LimitedList
+          label={PAST_TOURS_LABEL}
+          items={past.rows}
+          itemKey={(row) => row.tour.tourId}
+          renderItem={(row) => <PastTourRow row={row} />}
+          expansion={expansion}
+          footer={
+            <Link className={styles.moreLink} to="/tours/past">
+              {more ? `See all ${past.total} on the Past tab` : 'Open the Past tab'}
+            </Link>
+          }
+        />
+      ) : null}
       {past.reloadFailed ? (
         <p className={styles.sectionError} role="alert">
           Could not refresh past tours. Reload the page to see the latest.
@@ -478,10 +483,17 @@ export function Today(): React.JSX.Element {
   const glanceEmpty = toursToday.length === 0 && aiSuggestions.length === 0;
   // "All caught up" waits for the past-tours section to settle, so it never
   // flashes above rows that are about to appear (spec 2.3). At a glance never
-  // blocks it. Nor does the page claim it on a load it could not refresh: what
-  // is on screen may be stale, and an unknown state is not "done" (spec 2.3).
+  // blocks it. Nor does the page claim it on a load it could not refresh -
+  // Today's own refetch, or the past-tours reload: what is on screen may be
+  // stale, and an unknown state is not "done" (spec 2.3; code review R3-1).
   const allCaughtUp =
-    status === 'ready' && !refreshFailed && queueEmpty && !anyUnavailable && past.status === 'ready' && past.rows.length === 0;
+    status === 'ready' &&
+    !refreshFailed &&
+    !past.reloadFailed &&
+    queueEmpty &&
+    !anyUnavailable &&
+    past.status === 'ready' &&
+    past.rows.length === 0;
   // Meanwhile a page with nothing else to show keeps its spinner rather than
   // going blank.
   const settling = status === 'ready' && queueEmpty && glanceEmpty && !anyUnavailable && past.status === 'idle';

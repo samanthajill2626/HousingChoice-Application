@@ -27,12 +27,14 @@ in flight. Worktree W:/tmp/wp1-matching-charter, branch
 feat/wp1-matching-charter from main 970a29b9; the shared checkout stays
 on main.
 
-WHOLE-SPEC RE-READ CLOSED (2026-10-25): every item settled and folded
-(rounds 15 and 16 below; whole-spec-reread.md). Phase now: ADVERSARIAL
-DOCUMENT REVIEW of the folded spec (94951d54). Round 1 IN FLIGHT since
-2026-10-25: two Opus reviewers (general-purpose, background), outputs
-design-review/r1-reviewer-a.md and r1-reviewer-b.md. If they are gone
-after a compaction, check those files; re-dispatch only a missing one.
+WHOLE-SPEC RE-READ CLOSED (2026-10-25), rounds 15-16 below.
+DESIGN REVIEW ROUND 1 DONE (2026-10-25): reviewers A (23) and B (27),
+merged to 28 findings in design-review/adjudications.md; 26 accepted, 3
+partly rejected; folded into the spec. Planner defaults awaiting Cameron
+at the gate: M5 anonymized examples, M7 no auto-decline in WP1, M8 B4
+keeps hand-picks/tour-hold default/old drafts/partner flow, M10 the B2
+counterfactual fair-housing check, M22 staff notes off the card. Round 2
+goes to reviewer A (continued via SendMessage) with the re-review charge.
 
 NEXT STEP: the ADVERSARIAL DOCUMENT REVIEW: round 1
 = two independent Opus reviewers in parallel, same brief

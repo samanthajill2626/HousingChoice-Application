@@ -552,8 +552,8 @@ export interface QuietShareProperty {
   people: QuietSharePerson[];
 }
 /** Today's Quiet shares (spec r8 3; plan PR103: no distinct-people count).
- *  `truncated` = more than 100 available properties exist ("Showing the
- *  first 100 properties"). */
+ *  `truncated` = more than 100 available properties exist ("Only the first
+ *  100 available properties were checked."; never "All caught up"). */
 export type TodayQuietShares =
   | { status: 'ok'; properties: QuietShareProperty[]; truncated: boolean }
   | { status: 'unavailable' };

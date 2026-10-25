@@ -196,12 +196,34 @@ describe('QuietSharesSection (option C)', () => {
     expect(toggle).toHaveAttribute('aria-expanded', 'true');
   });
 
-  it('a truncated read says "Showing the first 100 properties"', () => {
+  // The note says what was READ, in the Follow up tab's wording (planner
+  // review ADV-1): "Showing the first 100 properties" read as if up to 100
+  // property lines were on screen.
+  it('a truncated read says "Only the first 100 available properties were checked."', () => {
     const { unmount } = render(ui(ok([property('u1', [person('a')])], { truncated: true })));
-    expect(screen.getByText('Showing the first 100 properties')).toBeInTheDocument();
+    expect(screen.getByText('Only the first 100 available properties were checked.')).toBeInTheDocument();
     unmount();
     render(ui(ok([property('u1', [person('a')])])));
-    expect(screen.queryByText('Showing the first 100 properties')).not.toBeInTheDocument();
+    expect(screen.queryByText('Only the first 100 available properties were checked.')).not.toBeInTheDocument();
+  });
+
+  // Planner review ADV-1: with no quiet person in the first 100 available
+  // properties and the rest never read, the section used to return null
+  // before its note, so nothing said the read was incomplete. A complete
+  // empty read still hides the section ("an empty section is not rendered").
+  it('a truncated read with NO property lines still shows the heading, the help line and the note', () => {
+    render(ui(ok([], { truncated: true })));
+    expect(screen.getByRole('heading', { level: 2, name: 'Quiet shares' })).toHaveTextContent(/^Quiet shares$/);
+    expect(
+      screen.getByText(
+        'Properties sent in the last 14 days. Replied and then went quiet for 2+ days, or never replied in 5+ days. A message or call from either side restarts the clock; sending another property does not.',
+      ),
+    ).toBeInTheDocument();
+    // The Follow up tab's note markup: a polite status line.
+    expect(screen.getByRole('status')).toHaveTextContent(/^Only the first 100 available properties were checked\.$/);
+    // No property lines: no list, no line buttons, no Show all.
+    expect(screen.queryByRole('list', { name: 'Quiet shares' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
   });
 
   it('unavailable: the bare heading and "We couldn\'t load quiet shares." in its place', () => {

@@ -32,6 +32,11 @@ export const QUIET_SHARES_HELP =
   'Properties sent in the last 14 days. Replied and then went quiet for 2+ days, or never replied in 5+ days. ' +
   'A message or call from either side restarts the clock; sending another property does not.';
 
+/** Under a truncated read (more than 100 available properties, spec 3): what
+ *  was READ, in the Follow up tab's wording - not a count of the lines shown
+ *  (planner review ADV-1). */
+const QUIET_SHARES_TRUNCATED_NOTE = 'Only the first 100 available properties were checked.';
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 const NO_PROPERTIES: readonly QuietShareProperty[] = [];
 
@@ -176,7 +181,12 @@ export function QuietSharesSection({ quiet, now, hidden = false }: QuietSharesSe
       </TodaySection>
     );
   }
-  if (properties.length === 0) return null;
+  // Empty AND complete: no section (spec 2.1). A truncated read with no quiet
+  // person in what it checked still shows the heading and the note: the
+  // properties past the first 100 were never read, so the section must not
+  // vanish as if they had been (planner review ADV-1; Today withholds "All
+  // caught up" on it too).
+  if (properties.length === 0 && !quiet.truncated) return null;
 
   const toggle = (unitId: string): void => {
     setOpenByUnit((prev) => {
@@ -188,22 +198,29 @@ export function QuietSharesSection({ quiet, now, hidden = false }: QuietSharesSe
 
   return (
     <TodaySection label={QUIET_SHARES_LABEL} help={QUIET_SHARES_HELP}>
-      <LimitedList
-        label={QUIET_SHARES_LABEL}
-        items={properties}
-        itemKey={(p) => p.unitId}
-        noun="properties"
-        expansion={{ expanded, onToggle: () => setExpanded((open) => !open) }}
-        renderItem={(p) => (
-          <PropertyLine
-            property={p}
-            open={openByUnit.get(p.unitId) === true}
-            onToggle={() => toggle(p.unitId)}
-            now={now}
-          />
-        )}
-      />
-      {quiet.truncated ? <p className={styles.note}>Showing the first 100 properties</p> : null}
+      {properties.length > 0 ? (
+        <LimitedList
+          label={QUIET_SHARES_LABEL}
+          items={properties}
+          itemKey={(p) => p.unitId}
+          noun="properties"
+          expansion={{ expanded, onToggle: () => setExpanded((open) => !open) }}
+          renderItem={(p) => (
+            <PropertyLine
+              property={p}
+              open={openByUnit.get(p.unitId) === true}
+              onToggle={() => toggle(p.unitId)}
+              now={now}
+            />
+          )}
+        />
+      ) : null}
+      {/* The Follow up tab's note markup (FollowUpView.tsx): a status line. */}
+      {quiet.truncated ? (
+        <p className={styles.note} role="status">
+          {QUIET_SHARES_TRUNCATED_NOTE}
+        </p>
+      ) : null}
     </TodaySection>
   );
 }

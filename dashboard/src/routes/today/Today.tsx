@@ -22,7 +22,8 @@
 // 6.3, 2.1; code review R2-2). "All caught up" shows
 // only when every checklist section is empty and settled, none failed to load,
 // neither the last refresh nor the last past-tours reload failed (code review
-// R3-1) and the load is not the fallback; At a glance
+// R3-1), Quiet shares read every available property (planner review ADV-1)
+// and the load is not the fallback; At a glance
 // still renders below it. Tokens + CSS Modules;
 // full width (no page-level max-width).
 import { useId, useState } from 'react';
@@ -507,6 +508,9 @@ export function Today(): React.JSX.Element {
   const aiSuggestions = rowsOf('ai_suggestions');
   const fallback = source === 'fallback';
   const quietProperties = quietShares.status === 'ok' ? quietShares.properties.length : 0;
+  // A truncated read checked only the first 100 available properties (spec
+  // 3): whether anyone past them is quiet is not known (planner review ADV-1).
+  const quietTruncated = quietShares.status === 'ok' && quietShares.truncated;
 
   // The checklist sections the queue itself fills (past tours settle on their own).
   const queueEmpty =
@@ -525,11 +529,14 @@ export function Today(): React.JSX.Element {
   // flashes above rows that are about to appear (spec 2.3). At a glance never
   // blocks it. Nor does the page claim it on a load it could not refresh -
   // Today's own refetch, or the past-tours reload: what is on screen may be
-  // stale, and an unknown state is not "done" (spec 2.3; code review R3-1).
+  // stale, and an unknown state is not "done" (spec 2.3; code review R3-1) -
+  // nor on a Quiet shares read that stopped at the first 100 available
+  // properties: the rest were never read (planner review ADV-1).
   const allCaughtUp =
     status === 'ready' &&
     !refreshFailed &&
     !past.reloadFailed &&
+    !quietTruncated &&
     queueEmpty &&
     !anyUnavailable &&
     past.status === 'ready' &&

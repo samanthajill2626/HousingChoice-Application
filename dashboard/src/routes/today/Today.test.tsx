@@ -520,6 +520,30 @@ describe('Today - All caught up (spec 2026-10-23 2.3, 2.5)', () => {
     expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
   });
 
+  // Planner review ADV-1: a truncated read checked only the first 100
+  // available properties. None of them has a quiet person here, but the rest
+  // were never read - an unknown state is not "done" (spec 2.3, the rule of
+  // code review R1-1 and R3-1).
+  it('a TRUNCATED Quiet shares read with no property lines withholds All caught up and says what it checked', () => {
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [],
+      quietShares: { status: 'ok', properties: [], truncated: true },
+    };
+    const view = renderToday();
+    expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
+    const quiet = sectionOf('Quiet shares');
+    expect(within(quiet).getByText('Only the first 100 available properties were checked.')).toBeInTheDocument();
+    expect(within(quiet).queryByRole('list', { name: 'Quiet shares' })).not.toBeInTheDocument();
+    // The control: the same load read in full is an empty section, and the
+    // page is caught up.
+    state = { ...state, quietShares: quietOk([]) };
+    view.rerender(todayTree());
+    expect(screen.getByText('All caught up')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Quiet shares' })).not.toBeInTheDocument();
+  });
+
   it('the fallback shows one line instead of an error per section, and never All caught up', () => {
     state = {
       status: 'ready',

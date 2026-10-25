@@ -43,7 +43,10 @@ accepted, 6 decisions changed (ranking off the SQS queue onto its own poll
 loop like extraction; credit/income in any field, cap-eligible keys;
 unlawful flags property-wide; claim generation and queued expiry;
 disability facts never extracted; fair-housing test failure blocks
-production enablement). Round 6 continues reviewer B. Round 5 was both reviewers continued (A and B, outputs
+production enablement). ROUND 6 DONE: 9 accepted, 4 decisions (carried trace and the named
+AGENTS.md exception; property-level unlawful flags staff resolve; reaction
+text under the never-extracted list; roles: Rank for admin+va, Rankings
+page admin only - planner default). Round 7 continues reviewer B. Round 5 was both reviewers continued (A and B, outputs
 design-review/r5-reviewer-a.md, r5-reviewer-b.md); later rounds continue
 the better one; stop when a round changes no decision; hard cap round 8,
 then the spec gate with the five planner defaults (staff notes off; no

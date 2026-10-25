@@ -413,3 +413,46 @@ M3). ACCEPT. Listed.
 Round 5 totals: 23 findings, 20 merged rulings, all ACCEPT. Decisions
 changed: yes (R5-1 to R5-6). Round 6 continues reviewer B (more accepted
 decision findings this round).
+
+## Round 6 (reviewer B continued; report r6-reviewer-b.md, 9 findings)
+
+Verified before ruling: jobs/pollLoop.ts:54-77 (a poll tick runs with a
+fresh pollRunId only), routes/aiRuns.ts:137 (AI runs routes admin only),
+lib/tables.ts:645-655 (ai_runs: itemId key, one sparse byEntity index).
+
+R6-1 [DECISION] The poll loses correlation and trace; AGENTS.md exception
+unnamed. ACCEPT. The queued record carries the request's correlation id
+and traceparent and the poll restores them; the exception to "all job
+traffic through jobs.enqueue" is named, with the extraction precedent
+and the reason.
+R6-2 How the poll finds queued records; poll interval. ACCEPT. Queued
+records carry a byEntity key family the poll queries; pickup latency and
+the queued expiry count the shared poll interval.
+R6-3 [DECISION] A false unlawful flag disables a lawful cap; no
+dismissal; stale flags. ACCEPT. An unlawful flag becomes a property-level
+record staff resolve (remove the text, or Dismiss as lawful, after which
+that field is not flagged again until its text changes). While open it
+suppresses the cap property-wide: a false flag costs a cap, never a
+tenant.
+R6-4 "Credit or income in ANY field" swallows rent and tenant portion.
+ACCEPT. The disregard covers requirements about the tenant's credit or
+income; rent, payment standard and the tenant's maximum portion stay
+inputs.
+R6-5 [DECISION] Reaction text outside the never-extracted list. ACCEPT.
+The list and B1's test cover reaction text.
+R6-6 Job states. ACCEPT. The poll itself takes over an expired lease
+with a new generation; a superseded job can write at most the batch in
+flight, which the newer job overwrites (accepted); the record's TTL is at
+least RANKING_MAX_AGE_DAYS.
+R6-7 Production switches unnamed. ACCEPT. AI_RANKING_ENABLED and
+AI_MATCHING_FACTS_ENABLED, default off, like aiExtractionEnabled.
+R6-8 [DECISION] Roles undecided. ACCEPT, planner default: Rank, Update
+and review open to admin and va, as the composer is; the Rankings page
+admin only, like the AI runs page.
+R6-9 Leftovers. ACCEPT. "By exclusion" renamed; the B1 row gains the
+facts display, remove control and suppression record; facts stored as a
+list on the tenant contact; a credit, income or move-in-cost clause
+inside a cap-eligible key never counts as failed.
+
+Round 6 totals: 9 findings, 9 ACCEPT. Decisions changed: yes (R6-1, R6-3,
+R6-5, R6-8). Round 7 continues reviewer B.

@@ -2,7 +2,7 @@
 
 Date: 2026-10-24
 Status: DRAFT charter. Whole-spec re-read 2026-10-25 folded in; design
-review rounds 1 to 5 folded in (records: design-review/adjudications.md);
+review rounds 1 to 6 folded in (records: design-review/adjudications.md);
 then the remaining review rounds and Cameron's spec gate.
 Mission: Amendment No. 1 Work Package 1 (signed; Cameron 2026-10-20, Sam
 2026-10-21). 52 contracted hours.
@@ -199,7 +199,7 @@ weigh.
 
 ## 6. D3 - What the model reads: the cards
 
-### 6.1 Definition by exclusion
+### 6.1 Definition by classification
 
 Each card is the record projected through ONE classification. No field is
 read until it is classified, and at runtime the card function drops every
@@ -312,11 +312,14 @@ in two ways:
   extracted: race, color, religion, sex, national origin, familial facts
   beyond household size, income and credit, and disability or medical
   facts other than the stated accessibility need and an assistance
-  animal. B1 tests the list: synthetic
+  animal. The same list governs the text of every extracted reaction
+  (section 6.3), and B1's test covers reactions too. Facts are stored as a
+  list on the tenant contact (the flexible document; no new table). B1 tests the list: synthetic
   conversations stating each excluded kind of fact, run on the testing
   key, must write no fact of an excluded kind (household size and tenant
   portion remain allowed). A failure blocks turning the matching facts on
-  in production until it passes or Cameron decides.
+  in production (`AI_MATCHING_FACTS_ENABLED`, default off, like
+  `aiExtractionEnabled`) until it passes or Cameron decides.
 - B1 also builds the facts' display on the tenant record, the remove
   control and its suppression record.
 - One reading per send: the tenant's reaction to the specific property
@@ -384,9 +387,11 @@ Fair housing: the rubric states that protected characteristics (race,
 color, religion, sex, national origin, familial status, disability) never
 lower a score. Disability enters only for the tenant's benefit: their own
 stated accessibility need matched to the property, and an accommodation
-(below) that lifts a requirement. Credit or income content in ANY field
-(qualifications, notes, deposit notes, application process, custom
-fields) is disregarded and never reported failed (A1). Names stay on the cards
+(below) that lifts a requirement. A requirement about the tenant's credit or
+income, in ANY field (qualifications, notes, deposit notes, application
+process, custom fields), is disregarded and never reported failed (A1).
+Rent, the payment standard and the tenant's maximum portion are not
+credit or income requirements and stay inputs. Names stay on the cards
 (Cameron 2026-10-25); the pool (section 5) uses no protected
 characteristic. A landlord or property requirement that is unacceptable
 under fair housing (for example "no kids", which discriminates on
@@ -403,6 +408,14 @@ against an assistance animal; it suppresses the cap for that pair and
 asks for no record change. Only an unlawful flag ever asks Sam to change a
 record.
 
+An unlawful flag becomes a PROPERTY-level record (field, the model's
+reason, the run that raised it), shown on the property record and in the
+composer, open until staff resolve it: removing the text closes it, and
+Dismiss ("this is lawful") closes it and keeps that field from being
+flagged again until its text changes. While a flag is open, that field
+caps no pair of that property, including pairs where the model missed it:
+a false flag costs a cap, never a tenant.
+
 The guarantee is tested, not only stated: before Sam's acceptance pass,
 B2 runs a counterfactual check on the testing key over SYNTHETIC pairs
 (made-up tenants and properties, never real records), swapping name,
@@ -410,8 +423,8 @@ address and household facts (an address swapped only for one equivalent
 for the tenant's stated area, so a fit change cannot pass for a proxy)
 and including an assistance-animal tenant against a No pets property; scores and the Weak cap (section 7.4) are
 compared against a tolerance B2 sets, and the result is a mission record.
-A failure blocks turning ranking on in production until it passes or
-Cameron decides. Planner default, for Cameron at the gate.
+A failure blocks turning ranking on in production (`AI_RANKING_ENABLED`,
+default off) until it passes or Cameron decides. Planner default, for Cameron at the gate.
 
 The rubric version is stored on every match and run. Worked examples are
 a separate versioned file. A person writes them from scratch, informed by
@@ -450,9 +463,10 @@ A pair is capped at Weak in code, whatever its score, when its
 `failedRequirements` holds a CAP-ELIGIBLE key (no_evictions_on_program,
 evictions_notes, qualifications, no_pets, pets; requirements.ts:69-108)
 that is a recorded requirement on that property's card, is not in the
-same pair's accommodation flags, and is not flagged unlawful on ANY pair
-of that property (an unlawful flag is property-wide); a key failing any
-test is ignored. Move-in costs, touring, credit and income never cap, so the cap can never enforce a
+same pair's accommodation flags, and has no open unlawful flag on that
+property (section 7.2); a key failing any test is ignored. A credit,
+income or move-in-cost clause inside a cap-eligible key never counts as
+failed. Move-in costs, touring, credit and income never cap, so the cap can never enforce a
 requirement the rubric disregards. A capped pair gets no priority
 treatment at all (section 9.2), sorts last within Weak, and its row reads
 "requirement not met" beside the score. This
@@ -567,8 +581,14 @@ poll loop over due ranking-job records (the extraction precedent,
 worker.ts:436-466), never on the SQS jobs queue. That consumer awaits a
 whole receive batch before it receives again (sqsJobConsumer.ts:126-129),
 so a one-to-two-minute ranking there would hold up group-text fan-out
-and sends. The poll carries its own correlation and trace context, as
-the extraction poll does.
+and sends. This is a named exception to AGENTS.md's "all job traffic
+goes through jobs.enqueue()", on the extraction precedent and for that
+reason. A poll tick starts a fresh context (pollLoop.ts:54-77), so the
+queued record carries the Rank request's correlation id and traceparent,
+and the poll restores both before it runs the job. Queued records carry
+a byEntity key family (lib/tables.ts:645-655) that the poll queries;
+pickup waits up to the shared poll interval (config.ts:608-612), which
+the queued record's expiry allows for.
 
 The claim: pressing Rank makes the app write the anchor's ranking-job
 record as queued, one conditional write that succeeds only when no live
@@ -577,11 +597,14 @@ the write joins the job that won, unless its window setting differs, in
 which case it is refused with "a ranking is running". A queued record
 expires on its own short timer if no poller takes it. The poll loop
 claims a queued record with a lease it renews while running; an expired
-lease means the job died, and the record can be taken over. The job
+lease means the job died, and the poll itself takes the record over
+with a new generation and re-runs it, with no new press needed. The job
 checks its generation before every model call and every write and exits
 quietly if it has been superseded. It never throws on a model, batch or
 organization-list failure: it records the failure on the record and
-finishes. Its batches run in parallel with a per-call timeout. Status:
+finishes. The generation check before a write is not atomic with the
+match write, so a superseded job can still write the batch it had in
+flight; the newer job rewrites every pair, so this is accepted. Its batches run in parallel with a per-call timeout. Status:
 queued, running, done, failed with a message, and the list of failed
 batches.
 
@@ -593,10 +616,13 @@ fallback, because the worker-to-app bridge is best-effort by design
 from the base table, never through the eventually consistent byUnit
 index. So the 30-second CloudFront origin timeout
 (infra/modules/cloudfront/main.tf:114) never applies to a model call.
-Rank gets its own per-user rate-limit knob, parsed fail-fast like the
+Rank, Update and the review controls are open to admin and va, as the
+composer is today (broadcasts.ts:1-4); planner default. Rank gets its own
+per-user rate-limit knob, parsed fail-fast like the
 existing cost-route knobs (app/src/lib/config.ts:1021-1040). The
 ranking-job record lives in the AI runs table in its own key family with
-a TTL, and the run listing and run-detail readers (routes/aiRuns.ts:
+a TTL of at least `RANKING_MAX_AGE_DAYS` (its failed-batch list must outlive
+the matches it flags), and the run listing and run-detail readers (routes/aiRuns.ts:
 139-140, 228-249) never return it.
 Background or scheduled ranking is out of WP1 (A1 excludes it); the engine
 is one function so a scheduled caller (WP3 era) would be configuration,
@@ -649,7 +675,8 @@ are kept 180 days, the same as matches, so every ranking stays recorded
 for Sam's review period (A1: "Each ranking is recorded so Client can
 review it").
 
-The Rankings page (staff only, B2) lists runs newest first with anchor,
+The Rankings page (admin only, like the AI runs page, routes/aiRuns.ts:137;
+planner default; B2) lists runs newest first with anchor,
 direction, model, candidates, cost and time, filters by date and anchor,
 totals cost by week and by environment, and opens a run into its pairs.
 It is where the engine is live-tested in production before the composer
@@ -795,8 +822,8 @@ reply yet / Interested / Not interested) remain where they are today.
 
 | Slice | Owns | Hours |
 |---|---|---|
-| B1 Ranking inputs | Tenant fields area preference, maximum tenant portion, accessibility need, preferences and constraints on the record and edit form; `priority` boolean on the unit, its edit-form control and record display; extraction schema widened (fixed fields, matching facts list written live above a confidence floor with the never-extracted list, per-send reaction stored on the listing_sends row; the never-extracted test). Ships to production first. | 6-8 |
-| B2 Ranking engine | Pool in both directions with the window and the sendability fences; cards by exclusion list with the landlord switch and the card fingerprint helpers; completeness pass; stage-one call on its own worker poll loop with persisted batches, an event hint and a GET re-read, rubric, examples, structured output; anthropic/fake/console drivers; matches with the out-of-date, age and version rules and the one-button whole-pool re-score; the lean seed row replaced; review records and the in-app review list; failedRequirements cap and per-candidate fair-housing flags; the counterfactual fair-housing check on synthetic pairs; the Rank rate-limit knob; the ranking-job record with claim generation, lease and failed batches; the cap-eligible key list; run log under its own keys with cost by environment; band and priority policy on read; endpoints: rank, read ranking by anchor, review a pair; the Rankings page. | 21-25 |
+| B1 Ranking inputs | Tenant fields area preference, maximum tenant portion, accessibility need, preferences and constraints on the record and edit form; `priority` boolean on the unit, its edit-form control and record display; extraction schema widened (fixed fields, matching facts list written live above a confidence floor with the never-extracted list, per-send reaction stored on the listing_sends row; the never-extracted test covering facts and reactions; the facts display, remove control and suppression record on the tenant record; `AI_MATCHING_FACTS_ENABLED`). Ships to production first. | 6-8 |
+| B2 Ranking engine | Pool in both directions with the window and the sendability fences; cards by classification with the landlord switch and the card fingerprint helpers; completeness pass; stage-one call on its own worker poll loop with persisted batches, an event hint and a GET re-read, rubric, examples, structured output; anthropic/fake/console drivers; matches with the out-of-date, age and version rules and the one-button whole-pool re-score; the lean seed row replaced; review records and the in-app review list; failedRequirements cap and per-candidate fair-housing flags; the counterfactual fair-housing check on synthetic pairs; the Rank rate-limit knob; the ranking poll loop and the ranking-job record with claim generation, lease, takeover, failed batches and carried trace; `AI_RANKING_ENABLED`; the property-level unlawful-flag record with Dismiss; the cap-eligible key list; run log under its own keys with cost by environment; band and priority policy on read; endpoints: rank, read ranking by anchor, review a pair; the Rankings page. | 21-25 |
 | B3 Send property from a tenant | The ranked row; the composer's tenant anchor; priority-only view; completeness banner; Rank/Update; one-step send with the outcome on the pair; agree/disagree; Send property action on the tenant record. | 9-11 |
 | B4 Send property from a property | The composer's property anchor; ranked tenants replacing the filter-only audience, the window toggle, rows unchecked by default, with hand-picks, the tour-hold chip, old filter drafts and the partner flow kept (section 13.1); already-sent No reply filter chip; pick one, a few or many; the Matching nav entry asking which record to start from; the property page's Send re-pointed; the Similar panel relabeled "similarity". | 11-13 |
 
@@ -818,7 +845,7 @@ citing this charter and lists which sections it implements.
 
 ### 15.4 Decisions no slice may reopen
 
-Sections 4 (soft rules), 5 (pool), 6.1 (cards by exclusion), 7.1 (staged
+Sections 4 (soft rules), 5 (pool), 6.1 (cards by classification), 7.1 (staged
 pipeline, stage one listwise, no tools), 8 (score, bands, reasons,
 missing), 9 (priority never a model input; last heard from roles), 10
 (pair rows; on demand; fingerprints and the age rule; one button, whole

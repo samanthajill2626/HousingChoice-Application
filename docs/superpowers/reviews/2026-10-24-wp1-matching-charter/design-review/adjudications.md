@@ -485,3 +485,43 @@ button; the ranking poll starts only when the switch is on.
 
 Round 7 totals: 6 findings, 6 ACCEPT. Decisions changed: yes (R7-1,
 R7-2), both narrow. Round 8, the last allowed, continues reviewer B.
+
+## Round 8 (reviewer B continued; report r8-reviewer-b.md, 6 findings)
+
+R8-1 [DECISION] Slice hours never re-estimated. ACCEPT. Re-estimated in
+15.1: B1 10-13, B2 30-38, B3 10-12, B4 13-16, total 63-79 against 52.
+Cutting scope or notifying Sam is CAMERON's call at the gate (A1
+section 7).
+R8-2 [DECISION] The rubric's forced Weak still covers every requirement.
+ACCEPT. Limited to the cap-eligible keys; deposit, fee and touring are
+weighed reasons.
+R8-3 [DECISION] An unlawful flag on a checkbox can never clear. ACCEPT.
+Unlawful flags only on free-text fields; a checkbox is lawful on its face
+and a tenant it must not apply to is an accommodation.
+R8-4 [DECISION] 15.4 omits the compliance decisions; section 0 implied
+the rest could be reopened. ACCEPT. Listed; section 0 now says every
+decision binds.
+R8-5 The counterfactual gate's timing; no pre-B3 trigger. ACCEPT. It
+passes before AI_RANKING_ENABLED is first turned on; the Rankings page
+gets a staff-only "Rank this anchor".
+R8-6 Slice-table gaps and facts-write details. ACCEPT. B4 owns the flag
+display, Dismiss and the switch-off composer; reactions sit behind the
+facts switch; a lost version check retries once then drops and logs; the
+bound drops the lowest-confidence oldest fact.
+
+Round 8 totals: 6 findings, 6 ACCEPT. Decisions changed: yes (R8-1 to
+R8-4). SECOND HARD CAP REACHED (Cameron's extension, rounds 5-8). Review
+closed; the spec gate goes to Cameron.
+
+## Totals, rounds 5-8
+
+| Round | Reviewer | Findings | Accept | Reject | Decisions changed |
+|---|---|---|---|---|---|
+| 5 | A and B | 23 (20 rulings) | 20 | 0 | 6 |
+| 6 | B | 9 | 9 | 0 | 4 |
+| 7 | B | 6 | 6 | 0 | 2 |
+| 8 | B | 6 | 6 | 0 | 4 (1 is the re-estimate) |
+
+Rounds 5-8 rejected nothing. The only REJECTs in the whole review are the
+three round-1 partials listed above (M10, M21, M28), all conceded by the
+reviewers.

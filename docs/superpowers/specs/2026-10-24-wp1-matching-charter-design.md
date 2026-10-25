@@ -2,8 +2,9 @@
 
 Date: 2026-10-24
 Status: DRAFT charter. Whole-spec re-read 2026-10-25 folded in; design
-review rounds 1 to 7 folded in (records: design-review/adjudications.md);
-then the remaining review rounds and Cameron's spec gate.
+review rounds 1 to 8 folded in (records: design-review/adjudications.md);
+review closed at its cap; awaiting Cameron's spec gate, including the
+slice re-estimate in section 15.1.
 Mission: Amendment No. 1 Work Package 1 (signed; Cameron 2026-10-20, Sam
 2026-10-21). 52 contracted hours.
 Records: docs/superpowers/reviews/2026-10-24-wp1-matching-charter/
@@ -20,8 +21,9 @@ written just before it starts and citing this document by section number.
 Rule for slices: a slice spec may refine a charter decision (add detail,
 name files, pick exact copy) but may NOT reverse one. A slice that finds a
 charter decision wrong stops and brings it to Cameron; the charter is
-amended here, with a dated note, and the slice continues. The list of
-decisions that may not be reopened is in section 15.4.
+amended here, with a dated note, and the slice continues. EVERY decision
+in this charter binds the slices; section 15.4 names the ones most likely
+to be argued, not the only ones.
 
 Hours in this document are Cameron's hands-on hours, not agent wall time.
 
@@ -104,12 +106,15 @@ section 17 for Sam to hear.
 ## 4. D1 - Soft rules: the model judges, nothing but eligibility excludes
 
 The ranking is one AI judgment over everything on the two cards. A tenant
-who fails a recorded requirement (no evictions on program, no pets, a
-free-text note) is NOT removed; the rubric tells the model to land that
-pair in the Weak band with the failure as the first reason against. Sam
+who fails a recorded SCREENING or PETS requirement (the cap-eligible keys
+of section 7.4: no evictions on program, evictions notes, qualifications,
+no pets, pets) is NOT removed; the rubric tells the model to land that
+pair in the Weak band with the failure as the first reason against. A
+deposit, fee or touring requirement the tenant may not meet is a reason
+the model weighs, never a forced landing. Sam
 sees the pair, at the bottom, with the reason.
 
-That forced landing applies to recorded requirement failures ONLY. A "Not
+That forced landing applies to cap-eligible requirement failures ONLY. A "Not
 interested" send outcome, an accessibility need the property cannot meet,
 or a rent above the tenant's stated portion are inputs the model weighs,
 not rules the rubric dictates. A pair marked Not interested stays in the
@@ -317,7 +322,10 @@ in two ways:
   bounded list on the tenant contact (the flexible document; no new
   table), with the suppression list beside it; writes are conditional on
   a version attribute so extraction and Sam's remove control never
-  overwrite each other. B1 tests the list: synthetic
+  overwrite each other; a write that loses its version check re-reads and
+  retries once, then drops the fact and logs it. At the bound, the
+  lowest-confidence oldest fact is dropped. Reactions sit behind the same
+  switch as facts. B1 tests the list: synthetic
   conversations stating each excluded kind of fact, run on the testing
   key, must write no fact of an excluded kind (household size and tenant
   portion remain allowed). A failure blocks turning the matching facts on
@@ -372,9 +380,9 @@ hundreds, which the window removes.
 ### 7.2 The rubric
 
 The rubric is a versioned prompt file in the app workspace. It states the
-inputs and how each bears on fit, the demotion rule for recorded
-requirement failures (section 4; declined sends are weighed, never
-forced), what the percentage means at anchor points
+inputs and how each bears on fit, the demotion rule for cap-eligible
+requirement failures (section 4; other requirements and declined sends
+are weighed, never forced), what the percentage means at anchor points
 (100 nothing against and preferences met; 80 strong fit with minor
 compromises; 60 workable with a real compromise; 40 unlikely; 0 cannot
 work), the reasons format (phrases or single words, each tagged with its
@@ -404,8 +412,10 @@ naming that requirement as one to remove from the record (section 7.4).
 
 Two kinds of flag, never confused. UNLAWFUL: the requirement or text is
 unacceptable for every tenant, so Sam removes it from the record; it may
-name any requirement key or any free-text field on the property card
-(notes, lease terms, application process). ACCOMMODATION: a lawful
+name any FREE-TEXT requirement or field on the property card (notes,
+lease terms, application process, qualifications, details fields), never
+a checkbox: No pets and No evictions on the program are lawful on their
+face, and a tenant they must not apply to is an accommodation. ACCOMMODATION: a lawful
 requirement that does not apply to THIS tenant, for example No pets
 against an assistance animal; it suppresses the cap for that pair and
 asks for no record change. Only an unlawful flag ever asks Sam to change a
@@ -425,8 +435,8 @@ editing its text, which closes the flag; the model is never told to apply
 a requirement it judged unlawful (Cameron 2026-10-25: an unlawful
 requirement "is something for Sam").
 
-The guarantee is tested, not only stated: before Sam's acceptance pass,
-B2 runs a counterfactual check on the testing key over SYNTHETIC pairs
+The guarantee is tested, not only stated: before `AI_RANKING_ENABLED` is
+first turned on in production (B2's own live test included), B2 runs a counterfactual check on the testing key over SYNTHETIC pairs
 (made-up tenants and properties, never real records), swapping name,
 address and household facts (an address swapped only for one equivalent
 for the tenant's stated area, so a fit change cannot pass for a proxy)
@@ -698,7 +708,9 @@ planner default; B2) lists runs newest first with anchor,
 direction, model, candidates, cost and time, filters by date and anchor,
 totals cost by week and by environment, and opens a run into its pairs.
 It is where the engine is live-tested in production before the composer
-views exist. Spend is two ledgers: testing-key spend counts against the A1
+views exist: B2 gives it
+a staff-only "Rank this anchor" action, so a ranking can be run before
+B3's composer. Spend is two ledgers: testing-key spend counts against the A1
 section 8 testing budget ($750 overall, matching checks $20-40), which
 Cameron watches, enforces with an account spend limit on the testing key
 (A1 allows Developer to set one), and must notify Sam before exceeding; production ranking
@@ -840,13 +852,18 @@ reply yet / Interested / Not interested) remain where they are today.
 
 | Slice | Owns | Hours |
 |---|---|---|
-| B1 Ranking inputs | Tenant fields area preference, maximum tenant portion, accessibility need, preferences and constraints on the record and edit form; `priority` boolean on the unit, its edit-form control and record display; extraction schema widened (fixed fields, matching facts list written live above a confidence floor with the never-extracted list, per-send reaction stored on the listing_sends row; the never-extracted test covering facts and reactions; the facts display, remove control and suppression record on the tenant record; `AI_MATCHING_FACTS_ENABLED`). Ships to production first. | 6-8 |
-| B2 Ranking engine | Pool in both directions with the window and the sendability fences; cards by classification with the landlord switch and the card fingerprint helpers; completeness pass; stage-one call on its own worker poll loop with persisted batches, an event hint and a GET re-read, rubric, examples, structured output; anthropic/fake/console drivers; matches with the out-of-date, age and version rules and the one-button whole-pool re-score; the lean seed row replaced; review records and the in-app review list; failedRequirements cap and per-candidate fair-housing flags; the counterfactual fair-housing check on synthetic pairs; the Rank rate-limit knob; the ranking poll loop and the ranking-job record with claim generation, lease, takeover, failed batches and carried trace; `AI_RANKING_ENABLED`; the property-level unlawful-flag record with Dismiss; the cap-eligible key list; run log under its own keys with cost by environment; band and priority policy on read; endpoints: rank, read ranking by anchor, review a pair; the Rankings page. | 21-25 |
-| B3 Send property from a tenant | The ranked row; the composer's tenant anchor; priority-only view; completeness banner; Rank/Update; one-step send with the outcome on the pair; agree/disagree; Send property action on the tenant record. | 9-11 |
-| B4 Send property from a property | The composer's property anchor; ranked tenants replacing the filter-only audience, the window toggle, rows unchecked by default, with hand-picks, the tour-hold chip, old filter drafts and the partner flow kept (section 13.1); already-sent No reply filter chip; pick one, a few or many; the Matching nav entry asking which record to start from; the property page's Send re-pointed; the Similar panel relabeled "similarity". | 11-13 |
+| B1 Ranking inputs | Tenant fields area preference, maximum tenant portion, accessibility need, preferences and constraints on the record and edit form; `priority` boolean on the unit, its edit-form control and record display; extraction schema widened (fixed fields, matching facts list written live above a confidence floor with the never-extracted list, the bounded version-checked facts list and suppression list on the contact, per-send reaction stored on the listing_sends row under shares_op); the never-extracted test covering facts and reactions; the facts display, remove control and suppression record on the tenant record; `AI_MATCHING_FACTS_ENABLED`. Ships to production first. | 10-13 |
+| B2 Ranking engine | Pool in both directions with the window and the sendability fences; cards by classification with the runtime allowlist and the landlord switch; card fingerprint helpers; completeness pass; rubric, examples, structured output; anthropic/fake/console drivers; the ranking poll loop and the ranking-job record (claim generation, lease, one takeover, failed batches, carried trace); persisted batches, event hint, GET and base-table re-read; matches with the out-of-date, age and version rules and the one-button whole-pool re-score; the lean seed row replaced; review records and the in-app review list; the cap with its key list, accommodation flags and the property-level unlawful-flag record; the counterfactual fair-housing check on synthetic pairs; the Rank rate-limit knob and roles; `AI_RANKING_ENABLED`; run log under its own keys with cost by environment; band and priority policy on read; endpoints: rank, read ranking by anchor, review a pair; the Rankings page with "Rank this anchor". | 30-38 |
+| B3 Send property from a tenant | The ranked row; the composer's tenant anchor; priority-only view; completeness banner; Rank/Update; one-step send with the outcome on the pair; agree/disagree; the tenant record's Send re-pointed. | 10-12 |
+| B4 Send property from a property | The composer's property anchor; ranked tenants replacing the filter-only audience, the window toggle, rows unchecked by default and Select all, with hand-picks, the tour-hold chip and confirm, old filter drafts and the partner flow kept (section 13.1); already-sent No reply filter chip; pick one, a few or many; the switch-off composer; the unlawful-flag display on the property record with the admin Dismiss; the Matching nav entry asking which record to start from; the property page's Send re-pointed; the Similar panel relabeled "similarity". | 13-16 |
 
-Total 47-57 against 52 contracted, Sam's acceptance pass inside it. All
-four bill to WP1.
+RE-ESTIMATE (2026-10-25, after the eight-round review): 63-79 hours
+against the 52 contracted. The review added most of the build: B1's write
+protocol, UI and paid test; B2's job architecture and fair-housing
+records; B4's selection and flag surfaces. A1 section 7 makes the hours an
+estimate; going over is Cameron's call to cut scope or to tell Sam before
+the hours are spent. PENDING CAMERON at the spec gate. All four bill to
+WP1.
 
 ### 15.2 Order
 
@@ -869,8 +886,13 @@ missing), 9 (priority never a model input; last heard from roles), 10
 (pair rows; on demand; fingerprints and the age rule; one button, whole
 pool), 11 (run log with cost; Rankings page), 12 (continuous review;
 every review kept as its own record; no client data committed), 13.1 (one composer, two anchors; Send property on both records),
-14 (model per stage; fake driver), 15.2 (order). A slice that needs one
-changed brings it to Cameron.
+14 (model per stage; fake driver), 15.2 (order), and the compliance
+decisions: 6.3 (an extracted hard_no never declines in WP1), 6.4 (the
+never-extracted list, its test and the facts switch), 7.2 (fair housing,
+credit and income, the counterfactual gate), 7.4 (the cap and its key
+list), 10.2 (no SQS queue for ranking; one automatic takeover), 13.1
+(selection defaults). A slice that needs one changed brings it to
+Cameron.
 
 ## 16. Questions for Sam (before or during B2)
 

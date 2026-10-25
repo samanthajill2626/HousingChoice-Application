@@ -11,63 +11,38 @@ cut from main @970a29b9. Docs only.
 
 ## STATE
 
-If you are reading this after a compaction: re-invoke the Skill
-abt:feature-mission with the argument "RESUME WP1 charter", read this file
-and the pool-count record, run the replay (command in the feature-mission
+If you are reading this after a compaction: DO NOTHING until Cameron
+speaks (he compacted before leaving, 2026-10-25). When he does:
+re-invoke the Skill abt:feature-mission with the argument "RESUME WP1
+charter", read this file, run the replay (command in the feature-mission
 skill, output W:/tmp/wp1-matching-charter/.superpowers/sdd/conversation.md)
-and READ ALL OF IT, report back in one line, then continue below. (Cameron
-gave his go on 2026-10-25; the earlier wait-for-go rule is spent.)
+and READ ALL OF IT, report back in one line, then take his spec-gate
+answers.
 
-Phase: SPEC WRITTEN and sent to Cameron for his WHOLE-SPEC RE-READ
-(2026-10-24) - docs/superpowers/specs/2026-10-24-wp1-matching-charter-
-design.md, 19 sections, committed (18445409). Brainstorm closed after 14
-rounds, all recorded below. Launch mode: none - this mission stops after
-Cameron's spec gate; spec + records merge as a docs-only branch. Nothing
-in flight. Worktree W:/tmp/wp1-matching-charter, branch
-feat/wp1-matching-charter from main 970a29b9; the shared checkout stays
-on main.
+Phase: CAMERON'S SPEC GATE. The adversarial design review is CLOSED
+after 8 rounds (4 + Cameron's 4-round extension, both caps reached):
+design-review/adjudications.md has every ruling, the totals tables and
+every REJECT (only three round-1 partials, all conceded). Spec at the
+commit that follows this STATE. Nothing in flight; both reviewers are
+idle (agent ids in this session; continue with SendMessage only if
+Cameron asks for more rounds).
 
-WHOLE-SPEC RE-READ CLOSED (2026-10-25), rounds 15-16 below.
-DESIGN REVIEW ROUND 1 DONE (2026-10-25): reviewers A (23) and B (27),
-merged to 28 findings in design-review/adjudications.md; 26 accepted, 3
-partly rejected; folded into the spec. Planner defaults awaiting Cameron
-at the gate: M5 anonymized examples, M7 no auto-decline in WP1, M8 B4
-keeps hand-picks/tour-hold default/old drafts/partner flow, M10 the B2
-counterfactual fair-housing check, M22 staff notes off the card. ROUND 2 DONE: 22 findings, all accepted and folded; new planner defaults:
-ranked rows start unchecked (R2-2), examples written from scratch with no
-export (R2-13/14, replaces M5), notes off the card. ROUNDS 1-4 DONE, cap reached (design-review/adjudications.md). Cameron
-2026-10-25: "Because this is so large, let's keep going with the
-adversarial reviewers. Let's do another max of 4 rounds." Phase now:
-REVIEW ROUNDS 5-8. ROUND 5 DONE: 23 findings (A 7, B 16), 20 rulings all
-accepted, 6 decisions changed (ranking off the SQS queue onto its own poll
-loop like extraction; credit/income in any field, cap-eligible keys;
-unlawful flags property-wide; claim generation and queued expiry;
-disability facts never extracted; fair-housing test failure blocks
-production enablement). ROUND 6 DONE: 9 accepted, 4 decisions (carried trace and the named
-AGENTS.md exception; property-level unlawful flags staff resolve; reaction
-text under the never-extracted list; roles: Rank for admin+va, Rankings
-page admin only - planner default). ROUND 7 DONE: 6 accepted, 2 narrow decisions (Dismiss display-only and
-admin-only; one automatic takeover then failed). Round 8 - LAST - goes to
-reviewer B. Round 7 continued reviewer B. Round 5 was both reviewers continued (A and B, outputs
-design-review/r5-reviewer-a.md, r5-reviewer-b.md); later rounds continue
-the better one; stop when a round changes no decision; hard cap round 8,
-then the spec gate with the five planner defaults (staff notes off; no
-auto-decline; examples from scratch, no export; counterfactual on
-synthetic pairs plus the never-extracted test; ranked rows unchecked with
-the B4 keep-list).
-
-NEXT STEP: the ADVERSARIAL DOCUMENT REVIEW: round 1
-= two independent Opus reviewers in parallel, same brief
-(W:/AI Projects/claude-plugins/abt/skills/feature-mission/design-review-briefs.md),
-spec + repo only, blind to this file and the brainstorm; adjudicate every
-finding (accept/reject/defer), write
-docs/superpowers/reviews/2026-10-24-wp1-matching-charter/design-review/adjudications.md
-and commit; rounds 2+ continue the better reviewer with SendMessage;
-stop when a round changes no decision, cap 4. Then Cameron's spec gate
-(show counts and every REJECT inline). Then: merge command for the
-docs-only branch (he merges), register-session --off, memory update. No
-plan, no build in this mission. Cameron's list: testing API key from
-Sam (before B2); WP1 hours log.
+Gate items waiting on Cameron:
+1. Pass the gate (or revise / more rounds).
+2. RE-ESTIMATE: slices now 63-79 hours vs 52 contracted (spec 15.1) -
+   cut scope or notify Sam (A1 section 7). Candidate cuts if he wants
+   them: Rankings page beyond the run list, the landlord switch, the
+   admin Dismiss.
+3. Planner defaults to confirm: staff notes off the card; no auto-decline
+   in WP1; worked examples from scratch, no review export; fair-housing
+   tests (counterfactual on synthetic pairs, never-extracted list) block
+   the production switches until they pass; ranked rows start unchecked
+   with the B4 keep-list; roles (Rank for admin + va, Rankings page
+   admin only).
+After the gate: merge command for the docs-only branch (he merges),
+register-session.mjs --off, memory update (next-build-contract-
+amendments.md + MEMORY.md; consider a wp1-matching-charter topic file).
+Cameron's list: testing API key from Sam (before B2); WP1 hours log.
 
 ## What Cameron asked for (verbatim where wording matters)
 

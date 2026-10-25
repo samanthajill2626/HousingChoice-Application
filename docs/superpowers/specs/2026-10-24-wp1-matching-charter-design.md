@@ -1,8 +1,9 @@
 # WP1 Matching Charter - design decisions for "Matching tenants and properties"
 
 Date: 2026-10-24
-Status: DRAFT charter, awaiting Cameron's whole-spec re-read, then the
-adversarial document review, then his spec gate.
+Status: DRAFT charter. Whole-spec re-read 2026-10-25 partly folded in
+(records: whole-spec-reread.md); then the adversarial document review,
+then Cameron's spec gate.
 Mission: Amendment No. 1 Work Package 1 (signed; Cameron 2026-10-20, Sam
 2026-10-21). 52 contracted hours.
 Records: docs/superpowers/reviews/2026-10-24-wp1-matching-charter/
@@ -98,10 +99,16 @@ are listed in section 17 for Sam to hear.
 The ranking is one AI judgment over everything on the two cards. A tenant
 who fails a recorded requirement (no evictions on program, no pets, a
 free-text note) is NOT removed; the rubric tells the model to land that
-pair in the Weak band with the failure as the first reason against. The
-same holds for a "Not interested" send outcome, an accessibility need the
-property cannot meet, or a rent above the tenant's stated portion. Sam
+pair in the Weak band with the failure as the first reason against. Sam
 sees the pair, at the bottom, with the reason.
+
+That forced landing applies to recorded requirement failures ONLY. A "Not
+interested" send outcome, an accessibility need the property cannot meet,
+or a rent above the tenant's stated portion are inputs the model weighs,
+not rules the rubric dictates. A pair marked Not interested stays in the
+pool and is never forced into Weak; the recorded outcome and the extracted
+reaction (a hard no, or "maybe, but show me others first") are both on the
+pair history for the model to read (Cameron 2026-10-25).
 
 Why: Cameron 2026-10-24: "the signed contract was a little bit too harsh
 ... I don't think hard rules are ever going to be the answer." The free
@@ -139,6 +146,12 @@ Tenant anchor (candidates are properties):
   a different tenant).
 - The size and authority rules above, read from the property's side.
 
+The pool rules apply to CANDIDATES only. The anchor can be any tenant or
+property, whatever its status: pressing Send property is Sam's affirmative
+choice of that record. When the anchor is not searching (a tenant) or not
+available (a property), the composer shows a banner saying so and ranks
+anyway (Cameron 2026-10-25).
+
 Explicitly NOT pool rules, by Cameron's decision: already sent, no reply,
 Not interested, Interested, tour outcomes, requirement failures. These are
 inputs (section 6.3) and UI chips (section 13.3).
@@ -162,9 +175,9 @@ field added to a record later is read automatically. Excluded:
 - Internal plumbing: ids, media, status_source and status history, import
   bookkeeping, timestamps other than created and last heard from,
   provenance maps, flyer settings.
-- Phone numbers, emails and street numbers are passed only where the model
-  needs them (the property address is passed whole for area reasoning; the
-  tenant's address is passed as city/zip only).
+- Phone numbers and email addresses (no matching value). Addresses are
+  passed whole on both cards (Cameron 2026-10-25: pass everything or
+  nothing, never city and zip only).
 
 The slice spec for B2 lists the exclusion as code, one function per card,
 with a test that fails when a new record field is neither included nor
@@ -173,8 +186,9 @@ listed, so the list is a decision each time rather than drift.
 ### 6.2 The two cards
 
 Tenant card: everything on the tenant contact except the exclusions, which
-today means name, voucher size, housing authority, porting, tenure, pets,
-evictions, status and last heard from, the B1 fields (area preference,
+today means name, address, voucher size, housing authority, porting,
+tenure, pets, evictions, status, last heard from as a recency bucket
+(section 9.1), the B1 fields (area preference,
 maximum tenant portion, accessibility need, preferences and constraints),
 the extracted matching facts (section 6.4), staff notes, and the
 requirement-relevant history.
@@ -186,6 +200,12 @@ pays, deposit, application fee, same-day RTA, tour type and process,
 application process, notes, the requirement checkboxes and every
 free-text requirement note (credit and income notes included - read as
 context the tenant may or may not meet, never to rank or exclude, A1).
+
+ONE card per record, whichever side the ranking starts from. A pair
+scored from a property's page and the same pair read on the tenant's page
+were scored from the same two cards, which is what makes one match per
+pair true. The two composer views may DISPLAY different things; the
+model's input never differs by direction.
 
 Landlord card switch (`RANKING_LANDLORD_CARD`, default off): when on, the
 property card also carries the landlord-of-record's recorded requirements,
@@ -255,7 +275,19 @@ failures and declined sends, what the percentage means at anchor points
 compromises; 60 workable with a real compromise; 40 unlikely; 0 cannot
 work), the reasons format (phrases or single words, each tagged with its
 source input), and the rule that uncertainty is scored as uncertainty, not
-guessed away. The rubric version is stored on every match and run. Worked
+guessed away. Scores are ABSOLUTE against those anchor points, not
+relative to the other candidates in the call: the listwise call buys
+consistency and cost, and batching, reuse across directions and any later
+re-score all rely on a 70 meaning the same thing everywhere.
+
+Fair housing: the rubric states that protected characteristics (race,
+color, religion, sex, national origin, familial status, disability) never
+lower a score. The one use of disability is a tenant's own stated
+accessibility need matched to the property. Names stay on the cards
+(Cameron 2026-10-25); the pool (section 5) uses no protected
+characteristic.
+
+The rubric version is stored on every match and run. Worked
 examples are a separate versioned file; Sam's reviewed matches (section
 12) are the source of new examples.
 
@@ -277,6 +309,12 @@ candidate: `candidateId`, `score` 0-100, `for[]`, `against[]`, each
 `{text, source}`, `unknowns[]`. Nothing else is trusted from the model;
 band, priority, tie order and chips are computed in code.
 
+`candidateId` is a per-call handle (c1, c2, ...) mapped back to the
+record in code, since ids are not on the cards. A candidate the model did
+not return, returned twice or under an unknown handle, and every candidate
+of a failed batch (API error, refusal, truncation) gets NO match: the row
+shows "not scored - retry". A default or guessed score is never written.
+
 ## 8. D5 - What a match is
 
 - Score 0 to 100, shown as a match percentage. 0 bad, 100 good.
@@ -294,14 +332,18 @@ band, priority, tie order and chips are computed in code.
 
 ### 9.1 Last heard from
 
-Three roles, all on the property anchor (on the tenant anchor the tenant
-is the anchor and it does not apply):
+Three roles:
 
-- Pool window: tenants heard from within `RANKING_POOL_WINDOW_DAYS`
-  (default 90) are in the pool; the composer toggle shows the rest.
-- Model input: recency inside the window is on the card as a signal of
-  active search.
-- Tie order: equal scores order by most recently heard from.
+- Pool window (property anchor only, where tenants are candidates):
+  tenants heard from within `RANKING_POOL_WINDOW_DAYS` (default 90) are
+  in the pool; the composer toggle shows the rest.
+- Model input, in BOTH directions (one card per record, section 6.2): a
+  recency BUCKET (this week, this month, one to three months, older), not
+  the timestamp. Only the bucket is fingerprinted, so a new text from a
+  tenant never makes their matches out of date; crossing into another
+  bucket does (Cameron 2026-10-25).
+- Tie order (property anchor only): equal scores order by most recently
+  heard from.
 
 Later (not WP1, WP3 era): outreach to tenants approaching the window
 ("still looking?"); a reply refreshes last heard from, silence moves them
@@ -320,10 +362,19 @@ mechanisms, both where properties are the candidates (a tenant's ranking):
 - A priority-only view in the composer that hides every non-priority
   candidate while the full ranking stays computed underneath.
 
-Sort order on read: band (after the priority strength), then priority on
-before off, then score, then last heard from. A Priority badge on the row.
+Sort order on read, one per anchor:
 
-Priority is an on/off boolean on the unit (`priority`). The existing
+- Property anchor (candidates are tenants): band, then score, then last
+  heard from. Priority does not apply; it is the anchor's own attribute.
+- Tenant anchor (candidates are properties): band after the priority
+  strength, then priority on before off, then score. A Priority badge on
+  the row.
+
+In both, pool members with no match yet sort last, shown "not ranked
+yet".
+
+Priority is an on/off boolean on the unit (`priority`), set on the
+property edit form and shown on the property record. The existing
 free-form string field is unused in production (0 values); B1 replaces it
 with the boolean and drops the string without migration.
 
@@ -352,7 +403,8 @@ A ranking is computed when a human presses Rank (or Update) in the
 composer. Opening a page reads stored rows and makes no model call.
 Background or scheduled ranking is out of WP1 (A1 excludes it); the engine
 is one function so a scheduled caller (WP3 era) would be configuration,
-not a redesign.
+not a redesign. One ranking is in flight per anchor at a time: a second
+press while one runs joins it rather than paying twice.
 
 ### 10.3 Fingerprints and what "out of date" means
 
@@ -371,6 +423,11 @@ current cards and history:
   than `RANKING_INCREMENTAL_LIMIT` (default 10) candidates changed, or the
   newest full ranking is older than `RANKING_FULL_RERANK_DAYS` (default 7).
 
+What changes a fingerprint, and what does not: the cards as defined in
+section 6 (recency only as its bucket); on the pair history, an outcome
+or an extracted reaction. A new send ALONE does not make a match out of
+date; its Already sent chip is derived on read and shows at once.
+
 Sam decides whether to update; an out-of-date list is still shown.
 
 ## 11. D8 - The run log, cost, and the Rankings page
@@ -379,7 +436,9 @@ Every model call is a run in the existing AI runs store (same pattern and
 the same 90-day retention as extraction): anchor, direction, candidate
 count, batch index, model, rubric version, input and output tokens, cost
 in dollars from a price table in configuration, latency, the raw
-structured output, and the ids of the rows it wrote.
+structured output, and the ids of the rows it wrote. Runs are kept 90
+days and matches 180, so an older match's runId can point at an expired
+run; accepted.
 
 The Rankings page (staff only, B2) lists runs newest first with anchor,
 direction, model, candidates, cost and time, filters by date and anchor,
@@ -412,6 +471,8 @@ the property half.
   and sends it (one property per message, A1).
 - The Matching navigation entry stays and first asks which record to start
   from.
+- Any record can be the anchor (section 5); a banner says when it is not
+  searching or not available, and nothing is blocked.
 
 The existing filter-only audience (status, authority, voucher size) is
 removed in B4; the pool rules and the window toggle replace it. The
@@ -446,8 +507,9 @@ complete records; nothing refuses to rank.
 ### 13.5 One-step send and the outcome
 
 Sending from the composer records the send on the pair (listing sends,
-tracker #27 shape) and the match row's pair-history fingerprint changes, so
-the next read shows the row as sent, not stale. The outcome controls (No
+tracker #27 shape). The row shows Already sent at once; the send alone does
+not make the match out of date (section 10.3). A later outcome or
+extracted reaction does. The outcome controls (No
 reply yet / Interested / Not interested) remain where they are today.
 
 ## 14. D11 - Models, drivers and configuration

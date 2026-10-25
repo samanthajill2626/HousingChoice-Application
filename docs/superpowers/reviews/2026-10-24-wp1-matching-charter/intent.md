@@ -27,14 +27,12 @@ in flight. Worktree W:/tmp/wp1-matching-charter, branch
 feat/wp1-matching-charter from main 970a29b9; the shared checkout stays
 on main.
 
-WHOLE-SPEC RE-READ DONE (2026-10-25, Cameron: "do the full reread of the spec
-now"): whole-spec-reread.md in this folder - 7 decisions for Cameron (A1
-fair housing, A2 Not interested no longer forced to Weak, A3 time-varying
-inputs and fingerprints, A4 reviews survive re-score and TTL, A5 matching
-facts live not suggested, A6 anchor eligibility, A7 tenant address whole),
-3 efficiency items, 9 precision edits. Awaiting his calls; nothing folded
-into the spec yet. (Supersedes the five planner notes of 2026-10-24, all
-carried into that file.)
+WHOLE-SPEC RE-READ (2026-10-25): whole-spec-reread.md; Cameron answered
+(round 15 below). Folded into the spec: soft Not interested, recency
+bucket, one card per record, anchor any status, whole address, fair-housing
+rubric line, seven precision edits. PENDING his answer: landlord "no kids"
+note flag, reviews as an outside training set, matching facts live or
+queued, one Update button re-scoring the whole ranking.
 
 NEXT STEP: fold Cameron's calls on whole-spec-reread.md into the spec,
 commit. Then the ADVERSARIAL DOCUMENT REVIEW: round 1
@@ -403,3 +401,36 @@ quality Sam trusts, then her review of it, then the two views.
   "part of the landlord onboarding or the property onboarding step, and
   possibly part of the sharing step ... work package 3 and work package
   4").
+
+## Decisions, round 15 (Cameron, 2026-10-25, on the whole-spec re-read)
+
+- Fair housing: the rubric line "protected traits never lower a score" is
+  fine; names STAY on the cards ("I don't know if we need to go as far as
+  taking the tenant's name off"). His priority: "we are not using a
+  protected trait to fully disqualify somebody from the pool list". He
+  questioned whether familial status is protected and whether fair housing
+  bears on ranking at all - answered 2026-10-25, his call pending on the
+  landlord "no kids" note flag.
+- Not interested: never forced into Weak, stays in the pool; "we need to
+  make sure that we're not specifying how the LLM is supposed to treat
+  these." A hard no stays recorded as Not interested; a "maybe" from
+  context should weigh only as a weak reason against (planner reading of
+  "forced as a 'weak against'", to confirm).
+- Recency: "We don't want any new text to make a contact go out of date"
+  - bucket adopted. Single shared match per pair confirmed; two different
+  UIs are fine.
+- Anchor: any status, affirmative choice; banner, "definitely not a full
+  bar on that feature".
+- Tenant address: whole ("either pass everything or pass nothing"); phone
+  and email out.
+- Efficiency: later, after the engine exists. He floated ONE Update button
+  that re-scores the whole ranking, no per-candidate re-score, and asked
+  whether prompt caching then matters. Pending.
+- Reviews: wants them kept but "part of a training set that lives outside
+  the application"; asked whether review is continuous or a set period.
+  Pending.
+- Matching facts: unclear what "written live" meant; floated a Today-page
+  queue with the 5-item cap and a More items line. Pending.
+- Precision edits: "Let's have you include them." Folded, except the two
+  that depend on the one-button question (Rank scoring only unmatched
+  pairs; the drift-guard source).

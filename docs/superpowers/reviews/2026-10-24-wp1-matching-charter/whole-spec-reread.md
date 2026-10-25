@@ -119,3 +119,11 @@ C8. The priority boolean is set on the property edit form and shown on the
 record (B1, 9.2).
 C9. Run log retention is 90 days, pair rows 180: an older match's runId can
 point at an expired run. Accepted; say so (11).
+
+## Cameron's calls (2026-10-25)
+
+Folded into the spec: A2 as Cameron framed it, A3 recency bucket and one
+card per record, A6, A7, the fair-housing rubric line with names kept, and
+precision edits C1, C2, C5, C6, C7, C8, C9. Pending his answer: A1 landlord
+note flag, A4 reviews, A5 matching facts, the one-button re-score (which
+decides C3, C4 and efficiency B1), B2 and B3 deferred with efficiency.

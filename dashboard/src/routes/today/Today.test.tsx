@@ -20,6 +20,7 @@ let state: {
   quietShares?: QuietSharesState;
   toursToBookStatus?: 'ok' | 'unavailable';
   generatedAt?: string;
+  refreshFailed?: boolean;
 } = {
   status: 'loading',
   items: [],
@@ -53,15 +54,20 @@ vi.mock('../../api/index.js', async () => {
 
 import { Today } from './Today.js';
 
-function renderToday(): void {
-  render(
+function todayTree(): React.JSX.Element {
+  return (
     <MemoryRouter>
       <Routes>
         <Route path="/" element={<Today />} />
         <Route path="/tours/:tourId" element={<TourPageProbe />} />
       </Routes>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
+}
+
+/** Renders the page; the result's rerender(todayTree()) re-reads `state`. */
+function renderToday(): ReturnType<typeof render> {
+  return render(todayTree());
 }
 
 /** The tour route's stand-in: shows the query string and the router state the
@@ -548,6 +554,59 @@ describe('Today - All caught up (spec 2026-10-23 2.3, 2.5)', () => {
     renderToday();
     expect(screen.getByRole('heading', { name: 'Identify these contacts' })).toBeInTheDocument();
     expect(screen.getByText("Some sections can't load right now.")).toBeInTheDocument();
+  });
+});
+
+// Fix wave 1 (FW1-1; code review R1A-2 / R1SC-1): after a good load, a failed
+// live refetch keeps the checklist on screen (useToday stays 'ready' with
+// refreshFailed set) under ONE note, and the page never claims "All caught
+// up" on data it could not refresh (spec 2.3). Today.refetch.test.tsx drives
+// the same through the real hook.
+describe('Today - a failed live refresh (fix wave 1)', () => {
+  const NOTE = "We couldn't refresh Today. Reload the page to see the latest.";
+
+  it('keeps the checklist on screen with ONE alert note above the sections', () => {
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [item('needs_you_now', 'n1'), item('identify', 'i1', { refType: 'contact' })],
+      refreshFailed: true,
+    };
+    renderToday();
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    const note = screen.getByRole('alert');
+    expect(note).toHaveTextContent(NOTE);
+    const headings = screen.getAllByRole('heading', { level: 2 });
+    expect(headings.map((h) => h.textContent)).toEqual(['Needs you now', 'Identify these contacts']);
+    // Above the sections: the note precedes the first section heading.
+    const firstSection = sectionOf('Needs you now');
+    expect(note.compareDocumentPosition(firstSection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByText(/couldn.t load your queue/i)).not.toBeInTheDocument();
+  });
+
+  it('withholds All caught up while the refresh failed', () => {
+    state = { status: 'ready', source: 'server', items: [], refreshFailed: true };
+    renderToday();
+    expect(screen.getByRole('alert')).toHaveTextContent(NOTE);
+    expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
+  });
+
+  it('the next good load clears the note, and an empty checklist reads All caught up again', () => {
+    state = { status: 'ready', source: 'server', items: [], refreshFailed: true };
+    const view = renderToday();
+    expect(screen.getByRole('alert')).toHaveTextContent(NOTE);
+    state = { status: 'ready', source: 'server', items: [], refreshFailed: false };
+    view.rerender(todayTree());
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByText('All caught up')).toBeInTheDocument();
+  });
+
+  it('a FIRST-load failure keeps the full-page error, and no refresh note', () => {
+    state = { status: 'error', items: [], source: 'server' };
+    renderToday();
+    expect(screen.getByRole('alert')).toHaveTextContent("We couldn't load your queue. Please try again.");
+    expect(screen.queryByText(NOTE)).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { level: 2 })).not.toBeInTheDocument();
   });
 });
 

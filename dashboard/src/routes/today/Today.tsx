@@ -14,9 +14,11 @@
 // stripe), each a link to its placement/contact/conversation/tour. An empty
 // section is not rendered. A section the server could not compute shows "We
 // couldn't load <section>." in its place; the client fallback (buildToday,
-// only on a 404) shows one line instead. "All caught up" shows only when every
-// checklist section is empty and settled, none failed to load and the load is
-// not the fallback; At a glance still renders below it. Tokens + CSS Modules;
+// only on a 404) shows one line instead. A failed live refetch keeps the last
+// good load on screen under one "couldn't refresh" note. "All caught up" shows
+// only when every checklist section is empty and settled, none failed to load,
+// the last refresh did not fail and the load is not the fallback; At a glance
+// still renders below it. Tokens + CSS Modules;
 // full width (no page-level max-width).
 import { useId, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -403,6 +405,7 @@ export function Today(): React.JSX.Element {
     quietShares = NO_QUIET_SHARES,
     toursToBookStatus = 'ok',
     generatedAt = '',
+    refreshFailed = false,
   } = useToday();
   const past = useTodayPastTours();
   const rowsOf = (group: TodayGroup): TodayItem[] => items.filter((i) => i.group === group);
@@ -430,8 +433,10 @@ export function Today(): React.JSX.Element {
   const glanceEmpty = toursToday.length === 0 && aiSuggestions.length === 0;
   // "All caught up" waits for the past-tours section to settle, so it never
   // flashes above rows that are about to appear (spec 2.3). At a glance never
-  // blocks it.
-  const allCaughtUp = status === 'ready' && queueEmpty && !anyUnavailable && past.status === 'ready' && past.rows.length === 0;
+  // blocks it. Nor does the page claim it on a load it could not refresh: what
+  // is on screen may be stale, and an unknown state is not "done" (spec 2.3).
+  const allCaughtUp =
+    status === 'ready' && !refreshFailed && queueEmpty && !anyUnavailable && past.status === 'ready' && past.rows.length === 0;
   // Meanwhile a page with nothing else to show keeps its spinner rather than
   // going blank.
   const settling = status === 'ready' && queueEmpty && glanceEmpty && !anyUnavailable && past.status === 'idle';
@@ -453,6 +458,14 @@ export function Today(): React.JSX.Element {
 
       {status === 'ready' ? (
         <>
+          {/* A failed live refetch after a good load (useToday refreshFailed):
+           *  the last good load stays on screen - so what the viewer opened,
+           *  folded or expanded survives (spec 6.3, 2.1) - under ONE note. */}
+          {refreshFailed ? (
+            <p className={styles.error} role="alert">
+              We couldn&apos;t refresh Today. Reload the page to see the latest.
+            </p>
+          ) : null}
           {fallback ? <p className={styles.notice}>Some sections can&apos;t load right now.</p> : null}
 
           {allCaughtUp ? (

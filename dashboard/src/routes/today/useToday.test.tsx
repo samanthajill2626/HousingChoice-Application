@@ -33,10 +33,11 @@ vi.mock('../../api/index.js', async () => {
 import { useToday } from './useToday.js';
 
 function Probe(): React.JSX.Element {
-  const { status, items, source, quietShares, toursToBookStatus, generatedAt } = useToday();
+  const { status, items, source, quietShares, toursToBookStatus, generatedAt, refreshFailed } = useToday();
   return (
     <div>
       <span data-testid="status">{status}</span>
+      <span data-testid="refresh-failed">{refreshFailed === undefined ? 'missing' : String(refreshFailed)}</span>
       <span data-testid="source">{source}</span>
       <span data-testid="count">{items.length}</span>
       <span data-testid="first">{items[0]?.who ?? ''}</span>
@@ -256,5 +257,73 @@ describe('useToday - Quiet shares and Tours to book statuses', () => {
     expect(screen.getByTestId('quiet').textContent).toBe('unavailable');
     expect(screen.getByTestId('ttb').textContent).toBe('unavailable');
     expect(screen.getByTestId('generated').textContent).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+});
+
+// Fix wave 1 (FW1-1; code review R1A-2 / R1SC-1; spec 6.3, 2.1, 2.3): a
+// failed LIVE refetch after a good load keeps the last good data and status
+// 'ready', and sets refreshFailed until the next good load - the page keeps
+// what the viewer opened, folded or expanded. Only a FIRST-load failure is the
+// error state.
+describe('useToday - a failed live refetch keeps the last good load (fix wave 1)', () => {
+  /** The failed refetch has landed, whichever way the hook reports it. */
+  const failureLanded = (): boolean =>
+    screen.getByTestId('status').textContent === 'error' || screen.getByTestId('refresh-failed').textContent === 'true';
+
+  it('keeps status ready and the last good data, and sets refreshFailed', async () => {
+    getToday.mockResolvedValue(TODAY);
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    expect(screen.getByTestId('refresh-failed').textContent).toBe('false');
+
+    getToday.mockRejectedValue(new ApiError(500, 'boom', 'server error'));
+    lastHandlers.onConversationUpdated?.();
+    await waitFor(() => expect(failureLanded()).toBe(true));
+
+    expect(screen.getByTestId('status')).toHaveTextContent('ready');
+    expect(screen.getByTestId('refresh-failed').textContent).toBe('true');
+    expect(screen.getByTestId('count')).toHaveTextContent('1');
+    expect(screen.getByTestId('first')).toHaveTextContent('Server Tasha');
+    expect(getToday).toHaveBeenCalledTimes(2);
+  });
+
+  it('the next good load clears refreshFailed and takes the new data', async () => {
+    getToday.mockResolvedValue(TODAY);
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    getToday.mockRejectedValueOnce(new ApiError(500, 'boom', 'server error'));
+    lastHandlers.onConversationUpdated?.();
+    await waitFor(() => expect(failureLanded()).toBe(true));
+    expect(screen.getByTestId('refresh-failed').textContent).toBe('true');
+
+    getToday.mockResolvedValue({
+      ...TODAY,
+      items: [{ group: 'needs_you_now', refType: 'placement', refId: 'k2', who: 'Updated', why: 'x' }],
+    });
+    lastHandlers.onConversationUpdated?.();
+    await waitFor(() => expect(screen.getByTestId('first')).toHaveTextContent('Updated'));
+
+    expect(screen.getByTestId('refresh-failed').textContent).toBe('false');
+    expect(screen.getByTestId('status')).toHaveTextContent('ready');
+  });
+
+  it('a FIRST-load failure is still the error state, with refreshFailed false', async () => {
+    getToday.mockRejectedValue(new ApiError(500, 'boom', 'server error'));
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('error'));
+    expect(screen.getByTestId('refresh-failed').textContent).toBe('false');
+  });
+
+  it('a failed first load followed by a good refetch is ready with no refresh flag', async () => {
+    getToday.mockRejectedValueOnce(new ApiError(500, 'boom', 'server error'));
+    getToday.mockResolvedValue(TODAY);
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('error'));
+
+    lastHandlers.onConversationUpdated?.();
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+
+    expect(screen.getByTestId('refresh-failed').textContent).toBe('false');
+    expect(screen.getByTestId('first')).toHaveTextContent('Server Tasha');
   });
 });

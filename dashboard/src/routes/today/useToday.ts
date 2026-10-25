@@ -4,6 +4,9 @@
 // /api/conversations + /api/tours (buildTodayFromSources). Subscribes to the SSE stream and
 // refetches (debounced) on placement.updated / conversation.updated /
 // suggestion.updated / tour.updated / contact.updated so the queue stays live. Returns a small { status, items, source } state for the view.
+// A failed live refetch after a good load keeps that load on screen (status
+// stays 'ready', refreshFailed is set until the next good load); only a failed
+// FIRST load is the error state.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ApiError,
@@ -41,6 +44,11 @@ export interface TodayState {
   /** The server's generatedAt (the fallback's own now): the clock Quiet
    *  shares counts "N days" from (plan S5 C4). */
   generatedAt: string;
+  /** The last live refetch failed after a good load: the data above is that
+   *  last good load, possibly stale, and status stays 'ready' so the page keeps
+   *  what the viewer opened, folded or expanded (spec 6.3, 2.1). Cleared by the
+   *  next good load. Never true alongside status 'error' (a failed FIRST load). */
+  refreshFailed: boolean;
   /** Optimistically drop a nag row once its Close / Keep-open action succeeds (the
    *  server also drops it from the next refetch: close clears the nag, defer pushes
    *  it 28 days out). */
@@ -51,8 +59,8 @@ export interface TodayState {
  *  placement/conversation events (e.g. a broadcast send) into one refetch. */
 const REFETCH_DEBOUNCE_MS = 300;
 
-/** What one load produces (status and dismissNag are the hook's own). */
-type TodayLoad = Omit<TodayState, 'status' | 'dismissNag'>;
+/** What one load produces (status, refreshFailed and dismissNag are the hook's own). */
+type TodayLoad = Omit<TodayState, 'status' | 'refreshFailed' | 'dismissNag'>;
 
 /** The Quiet shares of a load that has none to show: an older server that
  *  omits the field, and every fallback load (spec 3.1, plan PR31/PR32). */
@@ -125,6 +133,7 @@ export function useToday(): TodayState {
     quietShares: QUIET_SHARES_UNAVAILABLE,
     toursToBookStatus: 'unavailable',
     generatedAt: '',
+    refreshFailed: false,
   });
 
   // Optimistically drop a nag row after its Close / Keep-open action succeeds.
@@ -147,12 +156,16 @@ export function useToday(): TodayState {
     try {
       const load = await loadToday(controller.signal);
       if (controller.signal.aborted) return;
-      setState((prev) => ({ ...prev, ...load, status: 'ready' }));
+      setState((prev) => ({ ...prev, ...load, status: 'ready', refreshFailed: false }));
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
         return;
       }
-      setState((prev) => ({ ...prev, status: 'error' }));
+      // A failed REFETCH keeps the last good load and only flags it - flipping
+      // to 'error' unmounted every section, so the next good load re-seeded
+      // Quiet shares and reset every Show all and the AI line (code review
+      // R1A-2 / R1SC-1). A failed FIRST load is still the error state.
+      setState((prev) => (prev.status === 'ready' ? { ...prev, refreshFailed: true } : { ...prev, status: 'error' }));
     }
   }, []);
 

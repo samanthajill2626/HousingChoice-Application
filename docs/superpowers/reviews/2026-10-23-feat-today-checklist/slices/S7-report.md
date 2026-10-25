@@ -495,3 +495,56 @@ named in each item.
 ## S7.16
 
 S7.16: orchestrator-owned (Phase 5)
+
+## Closing run and watch items (S7.17)
+
+- Closing run (tag `close`, HEAD 65904980, one cold boot through
+  `.superpowers/s7/run-spec.sh`, lane 12): the plan's eleven files plus
+  `tests/flows/email-triage.spec.ts` (S7a changed it) - the same 12
+  behavior-changed files S7a ran together. Exit `0`; `Running 50 tests using
+  1 worker`, `50 passed (2.0m)`; results.json stats expected 50, unexpected
+  0, flaky 0, skipped 0. Per file: today-checklist 4, follow-up-tab 2,
+  unknown-caller-triage 2, unknown-inactive 1, conversation-fact-extraction
+  12, caseworkers 6, participant-names 1, today-past-tours 1,
+  post-tour-application 5, tours-page 6, relay-number-lifecycle 6,
+  email-triage 4. The one `ECONNREFUSED 127.0.0.1:10201` line is the Vite
+  proxy's `/__dev/ping` before the app listened (boot order; in S7a's runs
+  too). The run left a stale `session.pid` / `lane.json` (launcher 55700
+  dead); `npm run e2e:stop` said "no running session found; retained state
+  is stale or absent", removed both; lane 12 ports free.
+- e2e typecheck (`npm run typecheck -w @housingchoice/e2e`, bare) exit 0;
+  e2e vitest (`npm run test -w @housingchoice/e2e`, bare) exit 0, 22 files,
+  509 passed (performance/routes.test.ts 30, performance/collect.test.ts 40,
+  support/viewport.guard.test.ts 1 among them).
+- ASCII: the four new files 0 each (today-checklist.spec.ts,
+  followUpFixtures.ts, today-quiet-shares-read-cost.md, this report); added
+  lines `git diff -U0 050878ac^..HEAD -- e2e app/src/lib/events.ts
+  documentation docs/issues docs/superpowers/specs
+  dashboard/src/routes/today/useToday.test.tsx` 0.
+- WI9: no seed file changed (`git diff --name-only main...HEAD --
+  app/src/lib/seed` empty). The branch's only seed-named file is
+  `app/scripts/seed-smoke.mjs` (S4's comment rewrite), not a seed.
+- WI12: the backfill ran only with `--env local --lane 13` (S7.15), on a
+  lane this worktree booted and proved (dev ping, appCommit = HEAD, prefix,
+  key, no lane-0 port). RUNBOOK entry at RUNBOOK.md:553 ("Cameron runs it;
+  an agent never runs it against dev or prod"), dry run first (step 3), and
+  RUNBOOK.md:587 (an agent rehearses on a lane only). Its step 7 claim (a
+  second apply writes 0, skipped = planned) matched the rehearsal (0 / 2 /
+  2).
+- WI13: no test in any S7b run was re-run to green or excused as a flake;
+  the closing run passed on its first run. S7b had no e2e failure.
+- Plan deviations (S7b), each recorded above: S7.11 also re-cites
+  `CONTRACT_SOURCES.today` (same stale loader citation, unread export);
+  S7.12 names the as-built `stampRelayOutreach`; S7.13 corrects two plan
+  sentences that said Inactive changes nothing else on Today (it also takes
+  a contact off Quiet shares), adds the r8 Send now / Retry rule to last
+  reached out, and moves two entries' " - " so Markdown does not nest them;
+  S7.14 adds "(not when that contact is Inactive)" to the sign-up update,
+  and the final open count is unchanged rather than +1 (WL-21's own resolve
+  offsets the new issue; the middle run shows the +1); S7.15 ran on lane 13
+  (the lane-12 lease my lane CLI probe took), proved the PR78 guard on probe
+  copies before the boot, and skipped `npm run db:start` (the container was
+  up). No UI constant changed. (C4 is ruled by PR76 and C6 approved by PR78 -
+  neither is a deviation.)
+- State left: HEAD = this report's commit; no e2e stack of this worktree
+  (no session.pid, lane 12 and 13 ports free); no background command.

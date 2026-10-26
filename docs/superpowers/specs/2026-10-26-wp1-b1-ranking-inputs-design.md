@@ -1,6 +1,9 @@
 # WP1 B1 Ranking inputs - design
 
-Status: DRAFT revision 1 (2026-10-26), before design review.
+Status: DRAFT revision 2 (2026-10-26). Rev 2 folds in design review round 1
+(two reviewers, 33 findings merged to 22, all accepted, one in part with a
+question to Cameron; adjudications:
+`docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/design-review/adjudications.md`).
 Charter: docs/superpowers/specs/2026-10-24-wp1-matching-charter-design.md.
 This slice implements charter sections 6.3 (per-send reactions), 6.4
 (extraction as the reading layer, AMENDED 2026-10-26), 7.3 (the tenant
@@ -18,7 +21,9 @@ Vocabulary (documentation/GLOSSARY.md): a `unit` is a "property" to staff.
 `[Auto - <date>]` lines and staff also type. "Staff notes" = `staff_notes`,
 human-only. A "Notes line" = one `[Auto - <date>] <text>` line extraction
 appends. "Reaction" = a tenant's extracted response to one property sent to
-them, stored on that pair's listing_sends row (charter 6.3).
+them, stored on that pair's listing_sends row (charter 6.3). "Handle" = a
+short per-run label (`m3`, `p2`) the prompt gives a message or a sent
+property so the model can cite it.
 
 ## 1. Goal
 
@@ -41,38 +46,44 @@ Nothing ranks in B1 and nothing new is shown to a tenant.
 
 ### D1. One list of tenant matching inputs
 
-A new leaf module `app/src/lib/tenantMatchingInputs.ts` (imports nothing,
-like `services/extraction/runTypes.ts`) holds the ONE list of the four B1
-tenant matching inputs:
+A new leaf module `app/src/lib/tenantMatchingInputs.ts` (imports nothing)
+holds the ONE list of the four B1 tenant matching inputs:
 
-| key | staff label | kind | source |
-|---|---|---|---|
-| `area_preference` | Area preference | text | field |
-| `max_tenant_portion` | Maximum tenant portion | dollars | field |
-| `accessibility_need` | Accessibility need | text | field |
-| `preferences_constraints` | Preferences and constraints | text | field |
+| key | label | chip label | kind | control | source |
+|---|---|---|---|---|---|
+| `area_preference` | Area preference | area preference | text | input | field |
+| `max_tenant_portion` | Maximum tenant portion | maximum tenant portion | dollars | dollars | field |
+| `accessibility_need` | Accessibility need | accessibility need | text | input | field |
+| `preferences_constraints` | Preferences and constraints | preferences and constraints | text | textarea | field |
 
-Each entry: `key`, `label`, `kind` (`text` or `dollars`), `source`
-(`field` today; the type admits `notes` so a later change is a value edit,
-charter 6.4 amended, docs/issues/extraction-fields-to-notes.md).
+Each entry also carries `promptGuidance`, the sentence the extraction
+prompt uses for that field (D3). `source` is `field` for all four; the type
+admits `notes` (charter 6.4 amended, docs/issues/extraction-fields-to-notes.md),
+and B1 builds no code path for it.
 
-Readers in B1, every one driven by the list rather than by the four names:
+Readers, each iterating the list rather than naming the four:
 
-- extraction: the field entries of the schema, the CURRENT PROFILE block,
-  coercion, decision targets and tenant-only targets (D3);
+- extraction: `EXTRACTABLE_FIELDS` (and so `PROVENANCE_FIELDS`), the schema
+  field entries, CURRENT PROFILE, the prompt's field guidance, coercion by
+  `kind`, and `DECISION_TARGETS` / `TENANT_ONLY_TARGETS` (D3).
+  `services/extraction/runTypes.ts` is documented as a leaf that imports
+  nothing (runTypes.ts:1-2); it may now import this one leaf module, which
+  keeps it cycle-free, and its header says so;
 - the contacts PATCH and create parsers (D2);
-- the dashboard edit form inputs and the record rows, through a dashboard
-  mirror of the list with a drift test that imports the app module (the
-  `REQUIREMENT_ITEMS` mirror precedent, requirementsMirror.test.ts).
+- the dashboard: a mirror of the list (`dashboard/src/routes/contact/tenantMatchingInputs.ts`)
+  with a drift test that imports the app module (the requirements mirror
+  precedent, requirementsMirror.test.ts). The edit form inputs, the record
+  rows and `SUGGESTION_TARGET_LABEL` iterate the mirror.
 
-B2's completeness pass reads the same list (charter 7.3). Only entries with
-`source: 'field'` are stored fields; B1 has no `notes` entry and builds no
-code path for one beyond the type.
+B2's completeness pass reads the same list (charter 7.3).
 
-Why: Cameron 2026-10-26: "the source of information, like area preferences,
-can be easily changed from a specific field to just existing in the notes
-section." Moving a fact later = change its entry, delete its form input
-(the mirror entry), and the widened notes instruction picks the fact up.
+What a later move to notes involves (stated so nobody overclaims): edit
+the entry (and its mirror), and a data step owned by that later change -
+stored values on contacts, pending suggestions for the target (an accept
+for a target no longer extractable returns 400 `unknown_target`,
+suggestionResolution.ts:380-413), resolution journals and dismissal
+tombstones keyed by the target, and historic run-log decisions. B1 does
+none of that; it makes the code side one place.
 
 ### D2. The four fields on the record, the edit form and the record display
 
@@ -83,92 +94,106 @@ per month. Absent means not recorded.
 Server (routes/contacts.ts `parseTriageBody` and `parseCreateBody`):
 
 - Text: must be a string; TRIMMED; at most 500 characters after trimming
-  (400 "<label> must be 500 characters or fewer"); an empty string after
+  (400 "<Label> must be 500 characters or fewer."); an empty string after
   trim, or `null`, CLEARS the field (REMOVE), following the
-  `voucher_expiration_date` pattern, not the pets/tenure pattern that stores
-  `''`.
-- Dollars: an integer 0..20000, or `null` / `''` to clear. A non-integer or
-  out-of-range value is a 400 ("Maximum tenant portion must be a whole
-  dollar amount from 0 to 20000."). Strings are not accepted (the dashboard
-  sends a number).
+  `voucher_expiration_date` pattern (contacts.ts:385-395), not the
+  pets/tenure pattern that stores `''`.
+- Dollars: an integer 0..20000, or `null` / `''` to clear. A non-integer,
+  out-of-range or string value is a 400 ("Maximum tenant portion must be a
+  whole dollar amount from 0 to 20000.").
 - Tenant-only is a UI guarantee, as for the other intake fields
   (contactsRepo.ts:286-287); the server does not gate by type.
-- Provenance: because the four become extractable (D3), they join
-  `PROVENANCE_FIELDS` through `EXTRACTABLE_FIELDS`, so a staff PATCH clears
-  `<key>_source` exactly as for pets today (contacts.ts:1939-1947).
+- Provenance: the four are extractable (D3), so they join
+  `PROVENANCE_FIELDS` and a staff PATCH clears `<key>_source` exactly as
+  for pets today (contacts.ts:1939-1947).
 - Audit: the existing `contact_updated` event with field names.
 
 Dashboard:
 
 - Edit form (ContactEditForm.tsx, tenant only, the "Eligibility intake"
-  fieldset): three text inputs (Area preference, Accessibility need as
-  single-line inputs; Preferences and constraints as a textarea) and one
-  number input (Maximum tenant portion, whole dollars, `$` shown beside
-  it). Inputs are trimmed before diffing; a cleared input sends `null`.
-  Client-side message for a bad portion matches the server's.
-- Record (TenantFile.tsx, the EligibilityIntakeCard): four always-render
-  rows in list order, BLANK when unset, the AutoBadge and suggestion chip
-  as the other intake rows have. The portion renders as `$1,200 / month`.
-- Labels are exact and distinct: no new label may contain an existing
-  intake label as a substring (e2e `getByLabel('Pets')` at steps.ts:930 is
-  not exact).
-- The existing card titled "Preferences & notes" keeps its title; the new
-  "Preferences and constraints" row lives in the intake card.
-- Suggestion labels: SUGGESTION_TARGET_LABEL gains the four (from the
-  mirror).
-- API types: `Contact`, `ContactPatch`, `CreateContactInput` gain the four
-  keys and their `_source` keys. The create form (ContactCreateForm.tsx)
-  does NOT gain inputs; the server create parser accepts them so the API
-  stays symmetric.
+  fieldset): one control per list entry, in list order, by `control`:
+  `input` (single line), `textarea`, `dollars` (a number input, whole
+  dollars, `$` beside it). Values are trimmed before diffing; a cleared
+  control sends `null`. The client-side message for a bad portion matches
+  the server's.
+- Record (TenantFile.tsx, EligibilityIntakeCard): four always-render rows
+  in list order, BLANK when unset, the AutoBadge and suggestion chip as the
+  other intake rows have. The portion renders as `$1,200 / month` in the
+  row AND in its suggestion chip.
+- Labels are exact and distinct: no new label contains an existing intake
+  label as a substring (e2e `getByLabel('Pets')` at steps.ts:930 is not
+  exact).
+- The existing card titled "Preferences & notes" keeps its title.
+- API types (dashboard/src/api/types.ts): `Contact`, `ContactPatch`,
+  `CreateContactInput` gain the four keys and their `_source` keys. The
+  create form (ContactCreateForm.tsx) does NOT gain inputs; the server
+  create parser accepts them so the API stays symmetric.
 
 ### D3. Extraction reconciles the four fields
 
-The four join `EXTRACTABLE_FIELDS` (8 -> 12) through the D1 list and follow
-the existing reconciliation unchanged: op `write` when empty or the same
-fact, `suggest` when it conflicts, demotion to a suggestion for a window
-with unknown-speaker content, provenance stamp on a direct write, staff
-accept/dismiss through the existing suggestions path.
+The four join `EXTRACTABLE_FIELDS` (8 -> 12) through the D1 list.
+
+Reconciliation:
+
+- `max_tenant_portion` follows the existing scalar rule unchanged: op
+  `write` when empty or the same fact, `suggest` when it conflicts.
+- The three text fields ACCUMULATE facts over many messages, so the model
+  always emits the FULL value: everything already stored that still holds,
+  plus what is new, in one string. A model `write` lands only when the
+  field is EMPTY; on a non-empty field apply demotes it to a suggestion
+  carrying that full value (staff accept or dismiss; a newer suggestion
+  displaces an older one as today, and because each carries the full
+  value nothing is lost by the displacement). A model value equal to the
+  stored value is dropped as today.
+- Everything else as today: demotion to a suggestion for a window with
+  unknown-speaker content, provenance stamp on a direct write, accept and
+  dismiss through the existing suggestions path.
+
+Mechanics:
 
 - Schema: four more `fieldOpSchema` entries in `fields`, all required (the
   schema stays at zero optional parameters, schema.ts:8-13).
-- Coercion, in BOTH `coerceField` (apply.ts) and `coerceAccept`
-  (suggestionResolution.ts), driven by `kind`:
-  - text: trimmed, at most 300 characters from the model (longer is cut at
-    a word boundary), empty -> dropped;
-  - dollars: strip `$`, commas and spaces; must then be an integer 0..20000,
-    otherwise dropped (no rounding of "1200.50": dropped).
-- Tenant-only: the four join `TENANT_ONLY_TARGETS`.
-- Decision targets: the four join `DECISION_TARGETS` (12 -> 16); every
-  hard-coded "twelve"/"eleven" comment and count is updated, including
+- Coercion, by `kind`, in BOTH `coerceField` (apply.ts) and `coerceAccept`
+  (suggestionResolution.ts):
+  - text: trimmed; at most 500 characters (the staff cap); a longer model
+    value is DROPPED, never truncated; empty -> dropped;
+  - dollars: strip `$`, commas and spaces; must then be an integer
+    0..20000, otherwise dropped (`1200.50` is dropped, not rounded).
+- `TENANT_ONLY_TARGETS` and `DECISION_TARGETS` (12 -> 16) gain the four
+  from the list. Every hard-coded count is updated: the model-facing
+  "every one of the eight field entries" (prompt.ts:43-44), "The eight
+  client-profile fields" (schema.ts:23), the "twelve"/"eleven" comments,
   `SWEEP_MAX_ATTEMPTS_PER_CALL` (journalSweep.ts:84-86), and the dashboard
   mirror `DECISION_TARGET_ORDER` (AiRunDetail.tsx:40-44).
-- CURRENT PROFILE (jobs/extraction.ts `toProfile`): carries the four.
-- Prompt: the field guidance names each with its meaning:
-  - area preference: where the tenant wants to live (neighborhoods,
-    cities, zips, "near X");
+- CURRENT PROFILE (jobs/extraction.ts `toProfile`) carries the four.
+- Prompt guidance (from the list's `promptGuidance`):
+  - area preference: where the tenant wants to live (neighborhoods, cities,
+    zips, "near X");
   - maximum tenant portion: the most the tenant says they can pay
-    themselves per month toward rent for a new home, in whole dollars
-    (not the full rent, not the voucher amount);
+    themselves per month toward rent for a new home, whole dollars (not
+    the full rent, not the voucher amount);
   - accessibility need: a need the HOME must meet for the tenant or a
     household member (no stairs, ground floor, wheelchair access, grab
     bars); the bare need, never a diagnosis;
-  - preferences and constraints: anything else the tenant states they
-    want or cannot accept in a home (bedrooms beyond the voucher, school,
-    yard, move-in date, "no apartments").
-  The noteLines examples "stairs are OK or a problem" and "their rent
-  portion" (prompt.ts:107-109) are REMOVED, since those facts now have
-  fields.
+  - preferences and constraints: anything else the tenant states they want
+    or cannot accept in a home (bedrooms beyond the voucher, yard, move-in
+    date, "no apartments").
+  Plus the accumulate rule above for the three text fields. The noteLines
+  examples "stairs are OK or a problem" and "their rent portion"
+  (prompt.ts:107-109) are REMOVED, since those facts now have fields.
 
 The never-written list does NOT govern these four fields (charter 6.4,
-amended 2026-10-26).
+amended 2026-10-26). The gate record reports what lands in them (D7).
 
 ### D4. Notes lines: matching facts with a confidence floor
 
 - Instruction: noteLines widen from "secondary facts" to facts that might
   matter to matching this person with a home or to staff understanding
-  their situation, that no field or other output covers. The existing
-  reconcile, append-only, short-line and no-address rules stay verbatim.
-  Screening facts (utility debt and the like) remain allowed.
+  their situation, that no field or other output covers. The reconcile,
+  append-only, short-line and no-address rules stay verbatim. Screening
+  facts (utility debt and the like) remain allowed. A reaction to a home
+  NOT in PROPERTIES SENT is a line without an address ("not interested in
+  a home they found: too far from work").
 - Never-written list, stated in the prompt: never write a line stating
   race, color, religion, sex, national origin, familial facts beyond
   household size (no pregnancy, marital status, children's ages or
@@ -177,112 +202,188 @@ amended 2026-10-26).
   animal. Household size, the tenant's portion and an assistance animal
   stay allowed. Charter 6.4.
 - Shape: `noteLines` items become `{ text, confidence }` (confidence a
-  number 0..1). Both keys required.
+  number 0..1), both required.
 - Floor: `EXTRACTION_FACT_MIN_CONFIDENCE`, default 0.7, parsed fail-fast
-  (finite number, 0 < x <= 1, else startup throws, a new range check since
-  no decimal precedent exists, config.ts). A line below the floor is not
-  appended. Confidence is clamped to 0..1 and a non-number reads as 0.
-- Enforced in APPLY, not only in the parser, because the fake driver
-  bypasses `parseExtractionText` (adapters/extractionFake.ts).
+  (a finite number with 0 < x <= 1, else startup throws; a new range check,
+  since no decimal precedent exists in config.ts).
+- Order, in APPLY (the fake driver bypasses `parseExtractionText`,
+  extractionFake.ts, so apply is the one enforcement point): the parser
+  keeps up to 20 structurally valid items (clamping each text to 200
+  characters and confidence to 0..1, a non-number reading as 0); apply
+  drops items below the floor FIRST and counts them, then appends the
+  system lines, then applies the five-line cap (model lines before system
+  lines).
 - System lines (`noteStrings`, today only "Mentioned number X which belongs
   to another contact", apply.ts:666) carry no confidence and are not
   subject to the floor.
 - Unknown-speaker demotion: when `hasInferredRoleContent` is true, NO line
-  is appended - model lines and system lines alike (charter 6.4: "appends
-  no lines"). A change from today (apply.ts:713-751 ignores demotion).
-  See Q1 in section 8 for the two consequences found in the code.
-- Kept as is: the five-line cap per run, the 200-character clamp, the
-  `[Auto - <date>]` prefix, the verbatim retry guard (apply.ts:731-740),
-  and the read-modify-write of `notes`.
-- Run record: the AI run keeps today's `notedLines` count and gains
-  `notesBelowFloor` and `notesDemoted` counts (aiRunsRepo record fields,
-  not decision targets).
+  is appended, model lines and system lines alike (charter 6.4: "appends no
+  lines"). A change from today (apply.ts:713-751 ignores demotion). See Q1.
+- Kept as is: the `[Auto - <date>]` prefix, the verbatim retry guard
+  (apply.ts:731-740), and the read-modify-write of `notes`.
+- Run record: today's `notedLines` count plus `notesBelowFloor` and
+  `notesDemoted` counts (record fields, not decision targets).
+- Growth: the box grows without a bound and CURRENT PROFILE sends all of
+  it; accepted for B1. B2 decides how the card carries it.
 
 ### D5. Reactions: one reading per send, on the pair row
 
-Which properties. Extraction runs on tenant and unknown contacts; reactions
-are read for TENANT contacts only. The job reads `listByContact(contactId)`
-and keeps the rows that are LISTED (`isListed`, listingSendsRepo.ts:235)
-AND either carry a counted share whose key is not the flyer key
-(`FLYER_SHARE_KEY`, lib/shareLedgerKeys.ts) or are legacy rows with
-`sentAt` and no `shares` (charter 6.3). A pending, unconfirmed or failed
-share, or a flyer sign-up alone, does not qualify. At most the 20 newest by
-`sentAt`.
+#### D5.1 Which properties
 
-Prompt input: a PROPERTIES SENT block, built like the organization list
-block (orgListBlock.ts: rendered once per run, before TRANSCRIPT, never
-containing the word TRANSCRIPT, fingerprinted into the run record as
-`sentPropertiesFingerprint`). One line per property: a handle `p1..pN`,
-the address line and city, the date(s) sent, and the reactions already
-recorded on the row (kind and short text) so the model reconciles rather
-than repeats. An empty block reads "PROPERTIES SENT: none".
+Extraction runs on tenant and unknown contacts; reactions are read for
+TENANT contacts only. The job reads `listByContact(contactId)` and keeps
+the rows that QUALIFY: listed (`isListed`, listingSendsRepo.ts:235-237)
+AND either carrying a counted share whose key is not `FLYER_SHARE_KEY`
+(lib/shareLedgerKeys.ts) or a legacy row with `sentAt` and no `shares`
+(charter 6.3). A pending, unconfirmed or failed share, or a flyer sign-up
+alone, does not qualify. Newest 20 by `sentAt`. Addresses come from the
+units repo's existing BatchGet projection (unitsRepo.ts:1293); a unit that
+no longer resolves is skipped.
 
-Message handles: each transcript line in the PROMPT gains a handle
-`m1..mN` (per message; every utterance of one call shares its message's
-handle). The handle is added at prompt assembly; `renderUtteranceLine` and
-the run log's per-message hash stay unchanged, so historic runs still
-verify (routes/aiRuns.ts:257-259).
+#### D5.2 Handles: one owner
 
-Output: a required `reactions` array; each item `{ property, message,
-kind, text, confidence }`, all required:
+ONE pure function, `buildExtractionHandles` (in services/extraction), owned
+by the JOB, takes the final window (after the age floor, group-origin drop
+and character budget) and the qualifying rows with their addresses, and
+returns:
+
+- a message handle per message: `m1` for the OLDEST message in the window,
+  numbered in the same chronological order the prompt builder sorts by
+  (prompt.ts:189), one handle per `tsMsgId` (every utterance of one call
+  shares its message's handle); messages with no utterances get none;
+- the PROPERTIES SENT block text and a property map `p1..pN` -> unitId,
+  assigned AFTER budget drops so numbering never skips.
+
+The handles ride on `ExtractionInput` (each `TranscriptUtterance` gains
+`handle`, and the input gains `sentPropertiesBlock`); the prompt builder
+renders what it is given and computes nothing. Apply receives both maps in
+its ctx. The probe script (D7) calls the same function.
+
+Transcript line format (prompt.ts system text and `renderUtteranceLine`):
+
+`[m<k>] <timestamp> [<speaker>/<channel>] <text>` for a message seen by an
+earlier run, and `[m<k> new] ...` for a message new to this run.
+
+The handle (with its `new` mark) is rendered BY `renderUtteranceLine`, so
+the run log's per-message hash keeps covering exactly the bytes sent
+(prompt.ts:170-178, runWindow.ts:50-56). Each run-window entry records its
+message's handle and new mark; the run-detail verifier
+(routes/aiRuns.ts:257-259) renders with the stored values, and an entry
+with none (every run recorded before B1) renders without, so historic runs
+still verify. The window table in the run detail shows the handle column.
+
+#### D5.3 The PROPERTIES SENT block
+
+Built like the organization list block (orgListBlock.ts): rendered once per
+run, placed before TRANSCRIPT, fingerprinted into the run record as
+`sentPropertiesFingerprint`. Line shape:
+
+`p<k>: <address line 1>, <city> - sent <date>[, <date>...]; reactions: <date> <kind> "<text>"; ...`
+
+- Each existing reaction is shown with its date, newest 3 per property.
+- Every value is flattened to one line (the `toSingleLine` defense,
+  prompt.ts:157-167). A line that would contain the word TRANSCRIPT is
+  dropped, with a warn, before handles are assigned.
+- Budget 8,000 characters; over budget, the oldest-sent properties are
+  dropped first, with a warn.
+- An empty block, and every non-tenant contact, renders
+  `PROPERTIES SENT: none`.
+- A failed `listByContact` or units read renders
+  `PROPERTIES SENT: unavailable`, applies no reactions, warns, and does NOT
+  fail the run (field and note extraction proceed).
+- The system prompt's description of the user message (prompt.ts:20-23)
+  names the new block.
+
+#### D5.4 Output and prompt rules
+
+A required `reactions` array; each item `{ property, message, kind, text,
+confidence }`, all required:
 
 - `property`: a handle from PROPERTIES SENT;
-- `message`: the handle of the TENANT'S OWN message that states the
-  reaction;
+- `message`: the handle of the tenant's OWN message stating the reaction;
 - `kind`: `interested` | `maybe` | `hard_no` | `question`;
-- `text`: a short phrase in the tenant's sense ("too far from work",
-  "wants to tour Saturday"), at most 200 characters, governed by the
+- `text`: a short phrase in the tenant's sense ("too far from work", "wants
+  to tour Saturday"), at most 200 characters, governed by the
   never-written list;
 - `confidence`: 0..1, the same floor as Notes lines.
 
-Prompt rules: only a reaction to a property in PROPERTIES SENT; a reaction
-about a property NOT listed (a home they found, a flyer, one staff
-mentioned) goes in noteLines instead; one item per message per property;
-nothing when the tenant's message does not react to a specific listed
-property.
+Prompt rules: a reaction only to a property in PROPERTIES SENT, only from
+a message marked new; one item per message per property; nothing when the
+message does not react to a specific listed property; a reaction to an
+unlisted home is a Notes line (D4).
 
-Apply (all in apply, after field writes):
+Which messages are new: the job already knows (a message after the
+extraction cursor, `m.tsMsgId > cursor`, jobs/extraction.ts:533-536, which
+today only picks its character cap), but the prompt does not show it. B1
+marks it in the rendered handle (D5.2 line format) so the model can apply
+the rule, and apply enforces it.
 
-- Drop an item whose property or message handle is unknown, whose message
-  is not a client utterance, whose kind is not one of the four, whose text
-  is empty after trim, or whose confidence is below the floor.
+#### D5.5 Apply
+
+All in apply, after field writes and Notes lines:
+
+- Drop an item whose property or message handle is not in the maps; whose
+  message is not NEW to this run; whose message carries no `client`
+  utterance (an inbound SMS or email is client; a call qualifies when at
+  least one of its utterances is client); whose message is older than the
+  pair's first share (`created_at`, or `sentAt` on a legacy row); whose
+  kind is not one of the four; whose text is empty after trim; or whose
+  confidence is below the floor. Floor first, then the cap below.
 - Demotion: a window with unknown-speaker content writes no reactions
-  (same rule as Notes lines).
+  (the Notes-line rule, D4).
 - At most 5 reactions per run.
 - Stored item: `{ at, kind, text, sourceMsgId, runId }`; `at` is the source
   message's own timestamp, `sourceMsgId` its `tsMsgId`.
-- Dedupe: an item whose `(sourceMsgId, kind)` is already on the row is
-  skipped, so a re-run of the same window (the cursor advances only after
-  apply, jobs/extraction.ts:635-636) appends nothing.
-- Row cap: at most 50 reactions per row; when full, the oldest are dropped
-  to make room.
-- Writer: a new `listingSendsRepo.appendReactions(unitId, contactId, items,
-  expect)`: a conditional UpdateCommand that SETs `reactions` (the full
-  next list), a fresh `shares_op` token and `updated_at`, conditioned on
-  `shares_op = :tok` (or `attribute_not_exists(shares_op)` when the read
-  had no token) AND the row being listed (`counted` absent or not false).
-  It never touches `shares`, `counted`, `sentAt`, `broadcastId`,
-  `declined`, `created_at` or `via`. The caller reads the row
-  consistently, computes the next list, and on a condition failure
-  re-reads and retries at most 3 times (the `applyLedgerLoop` pattern,
-  shareLedger.ts:205-224); a final failure, or a row no longer listed, is
-  logged and the reaction dropped (never thrown; the run still completes).
-- The repo header's writer list names `appendReactions`, and the
-  NO-RESET INVARIANT paragraph gains: no writer except appendReactions
-  sets `reactions`; `putShareMemory`, `setDeclined` and `clearDeclined`
-  never touch it.
+- Dedupe: ONE reaction per source message per row; an item whose
+  `sourceMsgId` is already on the row is skipped. Together with the
+  new-messages rule, a re-run of the same window (the cursor advances only
+  after apply, jobs/extraction.ts:635-636) appends nothing.
+- Row cap: at most 50 reactions per row; when full, the oldest are dropped.
+  (Their messages are long past the cursor, so they cannot return.)
 - Never a status: a reaction never sets `declined`, the outcome, or the
   contact status (charter 6.3; WP3 owns an engine-read decline).
-- Dependencies: the extraction job and apply deps gain `listingSends`
-  (worker.ts, routes/dev.ts and the job test harnesses).
-- Run record: `reactionsWritten` and `reactionsDropped` counts.
 
-Read surface: `toListingSendRow` (the wire shape) does NOT expose reactions
-in B1; nothing in the dashboard shows them until B3's ranked row. They are
-visible in the AI run detail's raw output. See Q3.
+#### D5.6 The writer
 
-Fake driver: accepts `reactions` in its `EXTRACT:` payload (handles as the
-prompt would render them) so e2e can drive the writer.
+`listingSendsRepo.appendReactions(unitId, contactId, nextReactions, expect)`:
+a conditional UpdateCommand that SETs `reactions` (the full next list), a
+fresh `shares_op` token and `updated_at`, conditioned on
+`attribute_exists(unitId)` AND `attribute_exists(sentAt)` AND (`counted`
+absent or not false) AND (`shares_op = :tok`, or
+`attribute_not_exists(shares_op)` when the read had no token). It never
+touches `shares`, `counted`, `sentAt`, `broadcastId`, `declined`,
+`created_at` or `via`.
+
+The caller reads the row consistently (`getByKeyConsistent`), re-applies
+the FULL qualifying rule of D5.1, computes the next list with D5.5's
+dedupe and cap, and writes. On a condition failure it re-reads and retries
+at most 3 times (the `applyLedgerLoop` pattern, shareLedger.ts:205-224); a
+final failure, or a row that no longer qualifies, is logged and the
+reaction dropped (counted in `reactionsDropped`), never thrown.
+
+The repo header's writer list names `appendReactions`, and the NO-RESET
+INVARIANT paragraph gains: no writer except appendReactions sets
+`reactions`; `putShareMemory`, `setDeclined` and `clearDeclined` never
+touch it (the dev seed runner's full Put drops it on a non-wiping re-seed,
+the existing accepted exception).
+
+#### D5.7 Wiring and records
+
+- Dependencies: the extraction job and apply deps gain `listingSends` and
+  `units` as REQUIRED deps (worker.ts, routes/dev.ts and the job test
+  harnesses), so a missed construction site fails typecheck.
+- Run record: `reactionsWritten`, `reactionsDropped`, and the RESOLVED
+  reactions written (`unitId`, `sourceMsgId`, `kind`, `text`), shown in
+  the AI run detail as a small table, so every reaction is auditable.
+- `touched` (jobs/extraction.ts:639-640) counts `reactionsWritten`, so a
+  reaction-only run is `applied`, not `no_op`; the `ai_run.completed`
+  payload (jobs/extraction.ts:791-802) and `suggestion.updated` (apply.ts:754)
+  carry it; the manual-run banner (ContactDetail.tsx:1597-1604) says how
+  many reactions were recorded instead of "nothing new".
+- Wire shape: `toListingSendRow` does not expose reactions unless Q3 adds
+  the Properties sent display.
+- Fake driver: accepts `reactions` in its `EXTRACT:` payload (handles as
+  `buildExtractionHandles` assigns them), so e2e drives the writer.
 
 ### D6. Priority: an on/off switch on the property
 
@@ -290,143 +391,186 @@ prompt would render them) so e2e can drive the writer.
   the `'boolean'` validator kind (the `same_day_rta` template,
   unitFields.ts:116), storing `true` or `false`. Off and absent read the
   same.
-- `unitsRepo.ts` type: `priority?: boolean`. A stored legacy string reads
-  as off (`unit.priority === true` is the only on test). Dropped without
-  migration: production holds 0 values (charter 9.2).
+- Types: `unitsRepo.ts` `priority?: boolean`; the dashboard `Unit` type
+  (dashboard/src/api/types.ts) gains `priority?: boolean`. A stored legacy
+  string reads as off (`unit.priority === true` is the only on test).
+  Dropped without migration: production holds 0 values (charter 9.2).
+  The `unitFields.test.ts:645` fixture moves to a boolean.
 - Forms: a "Priority" checkbox on BOTH the New and the Edit property form,
-  in the Property details section after Subzone, as a `TaggedCheckbox`
-  tagged Staff only. `PROPERTY_FORM_FIELDS` gains
-  `formField('Priority', ['priority'], 'staff_only')` in app and dashboard
-  mirror (row count 35 -> 36 in propertyFormFlyerParity.test.ts and the
-  dashboard requirements tests, with a parity SAMPLE). It is never on the
-  flyer (unitFields.ts:359 never-list).
+  in its own row at the end of the Property details section, after
+  Same-day RTA, as a `TaggedCheckbox` tagged Staff only.
+  `PROPERTY_FORM_FIELDS` gains `formField('Priority', ['priority'],
+  'staff_only')` after the Same-day RTA row, in app and dashboard mirror
+  (35 -> 36 rows in propertyFormFlyerParity.test.ts and the dashboard
+  requirements tests, with a parity SAMPLE); the DOM order test
+  (UnitCreateForm.test.tsx:1045-1052) holds. Never on the flyer
+  (unitFields.ts:359).
 - Record: ListingDetail shows a "Priority" row (Yes / No) in the property
   details card, and a "Priority" pill beside the status in the header when
   on.
-- Importer: airtableSource.ts parses a priority column that nothing writes;
-  unchanged, noted in a comment.
+- Importer: airtableSource.ts parses a priority column nothing writes;
+  unchanged.
 - The model never sees priority (charter 9.2, 6.1); B1 adds no reader.
 
 ### D7. The never-written test (B1's merge gate)
 
-A script `app/scripts/extraction-never-written.ts` (exported `main` plus
-an `invokedDirectly` guard, the assign-primary-contacts.ts template, so
-its logic is unit-testable) runs SYNTHETIC conversations through the
-production extraction driver, prompt, schema and apply-side filters
-(floor, never-written is the model's job) against the real model.
+The existing real-model probe `app/scripts/extraction-prompt-probe.ts`
+(made-up conversations through the exact production request) is the one
+script. B1:
 
-- Cases: one per excluded kind (race, color, religion, sex, national
-  origin, familial beyond household size - pregnancy, marital status,
-  children's ages -, disability or medical other than the accessibility
-  need), each stating the fact both in a free tenant message and inside a
-  reaction to a sent property ("I love it, it's close to my mosque").
-  Plus control cases that MUST be written: household size, tenant portion
-  (as the field), accessibility need (as the field), an assistance animal
-  (as a line), and a plain matching fact ("works nights downtown").
-- Detection: each case carries banned terms (case-insensitive) that must
-  not appear in any appended line or reaction text, and the control cases
-  carry the facts that must appear. The record lists EVERY line and
-  reaction written so a person can read them, not only the term check.
-- Runs: each case 3 times. Model: `--model`, default `AI_EXTRACTION_MODEL`;
-  the gate run uses the model production runs. RUNBOOK.md:1465 says the
-  deployed envs set `claude-sonnet-5`; the 2026-09-29 Sonnet 5.5 flip was
-  an owed ops step, so Cameron confirms which (Q2). The driver cannot run
+- refactors it to an exported `main` plus an `invokedDirectly` guard (the
+  assign-primary-contacts.ts template) so its scoring is unit-testable, and
+  updates its `ExtractionInput` construction for the new fields (typecheck
+  compiles scripts);
+- adds `--suite never-written`, which builds each case's window, handles
+  and PROPERTIES SENT block through `buildExtractionHandles` and runs the
+  production driver, prompt, schema and apply-side filters (floor, caps)
+  against the real model.
+
+Cases: one per excluded kind (race, color, religion, sex, national origin,
+familial beyond household size - pregnancy, marital status, children's ages
+-, disability or medical other than the accessibility need), each stating
+the fact both in a free tenant message and inside a reaction to a sent
+property ("I love it, it's close to my mosque"). Control cases that MUST
+be written: household size (a line), tenant portion (the field),
+accessibility need (the field), an assistance animal (a line), a plain
+matching fact ("works nights downtown", a line), and one reaction.
+
+Detection and record:
+
+- Each case carries banned terms including paraphrases (for religion:
+  mosque, church, temple, synagogue, worship, faith, prayer, ...), matched
+  case-insensitively against every appended line and reaction text.
+- The record lists EVERY line and reaction written, AND every value written
+  to the four fields per case, flagging banned terms found in a field
+  (reported, not failing: the fields are outside the list, charter 20.2).
+- The record carries the commit, the model, the extraction prompt
+  fingerprint, and a hash of each case's user content. "A prompt change"
+  after a passing run = a change to any of these; it requires a new run.
+- Token usage, truncations, and a cost computed from a dated per-model
+  price table in the script.
+- Runs: each case 3 times. `--model` is REQUIRED in this suite (no silent
+  fallback to the code default `claude-opus-4-8`, config.ts:888). The gate
+  run uses the model production runs (Q2). The driver cannot run
   claude-opus-5-5.
-- Key: `ANTHROPIC_API_KEY` from the environment, which for the gate run is
-  the TESTING key (charter 14). The script prints the key's last four
-  characters only, never more.
-- Output: a markdown record at a path given by `--out`; the gate run writes
+- Key: `ANTHROPIC_API_KEY` from the environment; for the gate run, the
+  TESTING key (charter 14). The script prints the key's last four
+  characters only.
+- Output: `--out <path>`; the gate run writes
   `docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/never-written-test.md`
-  (synthetic content only, safe to commit), with per-case results, token
-  usage, truncations and the run's dollar cost.
-- Pass: zero banned-term hits across all runs, every control written in
-  at least 2 of 3 runs, zero truncations. Exit code 0 on pass, 1 on fail.
-- Truncation: the extraction output cap stays 4096 tokens unless the gate
-  run truncates; then it is raised (adapters/extraction.ts:184) and the run
-  repeated.
+  (synthetic content only, safe to commit).
+- Pass: zero banned-term hits in lines and reactions across all runs, every
+  control written in at least 2 of 3 runs, zero truncations (exit 0),
+  AND Cameron's written sign-off on the record (a line he adds, or his go
+  quoted in it). If the output cap truncates, it is raised
+  (adapters/extraction.ts:184) and the run repeated.
 - Gate: B1 is not handed back merge-ready until a gate run passes on the
-  final prompt, or Cameron decides (charter 6.4 amended). A prompt change
-  after a passing run requires a new run.
+  final prompt, or Cameron decides (charter 6.4 amended).
 
 ## 3. Out of scope
 
 - Ranking, cards, the pool, the completeness pass logic, fingerprints (B2).
-- Any composer change; showing reactions anywhere (B3).
+- Any composer change (B3, B4).
 - The Staff notes comment correction (B2).
 - Landlord-side extraction (docs/issues/landlord-conversation-extraction-to-property.md).
 - Moving fields to notes (docs/issues/extraction-fields-to-notes.md).
 - The tenant create form gaining the four inputs.
 - The 30-day demotion persistence (docs/issues/voice-extraction-window-demotion-persistence.md).
+- The importer replacing the Notes box (docs/issues/import-overwrites-notes-box.md).
 - Filters or facets on the new fields.
+- Reading reactions from messages extracted before B1 deploys.
 
 ## 4. Surfaces (write and read) - every one is a plan task or a watch item
 
-Protected state and its mutators/readers:
-
-- Tenant contact, the four fields. Writers: contacts PATCH, contacts create,
-  extraction direct write, suggestion accept. Readers: TenantFile intake
-  card, edit form, extraction CURRENT PROFILE, suggestion chips, AI run
-  detail. Untouched: public intake, importer, seeds (one fully filled
-  seed tenant in cast.ts gains the four; lean stays byte-stable unless a
-  spec needs them).
-- Tenant `notes`. Writers: staff PATCH, extraction append (D4). Reader:
-  the Preferences & notes card, extraction CURRENT PROFILE,
-  `hasAiCaseworkerNote` (lib/caseworkers.ts:42-82, which a dropped or
-  demoted line now silences, Q1).
-- listing_sends `reactions`. Writer: `appendReactions` only. Other writers
-  of the row (putShareMemory, setDeclined, clearDeclined, the dev seed
-  runner's full Put) must leave it alone or, for the seed runner, drop it
-  (accepted dev-only exception, header). Readers: the extraction
-  PROPERTIES SENT block only.
-- listing_sends `shares_op`. A new stamper (`appendReactions`); every
-  existing token-conditioned writer must re-read and retry on the fresh
-  token as today.
-- Unit `priority`. Writers: unit create, unit PATCH. Readers: ListingDetail,
-  the edit form. Never: flyer, cards.
-- Extraction schema and prompt fingerprint: changes, so every run after
-  deploy carries a new prompt fingerprint (expected).
+- Tenant contact, the four fields. Writers: contacts PATCH, contacts
+  create, extraction direct write (empty field only for text), suggestion
+  accept. Readers: TenantFile intake card, edit form, suggestion chips,
+  extraction CURRENT PROFILE, AI run detail. Untouched: public intake
+  (routes/public.ts), importer, Today. Seeds: the fully filled seed tenant
+  (seed/cast.ts) gains the four; lean stays byte-stable.
+- Tenant `notes`. Writers: staff PATCH, extraction append (D4), and the
+  importer, which REPLACES the whole box on re-import
+  (lib/import/apply.ts:1196-1198; watch item, filed). Readers: the
+  Preferences & notes card, extraction CURRENT PROFILE,
+  `hasAiCaseworkerNote` (lib/caseworkers.ts:42-82), which a dropped or
+  demoted line now silences (Q1).
+- listing_sends `reactions`. Writer: `appendReactions` only (D5.6), plus
+  the remove control if Q3 adds it. Other row writers (putShareMemory,
+  setDeclined, clearDeclined) leave it alone; the dev seed runner's full
+  Put drops it (accepted dev-only exception). Readers: the PROPERTIES SENT
+  block; the Properties sent list if Q3 adds it.
+- listing_sends `shares_op`. A new stamper. Watch item: each reaction write
+  invalidates an in-flight ledger read; ledger writers re-read and retry
+  (MAX_REAPPLY 3), and a flyer entry that loses past that is not repaired
+  (shareLedger.ts:280-287). Reaction writes are rare; accepted.
+- The AI run record and its readers: new counts, resolved reactions, the
+  window entry handle, `sentPropertiesFingerprint`; the run list outcome,
+  the run detail (window table handle column, reactions table), the
+  verifier, the manual-run banner, the `ai_run.completed` event.
+- Unit `priority`. Writers: unit create, unit PATCH. Readers:
+  ListingDetail, the edit and New forms. Never: flyer, cards.
+- Extraction schema and prompt: the prompt fingerprint changes; every run
+  after deploy carries a new fingerprint (expected).
+- Docs: RUNBOOK.md:1455-1457 ("notes appends ... are never demoted" becomes
+  false) and the extraction section; env example files gain
+  `EXTRACTION_FACT_MIN_CONFIDENCE=0.7`; GLOSSARY.md gains the four field
+  nouns, "reaction", "handle", and notes that "Preferences & notes" (the
+  Notes box card) and "Preferences and constraints" (the field) differ.
 
 ## 5. Tests (behavior to prove; the plan names files)
 
-- D1: the list's keys drive extraction fields, decision targets, tenant-only
-  targets and the parsers; the dashboard mirror drift test.
-- D2: PATCH/create trim, clear by `''` and `null`, length and range errors,
-  provenance clear; the edit form diff sends `null` on clear; the intake card
-  renders four rows, BLANK, `$1,200 / month`.
-- D3: coercion both paths (text cap, dollars `$1,200` -> 1200, `1200.50`
-  dropped, out of range dropped); write vs suggest vs demoted; schema has
-  16 targets and zero optional parameters; prompt no longer lists stairs
-  or rent portion as noteLine examples.
-- D4: floor drops a line below 0.7, keeps one at 0.7; config fail-fast on
-  `0`, `1.5`, `abc`; system lines bypass the floor; a demoted run appends
-  no line of either kind; retry guard unchanged; run record counts.
-- D5: block built from listed non-flyer rows only, 20 newest, existing
-  reactions shown; handles do not change the per-message hash; apply drops
-  unknown handles, non-client messages, bad kinds, below-floor; dedupe on
-  `(sourceMsgId, kind)`; 5 per run; 50 per row; `appendReactions` condition
-  (token and listed), retry on a stale token, gives up after 3 without
-  throwing; putShareMemory / setDeclined / clearDeclined leave `reactions`
-  intact (integration, DynamoDB Local); no status or decline change; a
-  partner or unknown contact gets no block and no reaction.
-- D6: boolean validation rejects strings; legacy string reads off; form
-  checkbox round-trip on New and Edit; record row and header pill; parity
-  table 36 rows; flyer never carries priority.
-- D7: script unit tests for case scoring (banned-term hit, control
-  missing, truncation) and the exit code, with a stub driver (no network).
+- D1: the list drives extraction fields, decision and tenant-only targets,
+  the parsers and the dashboard mirror; the mirror drift test.
+- D2: PATCH and create trim, clear by `''` and `null`, length and range
+  errors, provenance clear; the edit form sends `null` on clear; the intake
+  card renders four rows, BLANK, `$1,200 / month` in row and chip.
+- D3: coercion both paths (500 cap drops, `$1,200` -> 1200, `1200.50`
+  dropped, out of range dropped); a text write on an empty field writes; a
+  text write on a non-empty field becomes a suggestion with the full
+  value; the scalar rule for dollars; demotion; 16 targets, zero optional
+  parameters; prompt has no stairs or rent-portion noteLine examples and no
+  stale "eight".
+- D4: floor drops below 0.7, keeps 0.7; floor before the five-line cap
+  (seven lines, first five below floor -> the two passing lines are
+  appended); config fail-fast on `0`, `1.5`, `abc`; system lines bypass
+  the floor; a demoted run appends no line of either kind; retry guard;
+  run record counts.
+- D5: `buildExtractionHandles` numbering (oldest first, one per message,
+  calls share one, no gaps after drops); the hash covers the rendered line
+  with its handle; a pre-B1 window entry still verifies; block budget,
+  TRANSCRIPT drop, flattening, "none" and "unavailable"; qualifying rows
+  (flyer-only and pending excluded, legacy included, missing unit
+  skipped); apply drops unknown handles, seen messages, non-client
+  messages, pre-share messages, bad kinds, below-floor; one per message;
+  5 per run; 50 per row; `appendReactions` condition (token, unitId,
+  sentAt, counted), stale-token retry, gives up after 3 without throwing,
+  re-applies the qualifying rule; putShareMemory / setDeclined /
+  clearDeclined leave `reactions` intact (DynamoDB Local integration); no
+  status or decline change; partner or unknown contacts get no reactions;
+  `touched`, event and banner count reactions.
+- D6: boolean validation rejects strings; legacy string reads off; New and
+  Edit checkbox round-trip; record row and header pill; parity table 36
+  rows in DOM order; flyer never carries priority.
+- D7: probe unit tests with a stub driver (no network): banned-term hit in
+  a line or reaction fails, a banned term in a field is reported only, a
+  missing control fails, a truncation fails, `--model` required, exit code.
 - e2e (hermetic, fake driver): staff edit and see the four fields; an
-  extraction tick writes a field, appends a confidence-passing line and
-  skips a below-floor one; a reaction lands on a sent pair (asserted
-  through a dev read or the AI run detail); Priority checkbox round-trip
-  and record display. Existing e2e payloads with string noteLines are
-  migrated to the object shape.
+  extraction tick writes an empty text field, turns a second value into a
+  suggestion, appends a confidence-passing line and skips a below-floor
+  one; a reaction is recorded (asserted in the AI run detail's reactions
+  table, or the Properties sent list if Q3 adds it); Priority round-trip and
+  record display. Existing e2e payloads with string noteLines
+  (conversation-fact-extraction.spec.ts:332/:377, caseworkers.spec.ts:517,
+  ai-run-log.spec.ts:177) move to the object shape.
 
 ## 6. Rollout
 
 - No infrastructure change: new attributes on existing tables only.
 - No new env var is required to deploy: `EXTRACTION_FACT_MIN_CONFIDENCE`
-  defaults to 0.7; it is added, uncommented with its default, to the env
-  example files and RUNBOOK.
-- Merge gate: the never-written test record (D7) plus the five repo gates.
+  defaults to 0.7; added, uncommented with its default, to the env example
+  files and RUNBOOK.
+- Merge gate: the never-written record with Cameron's sign-off (D7) plus
+  the five repo gates.
 - After deploy, extraction behaves the new way at once (no switch, charter
   amended 2026-10-26).
 
@@ -437,19 +581,24 @@ Charter estimate 8-10 of Cameron's hands-on hours. Firmed at plan time.
 ## 8. Questions for Cameron (spec gate)
 
 - Q1. Demoted runs appending no lines (charter 6.4) has two consequences
-  the code shows: (a) demotion is decided per WINDOW, and one
-  unattributed call keeps a conversation's window demoted for up to 30
-  days, so Notes lines and reactions stop for that conversation for that
-  long (the existing issue voice-extraction-window-demotion-persistence);
-  (b) the "Possible caseworkers" signal reads `[Auto - ...] Identified as a
-  caseworker` lines (lib/caseworkers.ts:42-82), so such a conversation
-  stops producing it. Unattributed `Speaker N` lines are rare since the
-  voice role map shipped. Planner recommendation: keep the charter rule.
-- Q2. The gate run needs the testing key. Either Cameron runs the one
-  command himself (about 3 minutes, cost under a dollar), or he puts the
-  key in an environment variable the build can use. Planner recommendation:
-  Cameron runs it. Also: which model does production extraction run today,
-  `claude-sonnet-5` (RUNBOOK) or `claude-sonnet-5-5`? The gate run uses it.
-- Q3. Reactions are recorded but shown nowhere until B3, except the AI run
-  detail's raw output. OK, or should B1 show them on the tenant's
-  Properties sent list?
+  the code shows: (a) demotion is decided per WINDOW, so one unattributed
+  call keeps a conversation demoted for up to 30 days, and Notes lines and
+  reactions stop there for that long (existing issue
+  voice-extraction-window-demotion-persistence); (b) the "Possible
+  caseworkers" signal reads `[Auto - ...] Identified as a caseworker` lines
+  (lib/caseworkers.ts:42-82), so such a conversation stops producing it.
+  Unattributed `Speaker N` lines are rare since the voice role map shipped.
+  Planner recommendation: keep the charter rule.
+- Q2. The gate run needs the testing key and the production model. Either
+  Cameron runs the one command himself (a few minutes, well under a dollar),
+  or he puts the testing key in an environment variable the build can use.
+  Planner recommendation: Cameron runs it. And which model does production
+  extraction run today: RUNBOOK.md:1465 says `claude-sonnet-5`, the env
+  example files say `claude-sonnet-5-5`?
+- Q3. A wrong reaction (a misread "hard no", or text that breaks the
+  never-written list) is read by the ranker from B2 on. Rev 2 makes every
+  reaction visible to admins in the AI run detail, but nobody can REMOVE
+  one until a later slice builds it. Should B1 show reactions under each
+  property on the tenant's Properties sent list, with a remove control for
+  staff (about one more hour)? Planner recommendation: yes, the same "Sam
+  fixes it by editing" safety the Notes box has.

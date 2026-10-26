@@ -87,3 +87,36 @@ goes to Cameron's gate with Q1-Q3.
 
 Totals: 3 rounds, 40 findings (round 1 merged 33 to 22), all accepted, 0
 rejected. Decision-changing rounds: 1 and 2.
+
+## Between rounds 3 and 4: Cameron's spec-gate redesign (2026-10-26)
+
+At the gate on rev 4, Cameron withdrew stored per-pair reactions (and with
+them R1-1, R1-2, R1-3, R1-4, R1-9, R1-10, R1-14..R1-18, R2-1, R2-2, R2-7,
+R2-9, R3-3's reaction half, R3-6 and R3-8, whose mechanisms no longer
+exist). The charter was amended (section 20, items 4-6) and the spec cut
+to rev 5: reaction LINES in the Notes box and a read-only PROPERTIES SENT
+list. That is a decision change by the human, not by a reviewer.
+
+## Round 4 (2026-10-26) - the last allowed round; TERMINAL
+
+Reviewer A continued (round4-reviewer-a.md, 8 findings; contested no
+adjudication; confirmed nothing of the withdrawn design dangles). Spec
+rev 6.
+
+| # | Finding | Verdict | Decision changed | Resolution in rev 6 |
+|---|---|---|---|---|
+| R4-1 | A1 (address guard only on exact-pattern lines; the "no address" claim overreaches) | ACCEPT | no | Case-insensitive match; a non-reaction line containing a sent label is dropped (`reactionLinesMalformed`); the claim is narrowed to what is guarded; the tenant's own address stays guarded as today. |
+| R4-2 | A2 (demoting a filled-field write re-creates churn) | ACCEPT | no | Such a write is DROPPED with reason `text_field_filled`, not suggested, and kept out of `demotedFields`. |
+| R4-3 | A3 (an unavailable block leads to address-less reaction lines that then suppress the real one) | ACCEPT | no | A failed read fails the run, as the org-list read does; limit-dropped properties accepted as rare. |
+| R4-4 | A4 (address line 1 + city not unique in a building) | ACCEPT | no | Label includes line 2 when present; identical labels rendered once. A refinement (adds detail) of the charter's line shape, named to Cameron at the gate. |
+| R4-5 | A5 (flyer leads are often unknown contacts) | ACCEPT | no | The block is built for tenant AND unknown contacts. |
+| R4-6 | A6 (regex details, counting order) | ACCEPT | no | Lazy match, copied "- sent" suffix stripped, ordinary " - question: " lines dropped as unmatched, one count per line at the first failing check. |
+| R4-7 | A7 (D7 "no address" detection undefined) | ACCEPT | no | Each reaction control names its expected label and lowercase word; the unsent-home case fails on its street line or any digit-led street address. |
+| R4-8 | A8 (line prefix has no year) | ACCEPT as a B2 note | no | B2 ages a maybe from stored facts, never from the prefix. |
+
+Rejected: none. No decision changed: round 4 is terminal and the review is
+closed at its cap.
+
+Totals: 4 rounds, 48 findings (round 1 merged 33 to 22), all accepted, 0
+rejected; rounds 1 and 2 changed decisions; the human's gate redesign
+withdrew the stored-reaction mechanism between rounds 3 and 4.

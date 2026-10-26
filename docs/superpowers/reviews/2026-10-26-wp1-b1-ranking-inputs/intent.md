@@ -11,12 +11,13 @@ cut from main @d0e2c2d8.
 
 ## STATE
 
-Phase: SPEC REVISION after the gate conversation. Cameron answered Q1
-(keep) and Q2 (he runs the gate on claude-sonnet-5-5) and redesigned
-reactions (charter section 20 items 4-6). Next: cut the spec to rev 5
-(stored reactions out; reaction lines and a read-only sent-properties list
-in), run design-review round 4 (the last allowed), bring rev 5 back to
-Cameron's gate. Nothing in flight.
+Phase: SPEC GATE (second pass). Spec rev 6 after the reaction redesign
+and design-review round 4 (the last allowed; terminal, 8 precision
+findings). Waiting on Cameron to pass the gate on rev 6. One refinement
+to name to him: the reaction line's label includes address line 2 when
+present (charter 6.4 shape plus detail). Next after his go: offer
+compaction gate A, write the plan with the honest hours estimate, plan
+review, mission block, launch gate. Nothing in flight.
 
 ## What Cameron asked for (verbatim where wording matters)
 

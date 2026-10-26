@@ -1,7 +1,9 @@
 # WP1 B1 Ranking inputs - design
 
-Status: DRAFT revision 5 (2026-10-26). Revs 2-4 folded in design review
-rounds 1-3 (40 findings, all accepted). Rev 5 follows Cameron's spec-gate
+Status: DRAFT revision 6 (2026-10-26), at the spec gate. Revs 2-4 folded
+in design review rounds 1-3 (40 findings, all accepted); rev 6 folds in
+round 4, the last allowed (8 findings, all precision edits; no decision
+changed, so the review is closed). Rev 5 follows Cameron's spec-gate
 redesign (charter section 20, items 4-6): stored per-pair reactions, their
 writer, message and property handles, and the staff remove control are
 WITHDRAWN; a tenant's reaction to a property is a REACTION LINE in the
@@ -155,9 +157,12 @@ Reconciliation:
   is only for a contradiction ("now wants Decatur, not Marietta"), and its
   suggestion carries the full replacement value. ENFORCED in apply, since
   apply today honors any model `write` without an emptiness check
-  (apply.ts:299-316): a `write` on a NON-EMPTY text field is demoted to a
-  suggestion, so for the three text fields "write" means "fill an empty
-  field" and nothing else. (`max_tenant_portion` keeps the pets rule,
+  (apply.ts:299-316): a `write` on a NON-EMPTY text field is DROPPED (a
+  `dropped` decision with reason `text_field_filled`; not a suggestion,
+  and not counted in the Layer-3 `demotedFields` audit, apply.ts:321-327),
+  so for the three text fields "write" means "fill an empty field" and
+  nothing else, and only a `suggest` op (a contradiction) creates a
+  suggestion. (`max_tenant_portion` keeps the pets rule,
   including a same-fact write.) So the model never rewrites staff text
   live, a field never grows toward its cap through extraction, and
   suggestions do not churn on rewordings.
@@ -262,8 +267,9 @@ and a "maybe", reach the Notes box in a shape B2 and Sam can read.
 
 #### D5.1 The properties-sent list given to extraction
 
-For a TENANT contact, the job reads `listByContact(contactId)` and keeps
-the LISTED rows (`isListed`, listingSendsRepo.ts:235-237): any row with a
+For every contact extraction runs on (tenant and unknown: a flyer lead is
+often still `unknown`, listingSendsRepo.ts:141-142), the job reads
+`listByContact(contactId)` and keeps the LISTED rows (`isListed`, listingSendsRepo.ts:235-237): any row with a
 counted share, flyer sign-ups included (the tenant may react to a flyer
 property too), and legacy rows with `sentAt`. Newest 20 by `sentAt`.
 Addresses come from the units repo's existing BatchGet projection
@@ -273,18 +279,28 @@ It renders a PROPERTIES SENT block, built like the organization list block
 (orgListBlock.ts): once per run, before TRANSCRIPT, fingerprinted into the
 run record as `sentPropertiesFingerprint`. One line per property:
 
-`- <address line 1>, <city> - sent <date>` (or `- ... - signed up <date>`
-when the row's latest counted share is the flyer entry)
+`- <label> - sent <date>` (or `- <label> - signed up <date>` when the
+row's latest counted share is the flyer entry), where `<label>` is
+`<address line 1>[ <address line 2>], <city>`: line 2 is included when
+present, because units in one building share line 1 and differ only in
+line 2 (lib/address.ts:24). This refines the charter's
+`<address line 1>, <city>` shape (charter 6.4) by adding detail. Two rows
+whose labels are still identical are rendered once.
 
 - Every value is flattened to one line (the `toSingleLine` defense,
   prompt.ts:157-167); a line that would contain the word TRANSCRIPT is
   dropped with a warn.
 - Budget 4,000 characters; over budget, the oldest-sent properties are
   dropped first, with a warn.
-- No rows, and every non-tenant contact: `PROPERTIES SENT: none`.
-- A failed `listByContact` or units read: `PROPERTIES SENT: unavailable`,
-  a warn, and the run CONTINUES (fields and other lines proceed; with no
-  list, no reaction line can match, D5.3).
+- No rows: `PROPERTIES SENT: none`.
+- A failed `listByContact` or units read FAILS THE RUN, exactly as a failed
+  organization-list read does (jobs/extraction.ts:563-568): the row is
+  retried under the existing attempt count. (Continuing without the list
+  would let the model record a reaction as a line with no address, which
+  reconciliation would then treat as already recorded.)
+- A property dropped by the 20-row or character limit cannot be named;
+  a reaction to it is an ordinary line without an address. Accepted: the
+  limits keep the newest sends, which are the ones a tenant reacts to.
 - The system prompt's description of the user message (prompt.ts:20-23)
   names the block. Nothing else in the prompt or the transcript changes
   shape: no message handles, no change to `renderUtteranceLine` or the
@@ -298,9 +314,9 @@ when the row's latest counted share is the flyer entry)
 Prompt rules (in the noteLines guidance):
 
 - When the tenant reacts to a property in PROPERTIES SENT, write ONE
-  noteLine whose text is exactly
-  `<address line 1>, <city> - <reaction word>: <reason>`, copying the
-  address and city from the block, with the reaction word one of
+  noteLine whose text is exactly `<label> - <reaction word>: <reason>`,
+  copying the label from the block exactly (without its "- sent ..."
+  part), with the reaction word one of
   `interested`, `maybe`, `not interested`, `question`, and the reason a
   short phrase in the tenant's sense ("too far from work", "on the fence,
   wants to see other homes first", "asked if pets are allowed").
@@ -323,21 +339,34 @@ Prompt rules (in the noteLines guidance):
 
 Inside `filterNoteLines` (D4), after clamping and before the floor:
 
-- A line is a REACTION LINE when it matches
-  `^(.+) - (interested|maybe|not interested|question): (.+)$`.
-- Its property part must equal one block entry's `<address line 1>,
-  <city>` after trimming, folding case and collapsing whitespace. A
-  reaction line that matches no entry (a misspelled or invented address,
-  or any reaction line when the block is `none` or `unavailable`) is
-  DROPPED and counted (`reactionLinesUnmatched`), so no address that is
-  not a sent property's reaches the Notes box.
+- A line is a REACTION LINE when it matches, case-insensitively,
+  `^(.+?) - (interested|maybe|not interested|question): (.+)$`. The word
+  is stored lowercase. A trailing ` - sent ...` or ` - signed up ...`
+  copied from the block is stripped from the property part first.
+- Its property part must equal one block label after trimming, folding
+  case and collapsing whitespace; the stored line then carries the block's
+  label exactly. A reaction line that matches no label (a misspelled or
+  invented address, any reaction line when the block is `none`, or an
+  ordinary line that happens to contain " - question: ") is DROPPED and
+  counted (`reactionLinesUnmatched`).
+- A line that is NOT a reaction line but contains a block label (a sent
+  property named outside the shape) is also DROPPED and counted
+  (`reactionLinesMalformed`), so a sent property's address reaches the
+  Notes box only inside a well-formed reaction line.
+- What this guards, and what it does not: no reaction line carries an
+  address that is not a sent property's. The tenant's OWN address is kept
+  out as today, by the prompt rule and the postal filter (apply.ts:720-722);
+  B1 does not add a general street-address detector.
+- Order and counting: clamp, then the reaction-line checks above, then the
+  floor, then the retry guard, then the cap; a line is counted once, at the
+  first check that drops it.
 - Everything else is as for any line: the floor, the retry guard, the
   demotion rule (a demoted run appends no reaction line either), the
   five-line cap (reaction lines count toward it), the `[Auto - <date>]`
   prefix. Today's postal filter (lines starting "current address" with a
   digit, apply.ts:720-722) stays.
-- Run record: `reactionLines` (appended) and `reactionLinesUnmatched`
-  counts. Reaction lines are Notes lines, so `notedLines`, `touched`, the
+- Run record: `reactionLines` (appended), `reactionLinesUnmatched` and
+  `reactionLinesMalformed` counts. Reaction lines are Notes lines, so `notedLines`, `touched`, the
   `ai_run.completed` payload and the manual-run banner already count them.
 - Never a status: a reaction line never sets `declined`, an outcome or the
   contact status (charter 6.3; WP3 owns an engine-read decline).
@@ -350,6 +379,10 @@ Inside `filterNoteLines` (D4), after clamping and before the floor:
 - No "properties seen" on a card: that is B2's tenant card (charter 6.2
   amended). B1's list is extraction input only.
 - No Maybe button (charter 4 amended).
+- Note for B2: the `[Auto - <date>]` prefix carries no year
+  (apply.ts:144-149). B2 ages a maybe from stored facts (the declined
+  record's `at`, the send dates in properties seen), never from the line
+  prefix.
 
 ### D6. Priority: an on/off switch on the property
 
@@ -415,7 +448,11 @@ matching fact ("works nights downtown", a line), and reaction lines
 naming the right sent property with the right word: a `maybe` ("maybe,
 I'm on the fence, I want to see other places first"), a `not interested`
 with its reason ("I don't like that part of town"), and an `interested`.
-A reaction to a home not in the block must produce no address.
+A reaction to a home not in the block must produce no address. Detection:
+each reaction control names the property label and word it expects, and
+passes only on a line with that exact label (as stored after D5.3) and
+that lowercase word; the unsent-home case passes only when no written
+line contains that home's street line or any digit-led street address.
 
 Detection and record:
 
@@ -477,10 +514,12 @@ Detection and record:
   Preferences & notes card, extraction CURRENT PROFILE,
   `hasAiCaseworkerNote` (lib/caseworkers.ts:42-82), which a dropped or
   demoted line now silences (Q1); B2's tenant card (reaction lines).
-- listing_sends and units: READ only, by the extraction job (D5.1). No
-  write, no new attribute, no `shares_op` change.
+- listing_sends and units: READ only, by the extraction job (D5.1), for
+  tenant and unknown contacts; a read failure fails the run. No write, no
+  new attribute, no `shares_op` change.
 - The AI run record and its readers: new counts (`notesBelowFloor`,
-  `notesDemoted`, `reactionLines`, `reactionLinesUnmatched`) and
+  `notesDemoted`, `reactionLines`, `reactionLinesUnmatched`,
+  `reactionLinesMalformed`) and
   `sentPropertiesFingerprint`, shown in the run detail.
 - Unit `priority`. Writers: unit create, unit PATCH. Readers:
   ListingDetail, the edit and New forms. Never: flyer, cards.
@@ -511,15 +550,18 @@ Detection and record:
   appended); config fail-fast on `0`, `1.5`, `abc`; system lines bypass
   the floor; a demoted run appends no line of either kind; retry guard;
   run record counts.
-- D5: block lists listed rows newest 20 (flyer sign-ups as "signed up",
-  missing unit skipped), budget drop oldest first, TRANSCRIPT drop,
-  flattening, "none" for non-tenants and no rows, "unavailable" on a read
-  failure without failing the run; the transcript render and per-message
-  hash are unchanged; `filterNoteLines` keeps a reaction line whose
-  address matches a block entry (case and spacing folded), drops one that
-  matches none and counts it, drops every reaction line when the block is
-  none or unavailable, applies floor, guard, demotion and cap to reaction
-  lines; no listing_sends write anywhere in the extraction path.
+- D5: block lists listed rows newest 20 for tenant and unknown contacts
+  (flyer sign-ups as "signed up", missing unit skipped, line 2 in the
+  label, identical labels once), budget drop oldest first, TRANSCRIPT
+  drop, flattening, "none" for no rows; a read failure fails the run; the
+  transcript render and per-message hash are unchanged; `filterNoteLines`
+  keeps a reaction line whose label matches (case, spacing and a copied
+  "- sent" suffix folded) and stores the block's label and a lowercase
+  word, drops and counts an unmatched one and a malformed line naming a
+  label, counts each drop once in order, applies floor, guard, demotion
+  and cap to reaction lines; no listing_sends write anywhere in the
+  extraction path. D3: a write on a filled text field is dropped, not
+  suggested, and not in demotedFields.
 - D6: boolean validation rejects strings; legacy string reads off; New and
   Edit checkbox round-trip; record row and header pill; parity table 36
   rows in DOM order; flyer never carries priority.

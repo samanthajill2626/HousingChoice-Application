@@ -44,3 +44,24 @@ Rejected: none.
 Round 1 changed decisions (R1-1..R1-7, R1-9, R1-10, R1-12): round 2 runs
 with reviewer A continued (more unique accepted findings), handed reviewer
 B's report.
+
+## Round 2 (2026-10-26)
+
+Reviewer A continued (round2-reviewer-a.md, 10 findings; contested no
+round-1 adjudication). Spec rev 3.
+
+| # | Finding | Verdict | Decision changed | Resolution in rev 3 |
+|---|---|---|---|---|
+| R2-1 | A1 (calls' tsMsgId is ring time; cursor passes before the transcript lands) | ACCEPT | yes | The "new messages only" rule (R1-3) is WITHDRAWN: any window message may react; one reaction per source message per row (first reading wins) is the whole dedupe. The `new` mark is not rendered. |
+| R2-2 | A2 (new-only turns every no-write run into permanent loss) | ACCEPT | yes | Same withdrawal; Q1 now says a reaction is delayed, not lost, while its message stays in the window. Row cap no longer evicts (new ones dropped and counted), so the dedupe memory is never lost. |
+| R2-3 | A3 (full-value accumulation churns suggestions and bypasses dismissal; cap starvation) | ACCEPT | yes | R1-5 replaced: all four fields follow the pets/tenure rule unchanged; an ADDITIVE fact on a non-empty text field is a Notes line, and a field op on a non-empty text field is only for a contradiction. |
+| R2-4 | A4 (prompt change affects every production prompt; gate measures only never-written) | ACCEPT | yes | The probe's default suite runs on branch and main (`--repo`) as part of the gate; no case may score worse than main. |
+| R2-5 | A5 (probe must run production filters, not a copy) | ACCEPT | no | Value rules live in pure exported `filterNoteLines` / `filterReactions`; applyExtraction and the probe both call them; the probe still touches no data. |
+| R2-6 | A6 (clamps in the parser are bypassed by the fake driver) | ACCEPT | no | The parser does no value filtering; every clamp and the floor live in the pure filters. |
+| R2-7 | A7 (first-share check used created_at / latest sentAt) | ACCEPT | no | Earliest `countedAt` among counted non-flyer shares; `sentAt` on a legacy row. |
+| R2-8 | A8 (new mark has no field) | ACCEPT (moot in part) | no | No new mark; `TranscriptUtterance.handle?: string` named. |
+| R2-9 | A9 (Q3 remove control undesigned) | ACCEPT | no | Q3 now carries the design: soft remove (`removedAt`/`removedBy`, dedupe keeps it out), `removeReaction` under the token protocol, audit, admin and va. |
+| R2-10 | A10 (D2 string wording) | ACCEPT | no | "any other string is a 400". |
+
+Rejected: none. Round 2 changed decisions (R2-1..R2-4): round 3 runs,
+reviewer A continued.

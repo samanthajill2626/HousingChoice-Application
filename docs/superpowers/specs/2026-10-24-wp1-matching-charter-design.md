@@ -3,8 +3,11 @@
 Date: 2026-10-24
 Status: DRAFT charter. Whole-spec re-read 2026-10-25 folded in; design
 review rounds 1 to 8 folded in (records: design-review/adjudications.md);
-review closed at its cap; awaiting Cameron's spec gate, including the
-slice re-estimate in section 15.1.
+review closed at its cap; Cameron's spec-gate answers (2026-10-26)
+folded in: staff notes and the Notes box on the card, matching facts as
+Notes lines, declines left to WP3, the review dataset (section 12), and
+the planner defaults confirmed. Pending: the gate itself and the hours
+(section 15.1).
 Mission: Amendment No. 1 Work Package 1 (signed; Cameron 2026-10-20, Sam
 2026-10-21). 52 contracted hours.
 Records: docs/superpowers/reviews/2026-10-24-wp1-matching-charter/
@@ -126,7 +129,7 @@ section 10.3 lets it rise again as time passes.
 
 Why: Cameron 2026-10-24: "the signed contract was a little bit too harsh
 ... I don't think hard rules are ever going to be the answer." The free
-text on both sides (requirement notes, preferences, extracted facts)
+text on both sides (requirement notes, preferences, the Notes box)
 cannot be matched by rules at all, and a demoted pair with a reason is
 reviewable where an excluded one is invisible.
 
@@ -223,13 +226,6 @@ than drift. Excluded:
 - Credit and income: the unit's credit and income requirement notes and
   the tenant's `lifEligible` flag. A1 excludes credit or income from
   ranking ("staff see those as notes only"), so the model never sees them.
-- Staff notes (`staff_notes`): the field is documented as never
-  machine-read (contactsRepo.ts:160-168); WP1 keeps that promise. Planner
-  default, for Cameron at the gate.
-- The AI's own `notes` box, where extraction appends dated noteLines
-  (prompt.ts:107-111, apply.ts:713-735): it mixes screening and
-  income-like facts with matching ones. Excluded; matching facts (section
-  6.4) are the ranker's channel for what extraction learns.
 - Internal plumbing: ids, media, status_source and status history, import
   bookkeeping, consent fields, provenance maps, flyer settings, and every
   timestamp except created (last heard from enters only as its bucket,
@@ -241,6 +237,15 @@ than drift. Excluded:
 Included by default when B2 classifies them: `customFields`,
 `voucher_expiration_date`.
 
+Included by decision (Cameron 2026-10-26): the tenant's Notes box
+(`notes`), where extraction appends its dated lines and staff also type,
+and the tenant's Staff notes (`staff_notes`). Both exist to help staff
+understand and match the tenant; Staff notes is a second box only so that
+nothing machine-WRITES to it. Its code comment (contactsRepo.ts:161-168)
+also says nothing machine-reads it, which was never the intent; B2
+corrects the comment. Credit and income facts written in either box are
+disregarded by the rubric (section 7.2), as A1 requires.
+
 ### 6.2 The two cards
 
 Tenant card: everything on the tenant contact except the exclusions, which
@@ -248,7 +253,8 @@ today means name, address, voucher size, housing authority, porting,
 tenure, pets, evictions, status, voucher expiration, custom fields, last
 heard from as a recency bucket (section 9.1), the B1 fields (area
 preference, maximum tenant portion, accessibility need, preferences and
-constraints), and the extracted matching facts (section 6.4).
+constraints), the Notes box with extraction's matching lines (section
+6.4), and Staff notes.
 
 Property card: everything on the unit except the exclusions, which today
 means address, beds, baths, rent range, payment standard, accepted voucher
@@ -265,8 +271,8 @@ model's input never differs by direction.
 
 Landlord card switch (`RANKING_LANDLORD_CARD`, default off): when on, the
 property card also carries the landlord-of-record's recorded requirements
-(except credit and income, section 6.1) and notes, labeled as the landlord's defaults (landlord matching facts do
-not exist until landlord extraction is built); where the
+(except credit and income, section 6.1) and notes, labeled as the
+landlord's defaults; where the
 property records its own value, the property's value wins (requirements
 reach a property only by staff "Apply", a copy). Built in B2; turned on
 when Sam decides (section 16). While it is off, a landlord requirement
@@ -292,62 +298,63 @@ listing_sends row is listed with a counted send share, or is a legacy row
 with `sentAt` and no shares (the same fallback the pair history uses),
 gets reactions; a pending or failed share or a flyer sign-up alone does
 not; a reaction about a
-property never sent becomes a matching fact instead. The reaction writer
+property never sent becomes a Notes line instead. The reaction writer
 joins the row's change-token protocol (`shares_op`) and the repo
 header's list of writers. Kinds are interested, maybe, hard_no and
 question, so a WP3 hard_no maps one to one onto a DeclineRecord.
-Reactions are written for tenant rows only. In WP1 an extracted
-"hard no" does NOT set a decline: staff still mark Not interested, and the
-existing `by: 'engine'` decline stays for WP3. Planner default, for
-Cameron at the gate.
+Reactions are written for tenant rows only. WP1 records the reaction and
+the ranker reads it; it never sets a status. Recording an engine-read
+decline is WP3's deliverable (A1 WP3: "Declines the engine reads in the
+conversation are recorded in the decline tracking from Work Package 1"),
+through the existing `by: 'engine'` decline; staff mark Not interested
+as today.
 
 ### 6.4 Extraction is the reading layer (B1)
 
 The ranker never reads conversations. Extraction does, and WP1 widens it
-in two ways:
+as follows:
 
 - Fixed fields the system needs structurally: area preference (text),
   maximum tenant portion (dollars per month), accessibility need (text),
   preferences and constraints (text). Fixed because the completeness pass
   and the edit form must be able to ask Sam for them.
-- An open list of MATCHING FACTS per tenant: `{label, value, confidence,
-  source message}`, with the instruction to pull anything that might
-  matter to matching this person with a home. Cameron: "we can't think of
-  all of the pieces of information that might be relevant." Never
-  extracted: race, color, religion, sex, national origin, familial facts
-  beyond household size, income and credit, and disability or medical
-  facts other than the stated accessibility need and an assistance
-  animal. The same list governs the text of every extracted reaction
-  (section 6.3), and B1's test covers reactions too. Facts are stored as a
-  bounded list on the tenant contact (the flexible document; no new
-  table), with the suppression list beside it; writes are conditional on
-  a version attribute so extraction and Sam's remove control never
-  overwrite each other; a write that loses its version check re-reads and
-  retries once, then drops the fact and logs it. At the bound, the
-  lowest-confidence oldest fact is dropped. Reactions sit behind the same
-  switch as facts. B1 tests the list: synthetic
-  conversations stating each excluded kind of fact, run on the testing
-  key, must write no fact of an excluded kind (household size and tenant
-  portion remain allowed). A failure blocks turning the matching facts on
-  in production (`AI_MATCHING_FACTS_ENABLED`, default off, like
-  `aiExtractionEnabled`) until it passes or Cameron decides.
-- B1 also builds the facts' display on the tenant record, the remove
-  control and its suppression record.
+- MATCHING FACTS go where extraction already puts secondary facts: the
+  tenant's Notes box, as its dated `[Auto - <date>]` lines
+  (prompt.ts:107-111, apply.ts:713-745). No separate facts list. B1 widens
+  the noteLines instruction from "secondary facts" to anything that might
+  matter to matching this person with a home (Cameron: "we can't think of
+  all of the pieces of information that might be relevant"), and the
+  ranker reads the box (section 6.1). The append path, its five-line
+  cap per run and its retry guard (apply.ts:731-740, which drops a line
+  already present so a re-applied window appends nothing) are kept as
+  they are.
+- Written LIVE, as notes are today: no approval step is added where none
+  exists (Cameron 2026-10-25). Each line carries a confidence; a line
+  below `EXTRACTION_FACT_MIN_CONFIDENCE` (default set in B1) is not
+  appended and never reaches Sam or the ranker. A run demoted for an
+  unknown speaker (apply.ts:158-160) appends no lines, the same demotion
+  its field writes get (a change from today, where such a run still
+  appends). Sam fixes or removes a wrong line by editing the Notes box,
+  as today; a line removed by hand can return only if a later message
+  states it again.
+- Never written as a Notes line: race, color, religion, sex, national
+  origin, familial facts beyond household size, and disability or
+  medical facts other than the stated accessibility need and an
+  assistance animal. The same list governs the text of every extracted
+  reaction (section 6.3). Screening facts the box carries today (utility
+  debt and the like) stay, because Sam uses them; the
+  ranker disregards their credit and income content (section 7.2). B1
+  tests the list: synthetic conversations stating each excluded kind of
+  fact, run on the testing key, must append no line and write no reaction
+  of an excluded kind (household size and tenant portion remain allowed).
+  A failure blocks turning the widened instruction and reactions on in
+  production (`AI_MATCHING_NOTES_ENABLED`, default off, like
+  `aiExtractionEnabled`; off means today's noteLines instruction) until
+  it passes or Cameron decides.
 - One reading per send: the tenant's reaction to the specific property
   named, written to the pair history (section 6.3).
 
-Facts are written LIVE: no approval step is added where none exists
-today (Cameron 2026-10-25). A fact below a confidence floor
-(`EXTRACTION_FACT_MIN_CONFIDENCE`, default set in B1) is not written at
-all and never reaches Sam or the ranker. A fact from a run that
-extraction demotes for an unknown speaker (apply.ts:159, 318-319) is not
-written either. Written facts show on the tenant record with the message
-they came from; Sam can remove a wrong one, and a removed fact suppresses
-later facts with the same label and value after trimming and ignoring
-case (a reworded fact may return). Facts are keyed by label, value and
-source message and reactions by source message and kind, so an
-extraction retry that re-applies the same window (apply.ts:725-735)
-writes nothing new. The landlord-side counterpart is filed,
+The landlord-side counterpart is filed,
 not built: docs/issues/landlord-conversation-extraction-to-property.md.
 
 ## 7. D4 - The ranker
@@ -401,8 +408,9 @@ stated accessibility need matched to the property, and an accommodation
 (below) that lifts a requirement. A requirement about the tenant's credit or
 income, in ANY field (qualifications, notes, deposit notes, application
 process, custom fields), is disregarded and never reported failed (A1).
-Rent, the payment standard and the tenant's maximum portion are not
-credit or income requirements and stay inputs. Names stay on the cards
+So is a tenant's credit or income fact wherever it is written (the Notes
+box, Staff notes, custom fields). Rent, the payment standard and the
+tenant's maximum portion are not credit or income and stay inputs. Names stay on the cards
 (Cameron 2026-10-25); the pool (section 5) uses no protected
 characteristic. A landlord or property requirement that is unacceptable
 under fair housing (for example "no kids", which discriminates on
@@ -438,19 +446,16 @@ requirement "is something for Sam").
 The guarantee is tested, not only stated: before `AI_RANKING_ENABLED` is
 first turned on in production (B2's own live test included), B2 runs a counterfactual check on the testing key over SYNTHETIC pairs
 (made-up tenants and properties, never real records), swapping name,
-address and household facts (an address swapped only for one equivalent
+address, household facts and any credit or income line (an address swapped only for one equivalent
 for the tenant's stated area, so a fit change cannot pass for a proxy)
 and including an assistance-animal tenant against a No pets property; scores and the Weak cap (section 7.4) are
 compared against a tolerance B2 sets, and the result is a mission record.
 A failure blocks turning ranking on in production (`AI_RANKING_ENABLED`,
-default off) until it passes or Cameron decides. Planner default, for Cameron at the gate.
+default off) until it passes or Cameron decides (Cameron 2026-10-26).
 
 The rubric version is stored on every match and run. Worked examples are
-a separate versioned file. A person writes them from scratch, informed by
-reading Sam's reviews in the production app (section 12); no review is
-exported, copied or anonymized into the repository. No real client record
-is ever committed, and no model is trained on client data (A1, Agreement
-7.3). Planner default, for Cameron at the gate.
+versioned separately (`examplesVersion`) and grow from synthetic to real
+as section 12 describes.
 
 ### 7.3 The completeness pass
 
@@ -641,7 +646,7 @@ from the base table, never through the eventually consistent byUnit
 index. So the 30-second CloudFront origin timeout
 (infra/modules/cloudfront/main.tf:114) never applies to a model call.
 Rank, Update and the review controls are open to admin and va, as the
-composer is today (broadcasts.ts:1-4); planner default. Rank gets its own
+composer is today (broadcasts.ts:1-4) (Cameron 2026-10-26). Rank gets its own
 per-user rate-limit knob, parsed fail-fast like the
 existing cost-route knobs (app/src/lib/config.ts:1021-1040). The
 ranking-job record lives in the AI runs table in its own key family with
@@ -684,7 +689,8 @@ section 6 (recency only as its bucket); on the pair history (section 6.3),
 the declined record, a tour, or an extracted reaction. A new send ALONE
 does not make a match out of date, and neither does a text that adds
 nothing to the record: the derived outcome is never fingerprinted. A text
-that extraction turns into a field, fact or reaction does, correctly. The Already sent and outcome
+that extraction turns into a field, Notes line or reaction does,
+correctly, and so does a staff edit to either notes box. The Already sent and outcome
 chips are derived on read and show at once.
 
 Sam decides whether to update; an out-of-date list is still shown.
@@ -704,9 +710,11 @@ for Sam's review period (A1: "Each ranking is recorded so Client can
 review it").
 
 The Rankings page (admin only, like the AI runs page, routes/aiRuns.ts:137;
-planner default; B2) lists runs newest first with anchor,
+Cameron 2026-10-26; B2) lists runs newest first with anchor,
 direction, model, candidates, cost and time, filters by date and anchor,
 totals cost by week and by environment, and opens a run into its pairs.
+It also lists Sam's reviews, promotes a review to a worked example, and
+downloads the review export (section 12).
 It is where the engine is live-tested in production before the composer
 views exist: B2 gives it
 a staff-only "Rank this anchor" action, so a ranking can be run before
@@ -719,18 +727,59 @@ spend is an operating cost on the production key, outside A1 section 8.
 ## 12. D9 - Sam's review
 
 Capture is continuous: where she reads a ranking is where she reviews it.
-Each row in the composer carries agree / disagree and an optional note.
+Each row in the composer carries agree / disagree and an optional note; a
+disagree also says which way ("should be higher" or "should be lower"),
+because a bare disagree cannot tell a rubric change whether it helped.
 Each review is its OWN record, every one kept, never expiring: verdict,
-note, by, at, plus a snapshot of the match she judged (score, reasons,
-missing, rubric version, model). A later re-score never touches it, so the
-row can show "reviewed at 62, now 71". Reviews live in an EXISTING table
-(B2 picks it and proposes the key; A1 allows no new infrastructure).
+direction, note, by, at, plus a snapshot of the match she judged (score,
+reasons, missing, rubric version, examples version, model) AND of the
+exact model input (both cards and the pair history as sent), so the pair
+can be re-scored later under a new rubric. A later re-score never touches
+it, so the row can show "reviewed at 62, now 71". Reviews live in an
+EXISTING table (B2 picks it and proposes the key; A1 allows no new
+infrastructure).
 
-The app never reads reviews to score. Their only path to the model is a
-person: the Rankings page lists reviews in the app, and a person writes
-new worked examples from scratch after reading them (section 7.2).
-Nothing exports reviews. The Rankings page also shows review counts per
-run.
+The review dataset (Cameron 2026-10-26). The reviews are the dataset, used
+two ways: worked examples in the prompt, and an evaluation set that tests
+a rubric change against Sam's judgments. It grows from synthetic to real:
+
+- Day zero (B2): about ten SYNTHETIC worked examples spread across the
+  bands, including a capped pair, an accommodation pair and a pair with
+  missing inputs, and about thirty synthetic evaluation pairs with the band
+  each should land in. They live in the repository. Cameron checks them;
+  Sam is asked to glance at the bands.
+- From Sam's acceptance pass on: every review is a real labeled pair.
+  An admin promotes chosen reviews to worked examples on the Rankings page;
+  promoted examples are stored in production in the same existing table,
+  and each promotion makes a new `examplesVersion`. The production prompt
+  reads the synthetic file plus the promoted set.
+- Export: an admin download on the Rankings page. By default it is
+  DE-IDENTIFIED: names, phone numbers, emails and street lines are
+  replaced with consistent stand-ins, while area and zip stay so area fit
+  still reads. An identified export is built only after Sam approves it
+  in writing.
+- Growing it, per rubric revision: export (or work from the Rankings
+  page), pick examples, edit the rubric, then run the EVALUATION: a script
+  on the testing key that re-scores every pair in the set from its
+  snapshot under the current and the candidate rubric and examples, and
+  reports agreement with Sam (an agreed pair should keep its band; a
+  "higher" or "lower" pair should move that way). A candidate ships only
+  if agreement does not fall and the counterfactual check (section 7.2)
+  still passes; the new version then flags every older match out of date
+  (section 10.3). The run is a mission record.
+
+The app never reads reviews to score; their path to the model is a
+promoted example or a rubric change a person makes after an evaluation.
+
+Contract basis (Development Agreement, read 2026-10-26): improving a
+model operated within Client's own approved environment with Client data
+is permitted (section 7.3); real tenant or landlord data may not be used
+in development or test environments, which may hold synthetic or
+de-identified data (sections 7.3 and 2); copying production tenant or
+landlord data to a local or external environment needs Client's written
+approval (section 2). The de-identified export and the synthetic set
+satisfy the first two; the identified export waits on the third. No
+identified client record is ever committed to the repository.
 
 A1 acceptance: Sam opens twenty real tenants and ten real properties in
 production and finds the rankings useful. B3 provides the tenant half, B4
@@ -764,8 +813,7 @@ replace it. What that path carries today, and what happens to each:
 - Selection default: ranked rows start UNCHECKED; Sam picks one, a few or
   many (A1). Today's default checks every eligible row
   (blastAudienceRules.ts:178-182), which on a ranked pool would text Weak
-  and capped pairs with one press. Planner default, for Cameron at the
-  gate.
+  and capped pairs with one press (Cameron 2026-10-26).
 - Select all checks only the rows today's default would check (consent
   recorded, not already sent, not Not interested, not tour-held,
   blastAudienceRules.ts:178-182) and that are not capped; Sam checks
@@ -774,7 +822,7 @@ replace it. What that path carries today, and what happens to each:
   (broadcasts.ts:1196-1202), so this default is the guard against
   re-texting a tenant who declined.
 - Hand-picks and "Add a tenant" stay beside the ranked pool and start
-  checked, as today. This is how Sam still sends to an onboarding tenant
+  checked, as today (Cameron 2026-10-26). This is how Sam still sends to an onboarding tenant
   or a partner.
 - The tour-hold rule (an upcoming tour or a past tour with no outcome,
   blastAudienceRules.ts:59-165) becomes a chip on the row and a confirm
@@ -852,18 +900,19 @@ reply yet / Interested / Not interested) remain where they are today.
 
 | Slice | Owns | Hours |
 |---|---|---|
-| B1 Ranking inputs | Tenant fields area preference, maximum tenant portion, accessibility need, preferences and constraints on the record and edit form; `priority` boolean on the unit, its edit-form control and record display; extraction schema widened (fixed fields, matching facts list written live above a confidence floor with the never-extracted list, the bounded version-checked facts list and suppression list on the contact, per-send reaction stored on the listing_sends row under shares_op); the never-extracted test covering facts and reactions; the facts display, remove control and suppression record on the tenant record; `AI_MATCHING_FACTS_ENABLED`. Ships to production first. | 10-13 |
-| B2 Ranking engine | Pool in both directions with the window and the sendability fences; cards by classification with the runtime allowlist and the landlord switch; card fingerprint helpers; completeness pass; rubric, examples, structured output; anthropic/fake/console drivers; the ranking poll loop and the ranking-job record (claim generation, lease, one takeover, failed batches, carried trace); persisted batches, event hint, GET and base-table re-read; matches with the out-of-date, age and version rules and the one-button whole-pool re-score; the lean seed row replaced; review records and the in-app review list; the cap with its key list, accommodation flags and the property-level unlawful-flag record; the counterfactual fair-housing check on synthetic pairs; the Rank rate-limit knob and roles; `AI_RANKING_ENABLED`; run log under its own keys with cost by environment; band and priority policy on read; endpoints: rank, read ranking by anchor, review a pair; the Rankings page with "Rank this anchor". | 30-38 |
-| B3 Send property from a tenant | The ranked row; the composer's tenant anchor; priority-only view; completeness banner; Rank/Update; one-step send with the outcome on the pair; agree/disagree; the tenant record's Send re-pointed. | 10-12 |
+| B1 Ranking inputs | Tenant fields area preference, maximum tenant portion, accessibility need, preferences and constraints on the record and edit form; `priority` boolean on the unit, its edit-form control and record display; extraction schema widened (fixed fields; the noteLines instruction widened to matching facts, each line with a confidence and the floor, no lines from unknown-speaker runs, the never-written list; per-send reaction stored on the listing_sends row under shares_op); the never-written test covering Notes lines and reactions; `AI_MATCHING_NOTES_ENABLED`. Ships to production first. | 8-10 |
+| B2 Ranking engine | Pool in both directions with the window and the sendability fences; cards by classification with the runtime allowlist and the landlord switch; card fingerprint helpers; completeness pass; rubric, examples, structured output; anthropic/fake/console drivers; the ranking poll loop and the ranking-job record (claim generation, lease, one takeover, failed batches, carried trace); persisted batches, event hint, GET and base-table re-read; matches with the out-of-date, age and version rules and the one-button whole-pool re-score; the lean seed row replaced; review records with direction and input snapshots, the in-app review list, example promotion and `examplesVersion`, the synthetic examples and evaluation set, the de-identified export, the evaluation script; the Staff notes comment corrected; the cap with its key list, accommodation flags and the property-level unlawful-flag record; the counterfactual fair-housing check on synthetic pairs; the Rank rate-limit knob and roles; `AI_RANKING_ENABLED`; run log under its own keys with cost by environment; band and priority policy on read; endpoints: rank, read ranking by anchor, review a pair; the Rankings page with "Rank this anchor". | 33-42 |
+| B3 Send property from a tenant | The ranked row; the composer's tenant anchor; priority-only view; completeness banner; Rank/Update; one-step send with the outcome on the pair; agree/disagree with the disagree direction; the tenant record's Send re-pointed. | 10-12 |
 | B4 Send property from a property | The composer's property anchor; ranked tenants replacing the filter-only audience, the window toggle, rows unchecked by default and Select all, with hand-picks, the tour-hold chip and confirm, old filter drafts and the partner flow kept (section 13.1); already-sent No reply filter chip; pick one, a few or many; the switch-off composer; the unlawful-flag display on the property record with the admin Dismiss; the Matching nav entry asking which record to start from; the property page's Send re-pointed; the Similar panel relabeled "similarity". | 13-16 |
 
-RE-ESTIMATE (2026-10-25, after the eight-round review): 63-79 hours
-against the 52 contracted. The review added most of the build: B1's write
-protocol, UI and paid test; B2's job architecture and fair-housing
-records; B4's selection and flag surfaces. A1 section 7 makes the hours an
-estimate; going over is Cameron's call to cut scope or to tell Sam before
-the hours are spent. PENDING CAMERON at the spec gate. All four bill to
-WP1.
+RE-ESTIMATE (2026-10-25, after the eight-round review; revised
+2026-10-26 for the gate answers): 64-80 hours against the 52 contracted.
+The review added most of the build: B2's job architecture and
+fair-housing records; B4's selection and flag surfaces. The gate answers
+moved matching facts into the Notes box (B1 down 2-3) and added the review
+dataset (B2 up 3-4). A1 section 7 makes the hours an estimate; going over
+is Cameron's call to cut scope or to tell Sam before the hours are spent.
+PENDING CAMERON at the spec gate. All four bill to WP1.
 
 ### 15.2 Order
 
@@ -885,10 +934,11 @@ pipeline, stage one listwise, no tools), 8 (score, bands, reasons,
 missing), 9 (priority never a model input; last heard from roles), 10
 (pair rows; on demand; fingerprints and the age rule; one button, whole
 pool), 11 (run log with cost; Rankings page), 12 (continuous review;
-every review kept as its own record; no client data committed), 13.1 (one composer, two anchors; Send property on both records),
+every review kept as its own record with its input snapshot; the dataset
+from synthetic to real; no identified client record committed), 13.1 (one composer, two anchors; Send property on both records),
 14 (model per stage; fake driver), 15.2 (order), and the compliance
-decisions: 6.3 (an extracted hard_no never declines in WP1), 6.4 (the
-never-extracted list, its test and the facts switch), 7.2 (fair housing,
+decisions: 6.3 (reactions recorded, declines left to WP3), 6.4 (matching
+facts as Notes lines, the never-written list, its test and the switch), 7.2 (fair housing,
 credit and income, the counterfactual gate), 7.4 (the cap and its key
 list), 10.2 (no SQS queue for ranking; one automatic takeover), 13.1
 (selection defaults). A slice that needs one changed brings it to
@@ -945,7 +995,7 @@ Each is a deliberate call, listed so Sam hears all of them (section 16.2).
   the run log kept 180 days, and every review kept (sections 10, 11, 12).
 - Scope reaching into WP3: the signed WP3 text reads tenant reactions
   ("too far") during sharing; B1 builds the per-send reaction reading and
-  the open matching-facts list now and bills them to WP1, because the
+  the widened Notes instruction now and bills them to WP1, because the
   ranking reads them (section 6.4).
 - "Computed on open" / no background re-rank: built as computed on
   request with stored rankings shown on open (section 10.2). Still no
@@ -959,7 +1009,7 @@ Each is a deliberate call, listed so Sam hears all of them (section 16.2).
 
 Stage two refinement (7.1). Landlord-conversation extraction to the
 property (issue filed). An extracted "hard no" setting a decline (WP3,
-section 6.3). Staff notes on the card (6.1). Tools for the model
+section 6.3). Tools for the model
 to ask for more (7.1). Any scheduled or background caller of the engine
 (10.2). Dormant-tenant outreach (9.1). An authority-by-bedroom payment
 standard table: WP1 reads the per-property Payment standard field as

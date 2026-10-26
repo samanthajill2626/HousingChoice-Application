@@ -11,34 +11,18 @@ cut from main @970a29b9. Docs only.
 
 ## STATE
 
-If you are reading this after a compaction: DO NOTHING until Cameron
-speaks (he compacted before leaving, 2026-10-25). When he does:
-re-invoke the Skill abt:feature-mission with the argument "RESUME WP1
-charter", read this file, run the replay (command in the feature-mission
-skill, output W:/tmp/wp1-matching-charter/.superpowers/sdd/conversation.md)
-and READ ALL OF IT, report back in one line, then take his spec-gate
-answers.
-
-Phase: CAMERON'S SPEC GATE. The adversarial design review is CLOSED
-after 8 rounds (4 + Cameron's 4-round extension, both caps reached):
-design-review/adjudications.md has every ruling, the totals tables and
-every REJECT (only three round-1 partials, all conceded). Spec at the
-commit that follows this STATE. Nothing in flight; both reviewers are
-idle (agent ids in this session; continue with SendMessage only if
-Cameron asks for more rounds).
-
-Gate items waiting on Cameron:
-1. Pass the gate (or revise / more rounds).
-2. RE-ESTIMATE: slices now 63-79 hours vs 52 contracted (spec 15.1) -
-   cut scope or notify Sam (A1 section 7). Candidate cuts if he wants
-   them: Rankings page beyond the run list, the landlord switch, the
-   admin Dismiss.
-3. Planner defaults to confirm: staff notes off the card; no auto-decline
-   in WP1; worked examples from scratch, no review export; fair-housing
-   tests (counterfactual on synthetic pairs, never-extracted list) block
-   the production switches until they pass; ranked rows start unchecked
-   with the B4 keep-list; roles (Rank for admin + va, Rankings page
-   admin only).
+Phase: CAMERON'S SPEC GATE, partly answered (2026-10-26). His answers on
+the planner defaults are folded into the spec (round 17 below). Still
+open: (1) pass the gate or revise; (2) the hours, now 64-80 against 52
+contracted (spec 15.1): cut scope or tell Sam (A1 section 7); candidate
+cuts: Rankings page beyond the run list, the landlord switch, the admin
+Dismiss; (3) whether VAs should see scores in the composer (my reading of
+his 2026-10-26 'leave it to admins': only the Rankings page is
+admin-only, as already specced; asked, unanswered). Nothing in flight.
+Registered with compact-resume until Nov 1 (--persist); after any
+compaction re-invoke abt:feature-mission 'RESUME WP1 charter', read this
+file, replay and read ALL of it, report in one line, then wait for or
+take his gate answers.
 After the gate: merge command for the docs-only branch (he merges),
 register-session.mjs --off, memory update (next-build-contract-
 amendments.md + MEMORY.md; consider a wp1-matching-charter topic file).
@@ -453,3 +437,33 @@ quality Sam trusts, then her review of it, then the two views.
   follow the write path.
 - One Update button re-scoring the whole pool; prompt caching left to B2
   ("let's go with your solution").
+
+## Decisions, round 17 (Cameron, 2026-10-26, spec gate answers)
+
+- Staff notes go to the ranker. 'Sam already knows that the ranker reads
+  that box. It shouldn't have ever been listed as a private notes field.'
+  The box exists so NOTHING WRITES to it; the contactsRepo comment saying
+  nothing reads it is wrong and B2 corrects it.
+- The AI's Notes box goes to the ranker: 'The whole point of extracting
+  data from the conversation and putting it there is to make matching and
+  understanding what's going on easier.' Matching facts become Notes
+  lines; the separate facts list, its suppression list, version-checked
+  writes and remove control are dropped. Planner kept: confidence floor on
+  each line (his 2026-10-25 call), no lines from unknown-speaker runs (a
+  change from today, flagged to him), screening lines kept for Sam with
+  the ranker disregarding credit/income.
+- Declines: 'No, an extracted hard no should not set not interested by
+  itself.' It is WP3's deliverable (A1 WP3 text); not a WP1 decision.
+- Reviews and training: 'I just don't want to be locked into something
+  silly because of section 7.3.' Read the Agreement itself: 7.3 permits
+  improving a model within Client's approved environment; dev/test may
+  hold synthetic or de-identified data; an identified copy to a local
+  environment needs Sam's written approval (section 2). Dataset design
+  approved ('Yes, fold the dataset design in'): synthetic day zero; review
+  records with input snapshots and a disagree direction; promoted real
+  examples stored in production; de-identified export by default,
+  identified only with Sam's written OK; evaluation script gating rubric
+  changes.
+- Confirmed: fair-housing tests block the production switches; ranked
+  rows start unchecked; hand-picked tenants start checked; Rankings page
+  admin only ('just leave it to admins').

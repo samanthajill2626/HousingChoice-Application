@@ -11,11 +11,12 @@ cut from main @d0e2c2d8.
 
 ## STATE
 
-Phase: SPEC GATE. Spec rev 4 (1f63fddf) after 3 design-review rounds
-(terminal round 3; 40 findings, all accepted). Waiting on Cameron: pass
-the spec gate and answer Q1-Q3 (section 8 of the spec). Next after his
-answers: fold them in, offer compaction gate A, write the plan, plan
-review, mission block, launch gate. Nothing in flight.
+Phase: SPEC REVISION after the gate conversation. Cameron answered Q1
+(keep) and Q2 (he runs the gate on claude-sonnet-5-5) and redesigned
+reactions (charter section 20 items 4-6). Next: cut the spec to rev 5
+(stored reactions out; reaction lines and a read-only sent-properties list
+in), run design-review round 4 (the last allowed), bring rev 5 back to
+Cameron's gate. Nothing in flight.
 
 ## What Cameron asked for (verbatim where wording matters)
 
@@ -56,6 +57,42 @@ section."
 2026-10-26: "Okay, go. Let's cut the work tree, commit the charter
 amendment, and then file the issue and write the spec."
 
+2026-10-26, at the spec gate (spec rev 4):
+- Q1: "For Q1, yes, we should keep the rule." (demoted runs append no lines)
+- Q2: "For Q2, I can run the gate command. That's fine. Before we do the
+  merge, we're going to use Claude Sonic 5.5 like we've been doing for
+  everything else." -> the gate runs on claude-sonnet-5-5 ("Sonic" is a
+  dictation slip); production extraction runs claude-sonnet-5-5; RUNBOOK's
+  claude-sonnet-5 line is stale and B1 fixes it.
+- On reactions: "I just want the reaction to a property, any property, to
+  be fed into the model for any other property. If we have somebody say
+  something like, 'Yeah, I don't like that part of town,' that gets flagged
+  and shown to the new model for ranking purposes."
+- Q3 / redesign: "I don't understand the display and remove control.
+  That's what prompted this to begin with, so I think we need to redesign
+  how we're thinking about this reaction to a property. ... 1. What
+  information from a response to a property needs to go in 2. Tracking that
+  information. For now, maybe the best thing to do is just use the 'not
+  interested' or 'interested' tags, plus the property address and all of
+  its information, in order to flag what the person has already seen and
+  why they don't like that. The whole point of this is to build up an
+  understanding of what this person is interested in. Every time they give
+  us feedback on a property, that should change how we rank properties with
+  respect to them."
+- The maybe case: "we would have to track them in the system as not
+  interested in order for them to move on, because we're not creating a
+  tour. We don't want to look at just the not interested tag. We want to
+  make sure that that's very clearly shown as a maybe, and then after a
+  certain amount of time, that property would bubble back up because we do
+  know that they're at least a little bit interested in the property."
+- Accepted the planner's design: "Yeah, I like the way that we have
+  updated this. Let's amend the charter and cut the spec down." ->
+  reaction LINES in the Notes box (fixed shape: address, city, one of
+  interested / maybe / not interested / question, reason); no stored
+  reactions, no remove control; PROPERTIES SEEN on the tenant card (B2);
+  staff Not interested + a maybe line reads as a maybe; no Maybe button.
+  Charter section 20 items 4-6.
+
 ## Why
 
 Preference data should start accumulating before anything ranks (charter
@@ -72,6 +109,14 @@ estimate (8-10) before the WP1 scope question is revisited.
   gate is the protection.
 
 ## Rejected options
+
+- Stored per-pair reactions on listing_sends with a writer, handles and a
+  staff remove control (spec revs 1-4): Cameron did not want a new hidden
+  store needing its own display and correction path.
+- A Maybe button beside Not interested (declined again; extraction's
+  maybe line carries it, the button only if extraction misses maybes).
+- A per-pair-only reaction scope: feedback on one property must reach
+  every ranking for that tenant.
 
 - Extending the never-written list and its test to the free-text fixed
   fields (Cameron: no).

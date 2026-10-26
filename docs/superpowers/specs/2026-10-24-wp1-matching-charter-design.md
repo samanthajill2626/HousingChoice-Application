@@ -10,6 +10,9 @@ the planner defaults confirmed. Hours: no cut; B1 measures them
 (section 15.1). AMENDED 2026-10-26 at the B1 slice restatement (section
 20): `AI_MATCHING_NOTES_ENABLED` dropped, the never-written test made
 B1's merge gate, the fixed tenant fields built to move into notes later.
+AMENDED again 2026-10-26 at the B1 spec gate (section 20, items 4-6):
+stored reactions withdrawn for reaction lines in the Notes box, properties
+seen on the tenant card, the maybe case.
 Mission: Amendment No. 1 Work Package 1 (signed; Cameron 2026-10-20, Sam
 2026-10-21). 52 contracted hours.
 Records: docs/superpowers/reviews/2026-10-24-wp1-matching-charter/
@@ -123,11 +126,18 @@ That forced landing applies to cap-eligible requirement failures ONLY. A "Not
 interested" send outcome, an accessibility need the property cannot meet,
 or a rent above the tenant's stated portion are inputs the model weighs,
 not rules the rubric dictates. A pair marked Not interested stays in the
-pool and is never forced into Weak; the recorded outcome and the extracted
-reaction (a hard no, or "maybe, but show me others first") are both on the
-pair history for the model to read (Cameron 2026-10-25). A "maybe" read
+pool and is never forced into Weak; the recorded outcome and the tenant's
+reaction line (a hard no, or "maybe, but show me others first") are both
+in front of the model (Cameron 2026-10-25). A "maybe" read
 from context weighs only as a slight reason against, and the age rule in
-section 10.3 lets it rise again as time passes.
+section 10.3 lets it rise again as time passes. AMENDED 2026-10-26: the
+reaction is a Notes line in a fixed shape naming the property (section
+6.4), not a stored reaction. Staff still mark a "maybe" tenant Not
+interested so the tenant moves on (no tour is created); the rubric reads
+a staff Not interested together with a `maybe` reaction line for the same
+property as a MAYBE, never as a hard no (Cameron 2026-10-26: "we want to
+make sure that that's very clearly shown as a maybe, and then after a
+certain amount of time, that property would bubble back up").
 
 Why: Cameron 2026-10-24: "the signed contract was a little bit too harsh
 ... I don't think hard rules are ever going to be the answer." The free
@@ -258,6 +268,18 @@ preference, maximum tenant portion, accessibility need, preferences and
 constraints), the Notes box with extraction's matching lines (section
 6.4), and Staff notes.
 
+AMENDED 2026-10-26: the tenant card also carries PROPERTIES SEEN: every
+property sent to the tenant (and every flyer sign-up), each with that
+property's card details, the dates sent, and its stored outcome facts
+(the declined record with who and when, tour requests and outcomes; the
+same stored facts as section 6.3, never the derived outcome). With the
+reaction lines in the Notes box, this is how feedback on ANY property
+changes the ranking of EVERY property for that tenant (Cameron
+2026-10-26: "Every time they give us feedback on a property, that should
+change how we rank properties with respect to them"). B2 bounds its size
+(newest first) and fingerprints it so that a bare new send with no
+outcome does not change the tenant card (section 10.3).
+
 Property card: everything on the unit except the exclusions, which today
 means address, beds, baths, rent range, payment standard, accepted voucher
 sizes, accepted authorities, pets, accessibility, utilities the tenant
@@ -287,29 +309,26 @@ never from the derived outcome: the date of every counted send (the
 listing_sends row's shares, telling a flyer sign-up, which is the
 tenant's own interest, apart from a send, and falling back to `sentAt` on
 a legacy row with no shares), the declined record with who set it and when,
-tour requests and outcomes between the two, and every extracted reaction.
-The derived outcome (listingSendOutcome.ts:74-91) is not used: it flips
+tour requests and outcomes between the two. The derived outcome (listingSendOutcome.ts:74-91) is not used: it flips
 on a new text or a new send, and a re-send supersedes a decline in it,
 while the model must still see that the tenant once said no. Time since
 the last send is passed explicitly, so a "maybe" from weeks ago can rise
 again.
 
-Extracted reactions live on the existing listing_sends pair row as a list
-(at, kind, text, source message, run id); no new table. Only a pair whose
-listing_sends row is listed with a counted send share, or is a legacy row
-with `sentAt` and no shares (the same fallback the pair history uses),
-gets reactions; a pending or failed share or a flyer sign-up alone does
-not; a reaction about a
-property never sent becomes a Notes line instead. The reaction writer
-joins the row's change-token protocol (`shares_op`) and the repo
-header's list of writers. Kinds are interested, maybe, hard_no and
-question, so a WP3 hard_no maps one to one onto a DeclineRecord.
-Reactions are written for tenant rows only. WP1 records the reaction and
-the ranker reads it; it never sets a status. Recording an engine-read
-decline is WP3's deliverable (A1 WP3: "Declines the engine reads in the
-conversation are recorded in the decline tracking from Work Package 1"),
-through the existing `by: 'engine'` decline; staff mark Not interested
-as today.
+AMENDED 2026-10-26: there are NO stored reactions. The design that kept
+extracted reactions as a list on the listing_sends row (with its own
+writer under `shares_op`, kinds, and a staff remove control) is
+withdrawn: it was a new hidden store that needed its own display and
+correction path. Instead, what a tenant says about a property is a
+reaction line in the Notes box (section 6.4), which Sam already sees and
+edits, and the outcome is the stored facts above, which staff already
+set. The ranker reads both on the tenant card (section 6.2), so feedback
+on one property informs every ranking for that tenant.
+
+Extraction never sets a status. Recording an engine-read decline is
+WP3's deliverable (A1 WP3: "Declines the engine reads in the conversation
+are recorded in the decline tracking from Work Package 1"), through the
+existing `by: 'engine'` decline; staff mark Not interested as today.
 
 ### 6.4 Extraction is the reading layer (B1)
 
@@ -351,24 +370,36 @@ as follows:
 - Never written as a Notes line: race, color, religion, sex, national
   origin, familial facts beyond household size, and disability or
   medical facts other than the stated accessibility need and an
-  assistance animal. The same list governs the text of every extracted
-  reaction (section 6.3). Screening facts the box carries today (utility
+  assistance animal. The same list governs reaction lines (the last
+  bullet). Screening facts the box carries today (utility
   debt and the like) stay, because Sam uses them; the
   ranker disregards their credit and income content (section 7.2). B1
   tests the list: synthetic conversations stating each excluded kind of
-  fact, run on the testing key, must append no line and write no reaction
-  of an excluded kind (household size and tenant portion remain allowed).
+  fact, run on the testing key, must append no line of an excluded kind,
+  reaction lines included (household size and tenant portion remain
+  allowed).
   The test is B1's MERGE GATE: B1 is not handed back merge-ready until it
   passes on the widened prompt, or Cameron decides. AMENDED 2026-10-26:
-  there is no production switch for the widened instruction and the
-  reactions (the `AI_MATCHING_NOTES_ENABLED` this bullet named is
-  dropped); extraction writes only to the record and sends nothing, so
-  Cameron judged a switch an extra code path that protects nothing the
-  merge gate does not. The list governs Notes lines and reaction text
-  only; the fixed free-text fields above are not covered by it or by the
-  test (Cameron 2026-10-26).
-- One reading per send: the tenant's reaction to the specific property
-  named, written to the pair history (section 6.3).
+  there is no production switch for the widened instruction (the
+  `AI_MATCHING_NOTES_ENABLED` this bullet named is dropped); extraction
+  writes only to the record and sends nothing, so Cameron judged a switch
+  an extra code path that protects nothing the merge gate does not. The
+  list governs Notes lines only, reaction lines included; the fixed
+  free-text fields above are not covered by it or by the test (Cameron
+  2026-10-26).
+- AMENDED 2026-10-26 (replaces "one reading per send ... written to the
+  pair history"): a tenant's reaction to a property sent to them is a
+  REACTION LINE, a Notes line in a fixed shape that names the property and
+  starts with one of four reaction words:
+  `[Auto - <date>] <address line 1>, <city> - <interested | maybe | not interested | question>: <reason>`,
+  for example `[Auto - Oct 12] 123 Main St, Decatur - maybe: on the fence,
+  wants to see other homes first`. Extraction is told which properties
+  were sent to the tenant so it can name the right one; the rule keeping
+  addresses out of Notes lines covers the tenant's OWN address only. A
+  reaction to a home never sent is an ordinary Notes line without an
+  address. Reaction lines carry the same confidence floor, demotion rule
+  and never-written list as every Notes line, and Sam corrects one by
+  editing the Notes box.
 
 The landlord-side counterpart is filed,
 not built: docs/issues/landlord-conversation-extraction-to-property.md.
@@ -704,11 +735,16 @@ every pair fresh. There is no per-candidate re-score and no insertion call
 
 What changes a fingerprint, and what does not: the cards as defined in
 section 6 (recency only as its bucket); on the pair history (section 6.3),
-the declined record, a tour, or an extracted reaction. A new send ALONE
+the declined record or a tour. A new send ALONE
 does not make a match out of date, and neither does a text that adds
 nothing to the record: the derived outcome is never fingerprinted. A text
-that extraction turns into a field, Notes line or reaction does,
-correctly, and so does a staff edit to either notes box. The Already sent and outcome
+that extraction turns into a field or a Notes line (a reaction line
+included) does, correctly, and so does a staff edit to either notes box.
+AMENDED 2026-10-26: because the tenant card carries properties seen and
+the reaction lines (section 6.2), a decline, tour or reaction line about
+ANY property makes every match of that tenant out of date, which is
+intended: feedback re-ranks the whole list. A bare new send does not
+(B2 leaves sends with no outcome out of the tenant card's fingerprint). The Already sent and outcome
 chips are derived on read and show at once.
 
 Sam decides whether to update; an out-of-date list is still shown.
@@ -883,7 +919,7 @@ complete records; nothing refuses to rank.
 Sending from the composer records the send on the pair (listing sends,
 tracker #27 shape). The row shows Already sent at once; the send alone does
 not make the match out of date (section 10.3). A later decline, tour or
-extracted reaction does. The outcome controls (No
+reaction line does. The outcome controls (No
 reply yet / Interested / Not interested) remain where they are today.
 
 ## 14. D11 - Models, drivers and configuration
@@ -918,8 +954,8 @@ reply yet / Interested / Not interested) remain where they are today.
 
 | Slice | Owns | Hours |
 |---|---|---|
-| B1 Ranking inputs | Tenant fields area preference, maximum tenant portion, accessibility need, preferences and constraints on the record and edit form; `priority` boolean on the unit, its edit-form control and record display; extraction schema widened (fixed fields; the noteLines instruction widened to matching facts, each line with a confidence and the floor, no lines from unknown-speaker runs, the never-written list; per-send reaction stored on the listing_sends row under shares_op); the never-written test covering Notes lines and reactions, run as B1's merge gate (no production switch, amended 2026-10-26); the one list of tenant matching inputs and their sources (section 6.4). Ships to production first. | 8-10 |
-| B2 Ranking engine | Pool in both directions with the window and the sendability fences; cards by classification with the runtime allowlist and the landlord switch; card fingerprint helpers; completeness pass; rubric, examples, structured output; anthropic/fake/console drivers; the ranking poll loop and the ranking-job record (claim generation, lease, one takeover, failed batches, carried trace); persisted batches, event hint, GET and base-table re-read; matches with the out-of-date, age and version rules and the one-button whole-pool re-score; the lean seed row replaced; review records with direction and input snapshots, the in-app review list, example promotion and `examplesVersion`, the synthetic examples and evaluation set, the de-identified export, the evaluation script; the Staff notes comment corrected; the cap with its key list, accommodation flags and the property-level unlawful-flag record; the counterfactual fair-housing check on synthetic pairs; the Rank rate-limit knob and roles; `AI_RANKING_ENABLED`; run log under its own keys with cost by environment; band and priority policy on read; endpoints: rank, read ranking by anchor, review a pair; the Rankings page with "Rank this anchor". | 33-42 |
+| B1 Ranking inputs | Tenant fields area preference, maximum tenant portion, accessibility need, preferences and constraints on the record and edit form; `priority` boolean on the unit, its edit-form control and record display; extraction schema widened (fixed fields; the noteLines instruction widened to matching facts, each line with a confidence and the floor, no lines from unknown-speaker runs, the never-written list; reaction lines naming the property with one of four reaction words, and the list of properties sent to the tenant given to extraction so it can name them; amended 2026-10-26); the never-written test covering Notes lines, reaction lines included, run as B1's merge gate (no production switch, amended 2026-10-26); the one list of tenant matching inputs and their sources (section 6.4). Ships to production first. | 8-10 |
+| B2 Ranking engine | Pool in both directions with the window and the sendability fences; cards by classification with the runtime allowlist and the landlord switch; card fingerprint helpers; completeness pass; rubric, examples, structured output; anthropic/fake/console drivers; the ranking poll loop and properties seen on the tenant card with its fingerprint rule (amended 2026-10-26); the ranking-job record (claim generation, lease, one takeover, failed batches, carried trace); persisted batches, event hint, GET and base-table re-read; matches with the out-of-date, age and version rules and the one-button whole-pool re-score; the lean seed row replaced; review records with direction and input snapshots, the in-app review list, example promotion and `examplesVersion`, the synthetic examples and evaluation set, the de-identified export, the evaluation script; the Staff notes comment corrected; the cap with its key list, accommodation flags and the property-level unlawful-flag record; the counterfactual fair-housing check on synthetic pairs; the Rank rate-limit knob and roles; `AI_RANKING_ENABLED`; run log under its own keys with cost by environment; band and priority policy on read; endpoints: rank, read ranking by anchor, review a pair; the Rankings page with "Rank this anchor". | 33-42 |
 | B3 Send property from a tenant | The ranked row; the composer's tenant anchor; priority-only view; completeness banner; Rank/Update; one-step send with the outcome on the pair; agree/disagree with the disagree direction; the tenant record's Send re-pointed. | 10-12 |
 | B4 Send property from a property | The composer's property anchor; ranked tenants replacing the filter-only audience, the window toggle, rows unchecked by default and Select all, with hand-picks, the tour-hold chip and confirm, old filter drafts and the partner flow kept (section 13.1); already-sent No reply filter chip; pick one, a few or many; the switch-off composer; the unlawful-flag display on the property record with the admin Dismiss; the Matching nav entry asking which record to start from; the property page's Send re-pointed; the Similar panel relabeled "similarity". | 13-16 |
 
@@ -957,8 +993,8 @@ pool), 11 (run log with cost; Rankings page), 12 (continuous review;
 every review kept as its own record with its input snapshot; the dataset
 from synthetic to real; no identified client record committed), 13.1 (one composer, two anchors; Send property on both records),
 14 (model per stage; fake driver), 15.2 (order), and the compliance
-decisions: 6.3 (reactions recorded, declines left to WP3), 6.4 (matching
-facts as Notes lines, the never-written list, its test as B1's merge gate), 7.2 (fair housing,
+decisions: 6.3 (no stored reactions; declines left to WP3), 6.4 (matching
+facts and reaction lines as Notes lines, the never-written list, its test as B1's merge gate), 7.2 (fair housing,
 credit and income, the counterfactual gate), 7.4 (the cap and its key
 list), 10.2 (no SQS queue for ranking; one automatic takeover), 13.1
 (selection defaults). A slice that needs one changed brings it to
@@ -1014,8 +1050,8 @@ Each is a deliberate call, listed so Sam hears all of them (section 16.2).
 - Each ranking recorded: built as matches overwritten on each press plus
   the run log kept 180 days, and every review kept (sections 10, 11, 12).
 - Scope reaching into WP3: the signed WP3 text reads tenant reactions
-  ("too far") during sharing; B1 builds the per-send reaction reading and
-  the widened Notes instruction now and bills them to WP1, because the
+  ("too far") during sharing; B1 builds the reaction lines and the
+  widened Notes instruction now and bills them to WP1, because the
   ranking reads them (section 6.4).
 - "Computed on open" / no background re-rank: built as computed on
   request with stored rankings shown on open (section 10.2). Still no
@@ -1071,10 +1107,27 @@ date; this list is the index.
      an extra headache" because extraction is not "used to actually send
      anything directly". The never-written test becomes B1's merge gate
      instead (sections 6.4, 15.1, 15.4).
-  2. The never-written list stays limited to Notes lines and reaction
-     text; the fixed free-text tenant fields are not added to it or to its
-     test (section 6.4).
+  2. The never-written list stays limited to Notes lines; the fixed
+     free-text tenant fields are not added to it or to its test (section
+     6.4).
   3. The fixed tenant fields are expected to move into the Notes box
      later. B1 and B2 build so that is a one-place change: one list of
      tenant matching inputs and their sources (sections 6.4, 15.1).
      Wider direction filed: docs/issues/extraction-fields-to-notes.md.
+- 2026-10-26, at the B1 spec gate (records:
+  docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/intent.md):
+  4. Stored reactions are withdrawn. Cameron: "I don't understand the
+     display and remove control. That's what prompted this to begin with,
+     so I think we need to redesign how we're thinking about this reaction
+     to a property." A reaction is a REACTION LINE in the Notes box, a
+     fixed shape naming the property with one of four words (interested,
+     maybe, not interested, question); the outcome stays the stored
+     facts staff already set (sections 6.3, 6.4, 13.5, 15.1, 15.4, 17).
+  5. The tenant card carries PROPERTIES SEEN, every property sent with
+     its details and stored outcome facts, so feedback on any property
+     re-ranks every property for that tenant; a bare send changes nothing
+     (sections 6.2, 10.3, 15.1 B2).
+  6. The maybe case: staff mark Not interested so the tenant moves on;
+     the rubric reads that with a `maybe` reaction line as a maybe, and
+     the age rule lets the property bubble back up. No Maybe button
+     (section 4).

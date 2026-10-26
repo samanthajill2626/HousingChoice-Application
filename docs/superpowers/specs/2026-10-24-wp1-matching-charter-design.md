@@ -1,12 +1,12 @@
 # WP1 Matching Charter - design decisions for "Matching tenants and properties"
 
 Date: 2026-10-24
-Status: DRAFT charter. Whole-spec re-read 2026-10-25 folded in; design
+Status: APPROVED charter (Cameron passed the spec gate 2026-10-26). Whole-spec re-read 2026-10-25 folded in; design
 review rounds 1 to 8 folded in (records: design-review/adjudications.md);
 review closed at its cap; Cameron's spec-gate answers (2026-10-26)
 folded in: staff notes and the Notes box on the card, matching facts as
 Notes lines, declines left to WP3, the review dataset (section 12), and
-the planner defaults confirmed. Pending: the gate itself and the hours
+the planner defaults confirmed. Hours: no cut; B1 measures them
 (section 15.1).
 Mission: Amendment No. 1 Work Package 1 (signed; Cameron 2026-10-20, Sam
 2026-10-21). 52 contracted hours.
@@ -646,7 +646,9 @@ from the base table, never through the eventually consistent byUnit
 index. So the 30-second CloudFront origin timeout
 (infra/modules/cloudfront/main.tf:114) never applies to a model call.
 Rank, Update and the review controls are open to admin and va, as the
-composer is today (broadcasts.ts:1-4) (Cameron 2026-10-26). Rank gets its own
+composer is today (broadcasts.ts:1-4): VAs see and use everything in
+the composer, scores included; only the Rankings page is admin-only
+(Cameron 2026-10-26). Rank gets its own
 per-user rate-limit knob, parsed fail-fast like the
 existing cost-route knobs (app/src/lib/config.ts:1021-1040). The
 ranking-job record lives in the AI runs table in its own key family with
@@ -912,7 +914,9 @@ fair-housing records; B4's selection and flag surfaces. The gate answers
 moved matching facts into the Notes box (B1 down 2-3) and added the review
 dataset (B2 up 3-4). A1 section 7 makes the hours an estimate; going over
 is Cameron's call to cut scope or to tell Sam before the hours are spent.
-PENDING CAMERON at the spec gate. All four bill to WP1.
+Cameron 2026-10-26: no scope cut now; he expects the gap to be smaller
+than estimated, and B1 runs first to measure real hours against its
+estimate before the scope question is revisited. All four bill to WP1.
 
 ### 15.2 Order
 

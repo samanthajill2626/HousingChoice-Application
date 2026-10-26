@@ -11,21 +11,11 @@ cut from main @970a29b9. Docs only.
 
 ## STATE
 
-Phase: CAMERON'S SPEC GATE, partly answered (2026-10-26). His answers on
-the planner defaults are folded into the spec (round 17 below). Still
-open: (1) pass the gate or revise; (2) the hours, now 64-80 against 52
-contracted (spec 15.1): cut scope or tell Sam (A1 section 7); candidate
-cuts: Rankings page beyond the run list, the landlord switch, the admin
-Dismiss; (3) whether VAs should see scores in the composer (my reading of
-his 2026-10-26 'leave it to admins': only the Rankings page is
-admin-only, as already specced; asked, unanswered). Nothing in flight.
-Registered with compact-resume until Nov 1 (--persist); after any
-compaction re-invoke abt:feature-mission 'RESUME WP1 charter', read this
-file, replay and read ALL of it, report in one line, then wait for or
-take his gate answers.
-After the gate: merge command for the docs-only branch (he merges),
-register-session.mjs --off, memory update (next-build-contract-
-amendments.md + MEMORY.md; consider a wp1-matching-charter topic file).
+Phase: CHARTER COMPLETE. Cameron passed the spec gate 2026-10-26. Branch
+feat/wp1-matching-charter is docs-only and awaits his merge to main.
+The compact-resume registration for this session is turned off. Next
+work is the B1 Ranking inputs slice as its own feature mission, cut
+from main after this branch merges, citing the charter by section.
 Cameron's list: testing API key from Sam (before B2); WP1 hours log.
 
 ## What Cameron asked for (verbatim where wording matters)
@@ -467,3 +457,12 @@ quality Sam trusts, then her review of it, then the two views.
 - Confirmed: fair-housing tests block the production switches; ranked
   rows start unchecked; hand-picked tenants start checked; Rankings page
   admin only ('just leave it to admins').
+
+## Decisions, round 18 (Cameron, 2026-10-26, gate passed)
+
+- 'we're going to leave it to admins, meaning only the ranking page. VAs
+  should be able to see the other stuff.'
+- Hours: 'I'm not sure that the hours really change as much as you're
+  thinking they do. What I want to do is start working on the first slice
+  of this work package 1 and see how long that really takes.' No cut; no
+  note to Sam yet; B1 measures. Read as passing the spec gate.

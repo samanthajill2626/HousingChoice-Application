@@ -7,7 +7,9 @@ review closed at its cap; Cameron's spec-gate answers (2026-10-26)
 folded in: staff notes and the Notes box on the card, matching facts as
 Notes lines, declines left to WP3, the review dataset (section 12), and
 the planner defaults confirmed. Hours: no cut; B1 measures them
-(section 15.1).
+(section 15.1). AMENDED 2026-10-26 at the B1 slice restatement (section
+20): `AI_MATCHING_NOTES_ENABLED` dropped, the never-written test made
+B1's merge gate, the fixed tenant fields built to move into notes later.
 Mission: Amendment No. 1 Work Package 1 (signed; Cameron 2026-10-20, Sam
 2026-10-21). 52 contracted hours.
 Records: docs/superpowers/reviews/2026-10-24-wp1-matching-charter/
@@ -317,7 +319,16 @@ as follows:
 - Fixed fields the system needs structurally: area preference (text),
   maximum tenant portion (dollars per month), accessibility need (text),
   preferences and constraints (text). Fixed because the completeness pass
-  and the edit form must be able to ask Sam for them.
+  and the edit form must be able to ask Sam for them, and because A1 names
+  them ("new tenant preference fields ... on the record, the edit form and
+  the AI reading layer"). AMENDED 2026-10-26: Cameron expects these facts
+  to move into the Notes box later, as part of a wider change to how
+  extraction stores what it learns
+  (docs/issues/extraction-fields-to-notes.md). B1 and B2 build so that
+  move is a change in ONE place: a single list in code names each tenant
+  matching input and its source; extraction's field entries and B2's
+  completeness pass read that list, and the card already carries the
+  Notes box, so the ranker needs no change when a source moves.
 - MATCHING FACTS go where extraction already puts secondary facts: the
   tenant's Notes box, as its dated `[Auto - <date>]` lines
   (prompt.ts:107-111, apply.ts:713-745). No separate facts list. B1 widens
@@ -347,10 +358,15 @@ as follows:
   tests the list: synthetic conversations stating each excluded kind of
   fact, run on the testing key, must append no line and write no reaction
   of an excluded kind (household size and tenant portion remain allowed).
-  A failure blocks turning the widened instruction and reactions on in
-  production (`AI_MATCHING_NOTES_ENABLED`, default off, like
-  `aiExtractionEnabled`; off means today's noteLines instruction) until
-  it passes or Cameron decides.
+  The test is B1's MERGE GATE: B1 is not handed back merge-ready until it
+  passes on the widened prompt, or Cameron decides. AMENDED 2026-10-26:
+  there is no production switch for the widened instruction and the
+  reactions (the `AI_MATCHING_NOTES_ENABLED` this bullet named is
+  dropped); extraction writes only to the record and sends nothing, so
+  Cameron judged a switch an extra code path that protects nothing the
+  merge gate does not. The list governs Notes lines and reaction text
+  only; the fixed free-text fields above are not covered by it or by the
+  test (Cameron 2026-10-26).
 - One reading per send: the tenant's reaction to the specific property
   named, written to the pair history (section 6.3).
 
@@ -902,7 +918,7 @@ reply yet / Interested / Not interested) remain where they are today.
 
 | Slice | Owns | Hours |
 |---|---|---|
-| B1 Ranking inputs | Tenant fields area preference, maximum tenant portion, accessibility need, preferences and constraints on the record and edit form; `priority` boolean on the unit, its edit-form control and record display; extraction schema widened (fixed fields; the noteLines instruction widened to matching facts, each line with a confidence and the floor, no lines from unknown-speaker runs, the never-written list; per-send reaction stored on the listing_sends row under shares_op); the never-written test covering Notes lines and reactions; `AI_MATCHING_NOTES_ENABLED`. Ships to production first. | 8-10 |
+| B1 Ranking inputs | Tenant fields area preference, maximum tenant portion, accessibility need, preferences and constraints on the record and edit form; `priority` boolean on the unit, its edit-form control and record display; extraction schema widened (fixed fields; the noteLines instruction widened to matching facts, each line with a confidence and the floor, no lines from unknown-speaker runs, the never-written list; per-send reaction stored on the listing_sends row under shares_op); the never-written test covering Notes lines and reactions, run as B1's merge gate (no production switch, amended 2026-10-26); the one list of tenant matching inputs and their sources (section 6.4). Ships to production first. | 8-10 |
 | B2 Ranking engine | Pool in both directions with the window and the sendability fences; cards by classification with the runtime allowlist and the landlord switch; card fingerprint helpers; completeness pass; rubric, examples, structured output; anthropic/fake/console drivers; the ranking poll loop and the ranking-job record (claim generation, lease, one takeover, failed batches, carried trace); persisted batches, event hint, GET and base-table re-read; matches with the out-of-date, age and version rules and the one-button whole-pool re-score; the lean seed row replaced; review records with direction and input snapshots, the in-app review list, example promotion and `examplesVersion`, the synthetic examples and evaluation set, the de-identified export, the evaluation script; the Staff notes comment corrected; the cap with its key list, accommodation flags and the property-level unlawful-flag record; the counterfactual fair-housing check on synthetic pairs; the Rank rate-limit knob and roles; `AI_RANKING_ENABLED`; run log under its own keys with cost by environment; band and priority policy on read; endpoints: rank, read ranking by anchor, review a pair; the Rankings page with "Rank this anchor". | 33-42 |
 | B3 Send property from a tenant | The ranked row; the composer's tenant anchor; priority-only view; completeness banner; Rank/Update; one-step send with the outcome on the pair; agree/disagree with the disagree direction; the tenant record's Send re-pointed. | 10-12 |
 | B4 Send property from a property | The composer's property anchor; ranked tenants replacing the filter-only audience, the window toggle, rows unchecked by default and Select all, with hand-picks, the tour-hold chip and confirm, old filter drafts and the partner flow kept (section 13.1); already-sent No reply filter chip; pick one, a few or many; the switch-off composer; the unlawful-flag display on the property record with the admin Dismiss; the Matching nav entry asking which record to start from; the property page's Send re-pointed; the Similar panel relabeled "similarity". | 13-16 |
@@ -942,7 +958,7 @@ every review kept as its own record with its input snapshot; the dataset
 from synthetic to real; no identified client record committed), 13.1 (one composer, two anchors; Send property on both records),
 14 (model per stage; fake driver), 15.2 (order), and the compliance
 decisions: 6.3 (reactions recorded, declines left to WP3), 6.4 (matching
-facts as Notes lines, the never-written list, its test and the switch), 7.2 (fair housing,
+facts as Notes lines, the never-written list, its test as B1's merge gate), 7.2 (fair housing,
 credit and income, the counterfactual gate), 7.4 (the cap and its key
 list), 10.2 (no SQS queue for ranking; one automatic takeover), 13.1
 (selection defaults). A slice that needs one changed brings it to
@@ -1042,3 +1058,23 @@ income used to rank or exclude.
   design; B2 confirms the TTL attribute and GSI match section 10.1 and
   files an infra note only if a change is needed (no infra without
   Cameron's explicit ask).
+
+## 20. Amendments
+
+Each entry is a decision Cameron changed after the charter gate, per
+section 0. Earlier text is edited in place and marked AMENDED with the
+date; this list is the index.
+
+- 2026-10-26, at the B1 slice restatement (records:
+  docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/intent.md):
+  1. `AI_MATCHING_NOTES_ENABLED` is dropped. Cameron: the switch is "just
+     an extra headache" because extraction is not "used to actually send
+     anything directly". The never-written test becomes B1's merge gate
+     instead (sections 6.4, 15.1, 15.4).
+  2. The never-written list stays limited to Notes lines and reaction
+     text; the fixed free-text tenant fields are not added to it or to its
+     test (section 6.4).
+  3. The fixed tenant fields are expected to move into the Notes box
+     later. B1 and B2 build so that is a one-place change: one list of
+     tenant matching inputs and their sources (sections 6.4, 15.1).
+     Wider direction filed: docs/issues/extraction-fields-to-notes.md.

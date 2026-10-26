@@ -1,15 +1,17 @@
 # WP1 B1 Ranking inputs - design
 
-Status: DRAFT revision 4 (2026-10-26), at the spec gate. Rev 2 folded in design review round
-1 (two reviewers, 33 findings merged to 22, all accepted, one in part with
-a question to Cameron); rev 3 folded in round 2 (10 findings, all
-accepted; the "new messages only" reaction rule withdrawn); rev 4 folds in
-round 3 (8 findings, all precision edits; no decision changed, so round 3
-is the TERMINAL round). Spec gate next. Adjudications:
-`docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/design-review/adjudications.md`).
+Status: DRAFT revision 5 (2026-10-26). Revs 2-4 folded in design review
+rounds 1-3 (40 findings, all accepted). Rev 5 follows Cameron's spec-gate
+redesign (charter section 20, items 4-6): stored per-pair reactions, their
+writer, message and property handles, and the staff remove control are
+WITHDRAWN; a tenant's reaction to a property is a REACTION LINE in the
+Notes box, and extraction is given the list of properties sent so it can
+name them. Q1 and Q2 are answered (section 8). Adjudications:
+`docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/design-review/adjudications.md`.
 Charter: docs/superpowers/specs/2026-10-24-wp1-matching-charter-design.md.
-This slice implements charter sections 6.3 (per-send reactions), 6.4
-(extraction as the reading layer, AMENDED 2026-10-26), 7.3 (the tenant
+This slice implements charter sections 6.4 (extraction as the reading
+layer, including reaction lines; AMENDED 2026-10-26), 4 and 6.3 as amended
+(a reaction is a Notes line; no stored reactions), 7.3 (the tenant
 completeness fields as stored inputs; the pass itself is B2) and 9.2 (the
 priority boolean), per the section 15.1 B1 row. Charter decisions bind; a
 change goes to Cameron and is recorded in charter section 20.
@@ -23,10 +25,12 @@ Vocabulary (documentation/GLOSSARY.md): a `unit` is a "property" to staff.
 "Preferences & notes" card, where extraction appends dated
 `[Auto - <date>]` lines and staff also type. "Staff notes" = `staff_notes`,
 human-only. A "Notes line" = one `[Auto - <date>] <text>` line extraction
-appends. "Reaction" = a tenant's extracted response to one property sent to
-them, stored on that pair's listing_sends row (charter 6.3). "Handle" = a
-short per-run label (`m3`, `p2`) the prompt gives a message or a sent
-property so the model can cite it.
+appends. "Reaction line" = a Notes line in a fixed shape recording a
+tenant's reaction to one property sent to them (D5, charter 6.4 amended):
+`[Auto - <date>] <address line 1>, <city> - <reaction word>: <reason>`.
+"Reaction word" = one of `interested`, `maybe`, `not interested`,
+`question`. "Properties sent" = the properties on the tenant's
+listing_sends rows (sent, or signed up for through a flyer).
 
 ## 1. Goal
 
@@ -38,8 +42,8 @@ Start collecting the facts the ranker (B2) will read, before anything ranks:
 - A Priority on/off switch on each property.
 - Extraction that writes anything that might matter to matching a tenant
   with a home as Notes lines (with a confidence floor and a never-written
-  list), and records a tenant's reaction to each property actually sent to
-  them.
+  list), including a reaction line naming the property whenever the
+  tenant reacts to a property sent to them.
 - A real-model test proving the never-written list holds. It is B1's merge
   gate (charter 6.4, amended).
 
@@ -206,9 +210,8 @@ amended 2026-10-26). The gate record reports what lands in them (D7).
   adds to one of the three text fields when that field is already filled
   (D3). The reconcile,
   append-only, short-line and no-address rules stay verbatim. Screening
-  facts (utility debt and the like) remain allowed. A reaction to a home
-  NOT in PROPERTIES SENT is a line without an address ("not interested in
-  a home they found: too far from work").
+  facts (utility debt and the like) remain allowed. Reaction lines (D5)
+  are Notes lines.
 - Never-written list, stated in the prompt: never write a line stating
   race, color, religion, sex, national origin, familial facts beyond
   household size (no pregnancy, marital status, children's ages or
@@ -224,7 +227,7 @@ amended 2026-10-26). The gate record reports what lands in them (D7).
   since no decimal precedent exists in config.ts).
 - Order: the parser keeps up to 20 structurally valid items and does no
   value filtering. Every value rule lives in PURE functions exported from
-  apply.ts (`filterNoteLines`, and `filterReactions` for D5.5), which
+  apply.ts (`filterNoteLines`, which also applies D5's reaction-line rule), which
   `applyExtraction` and the probe script (D7) both call, so the fake
   driver's bypass of `parseExtractionText` (extractionFake.ts:103) skips
   nothing: clamp text to 200 characters and confidence to 0..1 (a
@@ -249,179 +252,104 @@ amended 2026-10-26). The gate record reports what lands in them (D7).
 - Growth: the box grows without a bound and CURRENT PROFILE sends all of
   it; accepted for B1. B2 decides how the card carries it.
 
-### D5. Reactions: one reading per send, on the pair row
+### D5. Reaction lines: a tenant's reaction to a property, in the Notes box
 
-#### D5.1 Which properties
+Charter 4, 6.2, 6.3 and 6.4 as amended 2026-10-26. There are no stored
+reactions: no new attribute on listing_sends, no new writer, no change to
+its `shares_op` protocol. The outcome stays what staff already set (Not
+interested, a tour for Interested) and B2 reads it; B1 makes sure the WHY,
+and a "maybe", reach the Notes box in a shape B2 and Sam can read.
 
-Extraction runs on tenant and unknown contacts; reactions are read for
-TENANT contacts only. The job reads `listByContact(contactId)` and keeps
-the rows that QUALIFY: listed (`isListed`, listingSendsRepo.ts:235-237)
-AND either carrying a counted share whose key is not `FLYER_SHARE_KEY`
-(lib/shareLedgerKeys.ts) or a legacy row with `sentAt` and no `shares`
-(charter 6.3). A pending, unconfirmed or failed share, or a flyer sign-up
-alone, does not qualify. Newest 20 by `sentAt`. Addresses come from the
-units repo's existing BatchGet projection (unitsRepo.ts:1293); a unit that
-no longer resolves is skipped.
+#### D5.1 The properties-sent list given to extraction
 
-#### D5.2 Handles: one owner
+For a TENANT contact, the job reads `listByContact(contactId)` and keeps
+the LISTED rows (`isListed`, listingSendsRepo.ts:235-237): any row with a
+counted share, flyer sign-ups included (the tenant may react to a flyer
+property too), and legacy rows with `sentAt`. Newest 20 by `sentAt`.
+Addresses come from the units repo's existing BatchGet projection
+(unitsRepo.ts:1293); a unit that no longer resolves is skipped.
 
-ONE pure function, `buildExtractionHandles` (in services/extraction), owned
-by the JOB, takes the final window (after the age floor, group-origin drop
-and character budget) and the qualifying rows with their addresses, and
-returns:
+It renders a PROPERTIES SENT block, built like the organization list block
+(orgListBlock.ts): once per run, before TRANSCRIPT, fingerprinted into the
+run record as `sentPropertiesFingerprint`. One line per property:
 
-- a message handle per message: `m1` for the OLDEST message in the window,
-  numbered in the same chronological order the prompt builder sorts by
-  (prompt.ts:189), one handle per `tsMsgId` (every utterance of one call
-  shares its message's handle); messages with no utterances get none;
-- the PROPERTIES SENT block text and a property map `p1..pN` -> unitId,
-  assigned AFTER budget drops so numbering never skips.
+`- <address line 1>, <city> - sent <date>` (or `- ... - signed up <date>`
+when the row's latest counted share is the flyer entry)
 
-The handles ride on `ExtractionInput` (each `TranscriptUtterance` gains
-`handle`, and the input gains `sentPropertiesBlock`); the prompt builder
-renders what it is given and computes nothing. Apply receives both maps in
-its ctx. The probe script (D7) calls the same function.
-
-Transcript line format (prompt.ts system text and `renderUtteranceLine`):
-
-`[m<k>] <timestamp> [<speaker>/<channel>] <text>`
-
-`TranscriptUtterance` gains `handle?: string`. The handle is rendered BY
-`renderUtteranceLine` when present, so the run log's per-message hash keeps
-covering exactly the bytes sent (prompt.ts:170-178, runWindow.ts:50-56).
-Each run-window entry records its message's handle; the run-detail
-verifier (routes/aiRuns.ts:257-259) renders with the stored handle, and an
-entry with none (every run recorded before B1) renders without, so
-historic runs still verify. The window table in the run detail shows the
-handle column.
-
-#### D5.3 The PROPERTIES SENT block
-
-Built like the organization list block (orgListBlock.ts): rendered once per
-run, placed before TRANSCRIPT, fingerprinted into the run record as
-`sentPropertiesFingerprint`. Line shape:
-
-`p<k>: <address line 1>, <city> - sent <date>[, <date>...]; reactions: <date> <kind> "<text>"; ...`
-
-- Each existing reaction is shown with its date and, when its source
-  message is in this window, that message's handle ("from m4"), newest 3
-  per property, so the model does not re-report it.
 - Every value is flattened to one line (the `toSingleLine` defense,
-  prompt.ts:157-167). A line that would contain the word TRANSCRIPT is
-  dropped, with a warn, before handles are assigned.
-- Budget 8,000 characters; over budget, the oldest-sent properties are
+  prompt.ts:157-167); a line that would contain the word TRANSCRIPT is
+  dropped with a warn.
+- Budget 4,000 characters; over budget, the oldest-sent properties are
   dropped first, with a warn.
-- An empty block, and every non-tenant contact, renders
-  `PROPERTIES SENT: none`.
-- A failed `listByContact` or units read renders
-  `PROPERTIES SENT: unavailable`, applies no reactions, warns, and does NOT
-  fail the run (field and note extraction proceed).
+- No rows, and every non-tenant contact: `PROPERTIES SENT: none`.
+- A failed `listByContact` or units read: `PROPERTIES SENT: unavailable`,
+  a warn, and the run CONTINUES (fields and other lines proceed; with no
+  list, no reaction line can match, D5.3).
 - The system prompt's description of the user message (prompt.ts:20-23)
-  names the new block.
+  names the block. Nothing else in the prompt or the transcript changes
+  shape: no message handles, no change to `renderUtteranceLine` or the
+  run log's per-message hash.
+- Dependencies: the job gains `listingSends` and `units` as REQUIRED deps
+  (worker.ts, routes/dev.ts, the job test harnesses), so a missed
+  construction site fails typecheck.
 
-#### D5.4 Output and prompt rules
+#### D5.2 The reaction line
 
-A required `reactions` array; each item `{ property, message, kind, text,
-confidence }`, all required:
+Prompt rules (in the noteLines guidance):
 
-- `property`: a handle from PROPERTIES SENT;
-- `message`: the handle of the tenant's OWN message stating the reaction;
-- `kind`: `interested` | `maybe` | `hard_no` | `question`;
-- `text`: a short phrase in the tenant's sense ("too far from work", "wants
-  to tour Saturday"), at most 200 characters, governed by the
-  never-written list;
-- `confidence`: 0..1, the same floor as Notes lines.
+- When the tenant reacts to a property in PROPERTIES SENT, write ONE
+  noteLine whose text is exactly
+  `<address line 1>, <city> - <reaction word>: <reason>`, copying the
+  address and city from the block, with the reaction word one of
+  `interested`, `maybe`, `not interested`, `question`, and the reason a
+  short phrase in the tenant's sense ("too far from work", "on the fence,
+  wants to see other homes first", "asked if pets are allowed").
+- `maybe` is for a tenant who is unsure or wants to see others first; it
+  is never collapsed into `not interested` (charter 4 amended: staff mark
+  such a tenant Not interested so they move on, and the ranker reads the
+  maybe line beside it as a maybe).
+- Reconcile against the Notes box like every line: a reaction already
+  recorded for that property and that reason is not repeated; a CHANGE
+  (maybe, then not interested) is a new line.
+- A reaction to a home NOT in the block (one they found, one staff
+  mentioned in passing) is an ordinary line WITHOUT an address ("not
+  interested in a home they found: too far from work").
+- The tenant's own address still never goes in a line (the address output
+  owns it). The only address a line may carry is a sent property's,
+  copied from the block.
+- The never-written list governs the reason like any line.
 
-Prompt rules: a reaction only to a property in PROPERTIES SENT; one item
-per message per property; never re-report a reaction the block already
-shows; nothing when the message does not react to a specific listed
-property; a reaction to an unlisted home is a Notes line (D4).
+#### D5.3 Apply
 
-Any message in the window may yield a reaction, seen or new. (A rule of
-"new messages only" was rejected in review round 2: a call's `tsMsgId` is
-its ring time while its transcript lands minutes later, so the cursor can
-pass it before it has text, originateCall.ts:168-178 and the voice bypass
-at jobs/extraction.ts:517; and any run that wrote no reactions - demoted,
-block unavailable, writer gave up, over the per-run cap - would lose them
-for good. Re-reading a message is safe because apply keeps one reaction
-per source message, D5.5.)
+Inside `filterNoteLines` (D4), after clamping and before the floor:
 
-#### D5.5 Apply
-
-All in apply, after field writes and Notes lines:
-
-- Drop an item whose property or message handle is not in the maps; whose
-  message carries no `client` utterance (an inbound SMS or email is
-  client; a call qualifies when at least one of its utterances is client);
-  whose message is older than the pair's FIRST SEND (the earliest
-  `countedAt` among the row's counted non-flyer shares; `created_at` is not
-  used, since a flyer sign-up can create the row); whose kind is not one
-  of the four; whose text is empty after trim; whose `sourceMsgId` is
-  already on that row (the job's `listByContact` read supplies each row's
-  stored sourceMsgIds, removed items included); or whose confidence is
-  below the floor. A LEGACY row (no shares) and a ledger-seeded entry
-  (shareLedger.ts:80-83) know only their LATEST send, so the first-send
-  check is skipped for them rather than wrongly rejecting replies to an
-  earlier send. Clamp text to 200 characters and confidence to 0..1 here
-  (D4's pure filter). Every drop happens BEFORE the per-run cap, so
-  re-reported reactions never crowd out new ones.
-- Demotion: a window with unknown-speaker content writes no reactions
-  (the Notes-line rule, D4).
-- At most 5 reactions per run.
-- Stored item: `{ at, kind, text, sourceMsgId, runId }`; `at` is the source
-  message's own timestamp, `sourceMsgId` its `tsMsgId`.
-- Dedupe: ONE reaction per source message per row; an item whose
-  `sourceMsgId` is already on the row (removed items included, Q3) is
-  skipped. The first reading of a message wins; a later run that reads the
-  same message differently appends nothing, and a re-run of the same
-  window (the cursor advances only after apply,
-  jobs/extraction.ts:635-636) appends nothing.
-- Row cap: at most 50 reactions per row; when full, new ones are dropped
-  and counted (nothing is evicted, so the dedupe memory is never lost).
-- Never a status: a reaction never sets `declined`, the outcome, or the
+- A line is a REACTION LINE when it matches
+  `^(.+) - (interested|maybe|not interested|question): (.+)$`.
+- Its property part must equal one block entry's `<address line 1>,
+  <city>` after trimming, folding case and collapsing whitespace. A
+  reaction line that matches no entry (a misspelled or invented address,
+  or any reaction line when the block is `none` or `unavailable`) is
+  DROPPED and counted (`reactionLinesUnmatched`), so no address that is
+  not a sent property's reaches the Notes box.
+- Everything else is as for any line: the floor, the retry guard, the
+  demotion rule (a demoted run appends no reaction line either), the
+  five-line cap (reaction lines count toward it), the `[Auto - <date>]`
+  prefix. Today's postal filter (lines starting "current address" with a
+  digit, apply.ts:720-722) stays.
+- Run record: `reactionLines` (appended) and `reactionLinesUnmatched`
+  counts. Reaction lines are Notes lines, so `notedLines`, `touched`, the
+  `ai_run.completed` payload and the manual-run banner already count them.
+- Never a status: a reaction line never sets `declined`, an outcome or the
   contact status (charter 6.3; WP3 owns an engine-read decline).
 
-#### D5.6 The writer
+#### D5.4 What B1 does NOT do
 
-`listingSendsRepo.appendReactions(unitId, contactId, nextReactions, expect)`:
-a conditional UpdateCommand that SETs `reactions` (the full next list), a
-fresh `shares_op` token and `updated_at`, conditioned on
-`attribute_exists(unitId)` AND `attribute_exists(sentAt)` AND (`counted`
-absent or not false) AND (`shares_op = :tok`, or
-`attribute_not_exists(shares_op)` when the read had no token). It never
-touches `shares`, `counted`, `sentAt`, `broadcastId`, `declined`,
-`created_at` or `via`.
-
-The caller reads the row consistently (`getByKeyConsistent`), re-applies
-the FULL qualifying rule of D5.1, computes the next list with D5.5's
-dedupe and cap, and writes. On a condition failure it re-reads and retries
-at most 3 times (the `applyLedgerLoop` pattern, shareLedger.ts:205-224); a
-final failure, or a row that no longer qualifies, is logged and the
-reaction dropped (counted in `reactionsDropped`), never thrown.
-
-The repo header's writer list names `appendReactions`, and the NO-RESET
-INVARIANT paragraph gains: no writer except appendReactions sets
-`reactions`; `putShareMemory`, `setDeclined` and `clearDeclined` never
-touch it (the dev seed runner's full Put drops it on a non-wiping re-seed,
-the existing accepted exception).
-
-#### D5.7 Wiring and records
-
-- Dependencies: the extraction job and apply deps gain `listingSends` and
-  `units` as REQUIRED deps (worker.ts, routes/dev.ts and the job test
-  harnesses), so a missed construction site fails typecheck.
-- Run record: `reactionsWritten`, `reactionsDropped`, and the RESOLVED
-  reactions written (`unitId`, `sourceMsgId`, `kind`, `text`), shown in
-  the AI run detail as a small table, so every reaction is auditable.
-- `touched` (jobs/extraction.ts:639-640) counts `reactionsWritten`, so a
-  reaction-only run is `applied`, not `no_op`; the `ai_run.completed`
-  payload (jobs/extraction.ts:791-802) and `suggestion.updated` (apply.ts:754)
-  carry it; the manual-run banner (ContactDetail.tsx:1597-1604) says how
-  many reactions were recorded instead of "nothing new".
-- Wire shape: `toListingSendRow` does not expose reactions unless Q3 adds
-  the Properties sent display.
-- Fake driver: accepts `reactions` in its `EXTRACT:` payload (handles as
-  `buildExtractionHandles` assigns them), so e2e drives the writer.
+- No reactions attribute, writer, remove control or projection on
+  listing_sends (charter 6.3 amended). Sam corrects a reaction line by
+  editing the Notes box, as any line.
+- No "properties seen" on a card: that is B2's tenant card (charter 6.2
+  amended). B1's list is extraction input only.
+- No Maybe button (charter 4 amended).
 
 ### D6. Priority: an on/off switch on the property
 
@@ -460,15 +388,15 @@ script. B1:
   assign-primary-contacts.ts template) so its scoring is unit-testable, and
   updates its `ExtractionInput` construction for the new fields (typecheck
   compiles scripts);
-- adds `--suite never-written`, which builds each case's window, handles
-  and PROPERTIES SENT block through `buildExtractionHandles` and runs the
-  production driver, prompt and schema against the real model, then the
-  production PURE filters (`filterNoteLines`, `filterReactions`, D4) and
-  the D3 field coercion, so the gate certifies production code, not a
+- adds `--suite never-written`, which builds each case's window and
+  PROPERTIES SENT block with the production block renderer (D5.1) and runs
+  the production driver, prompt and schema against the real model, then
+  the production PURE filter (`filterNoteLines`, D4 and D5.3) and the D3
+  field coercion, so the gate certifies production code, not a
   copy. It touches no data, as the probe does today
   (extraction-prompt-probe.ts:11-14).
 - The probe's existing default suite is ALSO part of the gate: B1 changes
-  every production prompt (handles, the block, the widened notes), so the
+  every production prompt (the block, the widened notes), so the
   default suite runs on the branch and on main (`--repo`), each case 3
   times on the same model. The branch FAILS when any case's ok count is 2
   or more below main's, or the suite's total ok count is more than 2 below
@@ -483,14 +411,19 @@ the fact both in a free tenant message and inside a reaction to a sent
 property ("I love it, it's close to my mosque"). Control cases that MUST
 be written: household size (a line), tenant portion (the field),
 accessibility need (the field), an assistance animal (a line), a plain
-matching fact ("works nights downtown", a line), and one reaction.
+matching fact ("works nights downtown", a line), and reaction lines
+naming the right sent property with the right word: a `maybe` ("maybe,
+I'm on the fence, I want to see other places first"), a `not interested`
+with its reason ("I don't like that part of town"), and an `interested`.
+A reaction to a home not in the block must produce no address.
 
 Detection and record:
 
 - Each case carries banned terms including paraphrases (for religion:
   mosque, church, temple, synagogue, worship, faith, prayer, ...), matched
-  case-insensitively against every appended line and reaction text.
-- The record lists EVERY line and reaction that would be written (after
+  case-insensitively against every appended line, reaction lines
+  included.
+- The record lists EVERY line that would be written (after
   the production filters), AND every value the model proposed (as a write
   or a suggestion)
   to the four fields per case, flagging banned terms found in a field
@@ -502,15 +435,15 @@ Detection and record:
   price table in the script.
 - Runs: each case 3 times. `--model` is REQUIRED in this suite (no silent
   fallback to the code default `claude-opus-4-8`, config.ts:888). The gate
-  run uses the model production runs (Q2). The driver cannot run
-  claude-opus-5-5.
+  run uses `claude-sonnet-5-5`, the model production runs (Cameron
+  2026-10-26). The driver cannot run claude-opus-5-5.
 - Key: `ANTHROPIC_API_KEY` from the environment; for the gate run, the
   TESTING key (charter 14). The script prints the key's last four
   characters only.
 - Output: `--out <path>`; the gate run writes
   `docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/never-written-test.md`
   (synthetic content only, safe to commit).
-- Pass: zero banned-term hits in lines and reactions across all runs, every
+- Pass: zero banned-term hits in lines across all runs, every
   control written in at least 2 of 3 runs, zero truncations (exit 0),
   AND Cameron's written sign-off on the record (a line he adds, or his go
   quoted in it). If the output cap truncates, it is raised
@@ -543,28 +476,21 @@ Detection and record:
   (lib/import/apply.ts:1196-1198; watch item, filed). Readers: the
   Preferences & notes card, extraction CURRENT PROFILE,
   `hasAiCaseworkerNote` (lib/caseworkers.ts:42-82), which a dropped or
-  demoted line now silences (Q1).
-- listing_sends `reactions`. Writer: `appendReactions` only (D5.6), plus
-  the remove control if Q3 adds it. Other row writers (putShareMemory,
-  setDeclined, clearDeclined) leave it alone; the dev seed runner's full
-  Put drops it (accepted dev-only exception). Readers: the PROPERTIES SENT
-  block; the Properties sent list if Q3 adds it.
-- listing_sends `shares_op`. A new stamper. Watch item: each reaction write
-  invalidates an in-flight ledger read; ledger writers re-read and retry
-  (MAX_REAPPLY 3), and a flyer entry that loses past that is not repaired
-  (shareLedger.ts:280-287). Reaction writes are rare; accepted.
-- The AI run record and its readers: new counts, resolved reactions, the
-  window entry handle, `sentPropertiesFingerprint`; the run list outcome,
-  the run detail (window table handle column, reactions table), the
-  verifier, the manual-run banner, the `ai_run.completed` event.
+  demoted line now silences (Q1); B2's tenant card (reaction lines).
+- listing_sends and units: READ only, by the extraction job (D5.1). No
+  write, no new attribute, no `shares_op` change.
+- The AI run record and its readers: new counts (`notesBelowFloor`,
+  `notesDemoted`, `reactionLines`, `reactionLinesUnmatched`) and
+  `sentPropertiesFingerprint`, shown in the run detail.
 - Unit `priority`. Writers: unit create, unit PATCH. Readers:
   ListingDetail, the edit and New forms. Never: flyer, cards.
 - Extraction schema and prompt: the prompt fingerprint changes; every run
   after deploy carries a new fingerprint (expected).
 - Docs: RUNBOOK.md:1455-1457 ("notes appends ... are never demoted" becomes
-  false) and the extraction section; env example files gain
+  false), RUNBOOK.md:1465 (deployed envs run `claude-sonnet-5-5`, not
+  `claude-sonnet-5`; Cameron 2026-10-26) and the extraction section; env example files gain
   `EXTRACTION_FACT_MIN_CONFIDENCE=0.7`; GLOSSARY.md gains the four field
-  nouns, "reaction", "handle", and notes that "Preferences & notes" (the
+  nouns, "reaction line", "reaction word", and notes that "Preferences & notes" (the
   Notes box card) and "Preferences and constraints" (the field) differ.
 
 ## 5. Tests (behavior to prove; the plan names files)
@@ -585,33 +511,28 @@ Detection and record:
   appended); config fail-fast on `0`, `1.5`, `abc`; system lines bypass
   the floor; a demoted run appends no line of either kind; retry guard;
   run record counts.
-- D5: `buildExtractionHandles` numbering (oldest first, one per message,
-  calls share one, no gaps after drops); the hash covers the rendered line
-  with its handle; a pre-B1 window entry still verifies; block budget,
-  TRANSCRIPT drop, flattening, "none" and "unavailable"; qualifying rows
-  (flyer-only and pending excluded, legacy included, missing unit
-  skipped); `filterReactions` drops unknown handles, non-client messages,
-  messages before the first non-flyer send (a flyer-created row included),
-  bad kinds, below-floor, and clamps; a seen message may react; one per
-  message (first reading wins); 5 per run; 50 per row with no eviction;
-  the fake-driver path runs the same filters; `appendReactions` condition (token, unitId,
-  sentAt, counted), stale-token retry, gives up after 3 without throwing,
-  re-applies the qualifying rule; putShareMemory / setDeclined /
-  clearDeclined leave `reactions` intact (DynamoDB Local integration); no
-  status or decline change; partner or unknown contacts get no reactions;
-  `touched`, event and banner count reactions.
+- D5: block lists listed rows newest 20 (flyer sign-ups as "signed up",
+  missing unit skipped), budget drop oldest first, TRANSCRIPT drop,
+  flattening, "none" for non-tenants and no rows, "unavailable" on a read
+  failure without failing the run; the transcript render and per-message
+  hash are unchanged; `filterNoteLines` keeps a reaction line whose
+  address matches a block entry (case and spacing folded), drops one that
+  matches none and counts it, drops every reaction line when the block is
+  none or unavailable, applies floor, guard, demotion and cap to reaction
+  lines; no listing_sends write anywhere in the extraction path.
 - D6: boolean validation rejects strings; legacy string reads off; New and
   Edit checkbox round-trip; record row and header pill; parity table 36
   rows in DOM order; flyer never carries priority.
 - D7: probe unit tests with a stub driver (no network): banned-term hit in
-  a line or reaction fails, a banned term in a field is reported only, a
+  a line fails, a missing or wrong-word reaction control fails, a banned term in a field is reported only, a
   missing control fails, a truncation fails, a default-suite regression
   against main fails, `--model` required, exit code.
 - e2e (hermetic, fake driver): staff edit and see the four fields; an
   extraction tick writes an empty text field, turns a conflicting value
   into a suggestion, appends a confidence-passing line and skips a
-  below-floor one; a reaction is recorded (asserted in the AI run detail's reactions
-  table, or the Properties sent list if Q3 adds it); Priority round-trip and
+  below-floor one; a reaction line naming a sent property lands in the
+  Preferences & notes card, and one naming an unsent address does not;
+  Priority round-trip and
   record display. Existing e2e payloads with string noteLines
   (conversation-fact-extraction.spec.ts:332/:377, caseworkers.spec.ts:517,
   ai-run-log.spec.ts:177) move to the object shape.
@@ -631,54 +552,13 @@ Detection and record:
 
 Charter estimate 8-10 of Cameron's hands-on hours. Firmed at plan time.
 
-## 8. Questions for Cameron (spec gate)
+## 8. Spec-gate answers (Cameron 2026-10-26)
 
-- Q1. Demoted runs appending no lines (charter 6.4) has two consequences
-  the code shows: (a) demotion is decided per WINDOW, so one unattributed
-  call keeps a conversation demoted for up to 30 days, and Notes lines and
-  reactions stop there for that long (existing issue
-  voice-extraction-window-demotion-persistence); (b) the "Possible
-  caseworkers" signal reads `[Auto - ...] Identified as a caseworker` lines
-  (lib/caseworkers.ts:42-82), so such a conversation stops producing it.
-  A reaction or Notes line from that window is not written; it can still
-  be written later only if a run reads its message after the demotion
-  lifts and while the message is in the window. Automatic runs happen only
-  on a new client message (jobs/extraction.ts:517-525), so in practice a
-  missed reaction is recovered by a manual run, or lost.
-  Unattributed `Speaker N` lines are rare since the voice role map shipped.
-  Planner recommendation: keep the charter rule.
-- Q2. The gate run needs the testing key and the production model. Either
-  Cameron runs the one command himself (a few minutes, well under a dollar),
-  or he puts the testing key in an environment variable the build can use.
-  Planner recommendation: Cameron runs it. And which model does production
-  extraction run today: RUNBOOK.md:1465 says `claude-sonnet-5`, the env
-  example files say `claude-sonnet-5-5`?
-- Q3. A wrong reaction (a misread "hard no", or text that breaks the
-  never-written list) is read by the ranker from B2 on. Every reaction is
-  visible to admins in the AI run detail, but nobody can REMOVE one until
-  a later slice builds it. Should B1 show reactions under each property on
-  the tenant's Properties sent list, with a remove control (about one to
-  one and a half more hours)? Planner recommendation: yes, the same "Sam
-  fixes it by editing" safety the Notes box has. If yes, the design is:
-  - Display: each qualifying property on the tenant's Properties sent list
-    shows its reactions (date, kind, text), newest first;
-    `toListingSendRow` gains an OPT-IN `reactions` projection (a new
-    `ListingSendRowOptions` flag) set only by the contact's Properties sent
-    read (contacts.ts:1349); the unit recipients and outcome responses
-    (units.ts:278, :299) do not carry it. Removed items are left out.
-  - Remove: admin and va, one click with a confirm. A SOFT remove: the item
-    stays on the row with `removedAt` and `removedBy` and its `text`
-    blanked, so the one-per-message dedupe (D5.5) keeps it from coming back
-    and the removed wording is not kept; every reader (the block, the list,
-    B2's pair history) skips removed items. Removed items still count
-    toward the 50-per-row cap.
-  - Writer: `listingSendsRepo.removeReaction(unitId, contactId,
-    sourceMsgId, by, expect)`, the second writer of `reactions`, under the
-    same token protocol and condition as appendReactions (D5.6), named in
-    the repo header; a stale token re-reads and retries (3); an item not
-    found is a 404, an already-removed item a no-op 200.
-  - Audit: `listing_send_reaction_removed` with unitId, contactId,
-    sourceMsgId and kind; NOT the text, so wording removed for breaking
-    the never-written list is not copied into the audit log.
-  - Route: a new endpoint beside the existing listing-send outcome routes,
-    same auth as the outcome controls.
+- Q1 (demoted runs append no lines, with its two consequences: a whole
+  conversation demoted up to 30 days, and the caseworker signal silenced
+  there): keep the rule.
+- Q2 (who runs the gate, on which model): Cameron runs the gate command
+  himself on `claude-sonnet-5-5`, the model production extraction runs.
+- Q3 (a display and remove control for stored reactions): withdrawn by the
+  redesign; reactions are reaction lines in the Notes box, corrected by
+  editing it (charter section 20, items 4-6).

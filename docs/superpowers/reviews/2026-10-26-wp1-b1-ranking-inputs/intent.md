@@ -11,9 +11,11 @@ cut from main @d0e2c2d8.
 
 ## STATE
 
-Phase: DESIGN. Worktree cut; charter amendment and issue committed. Next:
-research the code surfaces, write the slice spec, run the adversarial doc
-review, bring the spec to Cameron's gate.
+Phase: SPEC GATE. Spec rev 4 (1f63fddf) after 3 design-review rounds
+(terminal round 3; 40 findings, all accepted). Waiting on Cameron: pass
+the spec gate and answer Q1-Q3 (section 8 of the spec). Next after his
+answers: fold them in, offer compaction gate A, write the plan, plan
+review, mission block, launch gate. Nothing in flight.
 
 ## What Cameron asked for (verbatim where wording matters)
 

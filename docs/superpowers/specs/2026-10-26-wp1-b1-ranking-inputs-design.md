@@ -1,9 +1,11 @@
 # WP1 B1 Ranking inputs - design
 
-Status: DRAFT revision 3 (2026-10-26). Rev 2 folded in design review round
+Status: DRAFT revision 4 (2026-10-26), at the spec gate. Rev 2 folded in design review round
 1 (two reviewers, 33 findings merged to 22, all accepted, one in part with
-a question to Cameron); rev 3 folds in round 2 (10 findings, all accepted;
-the "new messages only" reaction rule is withdrawn); adjudications:
+a question to Cameron); rev 3 folded in round 2 (10 findings, all
+accepted; the "new messages only" reaction rule withdrawn); rev 4 folds in
+round 3 (8 findings, all precision edits; no decision changed, so round 3
+is the TERMINAL round). Spec gate next. Adjudications:
 `docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/design-review/adjudications.md`).
 Charter: docs/superpowers/specs/2026-10-24-wp1-matching-charter-design.md.
 This slice implements charter sections 6.3 (per-send reactions), 6.4
@@ -147,9 +149,14 @@ Reconciliation:
   contradicting it (a second neighborhood, another constraint) is NOT a
   field op; it is a Notes line (D4). A field op on a non-empty text field
   is only for a contradiction ("now wants Decatur, not Marietta"), and its
-  suggestion carries the full replacement value. So the model never
-  rewrites staff text to fit a new fact in, a field never grows toward its
-  cap through extraction, and suggestions do not churn on rewordings.
+  suggestion carries the full replacement value. ENFORCED in apply, since
+  apply today honors any model `write` without an emptiness check
+  (apply.ts:299-316): a `write` on a NON-EMPTY text field is demoted to a
+  suggestion, so for the three text fields "write" means "fill an empty
+  field" and nothing else. (`max_tenant_portion` keeps the pets rule,
+  including a same-fact write.) So the model never rewrites staff text
+  live, a field never grows toward its cap through extraction, and
+  suggestions do not churn on rewordings.
   This matches the direction recorded in
   docs/issues/extraction-fields-to-notes.md.
 
@@ -195,7 +202,9 @@ amended 2026-10-26). The gate record reports what lands in them (D7).
 
 - Instruction: noteLines widen from "secondary facts" to facts that might
   matter to matching this person with a home or to staff understanding
-  their situation, that no field or other output covers. The reconcile,
+  their situation, that no field or other output covers, PLUS a fact that
+  adds to one of the three text fields when that field is already filled
+  (D3). The reconcile,
   append-only, short-line and no-address rules stay verbatim. Screening
   facts (utility debt and the like) remain allowed. A reaction to a home
   NOT in PROPERTIES SENT is a line without an address ("not interested in
@@ -204,8 +213,9 @@ amended 2026-10-26). The gate record reports what lands in them (D7).
   race, color, religion, sex, national origin, familial facts beyond
   household size (no pregnancy, marital status, children's ages or
   custody), or disability or medical facts other than the stated
-  accessibility need (which goes in its field, D3) and an assistance
-  animal. Household size, the tenant's portion and an assistance animal
+  accessibility need (in its field, D3, or as a Notes line when it adds to
+  a filled field) and an assistance animal. The need is the home's
+  feature ("needs a ground floor"), never a diagnosis. Household size, the tenant's portion and an assistance animal
   stay allowed. Charter 6.4.
 - Shape: `noteLines` items become `{ text, confidence }` (confidence a
   number 0..1), both required.
@@ -219,8 +229,13 @@ amended 2026-10-26). The gate record reports what lands in them (D7).
   driver's bypass of `parseExtractionText` (extractionFake.ts:103) skips
   nothing: clamp text to 200 characters and confidence to 0..1 (a
   non-number reads as 0), drop items below the floor FIRST and count them,
-  then append the system lines, then apply the five-line cap (model lines
-  before system lines).
+  then drop lines the retry guard finds already present (today's guard,
+  apply.ts:738-740, moved BEFORE the cap; today it runs after the cap at
+  apply.ts:723), then append the system lines, then apply the five-line
+  cap (model lines before system lines). The floor reaches apply as an
+  `ApplyDeps` value from config (apply.ts:34-44); the probe passes the
+  same config value. `coerceField` (apply.ts:100) is exported as a pure
+  function for the probe.
 - System lines (`noteStrings`, today only "Mentioned number X which belongs
   to another contact", apply.ts:666) carry no confidence and are not
   subject to the floor.
@@ -339,12 +354,17 @@ All in apply, after field writes and Notes lines:
   message carries no `client` utterance (an inbound SMS or email is
   client; a call qualifies when at least one of its utterances is client);
   whose message is older than the pair's FIRST SEND (the earliest
-  `countedAt` among the row's counted non-flyer shares, or `sentAt` on a
-  legacy row; `created_at` is not used, since a flyer sign-up can create
-  the row); whose kind is not one of the four; whose text is empty after
-  trim; or whose confidence is below the floor. Clamp text to 200
-  characters and confidence to 0..1 here (D4's pure filter). Floor first,
-  then the cap below.
+  `countedAt` among the row's counted non-flyer shares; `created_at` is not
+  used, since a flyer sign-up can create the row); whose kind is not one
+  of the four; whose text is empty after trim; whose `sourceMsgId` is
+  already on that row (the job's `listByContact` read supplies each row's
+  stored sourceMsgIds, removed items included); or whose confidence is
+  below the floor. A LEGACY row (no shares) and a ledger-seeded entry
+  (shareLedger.ts:80-83) know only their LATEST send, so the first-send
+  check is skipped for them rather than wrongly rejecting replies to an
+  earlier send. Clamp text to 200 characters and confidence to 0..1 here
+  (D4's pure filter). Every drop happens BEFORE the per-run cap, so
+  re-reported reactions never crowd out new ones.
 - Demotion: a window with unknown-speaker content writes no reactions
   (the Notes-line rule, D4).
 - At most 5 reactions per run.
@@ -449,8 +469,11 @@ script. B1:
   (extraction-prompt-probe.ts:11-14).
 - The probe's existing default suite is ALSO part of the gate: B1 changes
   every production prompt (handles, the block, the widened notes), so the
-  default suite runs on the branch and on main (`--repo`), and the branch
-  may not score worse than main on any case. Its result goes in the same
+  default suite runs on the branch and on main (`--repo`), each case 3
+  times on the same model. The branch FAILS when any case's ok count is 2
+  or more below main's, or the suite's total ok count is more than 2 below
+  main's; a result within those bounds passes. A failing comparison may be
+  re-run once, both sides, before it counts. Both results go in the same
   record.
 
 Cases: one per excluded kind (race, color, religion, sex, national origin,
@@ -467,7 +490,9 @@ Detection and record:
 - Each case carries banned terms including paraphrases (for religion:
   mosque, church, temple, synagogue, worship, faith, prayer, ...), matched
   case-insensitively against every appended line and reaction text.
-- The record lists EVERY line and reaction written, AND every value written
+- The record lists EVERY line and reaction that would be written (after
+  the production filters), AND every value the model proposed (as a write
+  or a suggestion)
   to the four fields per case, flagging banned terms found in a field
   (reported, not failing: the fields are outside the list, charter 20.2).
 - The record carries the commit, the model, the extraction prompt
@@ -615,8 +640,11 @@ Charter estimate 8-10 of Cameron's hands-on hours. Firmed at plan time.
   voice-extraction-window-demotion-persistence); (b) the "Possible
   caseworkers" signal reads `[Auto - ...] Identified as a caseworker` lines
   (lib/caseworkers.ts:42-82), so such a conversation stops producing it.
-  A reaction is only delayed, not lost, while its message stays in the
-  window (D5.4); a Notes line is lost if its message ages out first.
+  A reaction or Notes line from that window is not written; it can still
+  be written later only if a run reads its message after the demotion
+  lifts and while the message is in the window. Automatic runs happen only
+  on a new client message (jobs/extraction.ts:517-525), so in practice a
+  missed reaction is recovered by a manual run, or lost.
   Unattributed `Speaker N` lines are rare since the voice role map shipped.
   Planner recommendation: keep the charter rule.
 - Q2. The gate run needs the testing key and the production model. Either
@@ -634,19 +662,23 @@ Charter estimate 8-10 of Cameron's hands-on hours. Firmed at plan time.
   fixes it by editing" safety the Notes box has. If yes, the design is:
   - Display: each qualifying property on the tenant's Properties sent list
     shows its reactions (date, kind, text), newest first;
-    `toListingSendRow` gains a `reactions` projection that leaves removed
-    items out.
+    `toListingSendRow` gains an OPT-IN `reactions` projection (a new
+    `ListingSendRowOptions` flag) set only by the contact's Properties sent
+    read (contacts.ts:1349); the unit recipients and outcome responses
+    (units.ts:278, :299) do not carry it. Removed items are left out.
   - Remove: admin and va, one click with a confirm. A SOFT remove: the item
-    stays on the row with `removedAt` and `removedBy`, so the
-    one-per-message dedupe (D5.5) keeps it from coming back on the next
-    run; every reader (the block, the list, B2's pair history) skips
-    removed items.
+    stays on the row with `removedAt` and `removedBy` and its `text`
+    blanked, so the one-per-message dedupe (D5.5) keeps it from coming back
+    and the removed wording is not kept; every reader (the block, the list,
+    B2's pair history) skips removed items. Removed items still count
+    toward the 50-per-row cap.
   - Writer: `listingSendsRepo.removeReaction(unitId, contactId,
     sourceMsgId, by, expect)`, the second writer of `reactions`, under the
     same token protocol and condition as appendReactions (D5.6), named in
     the repo header; a stale token re-reads and retries (3); an item not
     found is a 404, an already-removed item a no-op 200.
   - Audit: `listing_send_reaction_removed` with unitId, contactId,
-    sourceMsgId, kind and the text at removal.
+    sourceMsgId and kind; NOT the text, so wording removed for breaking
+    the never-written list is not copied into the audit log.
   - Route: a new endpoint beside the existing listing-send outcome routes,
     same auth as the outcome controls.

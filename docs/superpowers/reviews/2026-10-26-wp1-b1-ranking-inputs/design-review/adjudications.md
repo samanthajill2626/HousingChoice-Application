@@ -65,3 +65,25 @@ round-1 adjudication). Spec rev 3.
 
 Rejected: none. Round 2 changed decisions (R2-1..R2-4): round 3 runs,
 reviewer A continued.
+
+## Round 3 (2026-10-26) - TERMINAL
+
+Reviewer A continued (round3-reviewer-a.md, 8 findings; contested no
+adjudication). Spec rev 4.
+
+| # | Finding | Verdict | Decision changed | Resolution in rev 4 |
+|---|---|---|---|---|
+| R3-1 | A1 (D3 bullets contradict; apply honors any write) | ACCEPT | no | Rev 3 already stated the model never rewrites staff text live; rev 4 ENFORCES it: a write on a non-empty text field is demoted to a suggestion in apply. Dollars keeps the pets rule. |
+| R3-2 | A2 (D4 "no field covers" vs additive lines; accessibility vs the list) | ACCEPT | no | D4 names additive facts as Notes lines; the list allows the accessibility need as a line when it adds to a filled field, stated as the home's feature, never a diagnosis (D7 banned terms are diagnosis terms). |
+| R3-3 | A3 (cap before dedupe starves new reactions; same for notes) | ACCEPT | no | Every reaction drop, the stored-sourceMsgId dedupe included, runs before the per-run cap; the notes retry guard moves before the five-line cap. |
+| R3-4 | A4 (default-suite rule undefined) | ACCEPT | no | 3 runs per case; fail on a case down 2+ or a total down more than 2; one re-run of both sides allowed. |
+| R3-5 | A5 (Q1 "delayed, not lost" overstated) | ACCEPT | no | Q1 says a missed reaction or line is recovered by a manual run, or lost. |
+| R3-6 | A6 (projection scope; cap counting; audit copies text) | ACCEPT | no | Opt-in projection for the contact's Properties sent read only; removed items count toward the cap; removal blanks the text and the audit omits it. |
+| R3-7 | A7 (floor plumbing; coerceField private; "written" vs proposed) | ACCEPT | no | Floor via ApplyDeps from config, passed by the probe; coerceField exported pure; record lists values proposed. |
+| R3-8 | A8 (legacy first send is the latest send) | ACCEPT | no | First-send check skipped for legacy and ledger-seeded rows. |
+
+Rejected: none. No decision changed: round 3 is the terminal round. Spec
+goes to Cameron's gate with Q1-Q3.
+
+Totals: 3 rounds, 40 findings (round 1 merged 33 to 22), all accepted, 0
+rejected. Decision-changing rounds: 1 and 2.

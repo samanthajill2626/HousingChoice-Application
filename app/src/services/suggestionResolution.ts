@@ -22,6 +22,8 @@ import {
   formatAddressParts,
 } from './extraction/address.js';
 import { isDecisionTarget, TENANT_ONLY_TARGETS } from './extraction/runTypes.js';
+import { coerceField } from './extraction/apply.js';
+import { TENANT_MATCHING_INPUTS } from '../lib/tenantMatchingInputs.js';
 import { buildContactStatusTransitionPlan } from './statusTransition.js';
 import type { TenantStatus } from '../lib/statusModel.js';
 import { statusAllowlistFor } from '../lib/statusModel.js';
@@ -159,7 +161,17 @@ interface ResolutionServiceDeps {
 
 type Coerced = { ok: true; value: unknown } | { ok: false };
 
+/** B1 spec D3: the tenant matching input keys, from their one list. */
+const TENANT_MATCHING_KEYS: ReadonlySet<string> = new Set(TENANT_MATCHING_INPUTS.map((input) => input.key));
+
 function coerceAccept(field: ExtractableField, raw: string): Coerced {
+  // B1 spec D3: a tenant matching input accepts by the SAME by-kind rule
+  // extraction applies (apply.ts coerceField) - one rule, so a value can never
+  // be suggested that its accept would refuse, or written in another form.
+  if (TENANT_MATCHING_KEYS.has(field)) {
+    const coerced = coerceField(field, raw);
+    return coerced.ok ? { ok: true, value: coerced.value } : { ok: false };
+  }
   const value = raw.trim();
   if (field === 'voucherSize') {
     if (!/^\d+$/.test(value)) return { ok: false };

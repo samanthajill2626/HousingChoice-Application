@@ -63,6 +63,15 @@ describe('parseExtractionOps - per-target mapping', () => {
     expect(view.lastName).toEqual({ op: 'absent' });
   });
 
+  it('maps a tenant matching input off fields.<name>.op like any scalar (B1 spec D3)', () => {
+    const view = parseExtractionOps(
+      '{"fields":{"area_preference":{"op":"suggest","value":"Decatur","reason":"now wants Decatur"},"max_tenant_portion":{"op":"none","value":"","reason":""}}}',
+    );
+    expect(view.area_preference).toEqual({ op: 'suggest', value: 'Decatur', reason: 'now wants Decatur' });
+    expect(view.max_tenant_portion).toEqual({ op: 'none' });
+    expect(view.accessibility_need).toEqual({ op: 'absent' });
+  });
+
   it('maps statusAdvance.suggest to suggest/none', () => {
     expect(parseExtractionOps('{"statusAdvance":{"suggest":true,"reason":"RTA in hand"}}').status)
       .toEqual({ op: 'suggest', reason: 'RTA in hand' });

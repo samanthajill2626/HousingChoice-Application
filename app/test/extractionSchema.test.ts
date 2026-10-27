@@ -2,9 +2,12 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
+  EXTRACTABLE_FIELDS,
   EXTRACTION_SCHEMA,
+  PROVENANCE_FIELDS,
   parseExtractionText,
 } from '../src/services/extraction/schema.js';
+import { TENANT_MATCHING_INPUTS } from '../src/lib/tenantMatchingInputs.js';
 import {
   buildExtractionSystemPrompt,
   buildExtractionUserContent,
@@ -76,6 +79,44 @@ describe('EXTRACTION_SCHEMA', () => {
       'partner',
       'none',
     ]);
+  });
+});
+
+// B1 spec D3: the four tenant matching inputs join the extractable fields
+// through their one list - eight -> twelve - and the schema stays all-required.
+describe('the tenant matching inputs in the schema (B1 spec D3)', () => {
+  const ORIGINAL = ['firstName', 'lastName', 'voucherSize', 'housingAuthority', 'pets', 'evictions', 'tenure', 'porting'];
+  const MATCHING = TENANT_MATCHING_INPUTS.map((input) => input.key);
+
+  it('EXTRACTABLE_FIELDS is the eight, then the four in list order - twelve', () => {
+    expect(EXTRACTABLE_FIELDS).toEqual([...ORIGINAL, ...MATCHING]);
+    expect(EXTRACTABLE_FIELDS).toHaveLength(12);
+  });
+
+  it('PROVENANCE_FIELDS is every extractable field plus address, so a staff edit clears each _source', () => {
+    expect(PROVENANCE_FIELDS).toEqual([...ORIGINAL, ...MATCHING, 'address']);
+  });
+
+  it('carries ONE all-required fieldOp entry per extractable field', () => {
+    const fields = (EXTRACTION_SCHEMA['properties'] as Record<string, { properties: Record<string, unknown>; required: string[] }>)['fields']!;
+    expect(Object.keys(fields.properties)).toEqual([...EXTRACTABLE_FIELDS]);
+    expect(fields.required).toEqual([...EXTRACTABLE_FIELDS]);
+    for (const key of MATCHING) {
+      expect(fields.properties[key]).toEqual(fields.properties['pets']);
+    }
+  });
+
+  it('(PIN) stays at ZERO optional parameters', () => {
+    expect(countOptionalParams(EXTRACTION_SCHEMA)).toBe(0);
+  });
+
+  it('parses a field op for each tenant matching input', () => {
+    const parsed = parseExtractionText(JSON.stringify({
+      fields: Object.fromEntries(MATCHING.map((key) => [key, { op: 'write', value: `v-${key}`, reason: 'said so' }])),
+    }));
+    for (const key of MATCHING) {
+      expect(parsed.fields[key as keyof typeof parsed.fields]).toEqual({ op: 'write', value: `v-${key}`, reason: 'said so' });
+    }
   });
 });
 

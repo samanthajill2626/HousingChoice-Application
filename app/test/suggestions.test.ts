@@ -490,3 +490,120 @@ describe('dismissal tombstones', () => {
     expect(await world.extractionRepo.hasDismissal(contactId, 'pets', '2 cats')).toBe(false);
   });
 });
+
+// B1 spec D2/D3: the four tenant matching inputs through the existing
+// suggestions path - accept coerces by kind (the rule extraction applies), a
+// dismiss tombstones, and a human PATCH clears <key>_source as for pets.
+describe('the tenant matching inputs - accept, dismiss and the human-edit provenance clear (B1)', () => {
+  it('accepts a max_tenant_portion suggestion as whole dollars with ai provenance', async () => {
+    const { app, world } = makeWebhookHarness();
+    const contactId = seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: contactId,
+      target: 'max_tenant_portion',
+      suggestedValue: '1200',
+      reason: 'said she can pay 1200',
+      conversationId: 'conv-m1',
+      tsMsgId: 'ts-m1',
+    });
+    const res = await accept(app, contactId, 'max_tenant_portion');
+    expect(res.status).toBe(200);
+    expect(res.body.contact.max_tenant_portion).toBe(1200);
+    expect(res.body.contact.max_tenant_portion_source).toMatchObject({
+      source: 'ai', conversationId: 'conv-m1', tsMsgId: 'ts-m1', accepted_by: ACTOR,
+    });
+  });
+
+  it('accepts a dollars value written "$1,200" through the SAME coercion extraction uses', async () => {
+    const { app, world } = makeWebhookHarness();
+    const contactId = seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: contactId, target: 'max_tenant_portion', suggestedValue: '$1,200', conversationId: 'conv-m2',
+    });
+    const res = await accept(app, contactId, 'max_tenant_portion');
+    expect(res.status).toBe(200);
+    expect(world.contacts.find((c) => c.contactId === contactId)?.['max_tenant_portion']).toBe(1200);
+  });
+
+  it('accepts a text suggestion trimmed, and refuses one over 500 characters, KEEPING it', async () => {
+    const { app, world } = makeWebhookHarness();
+    const contactId = seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: contactId, target: 'area_preference', suggestedValue: '  Decatur or Tucker  ', conversationId: 'conv-a1',
+    });
+    const ok = await accept(app, contactId, 'area_preference');
+    expect(ok.status).toBe(200);
+    expect(ok.body.contact.area_preference).toBe('Decatur or Tucker');
+
+    await seedSuggestion(world, {
+      ownerContactId: contactId, target: 'preferences_constraints', suggestedValue: 'x'.repeat(501), conversationId: 'conv-a2',
+    });
+    const refused = await accept(app, contactId, 'preferences_constraints');
+    expect(refused.status).toBe(400);
+    expect(refused.body).toEqual({ error: 'invalid_suggestion_value' });
+    expect(await world.extractionRepo.getSuggestion(contactId, 'preferences_constraints')).toBeDefined();
+  });
+
+  it('(PIN) a dismiss tombstones the normalized value', async () => {
+    const { app, world } = makeWebhookHarness();
+    const contactId = seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: contactId, target: 'accessibility_need', suggestedValue: 'Ground Floor', conversationId: 'conv-d1',
+    });
+    const res = await dismiss(app, contactId, 'accessibility_need');
+    expect(res.status).toBe(200);
+    expect(await world.extractionRepo.hasDismissal(contactId, 'accessibility_need', 'ground floor')).toBe(true);
+  });
+
+  it('a human area_preference edit clears area_preference_source AND deletes the pending suggestion', async () => {
+    const { app, world } = makeWebhookHarness();
+    const contactId = seedTenant(world, {
+      area_preference: 'Marietta',
+      area_preference_source: { source: 'ai', at: '2026-10-20T00:00:00.000Z', conversationId: 'conv-p1' },
+    });
+    await seedSuggestion(world, {
+      ownerContactId: contactId, target: 'area_preference', currentValue: 'Marietta', suggestedValue: 'Decatur', conversationId: 'conv-p1',
+    });
+    const res = await request(app)
+      .patch(`/api/contacts/${contactId}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ area_preference: 'Tucker' });
+    expect(res.status).toBe(200);
+    expect(res.body.contact.area_preference).toBe('Tucker');
+    expect('area_preference_source' in res.body.contact).toBe(false);
+    expect(world.contacts.find((c) => c.contactId === contactId)?.['area_preference_source']).toBeUndefined();
+    expect(await world.extractionRepo.getSuggestion(contactId, 'area_preference')).toBeUndefined();
+  });
+
+  it('a human max_tenant_portion edit clears max_tenant_portion_source', async () => {
+    const { app, world } = makeWebhookHarness();
+    const contactId = seedTenant(world, {
+      max_tenant_portion: 1200,
+      max_tenant_portion_source: { source: 'ai', at: '2026-10-20T00:00:00.000Z', conversationId: 'conv-p2' },
+    });
+    const res = await request(app)
+      .patch(`/api/contacts/${contactId}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ max_tenant_portion: 1000 });
+    expect(res.status).toBe(200);
+    expect(res.body.contact.max_tenant_portion).toBe(1000);
+    expect('max_tenant_portion_source' in res.body.contact).toBe(false);
+  });
+
+  it('refuses a fractional or out-of-range dollars suggestion, KEEPING it (one coercion rule)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const contactId = seedTenant(world);
+    for (const [i, suggestedValue] of ['1200.50', '20001'].entries()) {
+      await seedSuggestion(world, {
+        ownerContactId: contactId, target: 'max_tenant_portion', suggestedValue, conversationId: `conv-r${i}`,
+      });
+      const res = await accept(app, contactId, 'max_tenant_portion');
+      expect(res.status, suggestedValue).toBe(400);
+      expect(res.body).toEqual({ error: 'invalid_suggestion_value' });
+      expect(await world.extractionRepo.getSuggestion(contactId, 'max_tenant_portion')).toBeDefined();
+    }
+    expect(world.contacts.find((c) => c.contactId === contactId)?.['max_tenant_portion']).toBeUndefined();
+  });
+});

@@ -1117,8 +1117,9 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   const router = Router();
 
   // conversation-fact-extraction: the field names whose `<field>_source` provenance
-  // a human edit clears - the eight AI-extractable scalars plus the compound
-  // `address` (address-extraction slice 3).
+  // a human edit clears - every AI-extractable scalar (twelve since B1, the
+  // tenant matching inputs included) plus the compound `address`
+  // (address-extraction slice 3).
   const PROVENANCE = new Set<string>(PROVENANCE_FIELDS);
   // property-requirements D2: the landlord requirement keys a PATCH may carry,
   // and the Deposit item's keys (D1 deposit_conflict is checked only when the

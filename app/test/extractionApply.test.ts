@@ -1568,3 +1568,84 @@ describe('coerceField - the tenant matching inputs by kind (B1 spec D3)', () => 
     expect(coerceField('porting', 'true')).toEqual({ ok: true, value: true });
   });
 });
+
+// B1 spec D3: the four follow the existing write/suggest/demotion rule, as pets
+// does. (The filled-text-field write drop is S3.4.)
+describe('applyExtraction - the tenant matching inputs (B1 spec D3)', () => {
+  it('writes an EMPTY text field directly, trimmed, with ai provenance', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: { area_preference: { op: 'write', value: ' Decatur or Tucker ', reason: 'said so' } },
+    });
+    expect(outcome.wrote).toEqual(['area_preference']);
+    expect(records.updates[0]!.patch['area_preference']).toBe('Decatur or Tucker');
+    expect(records.updates[0]!.patch['area_preference_source']).toEqual({
+      source: 'ai', at: NOW, conversationId: CONV, tsMsgId: 'ts-9',
+    });
+  });
+
+  it('writes the dollars field as a whole NUMBER', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: { max_tenant_portion: { op: 'write', value: '$1,200', reason: 'can pay 1200' } },
+    });
+    expect(outcome.wrote).toEqual(['max_tenant_portion']);
+    expect(records.updates[0]!.patch['max_tenant_portion']).toBe(1200);
+  });
+
+  it('suggests a contradiction on a filled text field, carrying the full replacement value', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant', area_preference: 'Marietta' }), {
+      fields: { area_preference: { op: 'suggest', value: 'Decatur, not Marietta', reason: 'changed her mind' } },
+    });
+    expect(outcome.suggested).toEqual(['area_preference']);
+    expect(records.updates).toHaveLength(0);
+    expect(records.suggestions[0]).toMatchObject({
+      target: 'area_preference', currentValue: 'Marietta', suggestedValue: 'Decatur, not Marietta',
+    });
+  });
+
+  it('demotes a write on an EMPTY field to a suggestion under inferred-role content, and audits it', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await applyExtraction(deps, {
+      orgEntries: ORG_ENTRIES,
+      contact: makeContact({ type: 'tenant' }),
+      conversationId: CONV,
+      cursorTsMsgId: 'ts-9',
+      result: { fields: { accessibility_need: { op: 'write', value: 'ground floor' } } },
+      hasInferredRoleContent: true,
+    });
+    expect(outcome.wrote).toEqual([]);
+    expect(outcome.suggested).toEqual(['accessibility_need']);
+    expect(outcome.decisions[0]).toMatchObject({ target: 'accessibility_need', outcome: 'suggested', demotedFrom: 'write' });
+    expect(records.audits.find((a) => a.type === 'ai_extraction_demoted')?.payload).toMatchObject({
+      fields: ['accessibility_need'],
+    });
+  });
+
+  it('drops the four for a contact that is not a tenant (wrong_contact_type)', async () => {
+    const { deps, records } = makeDeps();
+    const out = await run(deps, makeContact({ type: 'unknown' }), {
+      fields: { preferences_constraints: { op: 'write', value: 'no apartments' } },
+    });
+    expect(out.decisions).toEqual([
+      { target: 'preferences_constraints', outcome: 'dropped', dropReason: 'wrong_contact_type', proposedValue: 'no apartments' },
+    ]);
+    expect(records.updates).toHaveLength(0);
+  });
+
+  it('records invalid_value for an over-cap text value and a fractional dollar amount', async () => {
+    const { deps } = makeDeps();
+    const out = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: {
+        preferences_constraints: { op: 'write', value: 'x'.repeat(501) },
+        max_tenant_portion: { op: 'write', value: '1200.50' },
+      },
+    });
+    expect(out.wrote).toEqual([]);
+    expect(out.decisions.map((d) => [d.target, d.dropReason])).toEqual([
+      ['max_tenant_portion', 'invalid_value'],
+      ['preferences_constraints', 'invalid_value'],
+    ]);
+  });
+});

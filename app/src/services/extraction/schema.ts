@@ -19,8 +19,13 @@ import type {
 } from '../../adapters/extraction.js';
 import { cleanAddressParts, normalizeAddressForCompare } from './address.js';
 import { DECISION_TARGETS, type DecisionTarget, type ProposedOp } from './runTypes.js';
+import { TENANT_MATCHING_INPUTS } from '../../lib/tenantMatchingInputs.js';
 
-/** The eight client-profile fields the model may operate on. */
+/**
+ * The twelve client-profile fields the model may operate on: the eight
+ * original scalars, then the tenant matching inputs from their one list, in
+ * list order (B1 spec D1/D3). No reader names the four.
+ */
 export const EXTRACTABLE_FIELDS: readonly ExtractableField[] = [
   'firstName',
   'lastName',
@@ -30,12 +35,15 @@ export const EXTRACTABLE_FIELDS: readonly ExtractableField[] = [
   'evictions',
   'tenure',
   'porting',
+  ...TENANT_MATCHING_INPUTS.map((input) => input.key),
 ];
 
 /**
- * Fields carrying `<field>_source` AI provenance a human PATCH must clear: the
- * eight scalar extractables plus the compound `address`. ONE shared const so the
- * apply layer and the contacts PATCH provenance-clear gate always agree.
+ * Fields carrying `<field>_source` AI provenance a human PATCH must clear:
+ * every scalar extractable (twelve) plus the compound `address`. ONE shared
+ * const so the apply layer and the contacts PATCH provenance-clear gate
+ * (routes/contacts.ts) always agree - which is how the four tenant matching
+ * inputs get their staff-edit clear (B1 spec D2).
  */
 export const PROVENANCE_FIELDS: readonly string[] = [...EXTRACTABLE_FIELDS, 'address'];
 
@@ -70,26 +78,11 @@ export const EXTRACTION_SCHEMA: Record<string, unknown> = {
     fields: {
       type: 'object',
       additionalProperties: false,
-      properties: {
-        firstName: fieldOpSchema,
-        lastName: fieldOpSchema,
-        voucherSize: fieldOpSchema,
-        housingAuthority: fieldOpSchema,
-        pets: fieldOpSchema,
-        evictions: fieldOpSchema,
-        tenure: fieldOpSchema,
-        porting: fieldOpSchema,
-      },
-      required: [
-        'firstName',
-        'lastName',
-        'voucherSize',
-        'housingAuthority',
-        'pets',
-        'evictions',
-        'tenure',
-        'porting',
-      ],
+      // One fieldOpSchema per extractable field, every one REQUIRED (B1 spec D3:
+      // the schema stays at zero optional parameters - the 24-optional grammar
+      // cap tripwire). Built from EXTRACTABLE_FIELDS so the two cannot drift.
+      properties: Object.fromEntries(EXTRACTABLE_FIELDS.map((field) => [field, fieldOpSchema])),
+      required: [...EXTRACTABLE_FIELDS],
     },
     statusAdvance: {
       type: 'object',

@@ -397,7 +397,9 @@ as follows:
   tests the list: synthetic conversations stating each excluded kind of
   fact, run on the testing key, must append no line of an excluded kind,
   feedback lines included (household size and tenant portion remain
-  allowed).
+  allowed). AMENDED 2026-10-27: a model grader judges each written line
+  against a plain description of each excluded fact; there are no
+  banned-word lists.
   The test is B1's MERGE GATE: B1 is not handed back merge-ready until it
   passes on the widened prompt, or Cameron decides. AMENDED 2026-10-26:
   there is no production switch for the widened instruction (the
@@ -422,8 +424,11 @@ as follows:
   properties were sent to the tenant, each with its label (address line
   1, address line 2 when present, city), so it can name the right one;
   one shared function builds the label for extraction (B1) and for the
-  card (B2). The rule keeping addresses out of Notes lines covers the
-  tenant's OWN address only. Feedback lines carry the same confidence
+  card (B2). AMENDED 2026-10-27: the prompt rule keeping addresses out of
+  Notes lines is removed (it only kept the tenant's own address from
+  being written twice, and a feedback line must name its home); the
+  address output still never takes a sent or toured home as the
+  tenant's address. Feedback lines carry the same confidence
   floor, demotion rule and never-written list as every Notes line, and
   Sam corrects one by editing the Notes box.
 
@@ -1179,3 +1184,17 @@ date; this list is the index.
      re-design from the ground up on shared property feedback." Filed as
      docs/issues/wp3-property-feedback-redesign.md; B2 keeps its attach
      step minimal and easy to delete (sections 6.2, 18).
+- 2026-10-27, at the B1 launch gate (records:
+  docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/intent.md):
+  9. The no-address prompt rule for Notes lines is removed. Cameron: "I
+     think that might be an old rule rooted in something that we don't
+     need anymore." It dated from the address-extraction slice and only
+     prevented the tenant's own address being written twice; a feedback
+     line must name its home. The address output keeps its rule that a
+     sent or toured home is never the tenant's address (section 6.4).
+  10. The never-written test is judged by a model grader against a plain
+     description of each excluded fact, not banned-word lists. Cameron:
+     "I don't think that we should have a strict list of banned words ...
+     because the intelligence lives in the model. That's what we're
+     trying to lean into." He reviews the grader's verdicts in his
+     sign-off and may overrule one (section 6.4).

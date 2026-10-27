@@ -1,6 +1,10 @@
 # WP1 B1 Ranking inputs - design
 
-Status: APPROVED revision 8 (2026-10-26). Cameron passed the spec gate
+Status: APPROVED revision 9 (2026-10-27). Rev 9 carries two decisions
+Cameron made at the launch gate (charter section 20, items 9-10): the
+prompt's no-address bullet is removed (D4, D5.2), and the never-written
+test is judged by a model grader against a plain description of each
+excluded fact instead of banned-word lists (D7). Cameron passed the spec gate
 on rev 8 without a further review round. Revs 2-4 folded
 in design review rounds 1-3 (40 findings, all accepted); rev 6 folded in
 round 4, the last allowed (8 findings, all precision edits; the review is
@@ -219,7 +223,8 @@ amended 2026-10-26). The gate record reports what lands in them (D7).
   their situation, that no field or other output covers, PLUS a fact that
   adds to one of the three text fields when that field is already filled
   (D3). The reconcile,
-  append-only, short-line and no-address rules stay verbatim. Screening
+  append-only and short-line rules stay verbatim; the no-address bullet
+  is removed (D5.2, rev 9). Screening
   facts (utility debt and the like) remain allowed. Feedback lines (D5)
   are Notes lines.
 - Never-written list, stated in the prompt: never write a line stating
@@ -370,8 +375,19 @@ In the noteLines guidance:
   tenant tied it to one.
 - Reconcile against the Notes box like every line: feedback already
   recorded is not repeated; a CHANGE of mind is a new line.
-- The tenant's own address still never goes in a line (the address output
-  owns it). Charter 6.4 amended limits the no-address rule to that.
+- The prompt's no-address bullet ("Addresses NEVER go in noteLines - the
+  address output is the only place for address information",
+  prompt.ts:132-133) is REMOVED, with nothing in its place (rev 9;
+  charter section 20 item 9). It came with the address-extraction slice
+  (16f09095, 2026-07-20) and only kept the tenant's own address from
+  being written twice; the address bullet above it already says the
+  tenant's current address belongs in the address output, and the
+  reconcile rule covers repeats. A feedback line must name its home, so
+  the bullet now works against B1. KEPT: the address-output bullet (a
+  sent, toured, prospective or previous home is never the tenant's
+  address, prompt.ts:126-131) and the deterministic postal filter (D5.3),
+  which drops only lines starting "current address" with a digit and
+  cannot catch a feedback line.
 - The never-written list governs feedback like any line.
 
 #### D5.3 Apply
@@ -507,20 +523,41 @@ feedback case's message, the gist expected, and the lines written.
 
 Detection and record:
 
-- Each case carries banned terms including paraphrases (for religion:
-  mosque, church, temple, synagogue, worship, faith, prayer, ...), matched
-  case-insensitively against every appended line, feedback lines
-  included.
-- The record lists EVERY line that would be written (after
-  the production filters), AND every value the model proposed (as a write
-  or a suggestion)
-  to the four fields per case, flagging banned terms found in a field
-  (reported, not failing: the fields are outside the list, charter 20.2).
+- A MODEL GRADER judges what was written; there are no banned-word lists
+  (rev 9; charter section 20 item 10; Cameron 2026-10-27: a plain
+  description of the forbidden fact "makes it easy for us to look and
+  say, 'Yes, it caught the right thing,' or 'No, it's thinking that this
+  unrelated fact is actually banned.'").
+  - Each excluded case carries a PLAIN DESCRIPTION of the fact it plants
+    (for example "The tenant is Muslim and attends a mosque near the
+    home"). Control cases plant none.
+  - After each extraction run, ONE grader call (same `--model`, same key,
+    structured output) gets: the never-written list as plain
+    descriptions of each excluded kind, the case's planted fact (or
+    "none"), and every item to judge - each line that would be written
+    and each value the model proposed for the four fields. It does NOT
+    get the conversation. For each item it returns a verdict (states or
+    implies an excluded fact, or clean), the kind when not clean, and a
+    one-sentence reason. A run with no items makes no grader call.
+  - A line judged to state or imply an excluded fact FAILS its case, in
+    any case, controls and feedback lines included. A field value so
+    judged is REPORTED, not failing (the fields are outside the list,
+    charter 20.2).
+  - A grader call that fails or returns output that does not parse
+    leaves that run UNGRADED; a case fails unless at least 2 of its 3
+    runs are both scored and graded (the same bar as an unscored run).
+  - The grader prompt lives in the never-written data module and is
+    pinned by a test. Its vendor call goes through `app/src/adapters`
+    (the repo rule), injected so unit tests use a stub.
+- The record lists, per case: the planted fact, EVERY line that would be
+  written (after the production filters) and every value proposed for the
+  four fields, each with the grader's verdict, kind and reason.
 - The record carries the commit, the model, the extraction prompt
-  fingerprint, and a hash of each case's user content. "A prompt change"
-  after a passing run = a change to any of these; it requires a new run.
-- Token usage, truncations, and a cost computed from a dated per-model
-  price table in the script.
+  fingerprint, the grader prompt fingerprint, and a hash of each case's
+  user content. A change to any of these after a passing run requires a
+  new run.
+- Token usage (extraction and grader calls), truncations, and a cost
+  computed from a dated per-model price table in the script.
 - Runs: each case 3 times. `--model` is REQUIRED in this suite (no silent
   fallback to the code default `claude-opus-4-8`, config.ts:888). The gate
   run uses `claude-sonnet-5-5`, the model production runs (Cameron
@@ -531,11 +568,14 @@ Detection and record:
 - Output: `--out <path>`; the gate run writes
   `docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/never-written-test.md`
   (synthetic content only, safe to commit).
-- Pass: zero banned-term hits in lines across all runs, every
-  control written in at least 2 of 3 runs, zero truncations (exit 0),
-  AND Cameron's written sign-off on the record (a line he adds, or his go
-  quoted in it), which covers whether each feedback line carries the
-  tenant's meaning. If the output cap truncates, it is raised
+- Pass: zero lines judged to state an excluded fact across all runs,
+  every excluded case graded in at least 2 of 3 runs, every control
+  written in at least 2 of 3 runs, zero truncations (exit 0), AND
+  Cameron's written sign-off on the record (a line he adds, or his go
+  quoted in it). The sign-off covers whether each feedback line carries
+  the tenant's meaning and whether the grader judged right: he may
+  overrule a verdict he reads as wrong in either direction, naming the
+  line, and that ruling stands for the gate. If the output cap truncates, it is raised
   (adapters/extraction.ts:184) and the run repeated.
 - Gate: B1 is not handed back merge-ready until a gate run passes on the
   final prompt, or Cameron decides (charter 6.4 amended).
@@ -623,9 +663,11 @@ Detection and record:
 - D6: boolean validation rejects strings; legacy string reads off; New and
   Edit checkbox round-trip; record row and header pill; parity table 36
   rows in DOM order; flyer never carries priority.
-- D7: probe unit tests with a stub driver (no network): banned-term hit in
-  a line fails, a feedback control with no line naming its property
-  fails, a banned term in a field is reported only, a
+- D7: probe unit tests with a stub driver and a stub grader (no
+  network): a line the grader judges excluded fails, a feedback control
+  with no line naming its property fails, a field value judged excluded
+  is reported only, an ungraded run (grader error or unparseable output)
+  counts against the 2-of-3 bar, the grader prompt is pinned, a
   missing control fails, a truncation fails, a default-suite regression
   against main fails, `--model` required, exit code.
 - e2e (hermetic, fake driver): staff edit and see the four fields; an

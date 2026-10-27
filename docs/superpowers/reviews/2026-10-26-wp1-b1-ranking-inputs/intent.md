@@ -11,16 +11,17 @@ cut from main @d0e2c2d8.
 
 ## STATE
 
-Phase: LAUNCH GATE. Plan v4 FINAL (9d254258): plan review closed after 3
-rounds (24 findings, all accepted; round 3 terminal), rulings PR1-PR49.
-Hours table in plan section 4: 5.5-8.5 h total, ~3-3.5 h design spent.
-Mission block: mission-block.md (this folder). Launch gate asked as TEXT
-(Cameron's client drops text paired with AskUserQuestion): options Go
-AUTO / Go MANUAL / Revise, plus three confirmations at the gate - the
-rulings that depart from spec text (PR38 list), the banned-term lists
-(plan S6.1, BANNED_TERMS + STRICT_TERMS), the unverified price table.
-Nothing in flight. Next on a Go: compaction gate B (intent refreshed,
-replay proven, --show, watcher, offer), then AUTO dispatch of
+Phase: PLAN REVISION at the launch gate (2026-10-27). Cameron picked
+Revise: (1) remove the prompt's no-address bullet, (2) replace the
+never-written test's banned-word lists with a model grader. Spec rev 9
+and charter section 20 items 9-10 written. In flight: an opus agent
+redrafting plan S6 (grader) to .superpowers/sdd/plan-draft-S6-grader.md;
+planner rewrites S5.5 + section 4 (PR50+, superseding PR17, PR21's
+banned-union clause, PR41, PR44, PR48, PR49) and the hours table. Then
+ONE focused plan-review round (round-3 reviewer continued if resumable,
+else one fresh opus reviewer on the changed parts), adjudicate, commit,
+and back to the launch gate as TEXT (Go AUTO / Go MANUAL / Revise).
+Next on a Go: compaction gate B, then AUTO dispatch of
 abt:build-orchestrator with mission-block.md verbatim (or MANUAL prompt).
 Registered with compact-resume (--persist) until mission end.
 
@@ -129,6 +130,24 @@ amendment, and then file the issue and write the spec."
   for wp3, pass rev 8, and flag it for b2" -> SPEC GATE PASSED on rev 8;
   docs/issues/wp3-property-feedback-redesign.md filed; charter section 20
   item 8; flag in spec D5.4.
+
+- At the launch gate (2026-10-27), on the no-address rule and the banned
+  terms: "Talk to me about the no-address rule. I think that might be an
+  old rule rooted in something that we don't need anymore. Is there a
+  strict shared banned list of words? I don't think that we should have
+  a strict list of banned words for exactly the reason that you point
+  out, and because the intelligence lives in the model. That's what
+  we're trying to lean into." Planner: the rule dates from 16f09095
+  (2026-07-20) and only de-duplicated the tenant's own address; the word
+  lists live only in the test scorer; proposed deleting the prompt
+  bullet (keep the postal filter and the address-output rule) and a
+  model grader. Cameron: "For the no address rule, I agree with your
+  recommendation. ... If you want to change that to a model grader, I
+  think that that's fine because a plain description of the forbidden
+  fact is good. It makes it easy for us to look and say, 'Yes, it caught
+  the right thing,' or 'No, it's thinking that this unrelated fact is
+  actually banned.' Let's make both those changes." -> charter section 20
+  items 9-10, spec rev 9.
 
 ## Why
 

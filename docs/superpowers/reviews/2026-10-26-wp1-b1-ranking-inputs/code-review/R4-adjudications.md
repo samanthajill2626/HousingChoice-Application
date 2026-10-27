@@ -43,3 +43,20 @@ docs/issues/notes-guard-stale-reread-vs-flip-back.md.
   to earlier words is never silently dropped (spec D5.2), which the old
   guard did. Neither failure's frequency is known yet - the B2 issue asks
   for a count.
+
+## FW4 verified by the orchestrator; review loop closed (2026-10-27)
+
+FW4 (f04f1bb8, cee9cb00; report FW4-report.md) is a micro wave: FW4-1 is a
+12-line guard in `runComparison` that mirrors FW3-3's check, which R4
+verified REAL, and FW4-2 is comment-only. The orchestrator read the diff in
+context (extraction-prompt-probe.ts:1851-1862: after both sides' git reads
+and the dry-run branch, before any driver; every unreadable side named; exit
+1, no record) and its four tests (extractionPromptProbe.test.ts:1569-1629:
+branch side, baseline side, git that cannot start, dry-run PIN - each
+asserting no driver, no call, no record and the exact message), and re-ran
+extractionPromptProbe.test.ts + extractionNoteLines.test.ts: exit 0, 160/160.
+The child's reverted-fix run failed the same 3 tests. No fifth review round:
+R4 raised nothing above LOW, its one REGRESSION is closed by a mirror of
+already-reviewed code, and the remaining items are recorded or filed. The
+LOOP RULE is satisfied with no open REGRESSION. The full gate battery and
+live self-QA follow on the final commit.

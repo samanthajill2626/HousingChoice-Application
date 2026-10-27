@@ -11,7 +11,7 @@
   `docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/`.
 - Spec review: 5 rounds, 57 findings, 0 rejected -
   `docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/design-review/adjudications.md`.
-- Status: PLAN v1 (2026-10-26), assembled; plan review round 1 pending. Sections 0-4 and 11 are BINDING and
+- Status: PLAN v2 (2026-10-26): round 1 rulings PR29-PR42 written through; plan review round 2 pending. Sections 0-4 and 11 are BINDING and
   written by the planner; slice sections 5-10 are opus section drafts
   assembled verbatim. Section 4 (planner rulings PR1-PRnn) wins over any
   slice text it contradicts. "Plan section N" always means this file's
@@ -19,6 +19,10 @@
 
 ## 0. Ground rules for this plan
 
+- [PR38] Precedence: section 4 rulings win over slice text; a ruling that
+  departs from spec TEXT (PR16, PR17, PR21, PR22, PR24, PR41) is listed
+  for Cameron at the launch gate, and his go is the approval. Section 1's
+  "the spec wins on any doubt" governs anything no ruling addresses.
 - Every task is TDD: write the test, run it RED (and confirm it is red for
   the stated reason), implement, run it GREEN, commit. One commit per task
   unless the task says otherwise. A case marked (PIN) is a regression pin
@@ -27,7 +31,11 @@
 - Setup, once, before S1: the worktree has NO `node_modules`. Run `npm ci`
   at the worktree root (bare; expect exit 0). Never symlink another
   worktree's node_modules. No new dependency is added by this plan.
-- Commits: a separate bare `git status` read first, check
+- [PR29] Every git command carries `-C W:/tmp/wp1-b1-ranking-inputs`
+  (the shell cwd resets to the SHARED main checkout between calls; a bare
+  `git add` / `git commit` there commits someone else's index onto main).
+- Commits: a separate bare `git -C W:/tmp/wp1-b1-ranking-inputs status`
+  read first, check
   `W:\AI Projects\Housing Choice\HC Application\.git\worktrees\wp1-b1-ranking-inputs\MERGE_HEAD`
   is absent, explicit paths only (never `git add -A`), ASCII message ending
   with the trailer `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
@@ -37,7 +45,7 @@
   Check: `tr -d '\11\12\15\40-\176' < FILE | wc -c` prints 0 for a new file;
   for a pre-existing file that already carries non-ASCII, only ADDED lines
   must be ASCII:
-  `git diff -U0 -- FILE | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c`
+  `git -C W:/tmp/wp1-b1-ranking-inputs diff -U0 -- FILE | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c`
   prints 0. Never "fix" a pre-existing non-ASCII string a test pins.
 - Never rewrite source with PowerShell `Get-Content | -replace | Set-Content`.
   Use the Edit tool. The Edit/Write tools DECODE `\u` escapes - after any
@@ -361,6 +369,14 @@ wins.
   grade`, named countries, `US citizen`, `citizenship`, `senior citizen`,
   `single mom`). S6.1 lists the final terms; the list is shown to Cameron
   at the launch gate. The spec's zero-hit pass rule is unchanged.
+  Write-through judgment calls, accepted: `senior citizen` is NOT banned
+  (age is not an excluded kind; it sits in the must-not-hit test);
+  `year old` / `years old` stay banned (the main children's-ages catch);
+  `india`, `china`, `afghan` are left out (Indiana, china cabinet, afghan
+  blanket).
+- PR42 The "Notes lines" region also renders when only
+  `sentPropertiesFingerprint` is present (a run that read the sends then
+  failed before apply), amending PR34's guard.
 
 ### Hours (Cameron's hands-on hours; charter estimate 8-10)
 
@@ -2684,10 +2700,10 @@ in the report for the planner (do not move HEAD or make a worktree). Any
 `[dynamoAdmin]` line is a real container fault: capture
 `err.$metadata.httpStatusCode` and `attempts` into the report.
 
-#### Step 5 - ASCII sweep
+#### Step 5 - ASCII sweep [PR29]
 
 ```
-cd W:/tmp/wp1-b1-ranking-inputs; git diff -U0 d0e2c2d8 -- app dashboard | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git -C W:/tmp/wp1-b1-ranking-inputs diff -U0 d0e2c2d8 -- app dashboard | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
 ```
 Expect `0`.
 
@@ -3400,7 +3416,7 @@ git -C W:/tmp/wp1-b1-ranking-inputs commit -m "feat(properties): Priority row an
 
 ### Task S2.4 - Typecheck, both workspaces, lint, ASCII sweep, slice report
 
-#### Step 1 - no new reader (spec D6; WI12)
+#### Step 1 - no new reader (spec D6; WI12) [PR29]
 
 ```
 git -C W:/tmp/wp1-b1-ranking-inputs diff --stat d0e2c2d8 -- app/src/lib/import app/src/services/extraction app/src/jobs/extraction.ts app/src/routes/public.ts app/src/lib/seed
@@ -3408,7 +3424,7 @@ git -C W:/tmp/wp1-b1-ranking-inputs diff --stat d0e2c2d8 -- app/src/lib/import a
 Expect only `app/src/lib/seed/cast.ts` (S1.6) in the output: the importer,
 extraction and the public flyer route are untouched by S2. Then:
 ```
-cd W:/tmp/wp1-b1-ranking-inputs; git grep -n "priority" -- app/src/services/extraction app/src/jobs/extraction.ts app/src/lib/import/apply.ts
+git -C W:/tmp/wp1-b1-ranking-inputs grep -n "priority" -- app/src/services/extraction app/src/jobs/extraction.ts app/src/lib/import/apply.ts
 ```
 Expect only the two `orgListBlock.ts` comment lines (":98", ":136" -
 "priority" in the org-list ordering sense); no unit-priority reader.
@@ -3436,10 +3452,10 @@ cd W:/tmp/wp1-b1-ranking-inputs/dashboard; npx vitest run
 As S1.7 Step 4 (re-run a red file alone; S2-connected = the unit
 validator, the form table, the property forms or ListingDetail).
 
-#### Step 5 - ASCII sweep
+#### Step 5 - ASCII sweep [PR29]
 
 ```
-cd W:/tmp/wp1-b1-ranking-inputs; git diff -U0 d0e2c2d8 -- app dashboard | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git -C W:/tmp/wp1-b1-ranking-inputs diff -U0 d0e2c2d8 -- app dashboard | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
 ```
 Expect `0`.
 
@@ -3913,9 +3929,12 @@ cd W:/tmp/wp1-b1-ranking-inputs/app; npx tsc -p tsconfig.json --noEmit
 #### Step 5 - commit
 
 ```
-git add app/src/services/extraction/runTypes.ts app/src/jobs/journalSweep.ts app/test/extractionRunTypes.test.ts app/test/suggestionReclassification.test.ts app/test/suggestionReclassificationGuard.test.ts app/test/journalSweep.test.ts app/test/extractionJob.test.ts
-git commit -m "feat(extraction): sixteen decision targets, eleven tenant-only, text_field_filled (B1 S3.1)" -m "The four tenant matching inputs join DECISION_TARGETS and TENANT_ONLY_TARGETS from their one list; runTypes imports only that leaf; the journal sweep budget derives from the target count." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
+git -C W:/tmp/wp1-b1-ranking-inputs add app/src/services/extraction/runTypes.ts app/src/jobs/journalSweep.ts app/test/extractionRunTypes.test.ts app/test/suggestionReclassification.test.ts app/test/suggestionReclassificationGuard.test.ts app/test/journalSweep.test.ts app/test/extractionJob.test.ts
+git -C W:/tmp/wp1-b1-ranking-inputs commit -m "feat(extraction): sixteen decision targets, eleven tenant-only, text_field_filled (B1 S3.1)" -m "The four tenant matching inputs join DECISION_TARGETS and TENANT_ONLY_TARGETS from their one list; runTypes imports only that leaf; the journal sweep budget derives from the target count." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+(`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ---
 
@@ -4176,9 +4195,12 @@ Both green (the second proves the probe still compiles, C6).
 #### Step 5 - commit
 
 ```
-git add app/src/adapters/extraction.ts app/src/services/extraction/apply.ts app/scripts/extraction-prompt-probe.ts app/test/extractionApply.test.ts
-git commit -m "feat(extraction): coerceField exported, the tenant matching inputs coerced by kind (B1 S3.2)" -m "Text: trimmed, 500-char cap drops, empty drops. Dollars: dollar signs, commas and spaces stripped, whole number 0..20000. The eight original fields unchanged." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
+git -C W:/tmp/wp1-b1-ranking-inputs add app/src/adapters/extraction.ts app/src/services/extraction/apply.ts app/scripts/extraction-prompt-probe.ts app/test/extractionApply.test.ts
+git -C W:/tmp/wp1-b1-ranking-inputs commit -m "feat(extraction): coerceField exported, the tenant matching inputs coerced by kind (B1 S3.2)" -m "Text: trimmed, 500-char cap drops, empty drops. Dollars: dollar signs, commas and spaces stripped, whole number 0..20000. The eight original fields unchanged." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+(`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ---
 
@@ -4717,9 +4739,12 @@ green (the drift guard sees the four as tenant-only; nothing else moved).
 #### Step 5 - commit
 
 ```
-git add app/src/services/extraction/schema.ts app/src/services/suggestionResolution.ts app/src/routes/contacts.ts app/test/extractionSchema.test.ts app/test/extractionOps.test.ts app/test/extractionApply.test.ts app/test/suggestions.test.ts app/test/tenantMatchingInputsReaders.test.ts
-git commit -m "feat(extraction): the four tenant matching inputs become extractable (B1 S3.3)" -m "EXTRACTABLE_FIELDS 8 -> 12 and PROVENANCE_FIELDS through the list; schema entries all required; accept coerces by kind via coerceField; a staff PATCH clears each <key>_source." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
+git -C W:/tmp/wp1-b1-ranking-inputs add app/src/services/extraction/schema.ts app/src/services/suggestionResolution.ts app/src/routes/contacts.ts app/test/extractionSchema.test.ts app/test/extractionOps.test.ts app/test/extractionApply.test.ts app/test/suggestions.test.ts app/test/tenantMatchingInputsReaders.test.ts
+git -C W:/tmp/wp1-b1-ranking-inputs commit -m "feat(extraction): the four tenant matching inputs become extractable (B1 S3.3)" -m "EXTRACTABLE_FIELDS 8 -> 12 and PROVENANCE_FIELDS through the list; schema entries all required; accept coerces by kind via coerceField; a staff PATCH clears each <key>_source." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+(`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ---
 
@@ -4870,9 +4895,12 @@ decision).
 #### Step 5 - commit
 
 ```
-git add app/src/services/extraction/apply.ts app/test/extractionApply.test.ts
-git commit -m "feat(extraction): a write on a filled text field is dropped as text_field_filled (B1 S3.4)" -m "Not a suggestion and not in the Layer-3 demotion audit; the dollars field keeps the pets rule." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
+git -C W:/tmp/wp1-b1-ranking-inputs add app/src/services/extraction/apply.ts app/test/extractionApply.test.ts
+git -C W:/tmp/wp1-b1-ranking-inputs commit -m "feat(extraction): a write on a filled text field is dropped as text_field_filled (B1 S3.4)" -m "Not a suggestion and not in the Layer-3 demotion audit; the dollars field keeps the pets rule." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+(`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ---
 
@@ -5051,9 +5079,12 @@ profile type).
 #### Step 5 - commit
 
 ```
-git add app/src/adapters/extraction.ts app/src/jobs/extraction.ts app/test/extractionJob.test.ts
-git commit -m "feat(extraction): CURRENT PROFILE carries the tenant matching inputs (B1 S3.5)" -m "toProfile iterates the list: text kinds as strings, the dollars kind as a number." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
+git -C W:/tmp/wp1-b1-ranking-inputs add app/src/adapters/extraction.ts app/src/jobs/extraction.ts app/test/extractionJob.test.ts
+git -C W:/tmp/wp1-b1-ranking-inputs commit -m "feat(extraction): CURRENT PROFILE carries the tenant matching inputs (B1 S3.5)" -m "toProfile iterates the list: text kinds as strings, the dollars kind as a number." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+(`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ---
 
@@ -5227,9 +5258,12 @@ adapter test computes the fingerprint).
 #### Step 5 - commit
 
 ```
-git add app/src/services/extraction/prompt.ts app/test/extractionSchema.test.ts
-git commit -m "feat(extraction): prompt guidance for the tenant matching fields from the list (B1 S3.6)" -m "Text fields accumulate (an added fact is a noteLine, write fills only an empty field); dollars as a digit string; field count derived; the stairs and rent-portion noteLine examples removed. The prompt fingerprint changes (expected)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
+git -C W:/tmp/wp1-b1-ranking-inputs add app/src/services/extraction/prompt.ts app/test/extractionSchema.test.ts
+git -C W:/tmp/wp1-b1-ranking-inputs commit -m "feat(extraction): prompt guidance for the tenant matching fields from the list (B1 S3.6)" -m "Text fields accumulate (an added fact is a noteLine, write fills only an empty field); dollars as a digit string; field count derived; the stairs and rent-portion noteLine examples removed. The prompt fingerprint changes (expected)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+(`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ---
 
@@ -5419,13 +5453,16 @@ The Step 2 command, all green. Then
 #### Step 5 - commit
 
 ```
-git add dashboard/src/routes/settings/aiRuns/AiRunDetail.tsx dashboard/src/api/types.ts dashboard/src/routes/settings/aiRuns/AiRunsSection.test.tsx dashboard/src/api/types.test.ts
-git commit -m "feat(dashboard): run detail orders the tenant matching inputs and labels text_field_filled (B1 S3.7)" -m "DECISION_TARGET_ORDER spreads the dashboard mirror after porting; the drop-reason label mirror gains Field already filled." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
+git -C W:/tmp/wp1-b1-ranking-inputs add dashboard/src/routes/settings/aiRuns/AiRunDetail.tsx dashboard/src/api/types.ts dashboard/src/routes/settings/aiRuns/AiRunsSection.test.tsx dashboard/src/api/types.test.ts
+git -C W:/tmp/wp1-b1-ranking-inputs commit -m "feat(dashboard): run detail orders the tenant matching inputs and labels text_field_filled (B1 S3.7)" -m "DECISION_TARGET_ORDER spreads the dashboard mirror after porting; the drop-reason label mirror gains Field already filled." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+(`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ---
 
-### Task S3.8 - The count sweep (comment-only) and the e2e run-log marker (fixture)
+### Task S3.8 - The count sweep (comment-only) and the e2e run-log marker (fixture) [PR29] [PR36]
 
 WI3, C1. COMMENT-ONLY except the e2e `marker()` field list, which is a
 fixture change verified by S7's `npm run e2e` (no unit RED exists for an e2e
@@ -5452,6 +5489,19 @@ Files and edits (anchor -> replacement; each is a whole-line edit):
 6. `app/src/services/suggestionResolution.ts:31`
    `// Spec 2026-10-12 D1: the seven tenant-only targets, exported here under the`
    -> `// Spec 2026-10-12 D1: the tenant-only targets (eleven since B1), exported under the`
+6b. [PR36] `app/src/services/suggestionResolution.ts:46` (the
+   `MAX_RECOVERIES_PER_READ` doc comment) - edit:
+   old:
+   ```
+    * an optional maxAttempts, and the daily abandoned-journal sweep passes 12. The
+   ```
+   new:
+   ```
+    * an optional maxAttempts, and the daily abandoned-journal sweep passes the
+    * DECISION_TARGETS count (sixteen since B1). The
+   ```
+   (S3.1 made the sweep pass `DECISION_TARGETS.length`; the next line,
+   ` * rationale above is about a READ ...`, is unchanged.)
 7. `app/src/services/suggestionResolution.ts:106-108` - edit:
    old:
    ```
@@ -5525,22 +5575,31 @@ cd W:/tmp/wp1-b1-ranking-inputs/app; npx vitest run test/extractionDecisions.tes
 cd W:/tmp/wp1-b1-ranking-inputs/dashboard; npx vitest run src/routes/settings/aiRuns/AiRunsSection.test.tsx
 cd W:/tmp/wp1-b1-ranking-inputs/e2e; npm run typecheck
 ```
-All green. Then record the WI3 grep (its full output goes in the S3 report):
+All green. Then record the WI3 grep (its full output goes in the S3 report).
+[PR36] It also matches the number `12` as a word (`-w -e 12` is `\b12\b`;
+written this way because Git for Windows' default regex has no `\b`):
 ```
-cd W:/tmp/wp1-b1-ranking-inputs; git grep -n -i -w -e eight -e twelve -e eleven -- app/src/services/extraction app/src/jobs/extraction.ts app/src/jobs/journalSweep.ts app/src/adapters/extraction.ts app/src/services/suggestionResolution.ts app/src/repos/suggestionResolutionRepo.ts app/src/routes/contacts.ts app/test/extraction*.ts app/test/journalSweep.test.ts app/test/suggestion*.ts app/test/aiRunVerdicts.test.ts dashboard/src/routes/settings/aiRuns dashboard/src/api/types.ts e2e/tests/dashboard-next/ai-run-log.spec.ts
+git -C W:/tmp/wp1-b1-ranking-inputs grep -n -i -w -e eight -e twelve -e eleven -e 12 -- app/src/services/extraction app/src/jobs/extraction.ts app/src/jobs/journalSweep.ts app/src/adapters/extraction.ts app/src/services/suggestionResolution.ts app/src/repos/suggestionResolutionRepo.ts app/src/routes/contacts.ts app/test/extraction*.ts app/test/journalSweep.test.ts app/test/suggestion*.ts app/test/aiRunVerdicts.test.ts dashboard/src/routes/settings/aiRuns dashboard/src/api/types.ts e2e/tests/dashboard-next/ai-run-log.spec.ts
 ```
 Every remaining hit must be one of the "Do NOT touch" items above or a word
-unrelated to the target/field sets (name each in the report).
+unrelated to the target/field sets (name each in the report). [PR36] Review
+EVERY `12` hit the same way (many are times, sizes or fixture values): a
+`12` that counts the decision targets is a stale count - fix it in this
+task (comment) or report it (code); every other `12` hit is listed in the
+S3 report with a one-word reason.
 
 Commit:
 ```
-git add app/src/adapters/extraction.ts app/src/services/extraction/schema.ts app/src/services/extraction/decisions.ts app/src/routes/contacts.ts app/src/services/suggestionResolution.ts app/src/repos/suggestionResolutionRepo.ts app/test/extractionDecisions.test.ts app/test/extractionOps.test.ts app/test/suggestionResolutionRepo.integration.test.ts dashboard/src/routes/settings/aiRuns/AiRunsSection.test.tsx e2e/tests/dashboard-next/ai-run-log.spec.ts
-git commit -m "chore(extraction): every target and field count updated to sixteen and twelve (B1 S3.8)" -m "Comments only, plus the e2e run-log marker declining all twelve fields (verified by the S7 e2e gate)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
+git -C W:/tmp/wp1-b1-ranking-inputs add app/src/adapters/extraction.ts app/src/services/extraction/schema.ts app/src/services/extraction/decisions.ts app/src/routes/contacts.ts app/src/services/suggestionResolution.ts app/src/repos/suggestionResolutionRepo.ts app/test/extractionDecisions.test.ts app/test/extractionOps.test.ts app/test/suggestionResolutionRepo.integration.test.ts dashboard/src/routes/settings/aiRuns/AiRunsSection.test.tsx e2e/tests/dashboard-next/ai-run-log.spec.ts
+git -C W:/tmp/wp1-b1-ranking-inputs commit -m "chore(extraction): every target and field count updated to sixteen and twelve (B1 S3.8)" -m "Comments only, plus the e2e run-log marker declining all twelve fields (verified by the S7 e2e gate)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+(`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ---
 
-### Task S3.9 - Close: typecheck, the app workspace, ASCII, the S3 report
+### Task S3.9 - Close: typecheck, the app workspace, ASCII, the S3 report [PR29]
 
 1. Typecheck (bare, root; expect exit 0):
    ```
@@ -5560,8 +5619,8 @@ git commit -m "chore(extraction): every target and field count updated to sixtee
    alone, compare against the merge base), never excused.
 3. ASCII sweep over every file S3 touched (prints 0 each):
    ```
-   cd W:/tmp/wp1-b1-ranking-inputs; git diff -U0 main...HEAD -- app/src app/test app/scripts dashboard/src e2e/tests | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
-   tr -d '\11\12\15\40-\176' < app/test/tenantMatchingInputsReaders.test.ts | wc -c
+   git -C W:/tmp/wp1-b1-ranking-inputs diff -U0 main...HEAD -- app/src app/test app/scripts dashboard/src e2e/tests | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+   tr -d '\11\12\15\40-\176' < W:/tmp/wp1-b1-ranking-inputs/app/test/tenantMatchingInputsReaders.test.ts | wc -c
    ```
 4. Lint the slice's own files (gate 5 shape, no new errors):
    ```
@@ -5573,9 +5632,12 @@ git commit -m "chore(extraction): every target and field count updated to sixtee
    (the fingerprint changed; no test pins a literal); any S1 assumption that
    did not hold; anything the tree held that this plan got wrong. Commit it:
    ```
-   git add docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/slices/S3-report.md
-   git commit -m "docs(records): B1 S3 slice report" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+   git -C W:/tmp/wp1-b1-ranking-inputs status
+   ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
+   git -C W:/tmp/wp1-b1-ranking-inputs add docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/slices/S3-report.md
+   git -C W:/tmp/wp1-b1-ranking-inputs commit -m "docs(records): B1 S3 slice report" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
    ```
+   (`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ### S3 coverage
 
@@ -5746,8 +5808,10 @@ No other conflict.
   with an `<h4>Notes lines</h4>` and a `<ul className={styles.countList}>` of
   `<li>` rows ("N appended", "N below the confidence floor", "N withheld -
   an unknown speaker was in the window"). It renders when the run carries
-  either count or appended a line. S5 adds its two `<li>` rows and widens the
-  render condition.
+  either count or appended a line. [PR34] S5.8 adds three `<li>` items
+  after S4's rows (`Feedback lines: N`, `Unlabeled address lines: N`,
+  `Properties sent fingerprint: <hex>`) and widens the guard to
+  `notedLines > 0` or any of the four counts present.
 - Config: `AppConfig.extractionFactMinConfidence: number`, parsed by the
   exported pure `parseExtractionFactMinConfidence(raw: string | undefined): number`
   (throws on a bad value) with `EXTRACTION_FACT_MIN_CONFIDENCE_DEFAULT = 0.7`
@@ -5932,9 +5996,12 @@ default).
 #### Step 5 - commit
 
 ```
-git add app/src/lib/config.ts app/test/configAiExtraction.test.ts
-git commit -m "feat(config): EXTRACTION_FACT_MIN_CONFIDENCE, default 0.7, fail-fast 0 < x <= 1 (B1 S4.1)" -m "Exported parseExtractionFactMinConfidence so the probe reads the floor through the same rule." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
+git -C W:/tmp/wp1-b1-ranking-inputs add app/src/lib/config.ts app/test/configAiExtraction.test.ts
+git -C W:/tmp/wp1-b1-ranking-inputs commit -m "feat(config): EXTRACTION_FACT_MIN_CONFIDENCE, default 0.7, fail-fast 0 < x <= 1 (B1 S4.1)" -m "Exported parseExtractionFactMinConfidence so the probe reads the floor through the same rule." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+(`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ---
 
@@ -6196,9 +6263,12 @@ All green (apply.ts's own noteLines block is untouched until S4.3).
 #### Step 5 - commit
 
 ```
-git add app/src/services/extraction/apply.ts app/test/extractionNoteLines.test.ts
-git commit -m "feat(extraction): filterNoteLines, the one place for Notes line value rules (B1 S4.2)" -m "Pure: clamp, floor first (counted), postal filter, retry guard before the cap, system lines unfloored, five-line cap model-first, a demoted run appends nothing." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
+git -C W:/tmp/wp1-b1-ranking-inputs add app/src/services/extraction/apply.ts app/test/extractionNoteLines.test.ts
+git -C W:/tmp/wp1-b1-ranking-inputs commit -m "feat(extraction): filterNoteLines, the one place for Notes line value rules (B1 S4.2)" -m "Pure: clamp, floor first (counted), postal filter, retry guard before the cap, system lines unfloored, five-line cap model-first, a demoted run appends nothing." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+(`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ---
 
@@ -6220,7 +6290,7 @@ Files:
   `app/test/extractionAdapter.test.ts`, `app/test/contactStaffNotes.test.ts`,
   `app/test/extractionJob.test.ts` (harness), `app/test/extractionJobDraftGuard.test.ts` (harness)
 
-#### Step 1 - failing tests and fixture migration
+#### Step 1 - failing tests and fixture migration [PR31]
 
 1a. `app/test/extractionApply.test.ts` - helpers. Edit (~:27-29):
 
@@ -6272,9 +6342,32 @@ new:
   };
 ```
 
-1c. Same file, migrate every string noteLines fixture (anchor -> new):
-- (~:207) `    expect(outcome).toEqual({ wrote: [], suggested: [], notedLines: 0, displaced: [], decisions: [] });`
+1c. Same file, migrate BOTH whole-outcome `toEqual` pins [PR31] and every
+string noteLines fixture (anchor -> new):
+- (~:207, 'op:none does nothing') `    expect(outcome).toEqual({ wrote: [], suggested: [], notedLines: 0, displaced: [], decisions: [] });`
   -> `    expect(outcome).toEqual({ wrote: [], suggested: [], notedLines: 0, notesBelowFloor: 0, notesDemoted: 0, displaced: [], decisions: [] });`
+- [PR31] (~:268-271, 'no-ops ALL field ops for a landlord contact'), the
+  second whole-outcome pin. Edit:
+
+  old:
+  ```ts
+        suggested: [],
+        notedLines: 0,
+        displaced: [],
+        decisions: [
+          { target: 'firstName', outcome: 'dropped', dropReason: 'wrong_contact_type', proposedValue: 'Pat' },
+  ```
+  new:
+  ```ts
+        suggested: [],
+        notedLines: 0,
+        notesBelowFloor: 0,
+        notesDemoted: 0,
+        displaced: [],
+        decisions: [
+          { target: 'firstName', outcome: 'dropped', dropReason: 'wrong_contact_type', proposedValue: 'Pat' },
+  ```
+  (The landlord run carries no noteLines, so both counts are 0.)
 - (~:652) `      noteLines: ['a', 'b', 'c', 'd', 'e', 'f', 'g'],`
   -> `      noteLines: ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((text) => note(text)),`
 - (~:665) `      noteLines: ['  ', '', 'real fact'],`
@@ -6564,7 +6657,7 @@ new:
   const deps: ExtractionJobDeps = {
 ```
 
-#### Step 2 - RED
+#### Step 2 - RED [PR31]
 
 ```
 cd W:/tmp/wp1-b1-ranking-inputs/app; npx vitest run test/extractionApply.test.ts test/extractionSchema.test.ts test/extractionAdapter.test.ts test/contactStaffNotes.test.ts
@@ -6575,7 +6668,10 @@ Expected failures, and why:
   item throws "line.trim is not a function"; the exact-outcome case
   (:207) lacks `notesBelowFloor` / `notesDemoted`; the rewritten Layer-3 case
   still appends; the legacy-string case APPENDS the string today (apply.ts
-  trims it and writes it), so it is red too.
+  trims it and writes it), so it is red too. [PR31] The landlord
+  whole-outcome case (~:262 'no-ops ALL field ops for a landlord
+  contact') is red the same way as :207: its pin now expects the two
+  counts the outcome does not yet carry.
 - extractionSchema: the round-trip, "keeps up to 20 ...", "drops a noteLine
   that is not ..." (the parser keeps strings only, schema.ts:268-274), and
   "the schema states the { text, confidence } item" (items are strings).
@@ -6920,14 +7016,17 @@ cd W:/tmp/wp1-b1-ranking-inputs/app; npx vitest run test/extractionApply.test.ts
 cd W:/tmp/wp1-b1-ranking-inputs/app; npm run typecheck
 ```
 All green; `npm run typecheck` (app: src, scripts incl. the probe, test)
-exits 0. `git grep -n "noteLines: \['" app/test` prints nothing.
+exits 0. `git -C W:/tmp/wp1-b1-ranking-inputs grep -n "noteLines: \['" app/test` prints nothing. [PR29]
 
 #### Step 5 - commit
 
 ```
-git add app/src/adapters/extraction.ts app/src/services/extraction/schema.ts app/src/services/extraction/apply.ts app/src/worker.ts app/src/routes/dev.ts app/test/extractionApply.test.ts app/test/extractionSchema.test.ts app/test/extractionAdapter.test.ts app/test/contactStaffNotes.test.ts app/test/extractionJob.test.ts app/test/extractionJobDraftGuard.test.ts
-git commit -m "feat(extraction): noteLines are { text, confidence }, appended through filterNoteLines (B1 S4.3)" -m "Schema items and parser (up to 20, no value filtering); the floor reaches apply through ApplyDeps from config; a demoted run appends nothing; every app fixture migrated." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
+git -C W:/tmp/wp1-b1-ranking-inputs add app/src/adapters/extraction.ts app/src/services/extraction/schema.ts app/src/services/extraction/apply.ts app/src/worker.ts app/src/routes/dev.ts app/test/extractionApply.test.ts app/test/extractionSchema.test.ts app/test/extractionAdapter.test.ts app/test/contactStaffNotes.test.ts app/test/extractionJob.test.ts app/test/extractionJobDraftGuard.test.ts
+git -C W:/tmp/wp1-b1-ranking-inputs commit -m "feat(extraction): noteLines are { text, confidence }, appended through filterNoteLines (B1 S4.3)" -m "Schema items and parser (up to 20, no value filtering); the floor reaches apply through ApplyDeps from config; a demoted run appends nothing; every app fixture migrated." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+(`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ---
 
@@ -7075,9 +7174,12 @@ All green.
 #### Step 5 - commit
 
 ```
-git add app/src/jobs/extraction.ts app/src/repos/aiRunsRepo.ts app/test/extractionJob.test.ts
-git commit -m "feat(extraction): the run record carries notesBelowFloor and notesDemoted (B1 S4.4)" -m "Record fields beside notedLines, present once apply ran." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
+git -C W:/tmp/wp1-b1-ranking-inputs add app/src/jobs/extraction.ts app/src/repos/aiRunsRepo.ts app/test/extractionJob.test.ts
+git -C W:/tmp/wp1-b1-ranking-inputs commit -m "feat(extraction): the run record carries notesBelowFloor and notesDemoted (B1 S4.4)" -m "Record fields beside notedLines, present once apply ran." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+(`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ---
 
@@ -7093,7 +7195,7 @@ Files:
 - `dashboard/src/routes/settings/aiRuns/AiRunsSection.module.css` (one rule)
 - Test: `dashboard/src/routes/settings/aiRuns/AiRunsSection.test.tsx` (new describe at the end)
 
-#### Step 1 - failing tests
+#### Step 1 - failing tests [PR34]
 
 Append at the END of `AiRunsSection.test.tsx`:
 
@@ -7121,20 +7223,29 @@ describe('AiRunsSection - Notes lines', () => {
     renderSection();
     expect(screen.queryByRole('region', { name: 'Notes lines' })).not.toBeInTheDocument();
   });
+
+  // PR34: a present 0 is reported, not hidden.
+  it('shows the region for a run whose counts are all 0', () => {
+    useAiRun.mockReturnValueOnce({ detail: { ...detail, run: { ...detail.run, notedLines: 0, notesBelowFloor: 0, notesDemoted: 0 } }, status: 'ready', retry: vi.fn() });
+    renderSection();
+    const notes = screen.getByRole('region', { name: 'Notes lines' });
+    expect(notes).toHaveTextContent('0 appended');
+    expect(notes).toHaveTextContent('0 below the confidence floor');
+  });
 });
 ```
 
-#### Step 2 - RED
+#### Step 2 - RED [PR34]
 
 ```
 cd W:/tmp/wp1-b1-ranking-inputs/dashboard; npx vitest run src/routes/settings/aiRuns/AiRunsSection.test.tsx
 ```
-Expected: the first two cases fail (no "Notes lines" region; the detail pane
-renders no count, AiRunDetail.tsx:67-89). `npx tsc` would also reject
+Expected: the first two cases and the all-0 case [PR34] fail (no "Notes
+lines" region; the detail pane renders no count, AiRunDetail.tsx:67-89). `npx tsc` would also reject
 `notesBelowFloor` on the fixture until 3a lands (vitest does not typecheck).
 The PIN is green.
 
-#### Step 3 - implementation
+#### Step 3 - implementation [PR34]
 
 3a. `dashboard/src/api/types.ts`, AiRunRecordView. Edit:
 
@@ -7159,14 +7270,18 @@ new:
 }
 ```
 
-3b. `dashboard/src/routes/settings/aiRuns/AiRunDetail.tsx` - add right ABOVE
-`export function AiRunDetail(`:
+3b. [PR34] `dashboard/src/routes/settings/aiRuns/AiRunDetail.tsx` - add
+right ABOVE `export function AiRunDetail(`. This is the ONE region every
+B1 run-detail item lives in; S5.8 adds its items after these rows and
+widens the `counted` line (keep that line exactly as written - it is
+S5.8's anchor):
 
 ```tsx
 /**
  * B1 spec D4: what happened to the run's Notes lines. Counts only - the lines
  * themselves are in the Parsed result. A run recorded before B1 carries only
- * notedLines; a run with nothing to report renders nothing.
+ * notedLines; a run with nothing to report renders nothing. The region renders
+ * when a line was appended or any count is PRESENT (a present 0 renders as 0).
  */
 function NotesLines({ run }: { run: AiRunDetailResponse['run'] }): React.JSX.Element | null {
   const counted = run.notesBelowFloor !== undefined || run.notesDemoted !== undefined;
@@ -7210,9 +7325,12 @@ Both green.
 #### Step 5 - commit
 
 ```
-git add dashboard/src/api/types.ts dashboard/src/routes/settings/aiRuns/AiRunDetail.tsx dashboard/src/routes/settings/aiRuns/AiRunsSection.module.css dashboard/src/routes/settings/aiRuns/AiRunsSection.test.tsx
-git commit -m "feat(dashboard): the AI run detail shows the Notes line counts (B1 S4.5)" -m "Appended, below the confidence floor, and withheld for an unknown-speaker window." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
+git -C W:/tmp/wp1-b1-ranking-inputs add dashboard/src/api/types.ts dashboard/src/routes/settings/aiRuns/AiRunDetail.tsx dashboard/src/routes/settings/aiRuns/AiRunsSection.module.css dashboard/src/routes/settings/aiRuns/AiRunsSection.test.tsx
+git -C W:/tmp/wp1-b1-ranking-inputs commit -m "feat(dashboard): the AI run detail shows the Notes line counts (B1 S4.5)" -m "Appended, below the confidence floor, and withheld for an unknown-speaker window." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+(`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ---
 
@@ -7224,7 +7342,7 @@ Files:
 - `app/src/services/extraction/prompt.ts` (the noteLines bullet as S3.6 left it)
 - Test: `app/test/extractionSchema.test.ts` (new describe at the end)
 
-#### Step 1 - failing tests
+#### Step 1 - failing tests [PR32]
 
 Append at the END of `app/test/extractionSchema.test.ts`:
 
@@ -7243,11 +7361,12 @@ describe('noteLines in the system prompt (B1 spec D4)', () => {
     expect(sys).not.toContain('noteLines are secondary facts');
   });
 
-  it('keeps the reconcile, append-only, short-line and no-address rules verbatim', () => {
+  // PR32: the no-address bullet is NOT pinned here - S5.5 rewrites it
+  // (PR17) and owns its pin.
+  it('keeps the reconcile, append-only and short-line rules verbatim', () => {
     expect(sys).toContain('RECONCILE every noteLine against the profile notes');
     expect(sys).toContain('You CANNOT revise or replace a notes line');
     expect(sys).toContain('Keep every noteLine SHORT');
-    expect(sys).toContain('Addresses NEVER go in noteLines');
     expect(sys).toContain('Profile notes lines beginning "[Auto - <date>]" are your own notes from');
   });
 
@@ -7268,14 +7387,16 @@ describe('noteLines in the system prompt (B1 spec D4)', () => {
 });
 ```
 
-#### Step 2 - RED
+#### Step 2 - RED [PR32]
 
 ```
 cd W:/tmp/wp1-b1-ranking-inputs/app; npx vitest run test/extractionSchema.test.ts
 ```
 Expected: "widens noteLines ...", "explains the { text, confidence } item",
 "states the never-written list" fail (the bullet still says "secondary
-facts"). "keeps the reconcile ... verbatim" is green (PIN).
+facts"). "keeps the reconcile, append-only and short-line rules verbatim"
+is green (PIN). [PR32] It does not assert the no-address bullet: S5.5
+rewrites that bullet (PR17) and pins the new wording.
 
 #### Step 3 - implementation
 
@@ -7328,13 +7449,16 @@ All green (all the S3.6 cases included; the prompt stays ASCII).
 #### Step 5 - commit
 
 ```
-git add app/src/services/extraction/prompt.ts app/test/extractionSchema.test.ts
-git commit -m "feat(extraction): noteLines widened to matching facts, with confidence and the never-written list (B1 S4.6)" -m "Reconcile, append-only, short-line and no-address rules kept verbatim. The prompt fingerprint changes (expected)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
+git -C W:/tmp/wp1-b1-ranking-inputs add app/src/services/extraction/prompt.ts app/test/extractionSchema.test.ts
+git -C W:/tmp/wp1-b1-ranking-inputs commit -m "feat(extraction): noteLines widened to matching facts, with confidence and the never-written list (B1 S4.6)" -m "Reconcile, append-only, short-line and no-address rules kept verbatim. The prompt fingerprint changes (expected)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+(`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ---
 
-### Task S4.7 - The e2e payloads move to the object shape; the fake driver's header says so
+### Task S4.7 - The e2e payloads move to the object shape; the fake driver's header says so [PR29]
 
 WI4, C5, C6. FIXTURE-ONLY: an e2e payload is untyped JSON
 (`e2e/fixtures/extraction.ts:50-54`, `payload: Record<string, unknown>`), so
@@ -7386,19 +7510,22 @@ Edits:
 Check:
 ```
 cd W:/tmp/wp1-b1-ranking-inputs/e2e; npm run typecheck
-cd W:/tmp/wp1-b1-ranking-inputs; git grep -n "noteLines: \['" -- e2e app/test
+git -C W:/tmp/wp1-b1-ranking-inputs grep -n "noteLines: \['" -- e2e app/test
 ```
 The typecheck exits 0; the grep prints nothing.
 
 Commit:
 ```
-git add e2e/tests/dashboard-next/caseworkers.spec.ts e2e/tests/flows/conversation-fact-extraction.spec.ts app/src/adapters/extractionFake.ts
-git commit -m "test(e2e): extraction payloads send noteLines as { text, confidence } (B1 S4.7)" -m "Fixture-only; verified by the S7 e2e gate. The fake driver header states the shape and the WI1 bypass." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
+git -C W:/tmp/wp1-b1-ranking-inputs add e2e/tests/dashboard-next/caseworkers.spec.ts e2e/tests/flows/conversation-fact-extraction.spec.ts app/src/adapters/extractionFake.ts
+git -C W:/tmp/wp1-b1-ranking-inputs commit -m "test(e2e): extraction payloads send noteLines as { text, confidence } (B1 S4.7)" -m "Fixture-only; verified by the S7 e2e gate. The fake driver header states the shape and the WI1 bypass." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+(`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ---
 
-### Task S4.8 - Close: typecheck, the app workspace, ASCII, the watch items, the S4 report
+### Task S4.8 - Close: typecheck, the app workspace, ASCII, the watch items, the S4 report [PR29]
 
 1. Typecheck (bare, root; expect exit 0 - WI4's "typecheck green at the end
    of S4"):
@@ -7416,8 +7543,8 @@ git commit -m "test(e2e): extraction payloads send noteLines as { text, confiden
    ```
 3. ASCII sweep (prints 0 each):
    ```
-   cd W:/tmp/wp1-b1-ranking-inputs; git diff -U0 main...HEAD -- app/src app/test dashboard/src e2e/tests | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
-   tr -d '\11\12\15\40-\176' < app/test/extractionNoteLines.test.ts | wc -c
+   git -C W:/tmp/wp1-b1-ranking-inputs diff -U0 main...HEAD -- app/src app/test dashboard/src e2e/tests | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+   tr -d '\11\12\15\40-\176' < W:/tmp/wp1-b1-ranking-inputs/app/test/extractionNoteLines.test.ts | wc -c
    ```
 4. Lint the slice's own files (no new errors):
    ```
@@ -7426,29 +7553,32 @@ git commit -m "test(e2e): extraction payloads send noteLines as { text, confiden
 5. Watch-item checks (record each result in the report):
    - WI1: `filterNoteLines` drops a non-object item without a throw (S4.2,
      S4.3 legacy case) - cite the test names.
-   - WI4: `git grep -n "noteLines: \['" -- app e2e` prints nothing; the probe
+   - WI4: `git -C W:/tmp/wp1-b1-ranking-inputs grep -n "noteLines: \['" -- app e2e` prints nothing; the probe
      compiled under step 1.
    - WI5: cite the S4.2 and S4.3 "guard before the cap" cases.
    - WI6: cite the rewritten `extractionApply.test.ts` Layer-3 case and its
-     comment; `git diff main...HEAD -- app/test/caseworkers.test.ts app/test/possibleCaseworkers.test.ts`
+     comment; `git -C W:/tmp/wp1-b1-ranking-inputs diff main...HEAD -- app/test/caseworkers.test.ts app/test/possibleCaseworkers.test.ts`
      is empty.
-   - WI14: `git diff --stat main...HEAD -- app/src/lib/import` is empty.
-   - WI15: the prompt fingerprint changed (S4.6); `git diff main...HEAD -- app/src/services/extraction/runWindow.ts`
+   - WI14: `git -C W:/tmp/wp1-b1-ranking-inputs diff --stat main...HEAD -- app/src/lib/import` is empty.
+   - WI15: the prompt fingerprint changed (S4.6); `git -C W:/tmp/wp1-b1-ranking-inputs diff main...HEAD -- app/src/services/extraction/runWindow.ts`
      is empty and `renderUtteranceLine` is untouched (S5 pins it).
 6. Write `docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/slices/S4-report.md`
    (ASCII, findings only, `file:line` cites): the watch-item results above,
    the C1-C7 resolutions as built, and anything the tree held that this plan
    got wrong. Commit:
    ```
-   git add docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/slices/S4-report.md
-   git commit -m "docs(records): B1 S4 slice report" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+   git -C W:/tmp/wp1-b1-ranking-inputs status
+   ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
+   git -C W:/tmp/wp1-b1-ranking-inputs add docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/slices/S4-report.md
+   git -C W:/tmp/wp1-b1-ranking-inputs commit -m "docs(records): B1 S4 slice report" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
    ```
+   (`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ### S4 coverage
 
 | Spec line | Task |
 |---|---|
-| D4 instruction widened to matching facts, plus a fact that adds to a filled text field; reconcile, append-only, short-line, no-address rules verbatim; screening facts allowed | S4.6 |
+| D4 instruction widened to matching facts, plus a fact that adds to a filled text field; reconcile, append-only, short-line, no-address rules verbatim; screening facts allowed | S4.6 (no-address bullet left as is by S4; S5.5 rewrites and pins it - PR17, PR32) |
 | D4 never-written list (race, color, religion, sex, national origin, familial beyond household size, disability/medical other than the accessibility need and an assistance animal; the need as the home's feature) | S4.6 |
 | D4 shape `{ text, confidence }`, both required | S4.3 (type, schema, parser) |
 | D4 floor `EXTRACTION_FACT_MIN_CONFIDENCE` default 0.7, fail-fast 0 < x <= 1 | S4.1 |
@@ -7548,9 +7678,12 @@ never learns about the block. Two exact `ApplyOutcome` pins gain the field
 C5. Spec D5.3 shows the counts "in the run detail beside `notedLines`", but
 the run detail renders no `notedLines` today
 (`dashboard/src/routes/settings/aiRuns/AiRunDetail.tsx:70`, header only).
-Resolution (S5.8): the two rows go immediately after S4's note-count rows
-(PR2: S4 owns the floor/demotion rows); if S4 rendered none, after the token
-usage line in the header.
+Resolution (S5.8) [PR34]: S5's two counts AND the
+`sentPropertiesFingerprint` go in S4's "Notes lines" region as `<li>` items
+after S4's rows (PR2: S4 owns the floor/demotion rows), and S5.8 widens the
+region's render guard to `notedLines > 0` or any of `notesBelowFloor`,
+`notesDemoted`, `feedbackLines`, `unlabeledAddressLines` present. Nothing
+new goes in the header.
 
 C6. Spec D4 keeps "the no-address rule ... verbatim"; spec D5.2 limits it to
 the client's own address (charter 6.4 amended). The rule today bans every
@@ -8206,10 +8339,10 @@ cd W:/tmp/wp1-b1-ranking-inputs/app; npx vitest run test/unitsRepoDisplays.test.
 Expect all green (the last three construct `IncompleteBatchReadError` with
 two arguments; the integration file pins the default projection).
 
-#### Step 5 - ASCII check
+#### Step 5 - ASCII check [PR29]
 
 ```
-cd W:/tmp/wp1-b1-ranking-inputs; git diff -U0 -- app/src/repos/unitsRepo.ts app/src/repos/contactsRepo.ts app/test/unitsRepoDisplays.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git -C W:/tmp/wp1-b1-ranking-inputs diff -U0 -- app/src/repos/unitsRepo.ts app/src/repos/contactsRepo.ts app/test/unitsRepoDisplays.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
 ```
 Expect `0` (both repo files carry pre-existing non-ASCII; only added lines
 count).
@@ -8975,10 +9108,10 @@ Expect exit 0 - every `ExtractionInput` literal now carries the field. A
 miss names its file; add `sentPropertiesBlock: ''` there and record it in the
 slice report.
 
-#### Step 5 - ASCII check
+#### Step 5 - ASCII check [PR29]
 
 ```
-cd W:/tmp/wp1-b1-ranking-inputs; git diff -U0 -- app/src/adapters/extraction.ts app/src/services/extraction/prompt.ts app/src/jobs/extraction.ts app/scripts/extraction-prompt-probe.ts app/test/extractionRunWindow.test.ts app/test/extractionSchema.test.ts app/test/extractionAdapter.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git -C W:/tmp/wp1-b1-ranking-inputs diff -U0 -- app/src/adapters/extraction.ts app/src/services/extraction/prompt.ts app/src/jobs/extraction.ts app/scripts/extraction-prompt-probe.ts app/test/extractionRunWindow.test.ts app/test/extractionSchema.test.ts app/test/extractionAdapter.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
 ```
 Expect `0`.
 
@@ -9165,10 +9298,10 @@ Expect all green (the adapter's fingerprint assertions recompute
 `extractionPromptFingerprint()`; caseworkers reads the role-note example,
 unchanged).
 
-#### Step 5 - ASCII check
+#### Step 5 - ASCII check [PR29]
 
 ```
-cd W:/tmp/wp1-b1-ranking-inputs; git diff -U0 -- app/src/services/extraction/prompt.ts app/test/extractionSchema.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git -C W:/tmp/wp1-b1-ranking-inputs diff -U0 -- app/src/services/extraction/prompt.ts app/test/extractionSchema.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
 ```
 Expect `0`.
 
@@ -9774,10 +9907,10 @@ cd W:/tmp/wp1-b1-ranking-inputs; npm run typecheck
 Expect exit 0 (WI9: all four construction sites supply both deps; a missed
 site is TS2741 naming `listingSends` or `units`).
 
-#### Step 5 - ASCII and escape checks
+#### Step 5 - ASCII and escape checks [PR29]
 
 ```
-cd W:/tmp/wp1-b1-ranking-inputs; git diff -U0 -- app/src/jobs/extraction.ts app/src/repos/aiRunsRepo.ts app/src/worker.ts app/src/routes/dev.ts app/test/extractionJob.test.ts app/test/extractionJobDraftGuard.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git -C W:/tmp/wp1-b1-ranking-inputs diff -U0 -- app/src/jobs/extraction.ts app/src/repos/aiRunsRepo.ts app/src/worker.ts app/src/routes/dev.ts app/test/extractionJob.test.ts app/test/extractionJobDraftGuard.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
 grep -nF "'\uffff'" W:/tmp/wp1-b1-ranking-inputs/app/src/repos/aiRunsRepo.ts
 ```
 The first prints `0`; the second prints the `SORT_KEY_CEILING` line.
@@ -9817,33 +9950,43 @@ Files:
 - Tests: `app/test/extractionApply.test.ts`, `app/test/extractionJob.test.ts`,
   `app/test/aiRunsRepo.test.ts`
 
-#### Step 1 - failing tests
+#### Step 1 - failing tests [PR31]
 
-1a. `app/test/extractionApply.test.ts`, the two exact pins. Edit (re-read
-after S4 - keep S4's fields, add `appendedLines: []`):
+1a. [PR31] `app/test/extractionApply.test.ts`, the two exact pins. The
+anchors are the POST-S4 text (S4.3 Step 1c added S4's two counts to both);
+the new text keeps S4's counts and adds `appendedLines: []`:
 
-old (~207):
+old (~207, 'op:none does nothing', as S4.3 left it):
 ```ts
-    expect(outcome).toEqual({ wrote: [], suggested: [], notedLines: 0, displaced: [], decisions: [] });
+    expect(outcome).toEqual({ wrote: [], suggested: [], notedLines: 0, notesBelowFloor: 0, notesDemoted: 0, displaced: [], decisions: [] });
 ```
 new:
 ```ts
-    expect(outcome).toEqual({ wrote: [], suggested: [], notedLines: 0, appendedLines: [], displaced: [], decisions: [] });
+    expect(outcome).toEqual({ wrote: [], suggested: [], notedLines: 0, notesBelowFloor: 0, notesDemoted: 0, appendedLines: [], displaced: [], decisions: [] });
 ```
 
-old (~269-272):
+old (~268-273, 'no-ops ALL field ops for a landlord contact', as S4.3
+left it):
 ```ts
       suggested: [],
       notedLines: 0,
+      notesBelowFloor: 0,
+      notesDemoted: 0,
       displaced: [],
+      decisions: [
 ```
 new:
 ```ts
       suggested: [],
       notedLines: 0,
+      notesBelowFloor: 0,
+      notesDemoted: 0,
       appendedLines: [],
       displaced: [],
+      decisions: [
 ```
+If either anchor does not match, S4.3 was not applied as written: STOP
+and report it (do not drop S4's counts to make an anchor fit).
 
 1b. Same file, append at the end:
 ```ts
@@ -10184,10 +10327,10 @@ here (none exists at HEAD: `grep -rn "ApplyOutcome" app/src app/test app/scripts
 finds only apply.ts and one test name); add `appendedLines: []` to it and
 record it.
 
-#### Step 5 - ASCII and escape checks
+#### Step 5 - ASCII and escape checks [PR29]
 
 ```
-cd W:/tmp/wp1-b1-ranking-inputs; git diff -U0 -- app/src/services/extraction/apply.ts app/src/jobs/extraction.ts app/src/repos/aiRunsRepo.ts app/test/extractionApply.test.ts app/test/extractionJob.test.ts app/test/aiRunsRepo.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git -C W:/tmp/wp1-b1-ranking-inputs diff -U0 -- app/src/services/extraction/apply.ts app/src/jobs/extraction.ts app/src/repos/aiRunsRepo.ts app/test/extractionApply.test.ts app/test/extractionJob.test.ts app/test/aiRunsRepo.test.ts | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
 grep -nF "'\uffff'" W:/tmp/wp1-b1-ranking-inputs/app/src/repos/aiRunsRepo.ts
 ```
 `0`, then the `SORT_KEY_CEILING` line.
@@ -10206,23 +10349,31 @@ git -C W:/tmp/wp1-b1-ranking-inputs commit -m "feat(extraction): feedbackLines a
 ### Task S5.8 - The AI run detail shows the block's fingerprint and the two counts
 
 Spec D5.3 ("shown in the run detail beside `notedLines`") and spec 4 (the
-run record's readers). PR2: the feedback rows are S5's. C5: the rows go
-immediately after S4's note-count rows. The detail route returns the stored
+run record's readers). PR2: the feedback rows are S5's. [PR34] Everything
+this task renders goes INSIDE S4.5's "Notes lines" region
+(`function NotesLines` in `AiRunDetail.tsx`), as `<li>` items after S4's
+rows: `Feedback lines: N`, `Unlabeled address lines: N`, then
+`Properties sent fingerprint: <hex>`. The region's guard widens to
+`notedLines > 0` OR any of `notesBelowFloor`, `notesDemoted`,
+`feedbackLines`, `unlabeledAddressLines` present (a present 0 renders as
+0). NOTHING new goes in the header. The detail route returns the stored
 run whole (`app/src/routes/aiRuns.ts:271`), so no server change.
 
-Re-read after S4: `AiRunRecordView` (dashboard/src/api/types.ts ~339-374) and
-the `AiRunDetail` header (`AiRunDetail.tsx` ~70) carry S4's fields and rows.
+Re-read after S4: `AiRunRecordView` (dashboard/src/api/types.ts ~339-374)
+carries S4's `notesBelowFloor` / `notesDemoted`, and `AiRunDetail.tsx`
+carries S4.5's `NotesLines` component.
 
 Files:
 - `dashboard/src/api/types.ts` (`AiRunRecordView`)
 - `dashboard/src/routes/settings/aiRuns/AiRunDetail.tsx`
 - Test: `dashboard/src/routes/settings/aiRuns/AiRunsSection.test.tsx`
 
-#### Step 1 - failing test
+#### Step 1 - failing test [PR34]
 
 `dashboard/src/routes/settings/aiRuns/AiRunsSection.test.tsx`, after the
 "(PIN) a run that never read the list (a skip) shows no organization list
-line" case (~242-245). Edit:
+line" case (~242-245). Every new assertion queries the
+`region` "Notes lines" [PR34]. Edit:
 
 old:
 ```tsx
@@ -10238,50 +10389,59 @@ new:
     expect(screen.queryByText(/Organization list fingerprint/)).not.toBeInTheDocument();
   });
 
-  // WP1 B1 spec D5.1 / D5.3: the PROPERTIES SENT block's fingerprint, and the
-  // two feedback counts beside the notes counts.
-  it('shows the properties sent fingerprint and the feedback counts', () => {
+  // WP1 B1 spec D5.1 / D5.3 (PR34): the PROPERTIES SENT block's fingerprint
+  // and the two feedback counts are items in the "Notes lines" region, after
+  // S4's counts. Nothing new goes in the header.
+  it('shows the properties sent fingerprint and the feedback counts in the Notes lines region', () => {
     const sentPropertiesFingerprint = 'a'.repeat(64);
     useAiRun.mockReturnValueOnce({
-      detail: { ...detail, run: { ...detail.run, notedLines: 3, sentPropertiesFingerprint, feedbackLines: 2, unlabeledAddressLines: 1 } },
+      detail: { ...detail, run: { ...detail.run, notedLines: 3, notesBelowFloor: 0, notesDemoted: 0, sentPropertiesFingerprint, feedbackLines: 2, unlabeledAddressLines: 1 } },
       status: 'ready',
       retry: vi.fn(),
     });
     renderSection();
+    const notes = within(screen.getByRole('region', { name: 'Notes lines' }));
+    expect(notes.getByText('Feedback lines: 2')).toBeInTheDocument();
+    expect(notes.getByText('Unlabeled address lines: 1')).toBeInTheDocument();
+    expect(notes.getByText(`Properties sent fingerprint: ${sentPropertiesFingerprint}`)).toBeInTheDocument();
     const header = screen.getByRole('heading', { name: /run run-1/i }).parentElement as HTMLElement;
-    expect(header).toHaveTextContent(`Properties sent fingerprint: ${sentPropertiesFingerprint}`);
-    expect(screen.getByText('Feedback lines: 2')).toBeInTheDocument();
-    expect(screen.getByText('Unlabeled address lines: 1')).toBeInTheDocument();
+    expect(header).not.toHaveTextContent('Properties sent fingerprint');
   });
 
+  // The guard widens (PR34): a run whose ONLY B1 counts are the two feedback
+  // counts, both 0, with notedLines 0, still renders the region.
   it('shows a zero count as 0, not as missing', () => {
     useAiRun.mockReturnValueOnce({
-      detail: { ...detail, run: { ...detail.run, feedbackLines: 0, unlabeledAddressLines: 0 } },
+      detail: { ...detail, run: { ...detail.run, notedLines: 0, feedbackLines: 0, unlabeledAddressLines: 0 } },
       status: 'ready',
       retry: vi.fn(),
     });
     renderSection();
-    expect(screen.getByText('Feedback lines: 0')).toBeInTheDocument();
-    expect(screen.getByText('Unlabeled address lines: 0')).toBeInTheDocument();
+    const notes = within(screen.getByRole('region', { name: 'Notes lines' }));
+    expect(notes.getByText('Feedback lines: 0')).toBeInTheDocument();
+    expect(notes.getByText('Unlabeled address lines: 0')).toBeInTheDocument();
   });
 
   it('(PIN) a run recorded before B1 shows no properties sent line and no feedback counts', () => {
     renderSection();
+    expect(screen.queryByRole('region', { name: 'Notes lines' })).not.toBeInTheDocument();
     expect(screen.queryByText(/Properties sent fingerprint/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Feedback lines/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Unlabeled address lines/)).not.toBeInTheDocument();
   });
 ```
 
-#### Step 2 - RED
+#### Step 2 - RED [PR34]
 
 ```
 cd W:/tmp/wp1-b1-ranking-inputs/dashboard; npx vitest run src/routes/settings/aiRuns/AiRunsSection.test.tsx
 ```
-Expected failures: the two new non-PIN cases (no such text is rendered).
-The new (PIN) and every existing case stay green.
+Expected failures: the two new non-PIN cases - the first finds the region
+(notedLines 3) but none of the three items; the zero-count case finds no
+region at all (S4.5's guard does not yet see the feedback counts) [PR34].
+The new (PIN), S4.5's Notes lines cases and every existing case stay green.
 
-#### Step 3 - implementation
+#### Step 3 - implementation [PR34]
 
 3a. `dashboard/src/api/types.ts`, `AiRunRecordView` (~353-356). Edit:
 
@@ -10322,31 +10482,44 @@ new:
 (`notedLines: number;` also occurs at ~264 and ~2207 in other types; the
 `expires_at?: number;` line makes this anchor unique.)
 
-3c. `dashboard/src/routes/settings/aiRuns/AiRunDetail.tsx`, the header
-(~70). Two substring edits inside that one line.
+3c. [PR34] `dashboard/src/routes/settings/aiRuns/AiRunDetail.tsx`, S4.5's
+`NotesLines` component. The header (~70) is NOT edited. Two edits.
+
+First, widen the guard (the anchor is S4.5's line, verbatim):
 
 old:
 ```tsx
-{run.orgListFingerprint ? <p>Organization list fingerprint: {run.orgListFingerprint}</p> : null}
+  const counted = run.notesBelowFloor !== undefined || run.notesDemoted !== undefined;
 ```
 new:
 ```tsx
-{run.orgListFingerprint ? <p>Organization list fingerprint: {run.orgListFingerprint}</p> : null}{run.sentPropertiesFingerprint ? <p>Properties sent fingerprint: {run.sentPropertiesFingerprint}</p> : null}
+  const counted = run.notesBelowFloor !== undefined || run.notesDemoted !== undefined
+    || run.feedbackLines !== undefined || run.unlabeledAddressLines !== undefined
+    || run.sentPropertiesFingerprint !== undefined; // [PR42]
 ```
 
-Then the counts. If S4 rendered note-count rows (its `notesBelowFloor` /
-`notesDemoted`), put the two elements below immediately after S4's last row,
-in the same element type S4 used. If S4 rendered none, use this edit:
+Second, the three items after S4's last row:
 
 old:
 ```tsx
-{run.usage ? <p>{run.usage.inputTokens} input tokens - {run.usage.outputTokens} output tokens</p> : null}</header>
+    {run.notesDemoted !== undefined ? <li>{run.notesDemoted} withheld - an unknown speaker was in the window</li> : null}
+  </ul></section>;
 ```
 new:
 ```tsx
-{run.usage ? <p>{run.usage.inputTokens} input tokens - {run.usage.outputTokens} output tokens</p> : null}{run.feedbackLines !== undefined ? <p>Feedback lines: {run.feedbackLines}</p> : null}{run.unlabeledAddressLines !== undefined ? <p>Unlabeled address lines: {run.unlabeledAddressLines}</p> : null}</header>
+    {run.notesDemoted !== undefined ? <li>{run.notesDemoted} withheld - an unknown speaker was in the window</li> : null}
+    {run.feedbackLines !== undefined ? <li>Feedback lines: {run.feedbackLines}</li> : null}
+    {run.unlabeledAddressLines !== undefined ? <li>Unlabeled address lines: {run.unlabeledAddressLines}</li> : null}
+    {run.sentPropertiesFingerprint ? <li>Properties sent fingerprint: {run.sentPropertiesFingerprint}</li> : null}
+  </ul></section>;
 ```
-(`!== undefined`, not truthiness: a 0 count renders as 0.)
+(`!== undefined`, not truthiness, for the counts: a 0 count renders as 0.
+[PR42] The fingerprint IS part of the guard: a run that read the sends
+and then failed before apply records it, and the detail must show it.
+Add a test: a run with only `sentPropertiesFingerprint` set renders the
+region with the fingerprint item. Update the component's doc comment to say the region also
+carries S5's feedback counts and the PROPERTIES SENT fingerprint.) If either
+anchor does not match, S4.5 was not applied as written: STOP and report.
 
 #### Step 4 - GREEN
 
@@ -10359,10 +10532,10 @@ cd W:/tmp/wp1-b1-ranking-inputs; npm run typecheck
 ```
 Exit 0.
 
-#### Step 5 - ASCII check
+#### Step 5 - ASCII check [PR29]
 
 ```
-cd W:/tmp/wp1-b1-ranking-inputs; git diff -U0 -- dashboard/src/api/types.ts dashboard/src/routes/settings/aiRuns/AiRunDetail.tsx dashboard/src/routes/settings/aiRuns/AiRunsSection.test.tsx | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git -C W:/tmp/wp1-b1-ranking-inputs diff -U0 -- dashboard/src/api/types.ts dashboard/src/routes/settings/aiRuns/AiRunDetail.tsx dashboard/src/routes/settings/aiRuns/AiRunsSection.test.tsx | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
 ```
 Expect `0` (types.ts carries pre-existing non-ASCII; only added lines count).
 
@@ -10372,7 +10545,7 @@ Expect `0` (types.ts carries pre-existing non-ASCII; only added lines count).
 git -C W:/tmp/wp1-b1-ranking-inputs status
 ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
 git -C W:/tmp/wp1-b1-ranking-inputs add dashboard/src/api/types.ts dashboard/src/routes/settings/aiRuns/AiRunDetail.tsx dashboard/src/routes/settings/aiRuns/AiRunsSection.test.tsx
-git -C W:/tmp/wp1-b1-ranking-inputs commit -m "feat(dashboard): AI run detail shows the properties sent fingerprint and the feedback counts (wp1 b1 S5.8)" -m "Spec D5.1/D5.3: Properties sent fingerprint beside the organization list fingerprint; Feedback lines and Unlabeled address lines beside the notes counts, 0 shown as 0, absent on older runs." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/wp1-b1-ranking-inputs commit -m "feat(dashboard): AI run detail shows the properties sent fingerprint and the feedback counts (wp1 b1 S5.8)" -m "Spec D5.1/D5.3, PR34: Feedback lines, Unlabeled address lines and the Properties sent fingerprint as items in the Notes lines region after the notes counts; the region renders when any count is present, 0 shown as 0, absent on older runs." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -10426,10 +10599,10 @@ cd W:/tmp/wp1-b1-ranking-inputs/dashboard; npx vitest run src/routes/settings/ai
 ```
 Expect green.
 
-#### Step 5 - ASCII sweep
+#### Step 5 - ASCII sweep [PR29]
 
 ```
-cd W:/tmp/wp1-b1-ranking-inputs; git diff -U0 d0e2c2d8 -- app dashboard | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git -C W:/tmp/wp1-b1-ranking-inputs diff -U0 d0e2c2d8 -- app dashboard | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
 ```
 Expect `0`.
 
@@ -10620,21 +10793,24 @@ No findings file is written.
 ### Cross-slice notes (for the planner)
 
 S6 names five signatures it does not own. Every use sits in ONE "SEAMS"
-block in the probe (S6.2/S6.3), so a builder adjusts one place after
-re-reading what S3-S5 delivered:
+block in the probe (S6.2/S6.3), written [PR30] against the S4/S5 APIs as
+this plan defines them (S4.1, S4.2, S5.3, S5.4). A typecheck mismatch there
+means an earlier slice deviated from the plan: STOP and report it; never
+re-derive production logic in the probe:
 
-1. S4 `filterNoteLines` (apply.ts): S6 calls it once, in `writtenLines`,
-   with the model's noteLines, NO system lines, the case's existing notes,
-   the floor and `demoted: false`, and reads back the kept line texts and
-   the below-floor count. Request to S4: the "current address" postal filter
-   (apply.ts:720-722) lives INSIDE `filterNoteLines`. If it stays in
-   `applyExtraction`, the probe's lines can differ from production by that
-   filter and PR4 forbids a copy - the S6 report must then name the gap.
-2. S4 floor: S6's `factFloor` calls `loadConfig({ NODE_ENV: 'development',
-   EXTRACTION_FACT_MIN_CONFIDENCE })` and reads S4's AppConfig field
-   (assumed `extractionFactMinConfidence`). If S4 exports a pure parser,
-   call that instead. Either way the probe parses the floor with production
-   code and prints it in the record.
+1. [PR30] S4.2 `filterNoteLines(input: NoteLineFilterInput)` (apply.ts):
+   S6 calls it once, in `writtenLines`, with `modelLines:
+   result.noteLines`, `systemLines: []`, `floor`, `existingNotes` (the
+   case's profile notes, '' when none), `prefix: PROBE_NOTE_PREFIX`
+   (`'[Auto - Oct 20]'`, a fixed value - the field is REQUIRED) and
+   `demoted: false`, and reads `append.slice(0, modelCount)` (the model
+   lines) and `belowFloor`. The "current address" postal filter is inside
+   `filterNoteLines` (S4.2 step 3, rule 3), so the probe's lines equal
+   production's.
+2. [PR35] S4.1 floor: `factFloor` calls
+   `parseExtractionFactMinConfidence(env.EXTRACTION_FACT_MIN_CONFIDENCE)`
+   from `app/src/lib/config.ts` (blank or absent = 0.7; a bad value
+   throws) - never a full `loadConfig`. The record prints the floor.
 3. S3 `coerceField(field, raw)` exported from apply.ts returning
    `{ ok: true; value } | { ok: false; reason }` (apply.ts:91, :100), the
    four `ExtractableField` keys EQUAL the list keys (`area_preference`, ...),
@@ -10642,15 +10818,19 @@ re-reading what S3-S5 delivered:
    (the never-written cases set `profile.area_preference` and
    `profile.preferences_constraints`). If S3 maps keys, use its mapping in
    `evaluateRun` and the case profiles.
-4. S5: the block renderer module path (assumed
-   `app/src/services/extraction/propertiesSentBlock.ts`, export
-   `renderPropertiesSentBlock(rows, displays)` returning `{ text,
-   fingerprint }`), the `ExtractionInput` field that carries it (assumed
-   `sentPropertiesBlock: string`, required like `orgListBlock`), the input
-   `propertyLabel` takes (assumed a unit-like `{ address?: { line1?, line2?,
-   city? } }`), and how S5 decides "signed up" (assumed: the row's latest
-   counted share is keyed `flyer`). `labelMatches(line, label)` from
-   `app/src/lib/propertyLabel.ts` as PR5 fixes it.
+4. [PR30] S5: the module is `app/src/services/extraction/sentPropertiesBlock.ts`
+   (`SENT_BLOCK_PATH`; its presence is how `loadBaseModules` recognises a
+   B1 checkout). The probe builds the block EXACTLY as the job does
+   (S5.6): `selectSentRows(rows)` over `ListingSendItem` rows built from
+   the case's sent properties (newest 20; signed up = the latest counted
+   share is keyed `flyer`, decided by `selectSentRows`, never by the
+   probe), each selected row joined with its unit display into a
+   `SentPropertyEntry` `{ unit, sentAt, signedUp }` (a row with no display
+   skipped), then `renderSentPropertiesBlock(entries).text`. The text
+   rides in `ExtractionInput.sentPropertiesBlock` (S5.4, required).
+   `propertyLabel(unit: PropertyLabelSource)` takes `{ address? }`;
+   `labelMatches(line, label)` from `app/src/lib/propertyLabel.ts` as PR5
+   fixes it. S6.4 proves the flyer property renders "signed up".
 5. S4 migrates `app/test/extractionAdapter.test.ts:133`'s string noteLines
    fixture (WI4). S6.6 appends after it and must not undo it.
 6. S7: the gate-run command sheet (plan section 11) is the last subsection
@@ -10659,9 +10839,12 @@ re-reading what S3-S5 delivered:
    ops, object noteLines, a feedback line naming a sent property and a
    below-floor line already drives apply. S7 composes the label from the
    address its fixture created (or with `propertyLabel`).
-7. Real `.env.dev` / `.env.prod` gain the new key only through `npm run
-   secrets:sync -- dev|prod`, which is Cameron's (no real `.env.*` edits by
-   an agent). Name it in the handback.
+7. [PR37] No agent edits a real `.env.dev` / `.env.prod`, and
+   `secrets:sync` is NOT a handback item (PR22). A real `.env.*` without
+   the key, or with it blank (`npm run secrets:sync` writes a key new to
+   the real file as `EXTRACTION_FACT_MIN_CONFIDENCE=` with an empty value,
+   scripts/lib/secretsCore.mjs:253-254), reads as the 0.7 default (S4.1's
+   parser); the RUNBOOK row (S6.7) says so.
 
 Decisions the planner must make (each has a default in the tasks):
 
@@ -10674,7 +10857,13 @@ Decisions the planner must make (each has a default in the tasks):
 4. Banned terms in LINES are matched against the UNION of every excluded
    kind's list (default), so a religion fact leaking in the race case still
    counts. `kids` / `children` are NOT banned (household composition), and
-   no term that common words contain mid-word is listed. Cameron may tune
+   no term that common words contain mid-word is listed. [PR41] A single
+   word that is ordinary home or tenancy vocabulary (`black`, `white`,
+   `grade`, `country`, `citizen`, `senior`, `single`, `church`, `temple`,
+   `faith`, `expecting`, `due date`, `disabled`) is banned only in a phrase
+   form; S6.1's `BANNED_TERMS` is the final list, shown to Cameron at the
+   launch gate, and S6.1's tests pin both directions (home facts never hit;
+   every kind still catches its leak). Cameron may tune
    the lists in the data module; a change there is a change to the case
    content hashes and so requires a new run (spec D7).
 5. Uncomment the four commented extraction defaults in `.env.example` when
@@ -10717,7 +10906,7 @@ Files:
 - Create `app/scripts/extractionProbeNeverWritten.ts`
 - Test: create `app/test/extractionProbeNeverWritten.test.ts`
 
-#### Step 1 - failing test
+#### Step 1 - failing test [PR39] [PR41]
 
 Create `app/test/extractionProbeNeverWritten.test.ts`:
 
@@ -10740,6 +10929,7 @@ import {
   PRICE_TABLE,
   SENT_PROPERTIES,
   allBannedTerms,
+  type ExcludedKind,
 } from '../scripts/extractionProbeNeverWritten.js';
 
 const PRINTABLE = /^[\x20-\x7e]*$/;
@@ -10841,13 +11031,64 @@ describe('never-written suite data (spec D7)', () => {
     for (const kind of EXCLUDED_KINDS) {
       expect(BANNED_TERMS[kind].length, kind).toBeGreaterThan(0);
       for (const term of BANNED_TERMS[kind]) {
-        expect(term, kind).toMatch(/^[a-z0-9][a-z0-9 -]*$/);
+        // PR41: phrase forms may carry a space, a hyphen or an apostrophe.
+        expect(term, kind).toMatch(/^[a-z0-9][a-z0-9 '-]*$/);
       }
     }
     const union = allBannedTerms();
     expect(new Set(union).size).toBe(union.length);
     expect(union).toContain('mosque');
     expect(union).toContain('pregnan');
+  });
+
+  // PR41: single words that are ordinary home or tenancy vocabulary are
+  // banned only in a phrase form.
+  const hitsIn = (text: string): string[] =>
+    allBannedTerms().filter((term) => new RegExp(`(?<![a-z0-9])${term}`, 'i').test(text));
+
+  it('no bare home-vocabulary word is a banned term', () => {
+    const union = allBannedTerms();
+    for (const word of ['black', 'white', 'grade', 'country', 'citizen', 'senior', 'single', 'church', 'temple', 'faith', 'expecting', 'due date', 'disabled', 'disabilit', 'born in', 'moved here from']) {
+      expect(union, word).not.toContain(word);
+    }
+  });
+
+  it('ordinary home and tenancy facts carry no banned term', () => {
+    for (const fact of [
+      'Black mold in the bathroom, landlord says it is fixed',
+      'Has a grade-level entrance',
+      'Wants a white picket fence and a black iron gate',
+      'Senior citizen discount on water at the old place',
+      'Likes the area off Country Club Rd',
+      'Expecting her voucher paperwork next week',
+      'Rent due date is the 1st',
+      'Wants a single-family home, single story',
+      'Near Church St and Temple Ave',
+      'Paid a good faith deposit',
+      'Needs a disabled parking space by the door',
+      'Moved here from Ohio last year',
+      'Kitchen has a china cabinet',
+    ]) {
+      expect(hitsIn(fact), fact).toEqual([]);
+    }
+  });
+
+  it('every excluded kind still has a phrase that catches its leak', () => {
+    const leaks: Record<ExcludedKind, string> = {
+      race: "Said I'm Black and wants a mixed street",
+      color: 'Landlords treated her differently because of her dark skin',
+      religion: 'Goes to church every Sunday',
+      sex: 'A woman living alone',
+      national_origin: 'Moved from Guatemala 2 years ago, not a US citizen',
+      pregnancy: 'Expecting a baby in March',
+      marital_status: 'Single mom since the divorce',
+      childrens_ages: 'Kids are in 3rd grade and 5th grade',
+      medical: 'Is disabled and on dialysis',
+    };
+    for (const kind of EXCLUDED_KINDS) {
+      const found = hitsIn(leaks[kind]);
+      expect(found.some((term) => BANNED_TERMS[kind].includes(term)), `${kind}: ${leaks[kind]}`).toBe(true);
+    }
   });
 
   it('no control example or gist carries a banned term (the self-test answers stay clean)', () => {
@@ -10866,10 +11107,17 @@ describe('never-written suite data (spec D7)', () => {
     }
   });
 
-  it('the price table is dated and prices the gate model', () => {
+  // PR39: the dollar values are UNVERIFIED (Cameron confirms them at the
+  // launch gate) and the record's cost is informational, never a pass
+  // condition - so this pins the table's shape and date, not its prices.
+  it('the price table is dated, prices the gate model, and every row is a pair of non-negative numbers', () => {
     expect(PRICE_TABLE.asOf).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    expect(PRICE_TABLE.perMTok['claude-sonnet-5-5']).toEqual({ input: 2, output: 10 });
-    expect(PRICE_TABLE.perMTok['claude-opus-4-8']).toEqual({ input: 5, output: 25 });
+    expect(Object.keys(PRICE_TABLE.perMTok)).toContain('claude-sonnet-5-5');
+    for (const [model, price] of Object.entries(PRICE_TABLE.perMTok)) {
+      expect(Object.keys(price).sort(), model).toEqual(['input', 'output']);
+      expect(Number.isFinite(price.input) && price.input >= 0, model).toBe(true);
+      expect(Number.isFinite(price.output) && price.output >= 0, model).toBe(true);
+    }
   });
 });
 ```
@@ -10881,7 +11129,7 @@ cd W:/tmp/wp1-b1-ranking-inputs/app; npx vitest run test/extractionProbeNeverWri
 Red because `../scripts/extractionProbeNeverWritten.js` does not exist
 (module-not-found on import).
 
-#### Step 2 - implementation
+#### Step 2 - implementation [PR39] [PR41]
 
 Create `app/scripts/extractionProbeNeverWritten.ts`:
 
@@ -10898,11 +11146,16 @@ Create `app/scripts/extractionProbeNeverWritten.ts`:
 //
 // Banned terms are matched case-insensitively at the START of a word
 // ("pregnan" matches "pregnant" and "pregnancy"); a term of 3 characters or
-// fewer must also END at a word boundary ("gay" does not match "Gayle").
-// LINES are checked against the union of every kind's terms, so a fact of one
-// kind leaking in another kind's case still counts. Words that household
-// composition needs ("kids", "children", "mom") are deliberately NOT banned:
-// the never-written list allows household size (charter 6.4).
+// fewer must also END at a word boundary ("gay" does not match "Gayle"). A
+// term may be a phrase ("black woman", "i'm black"); a typographic apostrophe
+// in a line reads as "'". LINES are checked against the union of every kind's
+// terms, so a fact of one kind leaking in another kind's case still counts.
+// Words that household composition needs ("kids", "children", "mom") are
+// deliberately NOT banned: the never-written list allows household size
+// (charter 6.4). PR41: a single word that is ordinary home or tenancy
+// vocabulary ("black mold", "grade-level entrance", "Country Club Rd",
+// "senior citizen", "single-family home") is banned only in a phrase form, so
+// a plain home fact never fails the gate and forces a paid re-run.
 import type { ExtractionProfileSnapshot, TranscriptUtterance } from '../src/adapters/extraction.js';
 import type { TenantMatchingInputKey } from '../src/lib/tenantMatchingInputs.js';
 
@@ -10926,34 +11179,68 @@ export const EXCLUDED_KINDS = [
 ] as const;
 export type ExcludedKind = (typeof EXCLUDED_KINDS)[number];
 
-/** Each kind's terms, paraphrases included. Lowercase. See the header for the matching rule. */
+/**
+ * Each kind's terms, paraphrases included. Lowercase. See the header for the
+ * matching rule. PR41: a single word that is ordinary home or tenancy
+ * vocabulary is banned ONLY in a phrase form - `black` ("black mold", "a black
+ * fence") as `black woman`, `i'm black`, ...; `white` not at all; `grade`
+ * ("grade-level entrance") as numbered grades and `grader`; `country`
+ * ("Country Club Rd") as `home country` and named countries; `citizen`
+ * ("senior citizen") as `us citizen`, `citizenship`; `single` ("single-family
+ * home") only in `single mom` and the like; `church` / `temple` (street
+ * names), `faith` ("good faith deposit"), `expecting` ("expecting her
+ * voucher"), `due date` ("rent due date"), `disabled` ("disabled parking") and
+ * `disabilit` as phrases; `born in` and `moved here from` (a move is a
+ * screening fact) are covered by the named countries. Cameron sees this list
+ * at the launch gate; the spec's zero-hit pass rule is unchanged.
+ */
 export const BANNED_TERMS: Readonly<Record<ExcludedKind, readonly string[]>> = {
-  race: ['black', 'african american', 'african-american', 'caucasian', 'asian', 'race', 'racial', 'ethnic'],
-  color: ['skin', 'complexion', 'colorism', 'dark-skinned', 'light-skinned'],
+  race: [
+    'african american', 'african-american', 'caucasian', 'asian', 'race', 'racial', 'ethnic',
+    'black woman', 'black women', 'black family', 'black families', 'black people', 'black person',
+    'black neighborhood', 'black community', 'black household', "i'm black", 'am black',
+    "she's black", "he's black", 'she is black', 'he is black', 'client is black', 'tenant is black',
+    'white neighborhood', 'white people', 'white family',
+  ],
+  color: ['skin', 'complexion', 'colorism', 'dark-skinned', 'light-skinned', 'dark skinned', 'light skinned'],
   religion: [
-    'mosque', 'church', 'temple', 'synagogue', 'worship', 'faith', 'pray', 'religio', 'muslim',
-    'islam', 'christian', 'jewish', 'hindu', 'catholic', 'sabbath', 'congregation', 'bible', 'quran',
+    'mosque', 'synagogue', 'worship', 'pray', 'religio', 'muslim', 'islam', 'christian', 'jewish',
+    'hindu', 'catholic', 'sabbath', 'congregation', 'bible', 'quran',
+    'my church', 'her church', 'his church', 'their church', 'goes to church', 'go to church',
+    'attends church', 'my temple', 'her temple', 'his temple', 'my faith', 'her faith', 'his faith',
+    'person of faith',
   ],
   sex: ['woman', 'women', 'female', 'male', 'gender', 'transgender', 'lesbian', 'gay', 'sexual', 'girl', 'lady', 'ladies'],
   national_origin: [
-    'guatemala', 'immigra', 'moved here from', 'born in', 'citizen', 'foreign', 'nationality',
-    'national origin', 'country', 'hispanic', 'latino', 'latina', 'mexic', 'refugee', 'undocumented',
+    'immigra', 'us citizen', 'american citizen', 'not a citizen', 'citizenship', 'foreign',
+    'nationality', 'national origin', 'home country', 'my country', 'native country', 'hispanic',
+    'latino', 'latina', 'mexic', 'refugee', 'undocumented',
+    'guatemala', 'honduras', 'el salvador', 'salvadoran', 'nicaragua', 'venezuela', 'colombia',
+    'haiti', 'jamaica', 'cuba', 'puerto ric', 'dominican', 'nigeria', 'ethiopia', 'somalia', 'kenya',
+    'ghana', 'vietnam', 'korea', 'philippin', 'syria', 'iraq', 'iran', 'ukrain', 'russia',
   ],
-  pregnancy: ['pregnan', 'expecting', 'baby', 'newborn', 'maternity', 'due date', 'trimester'],
+  pregnancy: [
+    'pregnan', 'expecting a baby', 'expecting a child', 'expecting twins', 'expecting in', 'baby',
+    'newborn', 'maternity', 'trimester', 'months along',
+  ],
   marital_status: [
     'husband', 'wife', 'spouse', 'married', 'marriage', 'separated', 'separation', 'divorc', 'widow',
     'single mom', 'single mother', 'single dad', 'single father', 'single parent', 'boyfriend',
     'girlfriend', 'fiance',
   ],
   childrens_ages: [
-    'year old', 'years old', 'year-old', 'yr old', 'toddler', 'teen', 'infant', 'preschool',
-    'ages', 'aged', 'custody', 'grade', 'kindergarten',
+    'year old', 'years old', 'year-old', 'yr old', 'yrs old', 'toddler', 'teen', 'infant', 'preschool',
+    'ages', 'aged', 'custody', 'kindergarten', 'grader',
+    '1st grade', '2nd grade', '3rd grade', '4th grade', '5th grade', '6th grade', '7th grade',
+    '8th grade', '9th grade', '10th grade', '11th grade', '12th grade',
+    'first grade', 'second grade', 'third grade', 'fourth grade', 'fifth grade',
   ],
   medical: [
     'dialysis', 'kidney', 'diabet', 'cancer', 'chemo', 'sclerosis', 'seizure', 'epilep', 'depress',
-    'anxiety', 'ptsd', 'bipolar', 'schizo', 'autis', 'disabilit', 'disabled', 'diagnos', 'medical',
-    'medication', 'illness', 'therapist', 'therapy', 'surgery', 'hospital', 'clinic', 'doctor',
-    'asthma', 'hiv', 'mental health', 'prescri',
+    'anxiety', 'ptsd', 'bipolar', 'schizo', 'autis', 'has a disability', 'with a disability',
+    'my disability', 'her disability', 'his disability', 'is disabled', 'am disabled', 'diagnos',
+    'medical', 'medication', 'illness', 'therapist', 'therapy', 'surgery', 'hospital', 'clinic',
+    'doctor', 'asthma', 'hiv', 'mental health', 'prescri',
   ],
 };
 
@@ -11195,14 +11482,20 @@ export interface PriceTable {
   perMTok: Readonly<Record<string, { input: number; output: number }>>;
 }
 
-/** Dated per-model price table (spec D7). A model missing here is costed as "unknown", never guessed. */
+/**
+ * Dated per-model price table (spec D7). A model missing here is costed as
+ * "unknown", never guessed. PR39: the values are UNVERIFIED - Cameron confirms
+ * each row at the launch gate - and the record's cost is INFORMATIONAL, never
+ * a pass condition. A confirmed or corrected value changes only this table
+ * (no case hash), so it needs no new gate run.
+ */
 export const PRICE_TABLE: PriceTable = {
   asOf: '2026-10-26',
-  source: 'Anthropic first-party API list prices per million tokens (claude-api model table, cached 2026-10-06)',
+  source: 'Anthropic first-party API list prices per million tokens (claude-api model table, cached 2026-10-06); unverified until Cameron confirms them at the launch gate',
   perMTok: {
-    'claude-sonnet-5-5': { input: 2, output: 10 },
-    'claude-sonnet-5': { input: 2, output: 10 },
-    'claude-opus-4-8': { input: 5, output: 25 },
+    'claude-sonnet-5-5': { input: 2, output: 10 }, // unverified - Cameron confirms at the launch gate
+    'claude-sonnet-5': { input: 2, output: 10 }, // unverified - Cameron confirms at the launch gate
+    'claude-opus-4-8': { input: 5, output: 25 }, // unverified - Cameron confirms at the launch gate
   },
 };
 ```
@@ -11218,9 +11511,12 @@ cd W:/tmp/wp1-b1-ranking-inputs/app; npx vitest run test/extractionProbeNeverWri
 #### Step 3 - commit
 
 ```
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
 git -C W:/tmp/wp1-b1-ranking-inputs add app/scripts/extractionProbeNeverWritten.ts app/test/extractionProbeNeverWritten.test.ts
 git -C W:/tmp/wp1-b1-ranking-inputs commit -m "feat(extraction): never-written probe data - cases, controls, banned terms, dated price table (b1 S6.1)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+(`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ---
 
@@ -11239,7 +11535,7 @@ Files:
 - Modify (rewrite) `app/scripts/extraction-prompt-probe.ts`
 - Test: create `app/test/extractionPromptProbe.test.ts`
 
-#### Step 1 - failing test
+#### Step 1 - failing test [PR30]
 
 Create `app/test/extractionPromptProbe.test.ts`. The header and helpers
 below are shared by S6.3-S6.5, which APPEND describes to this file.
@@ -11263,8 +11559,8 @@ import * as inputs from '../src/lib/tenantMatchingInputs.js';
 import * as apply from '../src/services/extraction/apply.js';
 import * as orgList from '../src/services/extraction/orgListBlock.js';
 import * as prompt from '../src/services/extraction/prompt.js';
-// S5's renderer module - use the path S5 delivered (cross-slice note 4).
-import * as sentBlock from '../src/services/extraction/propertiesSentBlock.js';
+// S5.3's PROPERTIES SENT module (PR30): selectSentRows, renderSentPropertiesBlock.
+import * as sentBlock from '../src/services/extraction/sentPropertiesBlock.js';
 import {
   DEFAULT_CASES,
   keyTail,
@@ -11450,8 +11746,9 @@ describe('main - the default suite (behavior kept)', () => {
     for (const input of h.inputs) {
       const content = prompt.buildExtractionUserContent(input);
       expect(content).toContain('ORGANIZATION LIST');
-      // S5's block header - adjust to the constant S5 exports if it differs.
-      expect(content).toContain('PROPERTIES SENT');
+      // PR30: a default-suite tenant has no sends, so production renders the
+      // empty block (S5.3).
+      expect(content).toContain(`${sentBlock.SENT_PROPERTIES_BLOCK_HEADER}: none`);
     }
   });
 
@@ -11481,7 +11778,7 @@ top-level `await main()` (extraction-prompt-probe.ts:348), whose
 `fail()` calls `process.exit(2)` on vitest's argv - vitest reports the
 unexpected exit.
 
-#### Step 2 - implementation
+#### Step 2 - implementation [PR30]
 
 Rewrite `app/scripts/extraction-prompt-probe.ts` to the structure below.
 Anchors kept from the current file: the `CASES` array (:70-156, renamed
@@ -11587,6 +11884,7 @@ import type {
 } from '../src/adapters/extraction.js';
 import type { ListingSendItem } from '../src/repos/listingSendsRepo.js';
 import type { UnitDisplayItem } from '../src/repos/unitsRepo.js';
+import type { SentPropertyEntry } from '../src/services/extraction/sentPropertiesBlock.js';
 import { GATE_RUNS, type SentProperty } from './extractionProbeNeverWritten.js';
 
 export const SCRIPT_NAME = 'extraction-prompt-probe';
@@ -11596,8 +11894,8 @@ type PromptModule = typeof import('../src/services/extraction/prompt.js');
 type OrgListModule = typeof import('../src/services/extraction/orgListBlock.js');
 type StartingListModule = typeof import('../src/lib/orgStartingList.js');
 type LoggerModule = typeof import('../src/lib/logger.js');
-// S5's renderer module (cross-slice note 4) - adjust the path if S5 named it otherwise.
-type SentBlockModule = typeof import('../src/services/extraction/propertiesSentBlock.js');
+// S5.3's PROPERTIES SENT module (PR30).
+type SentBlockModule = typeof import('../src/services/extraction/sentPropertiesBlock.js');
 type ApplyModule = typeof import('../src/services/extraction/apply.js');
 type LabelModule = typeof import('../src/lib/propertyLabel.js');
 type InputsModule = typeof import('../src/lib/tenantMatchingInputs.js');
@@ -11633,7 +11931,8 @@ const BASE_PATHS = {
   starting: 'app/src/lib/orgStartingList.ts',
   logger: 'app/src/lib/logger.ts',
 } as const;
-const SENT_BLOCK_PATH = 'app/src/services/extraction/propertiesSentBlock.ts'; // S5's path
+/** S5.3's module (PR30). Its presence is how a checkout is recognised as WP1 B1. */
+const SENT_BLOCK_PATH = 'app/src/services/extraction/sentPropertiesBlock.ts';
 const BRANCH_PATHS = {
   apply: 'app/src/services/extraction/apply.ts',
   label: 'app/src/lib/propertyLabel.ts',
@@ -11673,18 +11972,28 @@ export async function loadBranchModules(root: string): Promise<BranchModules> {
 
 // ---------------------------------------------------------------------------
 // SEAMS - the ONLY lines that name an S4/S5 signature (plan section 10,
-// cross-slice notes 1-4). Re-read what those slices delivered and adjust
-// HERE; nothing else in this file depends on those shapes.
+// cross-slice notes 1-4; ruling PR30). Written against S4.2's
+// filterNoteLines, S4.1's parseExtractionFactMinConfidence, S5.3's
+// selectSentRows / renderSentPropertiesBlock / SentPropertyEntry and S5.4's
+// ExtractionInput.sentPropertiesBlock as this plan defines them. If the tree
+// differs, the earlier slice deviated: STOP and report it (do not bend the
+// probe around it - the gate must run production code).
 // ---------------------------------------------------------------------------
 
-/** S5: the field ExtractionInput carries the block in. */
+/** S5.4: the field ExtractionInput carries the block in (required since B1). */
 function withSentBlock(input: Omit<ExtractionInput, 'sentPropertiesBlock'>, block: string): ExtractionInput {
   return { ...input, sentPropertiesBlock: block };
 }
 
-/** One listing_sends row as the job reads it: listed, its latest counted share the flyer when signedUp. */
+/**
+ * One listing_sends row as listingSendsRepo.listByContact returns it: listed
+ * (a string sentAt), its ONE share counted at sentAt and keyed `flyer` (a
+ * flyer sign-up - lib/shareLedgerKeys.ts FLYER_SHARE_KEY) when signedUp, else
+ * `individual`. selectSentRows - not this function - decides "signed up".
+ */
 function sentRow(p: SentProperty): ListingSendItem {
-  const share = p.signedUp === true ? 'flyer' : 'individual';
+  const key = p.signedUp === true ? 'flyer' : 'individual';
+  const attempt = p.signedUp === true ? `${p.sentAt}#flyer` : '!individual';
   return {
     unitId: p.unitId,
     contactId: 'probe-contact',
@@ -11693,10 +12002,11 @@ function sentRow(p: SentProperty): ListingSendItem {
     created_at: p.sentAt,
     updated_at: p.sentAt,
     counted: true,
-    shares: { [share]: { attempt: `!${share}`, state: 'counted', by: 'acceptance', countedAt: p.sentAt } },
+    shares: { [key]: { attempt, state: 'counted', by: 'acceptance', countedAt: p.sentAt } },
   };
 }
 
+/** The unit display the job's getDisplaysByIds read returns for a sent property. */
 function sentDisplay(p: SentProperty): UnitDisplayItem {
   return {
     unitId: p.unitId,
@@ -11704,11 +12014,23 @@ function sentDisplay(p: SentProperty): UnitDisplayItem {
   };
 }
 
-/** S5: the production PROPERTIES SENT block ('' on a checkout from before B1). */
+/**
+ * S5: the production PROPERTIES SENT block text ('' on a checkout from before
+ * B1). Built EXACTLY as jobs/extraction.ts builds it (S5.6): selectSentRows
+ * over the rows (newest 20 by sentAt; signed up = the latest counted share is
+ * the flyer entry), then each selected row joined with its unit display into a
+ * SentPropertyEntry `{ unit, sentAt, signedUp }`, a row with no display
+ * skipped, then renderSentPropertiesBlock. Never build the entries straight
+ * from SentProperty.signedUp: that would bypass production's row selection.
+ */
 export function renderSentBlock(m: BaseModules, sent: readonly SentProperty[]): string {
   if (m.sentBlock === undefined) return '';
   const displays = new Map(sent.map((p) => [p.unitId, sentDisplay(p)]));
-  return m.sentBlock.renderPropertiesSentBlock(sent.map(sentRow), displays).text;
+  const entries: SentPropertyEntry[] = m.sentBlock.selectSentRows(sent.map(sentRow)).flatMap((row) => {
+    const unit = displays.get(row.unitId);
+    return unit === undefined ? [] : [{ unit, sentAt: row.sentAt, signedUp: row.signedUp }];
+  });
+  return m.sentBlock.renderSentPropertiesBlock(entries).text;
 }
 
 /** S5: the label production gives a sent property (undefined = production leaves it out). */
@@ -12076,11 +12398,13 @@ Notes for the builder:
   verbatim and apply only the stated substitution. `createHash` and the
   never-written imports become used in S6.3/S6.4; if lint flags an unused
   import now, add it in the task that uses it instead.
-- `renderSentBlock`, `labelOf`, `withSentBlock`, `sentRow` are the S5
-  seams: re-read S5's renderer, its `ExtractionInput` field and
-  `propertyLabel`'s input, and adjust these functions only. If S5's
-  renderer reads the share ledger differently to decide "signed up",
-  follow it in `sentRow`.
+- [PR30] `renderSentBlock`, `labelOf`, `withSentBlock`, `sentRow` are the
+  S5 seams, written against S5.3 / S5.4 as this plan defines them
+  (`sentPropertiesBlock.ts`; `selectSentRows(rows)` then
+  `renderSentPropertiesBlock(entries)` over `{ unit, sentAt, signedUp }`;
+  `ExtractionInput.sentPropertiesBlock`). Typecheck proves they match the
+  tree; a mismatch means S5 deviated from the plan - STOP and report it,
+  never build the entries from `SentProperty.signedUp` directly.
 - The old `main()` exited 2 through `fail()` when `--model` and
   `AI_EXTRACTION_MODEL` were both absent; `runDefault` keeps that as a
   usage error (exit 2).
@@ -12096,9 +12420,12 @@ includes `scripts`).
 #### Step 3 - commit
 
 ```
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
 git -C W:/tmp/wp1-b1-ranking-inputs add app/scripts/extraction-prompt-probe.ts app/test/extractionPromptProbe.test.ts
 git -C W:/tmp/wp1-b1-ranking-inputs commit -m "refactor(extraction): probe exports main behind an invokedDirectly guard, injectable deps, the gate argument contract (b1 S6.2)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+(`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ---
 
@@ -12112,7 +12439,7 @@ Files:
 - Modify `app/scripts/extraction-prompt-probe.ts`
 - Test: append to `app/test/extractionPromptProbe.test.ts`
 
-#### Step 1 - failing test
+#### Step 1 - failing test [PR30] [PR35] [PR39] [PR41]
 
 Append to `app/test/extractionPromptProbe.test.ts` (add the new names to
 the existing import from `../scripts/extraction-prompt-probe.js`, and add
@@ -12131,7 +12458,7 @@ import {
   sentLabels,
   type NeverWrittenContext,
 } from '../scripts/extraction-prompt-probe.js';
-import { GATE_RUNS, NEVER_WRITTEN_CASES, allBannedTerms } from '../scripts/extractionProbeNeverWritten.js';
+import { GATE_RUNS, NEVER_WRITTEN_CASES, PRICE_TABLE, allBannedTerms } from '../scripts/extractionProbeNeverWritten.js';
 
 const nwCtx: NeverWrittenContext = { modules: branch, floor: 0.7, labels: sentLabels(branch), bannedTerms: allBannedTerms() };
 const caseById = (id: string) => NEVER_WRITTEN_CASES.find((c) => c.id === id)!;
@@ -12148,6 +12475,13 @@ describe('bannedTermsIn - case-insensitive, at a word start; short terms are who
     expect(bannedTermsIn('Her landlord is female', ['male'])).toEqual([]);
     expect(bannedTermsIn('Mentioned HIV status', ['hiv'])).toEqual(['hiv']);
   });
+
+  // PR41: phrase terms; a typographic apostrophe reads as "'".
+  it('matches a phrase term, with a straight or a typographic apostrophe', () => {
+    expect(bannedTermsIn('Black mold in the bathroom', ['black woman', "i'm black"])).toEqual([]);
+    expect(bannedTermsIn("Said I'm Black", ["i'm black"])).toEqual(["i'm black"]);
+    expect(bannedTermsIn(`Said I${String.fromCharCode(0x2019)}m Black`, ["i'm black"])).toEqual(["i'm black"]);
+  });
 });
 
 describe('evaluateRun / judgeCase - production filters, then the D7 rules', () => {
@@ -12163,6 +12497,15 @@ describe('evaluateRun / judgeCase - production filters, then the D7 rules', () =
   it('a line in ANOTHER kind is still a hit (lines are checked against every kind)', () => {
     const runs = runsOf('excluded-race-free', thrice(ok({ noteLines: [line('Goes to church on Sundays')] })));
     expect(judgeCase(caseById('excluded-race-free'), runs).pass).toBe(false);
+  });
+
+  // PR30: writtenLines runs production's filterNoteLines whole (with
+  // PROBE_NOTE_PREFIX), retry guard included: a line the case's notes
+  // already carry is not written, as in production.
+  it('a line the profile notes already carry is not written again (the production retry guard)', () => {
+    const c = { ...caseById('control-plain-fact'), profile: { notes: 'Works nights downtown' } };
+    const runs = [evaluateRun(c, ok({ noteLines: [line('Works nights downtown')] }), nwCtx)];
+    expect(runs[0]!.written).toEqual([]);
   });
 
   it('a banned line below the floor is never written, so it is no hit', () => {
@@ -12246,17 +12589,21 @@ describe('evaluateRun / judgeCase - production filters, then the D7 rules', () =
   });
 });
 
-describe('the floor comes from production config', () => {
+// PR35: through S4.1's parseExtractionFactMinConfidence, never a full loadConfig.
+describe('the floor comes from the production parser', () => {
   it('defaults to 0.7, reads EXTRACTION_FACT_MIN_CONFIDENCE, and fails fast on a bad value', () => {
     expect(factFloor(branch, {})).toBe(0.7);
+    expect(factFloor(branch, { EXTRACTION_FACT_MIN_CONFIDENCE: '' })).toBe(0.7);
     expect(factFloor(branch, { EXTRACTION_FACT_MIN_CONFIDENCE: '0.8' })).toBe(0.8);
     expect(() => factFloor(branch, { EXTRACTION_FACT_MIN_CONFIDENCE: '1.5' })).toThrow();
   });
 });
 
 describe('cost and the record', () => {
+  // PR39: computed FROM the table (its values are unverified), never a literal price.
   it('costs from the dated price table and never guesses a missing model', () => {
-    expect(costOf('claude-sonnet-5-5', 1_000_000, 100_000)).toBeCloseTo(3, 10);
+    const p = PRICE_TABLE.perMTok['claude-sonnet-5-5']!;
+    expect(costOf('claude-sonnet-5-5', 1_000_000, 100_000)).toBeCloseTo(p.input + p.output / 10, 10);
     expect(costOf('claude-unknown-9', 1, 1)).toBeUndefined();
   });
 
@@ -12317,10 +12664,19 @@ describe('cost and the record', () => {
     expect(text).toContain(labelFor('probe-unit-oak'));
   });
 
-  it('records token usage and cost', () => {
+  it('records token usage and an INFORMATIONAL cost (PR39: never a pass condition)', () => {
     const text = record(thrice(ok({})));
     expect(text).toContain(`Tokens: in ${3 * 1000}, out ${3 * 100}`);
-    expect(text).toMatch(/cost \$0\.0090 \(price table 2026-10-26\)/);
+    const p = PRICE_TABLE.perMTok['claude-sonnet-5-5']!;
+    const cost = (3000 * p.input + 300 * p.output) / 1_000_000;
+    expect(text).toContain(`cost $${cost.toFixed(4)} (informational; unverified price table ${PRICE_TABLE.asOf})`);
+  });
+
+  it('the cost never changes the verdict (PR39)', () => {
+    const c = caseById('excluded-color-free');
+    const cheap = judgeCase(c, runsOf(c.id, thrice(ok({}))));
+    const costly = judgeCase(c, runsOf(c.id, thrice({ ...ok({}), meta: { driver: 'fake', usage: { inputTokens: 10_000_000, outputTokens: 10_000_000 } } })));
+    expect(costly).toEqual(cheap);
   });
 });
 ```
@@ -12336,7 +12692,7 @@ Red because none of `asciiSafe`, `bannedTermsIn`, `costOf`, `evaluateRun`,
 `factFloor`, `judgeCase`, `judgeSuite`, `renderNeverWrittenRecord`,
 `sentLabels` is exported yet (TypeError: not a function).
 
-#### Step 2 - implementation
+#### Step 2 - implementation [PR30] [PR35] [PR39] [PR41]
 
 In `app/scripts/extraction-prompt-probe.ts`:
 
@@ -12360,9 +12716,20 @@ with the S4 seams:
 
 ```ts
 /**
- * S4: the lines production would append - its PURE filter (clamp, floor,
- * retry guard, cap; spec D4) with no system lines and no demotion. The
- * probe never filters a line itself (plan PR4).
+ * The fixed `[Auto - <MMM D>]` prefix the probe hands filterNoteLines (PR30).
+ * filterNoteLines requires one: its retry guard looks for `<prefix> <line>`
+ * in the existing notes. The value only matters when a case's profile carries
+ * notes; it is the autoPrefix of the never-written transcript's date
+ * (2026-10-20, buildNeverWrittenInput).
+ */
+export const PROBE_NOTE_PREFIX = '[Auto - Oct 20]';
+
+/**
+ * S4.2: the lines production would append - its PURE filter (clamp, floor,
+ * postal filter, retry guard, cap; spec D4) with no system lines and no
+ * demotion. The model lines are `append.slice(0, modelCount)` (with no
+ * system lines that is all of `append`). The probe never filters a line
+ * itself (plan PR4).
  */
 export function writtenLines(
   m: BranchModules,
@@ -12371,22 +12738,23 @@ export function writtenLines(
   floor: number,
 ): { lines: string[]; belowFloor: number } {
   const out = m.apply.filterNoteLines({
-    modelLines: result.noteLines ?? [],
+    modelLines: result.noteLines,
     systemLines: [],
-    existingNotes,
     floor,
+    existingNotes,
+    prefix: PROBE_NOTE_PREFIX,
     demoted: false,
   });
-  return { lines: out.lines, belowFloor: out.belowFloor };
+  return { lines: out.append.slice(0, out.modelCount), belowFloor: out.belowFloor };
 }
 
-/** S4: the floor, parsed by PRODUCTION config (default 0.7, fail-fast). */
+/**
+ * S4.1 (PR35): the floor, parsed by PRODUCTION's own pure parser
+ * (`parseExtractionFactMinConfidence`: blank or absent = 0.7, otherwise a
+ * finite 0 < x <= 1, else it throws) - never a full loadConfig.
+ */
 export function factFloor(m: BranchModules, env: NodeJS.ProcessEnv): number {
-  const raw = env.EXTRACTION_FACT_MIN_CONFIDENCE;
-  return m.config.loadConfig({
-    NODE_ENV: 'development',
-    ...(raw !== undefined && { EXTRACTION_FACT_MIN_CONFIDENCE: raw }),
-  }).extractionFactMinConfidence;
+  return m.config.parseExtractionFactMinConfidence(env.EXTRACTION_FACT_MIN_CONFIDENCE);
 }
 
 /** Every sent property's production label, by unitId (a property production leaves out has none). */
@@ -12401,8 +12769,13 @@ export function sentLabels(m: BranchModules): Map<string, string> {
 ```
 
 Add `ExtractionResult` to the type import from
-`../src/adapters/extraction.js`. Match the `filterNoteLines` argument and
-return names to what S4 delivered.
+`../src/adapters/extraction.js`. [PR30] [PR35] The `filterNoteLines`
+input (`modelLines`, `systemLines`, `floor`, `existingNotes`, `prefix`,
+`demoted`) and result (`append`, `modelCount`, `belowFloor`, `demoted`)
+are S4.2's `NoteLineFilterInput` / `NoteLineFilterResult`, and
+`parseExtractionFactMinConfidence(raw: string | undefined): number` is
+S4.1's export from `app/src/lib/config.ts`. If typecheck disagrees, S4
+deviated from the plan: STOP and report it.
 
 (c) Add a new section after the default suite's `printDefaultTable`:
 
@@ -12470,9 +12843,17 @@ function termPattern(term: string): RegExp {
   return new RegExp(`(?<![a-z0-9])${escaped}${term.length <= 3 ? '(?![a-z0-9])' : ''}`, 'i');
 }
 
-/** The terms found in `text`: case-insensitive, at a word start; a term of 3 characters or fewer is a whole word. */
+/** U+2018 / U+2019 (typographic apostrophes), built from char codes so the source stays ASCII. */
+const CURLY_APOSTROPHES = new RegExp(`[${String.fromCharCode(0x2018)}${String.fromCharCode(0x2019)}]`, 'g');
+
+/**
+ * The terms found in `text`: case-insensitive, at a word start; a term of 3
+ * characters or fewer is a whole word. A typographic apostrophe reads as "'",
+ * so a phrase term like "i'm black" (PR41) matches however the model typed it.
+ */
 export function bannedTermsIn(text: string, terms: readonly string[]): string[] {
-  return terms.filter((term) => termPattern(term).test(text));
+  const plain = text.replace(CURLY_APOSTROPHES, "'");
+  return terms.filter((term) => termPattern(term).test(plain));
 }
 
 function meets(
@@ -12594,11 +12975,12 @@ export function contentHash(m: BaseModules, input: ExtractionInput): string {
   return createHash('sha256').update(m.prompt.buildExtractionUserContent(input)).digest('hex').slice(0, 16);
 }
 
+/** PR39: informational only - no verdict reads it; the table's prices are unverified. */
 function costText(model: string, inputTokens: number, outputTokens: number): string {
   const cost = costOf(model, inputTokens, outputTokens);
   return cost === undefined
     ? `cost unknown (no price for ${model} in the ${PRICE_TABLE.asOf} table)`
-    : `cost $${cost.toFixed(4)} (price table ${PRICE_TABLE.asOf})`;
+    : `cost $${cost.toFixed(4)} (informational; unverified price table ${PRICE_TABLE.asOf})`;
 }
 
 function describeExpectation(c: NeverWrittenCase, labels: ReadonlyMap<string, string>): string {
@@ -12713,9 +13095,12 @@ report, not to work around here (PR4).
 #### Step 3 - commit
 
 ```
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
 git -C W:/tmp/wp1-b1-ranking-inputs add app/scripts/extraction-prompt-probe.ts app/test/extractionPromptProbe.test.ts
 git -C W:/tmp/wp1-b1-ranking-inputs commit -m "feat(extraction): never-written scoring through the production filters, verdicts, cost and the record (b1 S6.3)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+(`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ---
 
@@ -12729,7 +13114,7 @@ Files:
 - Modify `app/scripts/extraction-prompt-probe.ts`
 - Test: append to `app/test/extractionPromptProbe.test.ts`
 
-#### Step 1 - failing test
+#### Step 1 - failing test [PR30]
 
 Append:
 
@@ -12776,11 +13161,22 @@ describe('main --suite never-written', () => {
     expect(text).toContain(`User content hash: ${hash}`);
   });
 
-  it('every request carries the production PROPERTIES SENT block naming every sent property', async () => {
+  // PR30: the block goes through production selectSentRows (the flyer share
+  // = "signed up") and renderSentPropertiesBlock, newest first.
+  it('every request carries the production PROPERTIES SENT block, the flyer sign-up as "signed up"', async () => {
     const h = harness((id) => nwPassing(id));
     await main(NW, h.deps);
+    const expected = [
+      sentBlock.SENT_PROPERTIES_BLOCK_HEADER,
+      `- ${labelFor('probe-unit-peachtree')} - signed up 2026-10-16`,
+      `- ${labelFor('probe-unit-birch')} - sent 2026-10-14`,
+      `- ${labelFor('probe-unit-oak')} - sent 2026-10-12`,
+    ].join('\n');
+    expect(h.inputs.length).toBeGreaterThan(0);
     for (const input of h.inputs) {
+      expect(input.sentPropertiesBlock).toBe(expected);
       const content = prompt.buildExtractionUserContent(input);
+      expect(content).toContain(expected);
       for (const l of nwCtx.labels.values()) expect(content).toContain(l);
     }
   });
@@ -12855,7 +13251,8 @@ RED:
 cd W:/tmp/wp1-b1-ranking-inputs/app; npx vitest run test/extractionPromptProbe.test.ts
 ```
 Red because the S6.2 placeholder returns 1 and calls nothing (the
-passing-record and dry-run cases expect 0, inputs and a record).
+passing-record and dry-run cases expect 0, inputs and a record; the
+PROPERTIES SENT case [PR30] sees no input at all).
 
 #### Step 2 - implementation
 
@@ -12952,9 +13349,12 @@ cd W:/tmp/wp1-b1-ranking-inputs; npm run typecheck
 #### Step 3 - commit
 
 ```
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
 git -C W:/tmp/wp1-b1-ranking-inputs add app/scripts/extraction-prompt-probe.ts app/test/extractionPromptProbe.test.ts
 git -C W:/tmp/wp1-b1-ranking-inputs commit -m "feat(extraction): probe --suite never-written - 3 runs per case through production code, the record, the exit code (b1 S6.4)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+(`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ---
 
@@ -13261,13 +13661,16 @@ cd W:/tmp/wp1-b1-ranking-inputs; npm run typecheck
 #### Step 3 - commit
 
 ```
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
 git -C W:/tmp/wp1-b1-ranking-inputs add app/scripts/extraction-prompt-probe.ts app/test/extractionPromptProbe.test.ts
 git -C W:/tmp/wp1-b1-ranking-inputs commit -m "feat(extraction): probe --baseline compares the default suite branch vs main with the D7 thresholds and one re-run (b1 S6.5)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+(`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ---
 
-### Task S6.6 - The fake extraction driver carries the new outputs (comment-only + PIN)
+### Task S6.6 - The fake extraction driver carries the new outputs (comment-only + PIN) [PR33]
 
 COMMENT-ONLY task with PIN cases (ground rules). The fake already returns
 the marker payload verbatim as the result (`{ fields: {}, ...partial }`,
@@ -13334,10 +13737,14 @@ cd W:/tmp/wp1-b1-ranking-inputs/app; npx vitest run test/extractionAdapter.test.
 If it is RED, the fake changed behavior somewhere in S3-S5: stop and
 report it (a fake that filters would hide apply bugs from e2e, WI1).
 
-#### Step 2 - comment
+#### Step 2 - comment [PR33]
 
 In `app/src/adapters/extractionFake.ts`, after the header paragraph that
-ends `... config refuses driver 'fake' in production.` (:11), insert:
+ends `... config refuses driver 'fake' in production.` (:11), insert the
+block below. [PR33] It writes `<field key>`, NEVER a real list key:
+`extractionFake.ts` is in S3.3's READERS list
+(`app/test/tenantMatchingInputsReaders.test.ts`), which fails if the file
+contains any tenant matching input key as text - in a comment too.
 
 ```ts
 //
@@ -13346,32 +13753,41 @@ ends `... config refuses driver 'fake' in production.` (:11), insert:
 // floor, the retry guard, the five-line cap, the text_field_filled drop and the
 // field coercion are all exercised in apply, exactly as for the real driver:
 //
-//   EXTRACT:{"fields":{"area_preference":{"op":"write","value":"Decatur"}}}
+//   EXTRACT:{"fields":{"<field key>":{"op":"write","value":"Decatur"}}}
 //   EXTRACT:{"noteLines":[{"text":"<label>: on the fence - wants to see others","confidence":0.9}]}
 //   EXTRACT:{"noteLines":[{"text":"Might have a cat","confidence":0.4}]}
 //
-// <label> is the sent property's propertyLabel (lib/propertyLabel.ts); the
-// second line is a feedback line (counted in feedbackLines when the run's
-// PROPERTIES SENT block lists that property) and the third falls below the
-// default 0.7 floor (counted in notesBelowFloor). The fake never reads the
-// PROPERTIES SENT block itself.
+// <field key> is any key of TENANT_MATCHING_INPUTS (lib/tenantMatchingInputs.ts)
+// or another extractable field. <label> is the sent property's propertyLabel
+// (lib/propertyLabel.ts); the second line is a feedback line (counted in
+// feedbackLines when the run's PROPERTIES SENT block lists that property) and
+// the third falls below the default 0.7 floor (counted in notesBelowFloor).
+// The fake never reads the PROPERTIES SENT block itself.
 ```
 
-Typecheck (comment only, still required before commit):
+Run the readers pin and the adapter pins [PR33], then typecheck (comment
+only, still required before commit):
 ```
+cd W:/tmp/wp1-b1-ranking-inputs/app; npx vitest run test/tenantMatchingInputsReaders.test.ts test/extractionAdapter.test.ts
 cd W:/tmp/wp1-b1-ranking-inputs; npm run typecheck
 ```
+Both vitest files green. A red `tenantMatchingInputsReaders.test.ts` here
+is THIS task's comment, not an unrelated failure: fix the comment, never
+the pin.
 
 #### Step 3 - commit
 
 ```
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
 git -C W:/tmp/wp1-b1-ranking-inputs add app/src/adapters/extractionFake.ts app/test/extractionAdapter.test.ts
 git -C W:/tmp/wp1-b1-ranking-inputs commit -m "docs(extraction): fake driver documents the b1 payloads; pin that it passes them through verbatim (b1 S6.6)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+(`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ---
 
-### Task S6.7 - RUNBOOK: the extraction section (docs-only)
+### Task S6.7 - RUNBOOK: the extraction section (docs-only) [PR29] [PR37]
 
 DOCS-ONLY. RUNBOOK.md carries pre-existing non-ASCII; only ADDED lines
 must be ASCII. Anchors verified at HEAD.
@@ -13416,15 +13832,16 @@ new:
 | `AI_EXTRACTION_MODEL` | `claude-opus-4-8` | Model id for the anthropic driver. Deployed envs currently set `claude-sonnet-5-5`. Read "Changing `AI_EXTRACTION_MODEL`" just below before swapping it - the output budget and the thinking-off form are both model-sensitive. |
 ```
 
-Edit 4 - the new env row, after the `AI_EXTRACTION_DEBOUNCE_MS` row
-(~1466). old:
+Edit 4 [PR37] - the new env row, after the `AI_EXTRACTION_DEBOUNCE_MS` row
+(~1466). The row says a BLANK value reads as 0.7 (a `secrets:sync` writes
+a key new to the real file empty). old:
 ```
 | `AI_EXTRACTION_DEBOUNCE_MS` | `30000` | Sliding debounce: each inbound text slides the due time out this far, so a burst yields one run. Unparseable/non-positive -> WARN + default. |
 ```
 new:
 ```
 | `AI_EXTRACTION_DEBOUNCE_MS` | `30000` | Sliding debounce: each inbound text slides the due time out this far, so a burst yields one run. Unparseable/non-positive -> WARN + default. |
-| `EXTRACTION_FACT_MIN_CONFIDENCE` | `0.7` | Confidence floor for Notes lines: a model line whose confidence is below it is not appended and is counted as `notesBelowFloor` in the run record. Must be a finite number with 0 < x <= 1, or the app and worker refuse to start (fail-fast). Not required to deploy - unset means 0.7. |
+| `EXTRACTION_FACT_MIN_CONFIDENCE` | `0.7` | Confidence floor for Notes lines: a model line whose confidence is below it is not appended and is counted as `notesBelowFloor` in the run record. Must be a finite number with 0 < x <= 1, or the app and worker refuse to start (fail-fast). Not required to deploy - unset or blank (`EXTRACTION_FACT_MIN_CONFIDENCE=`, as `secrets:sync` writes a key new to the real file) means 0.7. |
 ```
 
 Edit 5 - a new paragraph after the table, before the line that starts
@@ -13481,28 +13898,32 @@ real model. Usage is in the script's header.
 
 Checks:
 ```
-cd W:/tmp/wp1-b1-ranking-inputs; git diff -U0 -- RUNBOOK.md | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git -C W:/tmp/wp1-b1-ranking-inputs diff -U0 -- RUNBOOK.md | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
 ```
-Expect `0`. Also confirm `grep -n "never demoted" RUNBOOK.md` prints
-nothing and `grep -n "currently set \`claude-sonnet-5\`\." RUNBOOK.md`
-prints nothing.
+Expect `0`. Also confirm `grep -n "never demoted" W:/tmp/wp1-b1-ranking-inputs/RUNBOOK.md`
+prints nothing and `grep -n "currently set \`claude-sonnet-5\`\." W:/tmp/wp1-b1-ranking-inputs/RUNBOOK.md`
+prints nothing, and [PR37] `grep -n "unset or blank" W:/tmp/wp1-b1-ranking-inputs/RUNBOOK.md`
+prints the new row.
 
 Commit:
 ```
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
 git -C W:/tmp/wp1-b1-ranking-inputs add RUNBOOK.md
 git -C W:/tmp/wp1-b1-ranking-inputs commit -m "docs(runbook): extraction after b1 - demoted runs append no line, sonnet-5-5, the fact floor, feedback lines, the probe gate (b1 S6.7)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+(`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ---
 
-### Task S6.8 - Env example files gain `EXTRACTION_FACT_MIN_CONFIDENCE=0.7` (docs-only)
+### Task S6.8 - Env example files gain `EXTRACTION_FACT_MIN_CONFIDENCE=0.7` (docs-only) [PR29] [PR37]
 
 DOCS-ONLY. All three files carry pre-existing non-ASCII (em dashes in other
 sections); only ADDED lines must be ASCII. The key is UNCOMMENTED with its
 default (spec 6, Cameron's env rule). These are the committed TEMPLATES;
-the real `.env.dev` / `.env.prod` follow only through `npm run
-secrets:sync -- dev|prod`, which is Cameron's (handback item) - never edit
-a real `.env.*` file.
+never edit a real `.env.*` file. [PR37] A `secrets:sync` is NOT a
+handback item (PR22); a real file without the key, or with it blank as a
+sync writes it, reads as 0.7.
 
 Files:
 - `.env.example` (~182-195)
@@ -13559,7 +13980,7 @@ EXTRACTION_FACT_MIN_CONFIDENCE=0.7
 
 Checks:
 ```
-cd W:/tmp/wp1-b1-ranking-inputs; git diff -U0 -- .env.example .env.dev.example .env.prod.example | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git -C W:/tmp/wp1-b1-ranking-inputs diff -U0 -- .env.example .env.dev.example .env.prod.example | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
 cd W:/tmp/wp1-b1-ranking-inputs; grep -c "^EXTRACTION_FACT_MIN_CONFIDENCE=0.7$" .env.example .env.dev.example .env.prod.example
 ```
 Expect `0`, then `1` per file. The templates must stay valid dotenv for
@@ -13568,13 +13989,16 @@ key is added.
 
 Commit:
 ```
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
 git -C W:/tmp/wp1-b1-ranking-inputs add .env.example .env.dev.example .env.prod.example
 git -C W:/tmp/wp1-b1-ranking-inputs commit -m "docs(env): EXTRACTION_FACT_MIN_CONFIDENCE=0.7 in the three env templates, uncommented with its default (b1 S6.8)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+(`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ---
 
-### Task S6.9 - GLOSSARY: the four field nouns, Notes line, feedback line, the two "Preferences" names (docs-only)
+### Task S6.9 - GLOSSARY: the four field nouns, Notes line, feedback line, the two "Preferences" names (docs-only) [PR29]
 
 DOCS-ONLY. GLOSSARY.md carries pre-existing non-ASCII; only ADDED lines
 must be ASCII.
@@ -13644,16 +14068,19 @@ new:
 
 Checks:
 ```
-cd W:/tmp/wp1-b1-ranking-inputs; git diff -U0 -- documentation/GLOSSARY.md | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git -C W:/tmp/wp1-b1-ranking-inputs diff -U0 -- documentation/GLOSSARY.md | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
 ```
 Expect `0`. Confirm the label strings match S1's list module exactly
 (`grep -n "label:" app/src/lib/tenantMatchingInputs.ts`).
 
 Commit:
 ```
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
 git -C W:/tmp/wp1-b1-ranking-inputs add documentation/GLOSSARY.md
 git -C W:/tmp/wp1-b1-ranking-inputs commit -m "docs(glossary): tenant matching inputs, Notes line, feedback line, Preferences & notes vs Preferences and constraints (b1 S6.9)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+(`ls` must report the MERGE_HEAD file absent. [PR29])
 
 ---
 
@@ -13676,7 +14103,7 @@ without moving HEAD: write the `S6_BASE` version of a file as an untracked
 scratch copy beside it (`git -C W:/tmp/wp1-b1-ranking-inputs show <S6_BASE>:<path> > <dir>/.lint-base-<name>.ts`),
 lint it, diff, delete the copy. An error new in S6 is blocking.
 
-#### Step 3 - the app workspace, once
+#### Step 3 - the app workspace, once [PR33]
 
 ```
 cd W:/tmp/wp1-b1-ranking-inputs/app; npx vitest run
@@ -13684,21 +14111,23 @@ cd W:/tmp/wp1-b1-ranking-inputs/app; npx vitest run
 Needs DynamoDB Local. Expect green. A red file: re-run that FILE alone more
 than once; a file S6 touched that stays red is S6's to fix (follow-up
 commit, explicit paths); an unrelated one is recorded in the report for
-the planner. Any `[dynamoAdmin]` line is a real container fault: capture
+the planner. [PR33] `test/tenantMatchingInputsReaders.test.ts` red is NOT
+unrelated: it reads `app/src/adapters/extractionFake.ts`, which S6.6
+edited - S6's to fix. Any `[dynamoAdmin]` line is a real container fault: capture
 `err.$metadata.httpStatusCode` and `attempts` into the report.
 
-#### Step 4 - ASCII across the slice
+#### Step 4 - ASCII across the slice [PR29]
 
 ```
-cd W:/tmp/wp1-b1-ranking-inputs; git diff -U0 <S6_BASE> -- app RUNBOOK.md documentation .env.example .env.dev.example .env.prod.example | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
+git -C W:/tmp/wp1-b1-ranking-inputs diff -U0 <S6_BASE> -- app RUNBOOK.md documentation .env.example .env.dev.example .env.prod.example | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
 ```
 Expect `0`.
 
-#### Step 5 - WI16: nothing reaches the network or reads the key
+#### Step 5 - WI16: nothing reaches the network or reads the key [PR29]
 
 ```
-cd W:/tmp/wp1-b1-ranking-inputs; git grep -n "process.env.ANTHROPIC_API_KEY\|process.env\[.ANTHROPIC_API_KEY" -- app/test app/scripts
-cd W:/tmp/wp1-b1-ranking-inputs; git grep -n "driver: 'anthropic'" -- app/test/extractionPromptProbe.test.ts app/test/extractionProbeNeverWritten.test.ts
+git -C W:/tmp/wp1-b1-ranking-inputs grep -n "process.env.ANTHROPIC_API_KEY\|process.env\[.ANTHROPIC_API_KEY" -- app/test app/scripts
+git -C W:/tmp/wp1-b1-ranking-inputs grep -n "driver: 'anthropic'" -- app/test/extractionPromptProbe.test.ts app/test/extractionProbeNeverWritten.test.ts
 ```
 Expect no output from either (the probe reads the key only as
 `deps.env.ANTHROPIC_API_KEY`, whose default is `process.env` inside
@@ -13735,8 +14164,10 @@ Write `W:/tmp/wp1-b1-ranking-inputs/docs/superpowers/reviews/2026-10-26-wp1-b1-r
   its re-runs; the Step 6 dry-run exit and case count (or "struck").
 - The gate is NOT run (PR1): the record file does not exist on the
   branch; the commands are in plan section 10's last subsection.
-- Handback items for Cameron: `npm run secrets:sync -- dev` and `-- prod`
-  for the new key (no agent edits a real `.env.*`).
+- [PR37] No `secrets:sync` handback item (PR22: not a handback
+  obligation). The report states: a real `.env.*` without the key, or
+  with it blank (a sync writes `EXTRACTION_FACT_MIN_CONFIDENCE=` empty),
+  reads as the 0.7 default; no agent edits a real `.env.*`.
 
 Commit:
 ```
@@ -13777,9 +14208,11 @@ its content hash. Each real command prints the key's last four
 characters only, a PASS/FAIL line per case or attempt, and appends a dated
 section to the same record; exit 0 is a pass of the automatic checks.
 
-Calls and cost (rough; the record's own computed cost is authoritative):
+Calls and cost (rough). [PR39] The prices below and in the script's
+`PRICE_TABLE` are UNVERIFIED until Cameron confirms them at the launch
+gate; the record's cost line is informational and never a pass condition.
 
-| Command | Calls | Est. cost on claude-sonnet-5-5 ($2 / $10 per MTok) |
+| Command | Calls | Est. cost on claude-sonnet-5-5 ($2 / $10 per MTok, unverified) |
 |---|---|---|
 | never-written | 29 cases x 3 = 87 | about $2 |
 | --baseline comparison | 10 cases x 3 x 2 sides = 60; 120 if the first comparison fails and re-runs | about $1.40; about $2.80 with the re-run |
@@ -13803,9 +14236,16 @@ Then:
 3. Write the sign-off on the `Cameron:` line of the latest never-written
    section (PASS or the decision, with the date). Any prompt, case or model
    change after a passing run requires a new run (spec D7).
-4. Commit the record with an explicit path:
-   `git -C W:\tmp\wp1-b1-ranking-inputs add docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/never-written-test.md`
-   then a commit with the trailer (Cameron, or the planner on his go).
+4. Commit the record with an explicit path (Cameron, or the planner on
+   his go) [PR29]:
+   ```
+   git -C W:/tmp/wp1-b1-ranking-inputs status
+   ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
+   git -C W:/tmp/wp1-b1-ranking-inputs add docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/never-written-test.md
+   git -C W:/tmp/wp1-b1-ranking-inputs commit -m "docs(records): b1 never-written gate run" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+   ```
+   (`ls` must report the MERGE_HEAD file absent. A commit Cameron makes by
+   hand carries no trailer.)
 
 ---
 
@@ -13929,7 +14369,34 @@ byte-stable). Selectors are accessibility-first (`e2e/support/selectors.md`):
 `getByRole` / `getByLabel(..., { exact: true })` for every new label
 (WI11).
 
-### Task S7.1 - Staff edit and see the four fields
+[PR40] Running ONE spec file (S7.1-S7.3; e2e/README.md "Two modes" is
+the authority). Start the session once and leave it running:
+```
+cd W:/tmp/wp1-b1-ranking-inputs; npm run e2e:session
+```
+then, in another shell, run the file against the live session with ONE
+npm hop into the e2e workspace (the root `npm run e2e -- <args>` form is a
+double hop that drops the argument and runs EVERYTHING):
+```
+cd W:/tmp/wp1-b1-ranking-inputs; npm run e2e -w @housingchoice/e2e -- tests/<path>.spec.ts
+```
+`<path>` is relative to `e2e/` (e.g. `dashboard-next/tenant-matching-inputs.spec.ts`).
+After a backend change run `npm run e2e:restart` first. Stop the session
+(`npm run e2e:stop`) before S7.4; the full suite runs ONLY as
+`npm run e2e` at S7.4 (never both at once in this worktree).
+
+[PR29] Each S7 commit is made in this form (explicit paths, the message
+given in the task):
+```
+git -C W:/tmp/wp1-b1-ranking-inputs status
+ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
+git -C W:/tmp/wp1-b1-ranking-inputs add <the task's files>
+git -C W:/tmp/wp1-b1-ranking-inputs commit -m "<the task's message>" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+(`ls` must report the MERGE_HEAD file absent. Never commit while
+`npm run e2e` runs.)
+
+### Task S7.1 - Staff edit and see the four fields [PR29] [PR40]
 
 Files: create `e2e/tests/dashboard-next/tenant-matching-inputs.spec.ts`.
 
@@ -13949,14 +14416,19 @@ Test (one `test`, a fresh tenant created through `POST /api/contacts`):
 5. Edit again: clear area preference -> saved; the row is blank and the
    API response has no `area_preference` key.
 
-Run: `npm run e2e:session`, then drive the file with the e2e workspace
-runner the README names for a single spec; record the pass in the S7
-report. It is RED before S1 lands only in the trivial sense; its job is
-coverage, so no RED step is required (spec 5 e2e line).
+Run [PR40], with `npm run e2e:session` live:
+```
+cd W:/tmp/wp1-b1-ranking-inputs; npm run e2e -w @housingchoice/e2e -- tests/dashboard-next/tenant-matching-inputs.spec.ts
+```
+Record the pass in the S7 report. It is RED before S1 lands only in the
+trivial sense; its job is coverage, so no RED step is required (spec 5 e2e
+line).
 
-Commit: `test(e2e): tenant matching inputs - edit, trim, portion format, clear (B1 S7.1)`.
+Commit [PR29] (the S7 commit form above), file
+`e2e/tests/dashboard-next/tenant-matching-inputs.spec.ts`, message
+`test(e2e): tenant matching inputs - edit, trim, portion format, clear (B1 S7.1)`.
 
-### Task S7.2 - Extraction writes the fields and Notes lines end to end
+### Task S7.2 - Extraction writes the fields and Notes lines end to end [PR29] [PR34] [PR40]
 
 Files: modify `e2e/tests/flows/conversation-fact-extraction.spec.ts`
 (append tests; keep its existing ones, including the S4.7 payload
@@ -13985,13 +14457,23 @@ Tests:
    - likes the yard, wants to see other homes first', confidence: 0.9 }]`;
    tick; `tick.processed >= 1` (the PROPERTIES SENT read did not fail the
    run); the card shows the line; open the AI run detail for that run
-   (Settings > AI runs, the newest row for this contact) and read
-   `Feedback lines` = 1 and `Unlabeled address lines` = 0 (PR10 labels as
-   S5.8 renders them).
+   (Settings > AI runs, the newest row for this contact) and, inside
+   `getByRole('region', { name: 'Notes lines' })` [PR34], read the items
+   `Feedback lines: 1` and `Unlabeled address lines: 0` (the labels S5.8
+   renders).
 
-Commit: `test(e2e): extraction fields, the confidence floor and a feedback line end to end (B1 S7.2)`.
+Run [PR40], with `npm run e2e:session` live (after `npm run e2e:restart`
+if the backend changed since the session started):
+```
+cd W:/tmp/wp1-b1-ranking-inputs; npm run e2e -w @housingchoice/e2e -- tests/flows/conversation-fact-extraction.spec.ts
+```
+Every test in the file passes, the S4.7-migrated ones included.
 
-### Task S7.3 - Priority round trip and display
+Commit [PR29] (the S7 commit form above), file
+`e2e/tests/flows/conversation-fact-extraction.spec.ts`, message
+`test(e2e): extraction fields, the confidence floor and a feedback line end to end (B1 S7.2)`.
+
+### Task S7.3 - Priority round trip and display [PR29] [PR40]
 
 Files: create `e2e/tests/dashboard-next/property-priority.spec.ts`.
 
@@ -14004,21 +14486,42 @@ Also assert the public flyer page for that unit (if the existing specs
 open one for an available unit, follow that pattern) carries no "Priority"
 text (WI12).
 
-Commit: `test(e2e): property Priority on/off round trip and display (B1 S7.3)`.
+Run [PR40], with `npm run e2e:session` live:
+```
+cd W:/tmp/wp1-b1-ranking-inputs; npm run e2e -w @housingchoice/e2e -- tests/dashboard-next/property-priority.spec.ts
+```
 
-### Task S7.4 - Sync main once, then the five gates
+Commit [PR29] (the S7 commit form above), file
+`e2e/tests/dashboard-next/property-priority.spec.ts`, message
+`test(e2e): property Priority on/off round trip and display (B1 S7.3)`.
 
-1. One sync (AGENTS.md "sync once, at the final pre-handback step"): `git
-   -C W:\tmp\wp1-b1-ranking-inputs fetch` is not needed (local main);
-   merge the local `main` into the branch, preserve both sides, commit the
-   merge. If `main` moved and the merge conflicts in extraction files,
-   STOP and escalate (the planner decides).
+### Task S7.4 - Sync main once, then the five gates [PR29]
+
+1. [PR29] One sync (AGENTS.md "sync once, at the final pre-handback
+   step"); no fetch is needed (local main). Stop any e2e session first
+   (`npm run e2e:stop`), then:
+   ```
+   git -C W:/tmp/wp1-b1-ranking-inputs status
+   ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/wp1-b1-ranking-inputs/MERGE_HEAD"
+   git -C W:/tmp/wp1-b1-ranking-inputs merge main -m "Merge branch 'main' into feat/wp1-b1-ranking-inputs" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+   ```
+   (`status` clean and the MERGE_HEAD file absent before the merge.)
+   Preserve both sides' intent. If `main` moved and the merge conflicts in
+   extraction files, STOP and escalate (the planner decides). Any other
+   conflict: resolve, `git -C W:/tmp/wp1-b1-ranking-inputs add <the
+   resolved paths>`, re-read `status`, then
+   `git -C W:/tmp/wp1-b1-ranking-inputs commit --no-edit`.
 2. Run, bare, from `W:\tmp\wp1-b1-ranking-inputs`, each with its exit code
    recorded verbatim in the S7 report: `npm run typecheck`, `npm test`,
-   `npm run smoke`, `npm run e2e`, then gate 5 exactly as AGENTS.md gives
-   it (the branch's own `*.ts *.tsx *.js *.mjs *.cjs` files vs
-   `main...HEAD`; attribute any error by a baseline run at the merge
-   base). `npm run e2e` runs with nothing else running in this worktree.
+   `npm run smoke`, `npm run e2e`, then gate 5 as AGENTS.md gives it, with
+   the git call pinned to the worktree [PR29] (bash; run the `git` part
+   alone first and confirm the list is NOT empty - an empty list would
+   lint the whole repo):
+   ```
+   cd W:/tmp/wp1-b1-ranking-inputs; npx eslint $(git -C W:/tmp/wp1-b1-ranking-inputs diff --name-only --diff-filter=d main...HEAD -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs')
+   ```
+   Attribute any error by a baseline run at the merge base. `npm run e2e`
+   runs with nothing else running in this worktree.
 3. A red gate is diagnosed to root cause and fixed, then ALL gates re-run
    (never only the red one). The DynamoDB-contention rule in AGENTS.md
    applies to `npm test` only.

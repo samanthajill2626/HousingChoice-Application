@@ -16,7 +16,15 @@
  *                  the production PROPERTIES SENT renderer and runs the
  *                  production driver, prompt and schema, then the production
  *                  pure filters (filterNoteLines, coerceField) - it certifies
- *                  production code, not a copy. Cases live in
+ *                  production code, not a copy. Then ONE grader call per run
+ *                  that wrote a line or proposed a field value (the same
+ *                  --model and key, structured output, through
+ *                  createStructuredOutputClient in adapters/extraction.ts)
+ *                  judges each item against plain descriptions of the
+ *                  excluded kinds; it never sees the conversation. A line
+ *                  judged excluded fails its case; a field value judged
+ *                  excluded is reported only. There are no banned-word
+ *                  lists. Cases and the grader prompt live in
  *                  extractionProbeNeverWritten.ts.
  *
  * WHY: the prompt-text tests in test/extractionSchema.test.ts pin what the
@@ -28,7 +36,8 @@
  * conversation is invented, and the only network call is the Anthropic API.
  * The only file it writes is the --out record. It DOES spend money - one
  * extraction-sized call per case per run, the same as one real extraction run
- * each.
+ * each, plus (never-written only) one small grader call per run that wrote
+ * something.
  *
  * Usage (repo root; PowerShell sets the key with $env:ANTHROPIC_API_KEY = '...'):
  *   npx tsx app/scripts/extraction-prompt-probe.ts --model <id>
@@ -92,6 +101,7 @@ import type {
   ExtractionProfileSnapshot,
   ExtractionResult,
   StructuredOutputCall,
+  StructuredOutputClient,
   StructuredOutputRequest,
   TranscriptUtterance,
 } from '../src/adapters/extraction.js';
@@ -106,6 +116,7 @@ import {
   GRADER_SCHEMA,
   GRADER_SYSTEM_PROMPT,
   MIN_GRADED_RUNS,
+  NEVER_WRITTEN_CASES,
   PRICE_TABLE,
   SENT_PROPERTIES,
   buildGraderUserContent,
@@ -1068,6 +1079,24 @@ export function renderNeverWrittenRecord(r: NeverWrittenRecordInput): string {
   return out.join('\n');
 }
 
+/** One never-written case's request: the base tenant profile plus the case's, the production blocks. */
+export function buildNeverWrittenInput(c: NeverWrittenCase, orgListBlock: string, sentBlock: string): ExtractionInput {
+  const profile: ExtractionProfileSnapshot = { contactType: 'tenant', phones: ['+15555550123'], ...c.profile };
+  return withSentBlock(
+    { transcript: transcriptOf(c.id, 'nw', '2026-10-20T15:00:00.000Z', c.lines), profile, orgListBlock },
+    sentBlock,
+  );
+}
+
+/** A grader that throws is an ungraded run, never an escaped exception. */
+export async function safeGrade(grader: StructuredOutputClient, request: StructuredOutputRequest): Promise<StructuredOutputCall> {
+  try {
+    return await grader.call(request);
+  } catch (err) {
+    return { ok: false, failure: 'driver', message: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // The CLI.
 // ---------------------------------------------------------------------------
@@ -1173,6 +1202,8 @@ export interface ProbeCliDeps {
   loadBaseModules: (root: string) => Promise<BaseModules>;
   loadBranchModules: (root: string) => Promise<BranchModules>;
   createDriver: (m: BaseModules, opts: { model: string; apiKey: string; root: string }) => ExtractionDriver;
+  /** The never-written grader (spec D7): the SAME --model and key, through adapters/extraction.ts. */
+  createGrader: (m: BranchModules, opts: { model: string; apiKey: string }) => StructuredOutputClient;
   /** The checkout's HEAD and whether TRACKED files are modified (the record file itself is untracked). */
   gitInfo: (root: string) => { commit: string; dirty: boolean };
   appendRecord: (file: string, text: string) => void;
@@ -1219,6 +1250,7 @@ function defaultDeps(): ProbeCliDeps {
         apiKey: opts.apiKey,
         logger: m.logger.createLogger({ level: 'silent' }),
       }),
+    createGrader: (m, opts) => m.extraction.createStructuredOutputClient({ model: opts.model, apiKey: opts.apiKey }),
     gitInfo: gitInfoOf,
     appendRecord: appendRecordFile,
     now: () => new Date().toISOString(),
@@ -1268,9 +1300,82 @@ async function runDefault(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string): Pro
 }
 
 // Placeholders - S6.4 and S6.5 replace these two bodies.
-async function runNeverWritten(_a: ProbeArgs, deps: ProbeCliDeps, _apiKey: string): Promise<0 | 1 | 2> {
-  deps.printError('--suite never-written is built in plan task S6.4');
-  return 1;
+async function runNeverWritten(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string): Promise<0 | 1 | 2> {
+  const cases = selectCases(NEVER_WRITTEN_CASES, a.caseId);
+  if (cases === undefined) {
+    return usage(deps, `No never-written case "${a.caseId}". Cases: ${NEVER_WRITTEN_CASES.map((c) => c.id).join(', ')}`);
+  }
+  const model = a.model!; // parseProbeArgs refuses the suite without one
+  const root = path.resolve(deps.ownRoot);
+  const m = await deps.loadBranchModules(root);
+  const floor = factFloor(m, deps.env);
+  const orgListBlock = startingOrgListBlock(m);
+  const sentBlock = renderSentBlock(m, SENT_PROPERTIES);
+  const labels = sentLabels(m);
+  const extractionFingerprint = m.prompt.extractionPromptFingerprint();
+  const graderFingerprint = graderPromptFingerprint();
+  const startedAt = deps.now();
+  const inputs = cases.map((c) => buildNeverWrittenInput(c, orgListBlock, sentBlock));
+  const calls = GATE_RUNS * cases.length;
+  deps.print('Extraction prompt probe - never-written suite (WP1 B1 merge gate, spec D7)');
+  deps.print(`  checkout  ${root}`);
+  deps.print(`  model     ${model}`);
+  deps.print(`  key       ${keyTail(apiKey)}`);
+  deps.print(`  prompt    ${extractionFingerprint}`);
+  deps.print(`  grader    ${graderFingerprint} (same model and key; one call per run with a line or a field value)`);
+  deps.print(`  floor     ${floor}`);
+  deps.print(`  runs      ${GATE_RUNS} per case, ${cases.length} case(s), ${calls} extraction call(s), up to ${calls} grader call(s)`);
+  if (a.dryRun) {
+    for (const l of ['', ...sentBlock.split('\n')]) deps.print(l);
+    deps.print('');
+    deps.print('The grader system prompt:');
+    for (const l of GRADER_SYSTEM_PROMPT.split('\n')) deps.print(`  ${l}`);
+    cases.forEach((c, ci) => {
+      deps.print('');
+      deps.print(`[${c.id}] ${c.about}`);
+      deps.print(`  planted   ${c.plantedFact ?? 'none'}`);
+      deps.print(`  expects   ${describeExpectation(c, labels)}`);
+      deps.print(`  hash      ${contentHash(m, inputs[ci]!)}`);
+      for (const u of inputs[ci]!.transcript) deps.print(`  ${m.prompt.renderUtteranceLine(u)}`);
+    });
+    deps.print('');
+    deps.print('Dry run: nothing was sent.');
+    return 0;
+  }
+  const ctx: NeverWrittenContext = { modules: m, floor, labels };
+  const driver = deps.createDriver(m, { model, apiKey, root });
+  const grader = deps.createGrader(m, { model, apiKey });
+  const jobs = cases.flatMap((c, ci) =>
+    Array.from({ length: GATE_RUNS }, () => async () => {
+      const run = evaluateRun(c, await safeExtract(driver, inputs[ci]!), ctx);
+      // Spec D7: ONE grader call per run that has something to judge; none otherwise.
+      return run.grading === 'pending' ? applyGrade(run, await safeGrade(grader, graderRequest(c, graderItemsOf(run)))) : run;
+    }),
+  );
+  const runs = await pool(jobs, a.concurrency);
+  const perCase = cases.map((c, ci) => {
+    const mine = runs.slice(ci * GATE_RUNS, (ci + 1) * GATE_RUNS);
+    return { c, contentHash: contentHash(m, inputs[ci]!), runs: mine, verdict: judgeCase(c, mine) };
+  });
+  const suite = judgeSuite(perCase.map((p) => p.verdict));
+  deps.print('');
+  for (const p of perCase) {
+    deps.print(`  ${p.verdict.pass ? 'PASS' : 'FAIL'}  ${p.c.id}${p.verdict.reasons.length > 0 ? ` - ${p.verdict.reasons.join('; ')}` : ''}`);
+  }
+  const git = deps.gitInfo(root);
+  deps.appendRecord(a.out!, renderNeverWrittenRecord({
+    startedAt, commit: git.commit, dirty: git.dirty, model, keyTail: keyTail(apiKey),
+    extractionFingerprint, graderFingerprint, floor, partial: a.caseId !== undefined,
+    cases: perCase, suite, labels, sentBlock,
+  }));
+  deps.print('');
+  deps.print(`Record appended to ${a.out}`);
+  deps.print(
+    suite.pass
+      ? "PASS on every automatic check. The gate still needs Cameron's written sign-off in the record, where he may overrule any grader verdict."
+      : `FAIL: ${suite.reasons.length} case(s) - see the record.`,
+  );
+  return suite.pass ? 0 : 1;
 }
 async function runComparison(_a: ProbeArgs, deps: ProbeCliDeps, _apiKey: string): Promise<0 | 1 | 2> {
   deps.printError('--baseline is built in plan task S6.5');

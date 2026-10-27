@@ -665,3 +665,260 @@ describe('cost and the record', () => {
     expect(costly).toEqual(cheap);
   });
 });
+
+import type { StructuredOutputRequest } from '../src/adapters/extraction.js';
+import { GATE_RUNS, GRADER_ITEMS_HEADER } from '../scripts/extractionProbeNeverWritten.js';
+
+/** The items a grader request carries: the JSON after the ITEMS header (buildGraderUserContent). */
+function itemsOf(req: StructuredOutputRequest): GraderItem[] {
+  return JSON.parse(req.user.slice(req.user.indexOf(GRADER_ITEMS_HEADER) + GRADER_ITEMS_HEADER.length)) as GraderItem[];
+}
+
+type NwGrade = (items: GraderItem[], req: StructuredOutputRequest) => StructuredOutputCall;
+
+interface NwHarness extends Harness {
+  graderRequests: StructuredOutputRequest[];
+  gradersCreated: Array<{ model: string; apiKey: string }>;
+}
+
+/**
+ * S6.2's harness plus a STUB grader. EVERY never-written CLI test uses this:
+ * without it main would build the real structured-output client (WI16).
+ */
+function nwHarness(answer: Answer, grade: NwGrade = allClean, env?: NodeJS.ProcessEnv): NwHarness {
+  const h: NwHarness = { ...harness(answer, env), graderRequests: [], gradersCreated: [] };
+  h.deps.createGrader = (_m, opts) => {
+    h.gradersCreated.push({ model: opts.model, apiKey: opts.apiKey });
+    return {
+      model: opts.model,
+      call: async (req) => {
+        h.graderRequests.push(req);
+        return grade(itemsOf(req), req);
+      },
+    };
+  };
+  return h;
+}
+
+/** A correct answer for every never-written case (the self-test of the whole suite). */
+function nwPassing(caseId: string): ExtractionCall {
+  const e = caseById(caseId).expect;
+  switch (e.kind) {
+    case 'nothing-excluded':
+      return ok({ noteLines: [line('Looking for a 2 bedroom home')] });
+    case 'line':
+      return ok({ noteLines: [line(e.example)] });
+    case 'field':
+      return ok({ fields: { [e.field]: { op: 'write', value: e.example } } as ExtractionResult['fields'] });
+    case 'feedback':
+      return ok({ noteLines: [line(`${labelFor(e.unitId)}: ${e.gist}`)] });
+    case 'untied-feedback':
+      return ok({ noteLines: [line(e.example)] });
+    case 'no-address-op':
+      return ok({});
+  }
+}
+
+const NW = ['--suite', 'never-written', '--model', 'claude-sonnet-5-5', '--out', 'rec.md'];
+/** Every nwPassing run has an item except the no-address control's (it writes nothing): one grader call each. */
+const NW_GRADER_CALLS = (NEVER_WRITTEN_CASES.length - 1) * GATE_RUNS;
+const planted = (id: string) => `PLANTED FACT: ${caseById(id).plantedFact!}\n`;
+
+describe('main --suite never-written', () => {
+  it('runs every case 3 times, grades every run with items, and appends a passing record (exit 0)', async () => {
+    const h = nwHarness((id) => nwPassing(id));
+    expect(await main(NW, h.deps)).toBe(0);
+    expect(h.driversCreated).toHaveLength(1);
+    // The grader: the SAME model and key (spec D7), created once.
+    expect(h.gradersCreated).toEqual([{ model: 'claude-sonnet-5-5', apiKey: KEY }]);
+    expect(h.inputs).toHaveLength(NEVER_WRITTEN_CASES.length * GATE_RUNS);
+    expect(h.graderRequests).toHaveLength(NW_GRADER_CALLS);
+    expect(h.records).toHaveLength(1);
+    const { file, text } = h.records[0]!;
+    expect(file).toBe('rec.md');
+    expect(text).toContain("PENDING Cameron's sign-off");
+    expect(text).toContain(`Commit: ${'a'.repeat(40)}`);
+    expect(text).toContain('Model: claude-sonnet-5-5');
+    expect(text).toContain('Key: ...wxyz');
+    expect(text).not.toContain(KEY);
+    expect(text).toContain(`Extraction prompt fingerprint: ${prompt.extractionPromptFingerprint()}`);
+    expect(text).toContain(`Grader prompt fingerprint: ${graderPromptFingerprint()}`);
+    // The case hash is of the user content PRODUCTION built for the request the driver got.
+    const first = h.inputs.find((i) => caseIdOf(i) === NEVER_WRITTEN_CASES[0]!.id)!;
+    const hash = createHash('sha256').update(prompt.buildExtractionUserContent(first)).digest('hex').slice(0, 16);
+    expect(text).toContain(`User content hash: ${hash}`);
+  });
+
+  it('each grader request is the pinned prompt and schema, the planted fact and the items - never the conversation', async () => {
+    const h = nwHarness((id) => nwPassing(id));
+    await main(NW, h.deps);
+    const messages = NEVER_WRITTEN_CASES.flatMap((c) => c.lines.map(([, , t]) => t));
+    for (const req of h.graderRequests) {
+      expect(req.system).toBe(GRADER_SYSTEM_PROMPT);
+      expect(req.schema).toBe(GRADER_SCHEMA);
+      for (const message of messages) expect(req.user).not.toContain(message);
+    }
+    for (const c of NEVER_WRITTEN_CASES.filter((x) => x.role === 'excluded')) {
+      expect(h.graderRequests.filter((r) => r.user.startsWith(planted(c.id))), c.id).toHaveLength(GATE_RUNS);
+    }
+    const gradedControls = NEVER_WRITTEN_CASES.filter((x) => x.role === 'control' && x.expect.kind !== 'no-address-op').length;
+    expect(h.graderRequests.filter((r) => r.user.startsWith('PLANTED FACT: none\n'))).toHaveLength(gradedControls * GATE_RUNS);
+  });
+
+  // PR30: the block goes through production selectSentRows (the flyer share
+  // = "signed up") and renderSentPropertiesBlock, newest first.
+  it('every request carries the production PROPERTIES SENT block, the flyer sign-up as "signed up"', async () => {
+    const h = nwHarness((id) => nwPassing(id));
+    await main(NW, h.deps);
+    const expected = [
+      sentBlock.SENT_PROPERTIES_BLOCK_HEADER,
+      `- ${labelFor('probe-unit-peachtree')} - signed up 2026-10-16`,
+      `- ${labelFor('probe-unit-birch')} - sent 2026-10-14`,
+      `- ${labelFor('probe-unit-oak')} - sent 2026-10-12`,
+    ].join('\n');
+    expect(h.inputs.length).toBeGreaterThan(0);
+    for (const input of h.inputs) {
+      expect(input.sentPropertiesBlock).toBe(expected);
+      const content = prompt.buildExtractionUserContent(input);
+      expect(content).toContain(expected);
+      for (const l of nwCtx.labels.values()) expect(content).toContain(l);
+    }
+  });
+
+  it('a line the grader judges excluded fails the gate (exit 1), listed for review', async () => {
+    const h = nwHarness(
+      (id) => (id === 'excluded-religion-feedback'
+        ? ok({ noteLines: [line(`${labelFor('probe-unit-oak')}: loves it - close to her mosque`)] })
+        : nwPassing(id)),
+      judgeBy(/mosque/i, 'religion'),
+    );
+    expect(await main(NW, h.deps)).toBe(1);
+    const text = h.records[0]!.text;
+    expect(text).toContain('Verdict: FAIL');
+    expect(text).toContain('EXCLUDED (religion) - The text states religion.');
+    expect(text).toContain('[fails the case]');
+  });
+
+  it("a CONTROL's feedback line judged excluded fails the gate too", async () => {
+    const h = nwHarness(
+      (id) => (id === 'control-feedback-yes'
+        ? ok({ noteLines: [line(`${labelFor('probe-unit-birch')}: loves it - close to her church`)] })
+        : nwPassing(id)),
+      judgeBy(/church/i, 'religion'),
+    );
+    expect(await main(NW, h.deps)).toBe(1);
+    expect(h.records[0]!.text).toMatch(/control-feedback-yes: 3 written line\(s\) judged to state an excluded fact/);
+  });
+
+  it('a field value judged excluded still passes, and is listed as reported only', async () => {
+    const h = nwHarness(
+      (id) => (id === 'excluded-religion-free'
+        ? ok({ fields: { area_preference: { op: 'write', value: 'Near her mosque' } } as ExtractionResult['fields'] })
+        : nwPassing(id)),
+      judgeBy(/mosque/i, 'religion'),
+    );
+    expect(await main(NW, h.deps)).toBe(0);
+    expect(h.records[0]!.text).toContain('excluded, reported only (religion)');
+    expect(h.records[0]!.text).toContain('[reported only]');
+  });
+
+  it('a missing control fails the gate', async () => {
+    const h = nwHarness((id) => (id === 'control-assistance-animal' ? ok({}) : nwPassing(id)));
+    expect(await main(NW, h.deps)).toBe(1);
+    expect(h.records[0]!.text).toMatch(/control-assistance-animal: control met in 0 of 3 runs/);
+  });
+
+  it('a feedback control with no line naming its property fails the gate', async () => {
+    const h = nwHarness((id) => (id === 'control-feedback-yes' ? ok({ noteLines: [line('Loves the apartment, wants to apply')] }) : nwPassing(id)));
+    expect(await main(NW, h.deps)).toBe(1);
+    // WL-29 (D6b-S6-1): the reason is pinned, so a run that exits 1 for any
+    // other reason (main's catch-all) does not pass this case.
+    expect(h.records[0]!.text).toMatch(/control-feedback-yes: control met in 0 of 3 runs \(needs 2\)/);
+  });
+
+  it('one truncation anywhere fails the gate', async () => {
+    const h = nwHarness((id, nth) => (id === 'control-plain-fact' && nth === 2 ? failed('truncated') : nwPassing(id)));
+    expect(await main(NW, h.deps)).toBe(1);
+    expect(h.records[0]!.text).toContain('truncated: 1');
+  });
+
+  it('a case graded in only 1 of 3 runs is not measured (exit 1); 2 of 3 is enough (exit 0)', async () => {
+    const failFirst = (n: number): NwGrade => {
+      let seen = 0;
+      return (items, req) =>
+        req.user.startsWith(planted('excluded-medical-free')) && seen++ < n
+          ? { ok: false, failure: 'driver', message: 'stub grader down' }
+          : allClean(items);
+    };
+    const two = nwHarness((id) => nwPassing(id), failFirst(2));
+    expect(await main(NW, two.deps)).toBe(1);
+    expect(two.records[0]!.text).toMatch(/excluded-medical-free: only 1 of 3 runs were scored and graded \(needs 2\) - not measured/);
+    expect(two.records[0]!.text).toContain('NOT GRADED - grader call failed (driver): stub grader down');
+    const one = nwHarness((id) => nwPassing(id), failFirst(1));
+    expect(await main(NW, one.deps)).toBe(0);
+    expect(one.records[0]!.text).toContain('ungraded runs: 1');
+  });
+
+  it('grader output that does not parse leaves the run ungraded, like a failed call', async () => {
+    let seen = 0;
+    const h = nwHarness((id) => nwPassing(id), (items, req) =>
+      req.user.startsWith(planted('excluded-medical-free')) && seen++ < 2 ? graderBabbles(items) : allClean(items));
+    expect(await main(NW, h.deps)).toBe(1);
+    expect(h.records[0]!.text).toContain('NOT GRADED - grader output did not parse: not JSON');
+  });
+
+  it('a grader that throws makes runs ungraded, never an escaped exception', async () => {
+    const h = nwHarness((id) => nwPassing(id), () => {
+      throw new Error('socket hang up');
+    });
+    expect(await main(NW, h.deps)).toBe(1);
+    expect(h.errors.join('\n')).not.toMatch(/FAILED/);
+    expect(h.records[0]!.text).toContain('NOT GRADED - grader call failed (driver): socket hang up');
+  });
+
+  it('a run with nothing to judge makes no grader call', async () => {
+    const h = nwHarness((id) => nwPassing(id));
+    expect(await main([...NW, '--case', 'control-no-address-op'], h.deps)).toBe(0);
+    expect(h.graderRequests).toEqual([]);
+    expect(h.records[0]!.text).toContain('nothing to grade (no line, no field value; no grader call)');
+  });
+
+  it('records extraction AND grader tokens', async () => {
+    const h = nwHarness((id) => nwPassing(id));
+    await main(NW, h.deps);
+    const calls = NEVER_WRITTEN_CASES.length * GATE_RUNS;
+    const text = h.records[0]!.text;
+    expect(text).toContain(`grader calls: ${NW_GRADER_CALLS}`);
+    expect(text).toContain(`Tokens: extraction in ${calls * 1000}, out ${calls * 100}; grader in ${NW_GRADER_CALLS * 500}, out ${NW_GRADER_CALLS * 50};`);
+  });
+
+  it('--case runs one case and marks the record PARTIAL', async () => {
+    const h = nwHarness((id) => nwPassing(id));
+    expect(await main([...NW, '--case', 'control-feedback-unsure'], h.deps)).toBe(0);
+    expect(h.inputs).toHaveLength(GATE_RUNS);
+    expect(h.records[0]!.text).toContain('PARTIAL');
+    expect(h.records[0]!.text).not.toContain('### Sign-off');
+  });
+
+  it('a record that cannot be written exits 1', async () => {
+    const h = nwHarness((id) => nwPassing(id));
+    h.deps.appendRecord = () => {
+      throw new Error('disk full');
+    };
+    expect(await main(NW, h.deps)).toBe(1);
+    expect(h.errors.join('\n')).toMatch(/disk full/);
+  });
+
+  it('a dry run needs no key, builds every request, prints the grader prompt and planted facts, calls nothing and writes nothing', async () => {
+    const h = nwHarness(() => ok({}), allClean, {});
+    expect(await main(['--suite', 'never-written', '--model', 'claude-sonnet-5-5', '--dry-run'], h.deps)).toBe(0);
+    expect(h.driversCreated).toEqual([]);
+    expect(h.gradersCreated).toEqual([]);
+    expect(h.records).toEqual([]);
+    const printed = h.printed.join('\n');
+    expect(printed).toContain('Dry run: nothing was sent.');
+    expect(printed).toContain(`grader    ${graderPromptFingerprint()}`);
+    expect(printed).toContain(EXCLUDED_KIND_DESCRIPTIONS.religion);
+    for (const c of NEVER_WRITTEN_CASES) expect(printed, c.id).toContain(`  planted   ${c.plantedFact ?? 'none'}`);
+  });
+});

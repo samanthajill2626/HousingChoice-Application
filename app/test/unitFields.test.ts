@@ -642,7 +642,9 @@ describe('toUnitFlyer - the merged public allowlist', () => {
       payment_standard: 1700,
       lif: 500,
       notes: 'SECRET in-unit washer note',
-      priority: 'SECRET high',
+      // WP1 B1 spec D6: an on/off switch now; still never on the flyer (the
+      // forbidden-keys wall below lists it).
+      priority: true,
       tour_process: 'SECRET lockbox 9999',
       // E3 pin: set on the fixture but NOT listed in the exact-shape expected
       // object below, so the flyer test FAILS loudly if tour_type ever leaks.
@@ -837,5 +839,31 @@ describe('toUnitFlyer - the merged public allowlist', () => {
       expect(toUnitFlyer(fullUnit({ washer_dryer: v })).washer_dryer).toBe(v);
     }
     expect(toUnitFlyer(fullUnit({ washer_dryer: 'in-unit' as unknown as 'hookups' })).washer_dryer).toBeNull();
+  });
+});
+
+describe('validateUnitBody - priority is an on/off switch (WP1 B1 spec D6)', () => {
+  it('accepts true and false', () => {
+    expect(validateUnitBody({ priority: true }, 'update')).toEqual({ ok: true, fields: { priority: true } });
+    expect(validateUnitBody({ priority: false }, 'update')).toEqual({ ok: true, fields: { priority: false } });
+    expect(
+      validateUnitBody({ landlordId: 'contact-ll-1', priority: true }, 'create'),
+    ).toEqual({ ok: true, fields: { landlordId: 'contact-ll-1', priority: true } });
+  });
+
+  it('refuses a string (the retired free-form kind) and every other non-boolean, null included', () => {
+    for (const bad of ['high', '', 'true', 1, 0, null, {}]) {
+      expect(validateUnitBody({ priority: bad }, 'update'), JSON.stringify(bad)).toEqual({
+        ok: false,
+        error: 'priority must be a boolean',
+      });
+    }
+  });
+
+  it('(PIN) toUnitFlyer never carries priority, on or off (WI12)', () => {
+    for (const priority of [true, false]) {
+      const flyer = toUnitFlyer({ unitId: 'u-p', landlordId: 'contact-ll-1', status: 'available', priority });
+      expect('priority' in flyer, String(priority)).toBe(false);
+    }
   });
 });

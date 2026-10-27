@@ -461,8 +461,9 @@ export interface UnitItem {
    * stores a boolean any more (lib/unitFields.ts validateUnitBody).
    */
   pets?: string | boolean;
-  /** Property priority — free-form. */
-  priority?: string;
+  /** WP1 B1 (spec D6): the staff Priority switch. `priority === true` is the
+   *  only on test - false, absent and a legacy stored string all read as off. */
+  priority?: boolean;
   /** Photo/media references — S3 keys or URLs. */
   media?: string[];
   /** Public flyer link. */

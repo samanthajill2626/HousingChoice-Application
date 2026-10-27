@@ -246,6 +246,7 @@ import {
   judgeSuite,
   parseGraderOutput,
   RAW_GRADER_TEXT_MAX,
+  RECORD_FILE_HEADER,
   renderNeverWrittenRecord,
   sentLabels,
   type NeverWrittenContext,
@@ -1055,6 +1056,20 @@ describe('main --suite never-written', () => {
     expect(h.records[0]!.text).not.toContain('### Sign-off');
   });
 
+  // FW-3 (R1 ADV-3) + FW-15 (CONF-7): the console says PARTIAL too, and a
+  // passing --case run asks for no sign-off (WL-33's record text).
+  it('--case: the console says PARTIAL, and a pass asks for no sign-off', async () => {
+    const pass = nwHarness((id) => nwPassing(id));
+    expect(await main([...NW, '--case', 'control-feedback-unsure'], pass.deps)).toBe(0);
+    const printed = pass.printed.join('\n');
+    expect(printed).toContain('PARTIAL - one case (--case control-feedback-unsure), not a gate run');
+    expect(printed).toContain('PASS on every automatic check (PARTIAL - one case, not a gate run; no sign-off).');
+    expect(printed).not.toContain('sign-off in the record');
+    const fail = nwHarness((id) => (id === 'control-feedback-unsure' ? ok({}) : nwPassing(id)));
+    expect(await main([...NW, '--case', 'control-feedback-unsure'], fail.deps)).toBe(1);
+    expect(fail.printed.join('\n')).toContain('PARTIAL - one case (--case control-feedback-unsure), not a gate run');
+  });
+
   it('a record that cannot be written exits 1', async () => {
     const h = nwHarness((id) => nwPassing(id));
     h.deps.appendRecord = () => {
@@ -1221,5 +1236,28 @@ describe('main --baseline', () => {
     expect(await main(['--model', 'claude-sonnet-5-5', '--baseline', BASELINE_ROOT, '--dry-run'], h.deps)).toBe(0);
     expect(h.driversCreated).toEqual([]);
     expect(h.records).toEqual([]);
+  });
+
+  // FW-3 (code review R1 ADV-3): a one-case re-run that passes on noise must
+  // never append a section that reads as the gate's latest PASS.
+  it('--case runs one case on each side and marks the section PARTIAL - heading, verdict and console', async () => {
+    const h = harness((id) => defaultCorrect(id));
+    expect(await main([...CMP, '--case', 'states-voucher'], h.deps)).toBe(0);
+    expect(h.inputs).toHaveLength(GATE_RUNS * 2);
+    const text = h.records[0]!.text;
+    expect(text.split('\n')[0]).toBe('## Default suite, branch vs baseline - 2026-10-27T12:00:00.000Z (PARTIAL: one case, not a gate run)');
+    expect(text).toContain('- Verdict: PASS (after 1 attempt(s)) - PARTIAL (one case, not a gate run; it never counts)');
+    expect(h.printed.join('\n')).toContain('PARTIAL - one case (--case states-voucher), not a gate run');
+  });
+
+  it('a full comparison is not PARTIAL', async () => {
+    const h = harness((id) => defaultCorrect(id));
+    expect(await main(CMP, h.deps)).toBe(0);
+    expect(h.records[0]!.text).not.toContain('PARTIAL');
+    expect(h.printed.join('\n')).not.toContain('PARTIAL');
+  });
+
+  it('the record file header says a PARTIAL section never counts', () => {
+    expect(RECORD_FILE_HEADER).toContain('a PARTIAL section (one --case) never counts');
   });
 });

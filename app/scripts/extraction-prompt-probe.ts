@@ -65,8 +65,8 @@
  *               With --baseline or --suite never-written only (refused on the
  *               plain default suite, which writes no record).
  *   --runs      plain default suite only (default 5); FIXED at 3 otherwise.
- *   --case      run only the case with this id (a never-written record is then
- *               marked PARTIAL - not a gate run).
+ *   --case      run only the case with this id (the record section, of either
+ *               suite, is then marked PARTIAL - not a gate run; it never counts).
  *   --dry-run   build every request and print the plan; calls nothing, needs no key.
  *
  * KEY: ANTHROPIC_API_KEY from the environment, printed as its last four
@@ -701,11 +701,16 @@ export function renderComparisonRecord(r: {
   cases: readonly ProbeCase[];
   sides: readonly [ComparisonSide, ComparisonSide];
   attempts: readonly ComparisonAttempt[];
+  /** FW-3: --case was given - one case, not a gate run; the section never counts. */
+  partial: boolean;
 }): string {
   const final = r.attempts[r.attempts.length - 1]!;
   const out: string[] = [];
-  out.push(`## Default suite, branch vs baseline - ${r.startedAt}`, '');
-  out.push(`- Verdict: ${final.comparison.pass ? 'PASS' : 'FAIL'} (after ${r.attempts.length} attempt(s))`);
+  out.push(`## Default suite, branch vs baseline - ${r.startedAt}${r.partial ? ' (PARTIAL: one case, not a gate run)' : ''}`, '');
+  out.push(
+    `- Verdict: ${final.comparison.pass ? 'PASS' : 'FAIL'} (after ${r.attempts.length} attempt(s))`
+      + (r.partial ? ' - PARTIAL (one case, not a gate run; it never counts)' : ''),
+  );
   out.push(`- Model: ${r.model}`, `- Key: ${r.keyTail}`);
   const [b, m] = r.sides;
   out.push(`- Branch: ${asciiSafe(b.root)} @ ${b.commit}${b.dirty ? ' (tracked files modified)' : ''}, prompt ${b.fingerprint}`);
@@ -1462,7 +1467,7 @@ export const RECORD_FILE_HEADER = [
   '# Extraction probe record',
   '',
   'Written by app/scripts/extraction-prompt-probe.ts. Synthetic conversations only - no client data.',
-  'Each run APPENDS a section; the latest section of each suite is the one that counts.',
+  'Each run APPENDS a section; the latest full section of each suite is the one that counts - a PARTIAL section (one --case) never counts.',
   '',
 ].join('\n');
 
@@ -1493,6 +1498,11 @@ function defaultDeps(): ProbeCliDeps {
     appendRecord: appendRecordFile,
     now: () => new Date().toISOString(),
   };
+}
+
+/** FW-3 (code review R1 ADV-3): what a --case run is, on the console of either suite. */
+function partialText(caseId: string): string {
+  return `PARTIAL - one case (--case ${caseId}), not a gate run; its record section never counts.`;
 }
 
 function usage(deps: ProbeCliDeps, message: string): 2 {
@@ -1562,6 +1572,7 @@ async function runNeverWritten(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string)
   deps.print(`  grader    ${graderFingerprint} (same model and key; one call per run with a line or a field value)`);
   deps.print(`  floor     ${floor}`);
   deps.print(`  runs      ${GATE_RUNS} per case, ${cases.length} case(s), ${calls} extraction call(s), up to ${calls} grader call(s)`);
+  if (a.caseId !== undefined) deps.print(`  partial   ${partialText(a.caseId)}`);
   if (a.dryRun) {
     for (const l of ['', ...sentBlock.split('\n')]) deps.print(l);
     deps.print('');
@@ -1607,10 +1618,14 @@ async function runNeverWritten(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string)
   }));
   deps.print('');
   deps.print(`Record appended to ${a.out}`);
+  // FW-3 / FW-15 (WL-33): a --case run is PARTIAL - not a gate run, no sign-off.
+  const partial = a.caseId !== undefined;
   deps.print(
     suite.pass
-      ? "PASS on every automatic check. The gate still needs Cameron's written sign-off in the record, where he may overrule any grader verdict."
-      : `FAIL: ${suite.reasons.length} case(s) - see the record.`,
+      ? partial
+        ? 'PASS on every automatic check (PARTIAL - one case, not a gate run; no sign-off).'
+        : "PASS on every automatic check. The gate still needs Cameron's written sign-off in the record, where he may overrule any grader verdict."
+      : `FAIL: ${suite.reasons.length} case(s) - see the record.${partial ? ' (PARTIAL - one case, not a gate run.)' : ''}`,
   );
   return suite.pass ? 0 : 1;
 }
@@ -1640,6 +1655,7 @@ async function runComparison(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string): 
   deps.print(`  key       ${keyTail(apiKey)}`);
   const perAttempt = cases.length * GATE_RUNS * 2;
   deps.print(`  runs      ${GATE_RUNS} per case per side, ${cases.length} case(s), ${perAttempt} call(s); up to ${perAttempt * 2} with the one re-run`);
+  if (a.caseId !== undefined) deps.print(`  partial   ${partialText(a.caseId)}`);
   if (a.dryRun) {
     deps.print(''); // [PR52] its own blank line: the test matches the whole string
     deps.print('Dry run: nothing was sent.');
@@ -1672,8 +1688,10 @@ async function runComparison(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string): 
     if (comparison.pass) break;
     if (attempt === 1) deps.print('The comparison failed; re-running both sides once (spec D7).');
   }
-  deps.appendRecord(a.out!, renderComparisonRecord({ startedAt, model, keyTail: keyTail(apiKey), cases, sides, attempts }));
+  const partial = a.caseId !== undefined;
+  deps.appendRecord(a.out!, renderComparisonRecord({ startedAt, model, keyTail: keyTail(apiKey), cases, sides, attempts, partial }));
   deps.print(`\nRecord appended to ${a.out}`);
+  if (partial) deps.print(partialText(a.caseId!));
   return attempts[attempts.length - 1]!.comparison.pass ? 0 : 1;
 }
 

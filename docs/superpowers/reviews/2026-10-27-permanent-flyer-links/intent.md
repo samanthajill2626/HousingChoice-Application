@@ -2,12 +2,14 @@
 
 ## STATE (replaced at each gate)
 
-- Phase: DESIGN - spec rev 1 written, design review round 1 next.
+- Phase: DESIGN - spec rev 3, design review CLOSED after round 2 (terminal).
+  Waiting on Cameron's spec gate.
 - Launch mode: not chosen yet.
-- In flight: nothing (no orchestrator, watchdog or mirror).
-- Next step: dispatch two opus spec reviewers on
-  `docs/superpowers/specs/2026-10-27-permanent-flyer-links-design.md`,
-  adjudicate into `design-review/adjudications.md`, then Cameron's spec gate.
+- In flight: nothing (no orchestrator, watchdog or mirror). Round-2 reviewer
+  (reviewer B) is idle and can be continued for the plan review.
+- Next step: on Cameron's spec approval, compaction gate A, then write the
+  plan `docs/superpowers/plans/2026-10-27-permanent-flyer-links-plan.md` and
+  run its adversarial review.
 
 ## What Cameron asked for
 
@@ -51,6 +53,10 @@ application falls through. Shared links should keep pulling in leads.
 3. Sign-ups from a non-available flyer: "Full credit + status (Recommended)" -
    capture source flyer, home of interest, pin, properties-sent entry; the pin
    names the status when it is not Available.
+
+4. Non-Available flyer body (asked after review round 1): "Drop listing link
+   only (Recommended)" - leave out the external "See the full listing" link
+   when the home is not Available; keep "Same-day tours available".
 
 ## Preferences / taste
 

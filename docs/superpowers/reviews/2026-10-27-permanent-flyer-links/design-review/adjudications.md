@@ -29,3 +29,18 @@ and :351-357 signed_up row is actionable, public.ts:279-286 unitId shape check).
 
 Round 1 changed decisions (#1, #4, #12), so round 2 runs: reviewer B is
 continued (it carried the most accepted unique findings: #4, #12, #13, #15).
+
+## Round 2 (spec rev 2 -> rev 3), 2026-10-27
+
+Reviewer B continued (R2-reviewer-b.md, 4 findings). It conceded #10, #13 and
+#15, and conceded Cameron's decision on #2 but not the wording that closed it.
+
+| # | Finding | Ruling | Decision changed? |
+|---|---|---|---|
+| R2-1 | "Take a flyer down by setting Setup" does not hold: Setup is a baseline status that derivation overwrites (verified statusModel.ts:321-337); the D7 note D1 cited does not exist | ACCEPT - D1 now says soft-delete is the only durable take-down and Setup is not offered as one; no new off switch (Sam wants links forever). Raised to Cameron at the spec gate as an open item | No (a withdrawn claim; nothing built changes) |
+| R2-2 | D4 unitId rule ignores the app-wide trim; MAX_UNIT_ID_LEN is private; the no-unitId branch is a /join-style lead | ACCEPT - D4 trims, cites the constant, states the /join-style outcome | No (precision) |
+| R2-3 | broadcasts.spec.ts ~283 and a broadcastApi.test.ts title pin the retired reason | ACCEPT - section 5 | No (precision) |
+| R2-4 | More comment sites state the old rule | ACCEPT - section 4 list extended (the grep rule stands) | No (precision) |
+
+Round 2 changed no decision: the review closes (terminal round, 2 of the
+4-round cap). Spec rev 3 goes to Cameron's spec gate.

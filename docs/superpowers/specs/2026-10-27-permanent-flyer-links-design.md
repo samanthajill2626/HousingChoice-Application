@@ -1,6 +1,10 @@
 # Permanent flyer links - design
 
-Status: DRAFT revision 2 (2026-10-27).
+Status: DRAFT revision 3 (2026-10-27), design review closed - to Cameron's spec gate.
+- Rev 3 folds in round 2 (the continued reviewer): 4 findings, all accepted as
+  precision edits (the Setup take-down claim withdrawn, the fallback's unitId
+  rule trimmed, missed test and comment sites). Round 2 changed no decision,
+  so it is the terminal round.
 - Rev 2 folds in design review round 1: two reviewers, 23 findings merged to
   15 items: 9 accepted, 2 settled by Cameron's answer (D3, D3a), 3 accepted
   as wording or a stated consequence, 1 deferred to an issue.
@@ -104,8 +108,13 @@ nobody mistakes them for bugs:
   though it was never Available.
 - An Off market property (often a landlord who withdrew the home) is served
   forever.
-- The ways to take a flyer down are: set the property to Setup, or delete it.
-  D7's note on the property page says so.
+- The only durable way to take a flyer down is to delete the property
+  (soft-delete, restorable - `units.ts` ~2501). Setting Setup hides it only
+  until the next placement event: Setup is a baseline status that derivation
+  overwrites (`statusModel.ts:321-337`; a placement create or stage move
+  re-derives, and a lost placement with no other active one derives
+  `available`). So Setup is NOT offered or documented as a take-down, and no
+  new off switch is built (Sam wants links to live forever).
 
 ### D2. Flyer API
 
@@ -149,11 +158,16 @@ fetch failure (5xx, network, 429) render it identically.
   tour."; then the same `IntakeForm` (submit label "Sign up") inline. On
   success: heading "Thanks - you're all set!" and "We'll text you about homes
   that fit your voucher." (focus moves to the heading, as on the flyer today).
-- The fallback's sign-up sends the route's `unitId` when it is 1 to
-  MAX_UNIT_ID_LEN characters (the server's own check, `public.ts:279-286`), and
-  no `unitId` otherwise, so the page's one button can always succeed. With a
-  unitId, the server decides: missing / deleted / setup -> the no-property
-  flyer sign-up (D5). Accepted consequence: when the fallback came from a
+- The fallback's sign-up sends the route's `unitId` when, after trimming, it
+  is 1 to 200 characters (the server's own check, `MAX_UNIT_ID_LEN`,
+  `public.ts:124` and `:279-286`, applied after the app-wide body trim,
+  `app.ts:146`), and no `unitId` otherwise, so the page's one button can always
+  succeed. The dashboard holds its own copy of 200 with a comment citing
+  `public.ts:124`. With a unitId, the server decides: missing / deleted / setup
+  -> the no-property flyer sign-up (D5). Without one (only a malformed link
+  gets here) the sign-up is a /join-style lead: it starts 'onboarding' and its
+  pin reads "Signed up on the join page as <name>" (`public.ts:207`, `:596`).
+  Accepted. Accepted consequence: when the fallback came from a
   transient failure on a PUBLIC unit, the sign-up is fully credited to that
   home although the visitor never saw it - they did follow its link.
 - Text variant: heading "Find a home that fits your voucher"; with the 404
@@ -263,7 +277,11 @@ for more: `shareable`, `SHAREABLE`, `no longer available`, `flyer link`):
   `:749-752`, `:787`, `:838-839`, `:846`; `broadcasts.ts:1181-1186`;
   `units.ts` ~982-983; `dashboard/src/routes/public/publicApi.ts:5-7`;
   `FlyerPage.tsx` header (14-15) and `:241-242`; `ListingDetail.tsx:416-417`,
-  `:937-938`; `app/src/lib/seed/lean.ts` ~211.
+  `:937-938`, `:82-83`; `RecipientPreview.tsx:87-89`, `:375-377`;
+  `activityEventsRepo.ts:74`; `dashboard/src/api/types.ts:3048-3049`;
+  `StatusBadge.tsx:46`; `app/src/lib/import/apply.ts:1622`;
+  `e2e/support/steps.ts:1033`; `documentation/GLOSSARY.md:73`;
+  `app/src/lib/seed/lean.ts` ~211.
 
 ## 5. Tests
 
@@ -288,7 +306,8 @@ for more: `shareable`, `SHAREABLE`, `no longer available`, `flyer link`):
     without one; thank-you state; sms prefill).
   - `ListingDetail.test.tsx`: the flyer line for available, occupied, setup,
     deleted, and deleted + setup.
-  - Broadcast tests pinning the D8 strings.
+  - Broadcast tests pinning the D8 strings (and the `broadcastApi.test.ts`
+    ~2162 test title that states the retired reason).
   - A parity test that the dashboard `FLYER_PUBLIC` mirror equals the same six
     statuses.
 - e2e (each new test creates its own run-unique property through the API; the
@@ -301,6 +320,8 @@ for more: `shareable`, `SHAREABLE`, `no longer available`, `flyer link`):
     still shows its photos and the API answers 200.
   - `environment-identity.spec.ts:44` (`/p/missing-unit`): asserts the
     fallback heading instead of "no longer available".
+  - `broadcasts.spec.ts` ~283: asserts the D8 composer note instead of "its
+    flyer link won't work".
   - One sign-up from a run-unique Occupied property's flyer asserts the pin
     "Signed up from the flyer for <address> (Occupied) as <name>" on the
     contact page.

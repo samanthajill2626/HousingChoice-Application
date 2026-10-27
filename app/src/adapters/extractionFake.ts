@@ -10,6 +10,13 @@
 // utterances and older markers are ignored. Malformed JSON or no marker ->
 // empty result (warn, never throw). config refuses driver 'fake' in production.
 //
+// The payload is NOT run through parseExtractionText, so nothing here is
+// validated. noteLines items are { "text": ..., "confidence": ... } (B1 spec
+// D4); every value rule - the floor included - is apply.ts filterNoteLines,
+// which drops a legacy string item without throwing (B1 watch item WI1). A
+// marker line meant to land needs a confidence at or above
+// EXTRACTION_FACT_MIN_CONFIDENCE (default 0.7).
+//
 // FAILURE MARKER (dev/test only, F7c). The driver's discriminated `ok: false`
 // arm - the one that produces outcome 'failed', an error block, a burned
 // attempt and eventually a parked row - had NO hermetic reachability, because

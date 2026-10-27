@@ -329,7 +329,7 @@ test('type recommendation: an unknown caseworker triages to Partner and clears T
 
   await sendExtractSms(request, phone, {
     typeSuggestion: { value: 'partner', reason: 'caseworker at Hope Atlanta' },
-    noteLines: ['Identified as a caseworker at Hope Atlanta'],
+    noteLines: [{ text: 'Identified as a caseworker at Hope Atlanta', confidence: 0.9 }],
   });
   const tick = await extractionTick(request);
   expect(tick.processed).toBeGreaterThanOrEqual(1);
@@ -374,7 +374,7 @@ test('type recommendation: an unknown property manager triages to the landlord p
 
   await sendExtractSms(request, phone, {
     typeSuggestion: { value: 'property_manager', reason: 'manages properties for the owner' },
-    noteLines: ['Identified as property manager for Example Homes'],
+    noteLines: [{ text: 'Identified as property manager for Example Homes', confidence: 0.9 }],
   });
   const tick = await extractionTick(request);
   expect(tick.processed).toBeGreaterThanOrEqual(1);

@@ -514,7 +514,7 @@ test.describe('Caseworkers - the Unknown card', () => {
     // an AI note line.
     await sendExtractSms(request, phone, {
       typeSuggestion: { value: 'partner', reason: `caseworker at Quillwort ${stamp}` },
-      noteLines: [noteLine],
+      noteLines: [{ text: noteLine, confidence: 0.9 }],
     });
     expect((await extractionTick(request)).processed).toBeGreaterThanOrEqual(1);
     const contactId = await findUnknownContactId(req, phone);

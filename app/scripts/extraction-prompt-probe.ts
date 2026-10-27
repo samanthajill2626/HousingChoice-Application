@@ -89,7 +89,7 @@
  * a case that repeats an example only proves the model can echo it.
  */
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -1197,9 +1197,51 @@ function commitText(g: { commit: string; dirty: boolean }): string {
   return `${g.commit}${g.dirty ? ' (tracked files modified)' : ''}`;
 }
 
-/** FW-6 (code review R1 ADV-11): the commit or the dirty flag read after the last call differs from the one read before the first. */
-export function checkoutChanged(before: { commit: string; dirty: boolean }, after: { commit: string; dirty: boolean }): boolean {
-  return before.commit !== after.commit || before.dirty !== after.dirty;
+/** `git -C <root> <args>`: its exit code and stdout. Throws only when git itself cannot run. */
+export type GitRunner = (root: string, args: readonly string[]) => { status: number; stdout: string };
+
+/** A checkout's HEAD and its dirty flag, as the record prints them. */
+export interface GitInfo {
+  commit: string;
+  dirty: boolean;
+}
+
+/**
+ * FW2-3 (code review R2-3): the paths a run MEASURES - production code and
+ * the probe itself. The gate record lives in the measured checkout and is
+ * committed as produced (AGENTS.md), so the git checks look here only:
+ * appending to or committing the record - or any other doc - neither marks a
+ * run dirty nor fails it.
+ */
+export const MEASURED_PATHS: readonly string[] = ['app/src', 'app/scripts'];
+
+/** HEAD, and whether a TRACKED file under MEASURED_PATHS is modified (FW2-3). */
+export function gitInfoOf(git: GitRunner, root: string): GitInfo {
+  try {
+    const head = git(root, ['rev-parse', 'HEAD']);
+    const status = git(root, ['status', '--porcelain', '--untracked-files=no', '--', ...MEASURED_PATHS]);
+    if (head.status === 0 && status.status === 0) return { commit: head.stdout.trim(), dirty: status.stdout.trim().length > 0 };
+  } catch {
+    // git itself could not run: reported as below.
+  }
+  return { commit: 'unknown (git failed)', dirty: false };
+}
+
+/**
+ * FW-6 (code review R1 ADV-11) + FW2-3 (R2-3): the MEASURED code changed
+ * between the read before the first call and the read after the last - the
+ * dirty flag flipped, or the commit moved and `git diff --quiet` finds a
+ * difference under MEASURED_PATHS (or cannot answer: no answer is no
+ * certificate). A commit that only adds the record, or any doc, is no change.
+ */
+export function measuredCodeChanged(git: GitRunner, root: string, before: GitInfo, after: GitInfo): boolean {
+  if (before.dirty !== after.dirty) return true;
+  if (before.commit === after.commit) return false;
+  try {
+    return git(root, ['diff', '--quiet', before.commit, after.commit, '--', ...MEASURED_PATHS]).status !== 0;
+  } catch {
+    return true;
+  }
 }
 
 /** sha256 (first 16 hex) of the user content production builds for this input. */
@@ -1266,8 +1308,8 @@ export interface NeverWrittenRecordInput {
   /** The commit and dirty flag read BEFORE the first call (FW-6). */
   commit: string;
   dirty: boolean;
-  /** FW-6: the same, read again after the last call; a difference is printed (and fails the run). */
-  after?: { commit: string; dirty: boolean };
+  /** FW-6: the same, read again after the last call - set only when the run's measured code changed (which fails it); printed when set. */
+  after?: GitInfo;
   model: string;
   keyTail: string;
   /** FW-8: where the extraction and grader calls went. */
@@ -1303,7 +1345,7 @@ export function renderNeverWrittenRecord(r: NeverWrittenRecordInput): string {
   out.push(`- Verdict: ${r.suite.pass ? passText : 'FAIL'}${ungraded === '' ? '' : `; ${ungraded}`}`);
   for (const reason of r.suite.reasons) out.push(`  - ${asciiSafe(reason)}`);
   out.push(`- Commit: ${commitText(r)}`);
-  if (r.after !== undefined && checkoutChanged(r, r.after)) {
+  if (r.after !== undefined) {
     out.push(`- Commit after the last call: ${commitText(r.after)} - the checkout changed during the run`);
   }
   out.push(`- Model: ${r.model}`);
@@ -1540,8 +1582,8 @@ export interface ProbeCliDeps {
   createDriver: (m: BaseModules, opts: { model: string; apiKey: string; root: string }) => ExtractionDriver;
   /** The never-written grader (spec D7): the SAME --model and key, through adapters/extraction.ts. */
   createGrader: (m: BranchModules, opts: { model: string; apiKey: string }) => StructuredOutputClient;
-  /** The checkout's HEAD and whether TRACKED files are modified (the record file itself is untracked). */
-  gitInfo: (root: string) => { commit: string; dirty: boolean };
+  /** Every git read the probe makes, `git -C <root> <args>` (FW2-3: the tests see each command). */
+  git: GitRunner;
   /** FW-4: the platform the same-checkout guard compares paths for (win32 paths are case-insensitive). */
   platform: NodeJS.Platform;
   appendRecord: (file: string, text: string) => void;
@@ -1566,14 +1608,11 @@ export function canonicalRoot(root: string, platform: NodeJS.Platform): string {
   return platform === 'win32' ? real.toLowerCase() : real;
 }
 
-function gitInfoOf(root: string): { commit: string; dirty: boolean } {
-  try {
-    const commit = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-    const status = execFileSync('git', ['-C', root, 'status', '--porcelain', '--untracked-files=no'], { encoding: 'utf8' });
-    return { commit, dirty: status.trim().length > 0 };
-  } catch {
-    return { commit: 'unknown (git failed)', dirty: false };
-  }
+/** The real GitRunner: `git -C <root> <args>` with its exit code (`diff --quiet` exits 1 on a difference). */
+function runGit(root: string, args: readonly string[]): { status: number; stdout: string } {
+  const result = spawnSync('git', ['-C', root, ...args], { encoding: 'utf8' });
+  if (result.error !== undefined) throw result.error;
+  return { status: result.status ?? -1, stdout: result.stdout };
 }
 
 export const RECORD_FILE_HEADER = [
@@ -1607,7 +1646,7 @@ function defaultDeps(): ProbeCliDeps {
         logger: m.logger.createLogger({ level: 'silent' }),
       }),
     createGrader: (m, opts) => m.extraction.createStructuredOutputClient({ model: opts.model, apiKey: opts.apiKey }),
-    gitInfo: gitInfoOf,
+    git: runGit,
     platform: process.platform,
     appendRecord: appendRecordFile,
     now: () => new Date().toISOString(),
@@ -1671,8 +1710,9 @@ async function runNeverWritten(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string)
   const root = path.resolve(deps.ownRoot);
   // FW-6 (code review R1 ADV-11): the commit the record certifies is read
   // BEFORE the code is loaded and the first call made, and again after the
-  // last call; a change fails the run.
-  const gitBefore = deps.gitInfo(root);
+  // last call; a change to the MEASURED code fails the run (FW2-3: app/src
+  // and app/scripts - the record itself, or any doc, never counts).
+  const gitBefore = gitInfoOf(deps.git, root);
   const m = await deps.loadBranchModules(root);
   const floor = factFloor(m, deps.env);
   const orgListBlock = startingOrgListBlock(m);
@@ -1721,8 +1761,8 @@ async function runNeverWritten(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string)
     }),
   );
   const runs = await pool(jobs, a.concurrency);
-  const gitAfter = deps.gitInfo(root);
-  const changed = checkoutChanged(gitBefore, gitAfter);
+  const gitAfter = gitInfoOf(deps.git, root);
+  const changed = measuredCodeChanged(deps.git, root, gitBefore, gitAfter);
   const perCase = cases.map((c, ci) => {
     const mine = runs.slice(ci * GATE_RUNS, (ci + 1) * GATE_RUNS);
     return { c, contentHash: contentHash(m, inputs[ci]!), runs: mine, verdict: judgeCase(c, mine) };
@@ -1737,7 +1777,8 @@ async function runNeverWritten(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string)
   }
   if (changed) deps.print(`  FAIL  ${changeReason}`);
   deps.appendRecord(a.out!, renderNeverWrittenRecord({
-    startedAt, commit: gitBefore.commit, dirty: gitBefore.dirty, after: gitAfter, model, keyTail: keyTail(apiKey), endpoint: endpointOf(deps.env),
+    startedAt, commit: gitBefore.commit, dirty: gitBefore.dirty, ...(changed && { after: gitAfter }),
+    model, keyTail: keyTail(apiKey), endpoint: endpointOf(deps.env),
     extractionFingerprint, graderFingerprint, floor, partial: a.caseId !== undefined,
     cases: perCase, suite, labels, sentBlock,
   }));
@@ -1770,9 +1811,9 @@ async function runComparison(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string): 
   const sides = (await Promise.all(
     roots.map(async (root): Promise<ComparisonSide> => {
       const m = await deps.loadBaseModules(root);
-      const git = deps.gitInfo(root);
+      const info = gitInfoOf(deps.git, root);
       return {
-        root, m, commit: git.commit, dirty: git.dirty,
+        root, m, commit: info.commit, dirty: info.dirty,
         fingerprint: m.prompt.extractionPromptFingerprint(),
         orgListBlock: startingOrgListBlock(m),
         sentBlock: renderSentBlock(m, []),

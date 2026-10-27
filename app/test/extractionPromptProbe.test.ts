@@ -29,6 +29,7 @@ import {
   scoreSide,
   type BaseModules,
   type BranchModules,
+  type GitRunner,
   type ProbeCliDeps,
   type RunOutcome,
   type SideScore,
@@ -56,6 +57,49 @@ function failed(failure: 'refusal' | 'parse' | 'truncated' | 'driver'): Extracti
 /** The case id the probe encodes in every utterance's tsMsgId (never rendered into the prompt). */
 function caseIdOf(input: ExtractionInput): string {
   return input.transcript[0]!.tsMsgId.replace(/^(nw|probe)-/, '').replace(/-\d+$/, '');
+}
+
+/**
+ * FW2-3: a fake `git -C <root>` for the probe's injected git dep, over one
+ * MUTABLE checkout - a test changes it mid-run from its driver answer. A
+ * directory pathspec after `--` is honored as git honors one (the path itself
+ * or anything under it), so what comes back proves WHICH paths were asked.
+ */
+interface FakeCheckout {
+  head: string;
+  /** Tracked files modified in the working tree. */
+  modified: string[];
+  /** `<from>..<to>` -> the files those two commits differ in. */
+  diffs: Record<string, string[]>;
+  /** Exit code of a `diff` the checkout cannot answer (a bad revision is 128). */
+  diffStatus?: number;
+}
+
+function fakeCheckout(head: string): FakeCheckout {
+  return { head, modified: [], diffs: {} };
+}
+
+function fakeGit(checkoutOf: (root: string) => FakeCheckout, log?: string[]): GitRunner {
+  return (root, args) => {
+    log?.push(args.join(' '));
+    const co = checkoutOf(root);
+    const dash = args.indexOf('--');
+    const specs = dash === -1 ? [] : args.slice(dash + 1);
+    const inScope = (file: string): boolean => specs.length === 0 || specs.some((s) => file === s || file.startsWith(`${s}/`));
+    switch (args[0]) {
+      case 'rev-parse':
+        return { status: 0, stdout: `${co.head}\n` };
+      case 'status':
+        return { status: 0, stdout: co.modified.filter(inScope).map((f) => ` M ${f}\n`).join('') };
+      case 'diff': {
+        if (co.diffStatus !== undefined) return { status: co.diffStatus, stdout: '' };
+        const files = co.diffs[`${args[2]}..${args[3]}`] ?? [];
+        return { status: files.some(inScope) ? 1 : 0, stdout: '' };
+      }
+      default:
+        throw new Error(`fake git: unexpected command: ${args.join(' ')}`);
+    }
+  };
 }
 
 /** nth = how many calls this side already made for this case (0-based). */
@@ -102,7 +146,7 @@ function harness(answer: Answer, env: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: K
       };
       return driver;
     },
-    gitInfo: (root) => ({ commit: (root.endsWith('main') ? 'b' : 'a').repeat(40), dirty: false }),
+    git: fakeGit((root) => fakeCheckout((root.endsWith('main') ? 'b' : 'a').repeat(40))),
     appendRecord: (file, text) => {
       h.records.push({ file, text });
     },
@@ -1109,21 +1153,31 @@ describe('main --suite never-written', () => {
       events.push('extract');
       return nwPassing(id);
     });
-    h.deps.gitInfo = () => {
-      events.push('git');
-      return { commit: 'a'.repeat(40), dirty: false };
+    // FW2-3: the git dep is now the raw runner, so one read is two commands
+    // (rev-parse, status) and an unmoved commit asks for no diff.
+    const git = fakeGit(() => fakeCheckout('a'.repeat(40)));
+    h.deps.git = (root, args) => {
+      events.push(`git ${args[0]}`);
+      return git(root, args);
     };
     expect(await main(NW, h.deps)).toBe(0);
-    expect(events[0]).toBe('git');
-    expect(events[events.length - 1]).toBe('git');
-    expect(events.filter((e) => e === 'git')).toHaveLength(2);
+    expect(events.slice(0, 2)).toEqual(['git rev-parse', 'git status']);
+    expect(events.slice(-2)).toEqual(['git rev-parse', 'git status']);
+    expect(events.filter((e) => e.startsWith('git'))).toHaveLength(4);
+    expect(events).toContain('extract');
     expect(h.records[0]!.text).not.toContain('changed during the run');
   });
 
   it('a commit that changes during the run fails it (exit 1), and the record shows both', async () => {
-    const h = nwHarness((id) => nwPassing(id));
-    let reads = 0;
-    h.deps.gitInfo = () => ({ commit: (reads++ === 0 ? 'a' : 'c').repeat(40), dirty: false });
+    // FW2-3: the raw git dep; the commit moves mid-run and changes MEASURED
+    // code (app/src), which is what fails a run now.
+    const co = fakeCheckout('a'.repeat(40));
+    co.diffs[`${'a'.repeat(40)}..${'c'.repeat(40)}`] = ['app/src/services/extraction/prompt.ts'];
+    const h = nwHarness((id) => {
+      co.head = 'c'.repeat(40);
+      return nwPassing(id);
+    });
+    h.deps.git = fakeGit(() => co);
     expect(await main(NW, h.deps)).toBe(1);
     const text = h.records[0]!.text;
     expect(text).toContain('- Verdict: FAIL');
@@ -1134,11 +1188,97 @@ describe('main --suite never-written', () => {
   });
 
   it('tracked files modified during the run fail it too', async () => {
-    const h = nwHarness((id) => nwPassing(id));
-    let reads = 0;
-    h.deps.gitInfo = () => ({ commit: 'a'.repeat(40), dirty: reads++ > 0 });
+    // FW2-3: the raw git dep; the file modified mid-run is MEASURED code.
+    const co = fakeCheckout('a'.repeat(40));
+    const h = nwHarness((id) => {
+      co.modified = ['app/src/services/extraction/prompt.ts'];
+      return nwPassing(id);
+    });
+    h.deps.git = fakeGit(() => co);
     expect(await main(NW, h.deps)).toBe(1);
     expect(h.records[0]!.text).toContain(`- Commit after the last call: ${'a'.repeat(40)} (tracked files modified) - the checkout changed during the run`);
+  });
+
+  // FW2-3 (code review R2-3): the git checks certify the MEASURED code -
+  // app/src and app/scripts. The gate record sits in the measured checkout
+  // and is committed as produced (AGENTS.md), so appending to it or
+  // committing it mid-run must neither mark the run dirty nor fail it.
+  describe('the git checks look at app/src and app/scripts only (FW2-3)', () => {
+    const GATE_RECORD = 'docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/never-written-test.md';
+    const A = 'a'.repeat(40);
+    const D = 'd'.repeat(40);
+
+    it('the gate record appended during the run neither marks it dirty nor fails it', async () => {
+      const co = fakeCheckout(A);
+      const h = nwHarness((id) => {
+        co.modified = [GATE_RECORD];
+        return nwPassing(id);
+      });
+      h.deps.git = fakeGit(() => co);
+      expect(await main(NW, h.deps)).toBe(0);
+      expect(h.records[0]!.text).toContain(`- Commit: ${A}\n`);
+      expect(h.records[0]!.text).not.toContain('changed during the run');
+    });
+
+    it('docs modified before the run do not mark the certified commit dirty', async () => {
+      const co = fakeCheckout(A);
+      co.modified = [GATE_RECORD, 'RUNBOOK.md'];
+      const h = nwHarness((id) => nwPassing(id));
+      h.deps.git = fakeGit(() => co);
+      expect(await main(NW, h.deps)).toBe(0);
+      expect(h.records[0]!.text).toContain(`- Commit: ${A}\n`);
+    });
+
+    it('a docs-only commit during the run (the record committed as produced) does not fail it', async () => {
+      const co = fakeCheckout(A);
+      co.diffs[`${A}..${D}`] = [GATE_RECORD];
+      const h = nwHarness((id) => {
+        co.head = D;
+        return nwPassing(id);
+      });
+      h.deps.git = fakeGit(() => co);
+      expect(await main(NW, h.deps)).toBe(0);
+      expect(h.records[0]!.text).toContain(`- Commit: ${A}\n`);
+      expect(h.records[0]!.text).not.toContain('changed during the run');
+    });
+
+    it('asks git about app/src and app/scripts only: both status reads and, once the commit moved, one diff', async () => {
+      const log: string[] = [];
+      const co = fakeCheckout(A);
+      co.diffs[`${A}..${D}`] = [GATE_RECORD];
+      const h = nwHarness((id) => {
+        co.head = D;
+        return nwPassing(id);
+      });
+      h.deps.git = fakeGit(() => co, log);
+      expect(await main(NW, h.deps)).toBe(0);
+      const status = 'status --porcelain --untracked-files=no -- app/src app/scripts';
+      expect(log).toEqual(['rev-parse HEAD', status, 'rev-parse HEAD', status, `diff --quiet ${A} ${D} -- app/src app/scripts`]);
+    });
+
+    it('(PIN) a moved commit that changes app/scripts fails the run', async () => {
+      const co = fakeCheckout(A);
+      co.diffs[`${A}..${D}`] = [GATE_RECORD, 'app/scripts/extractionProbeNeverWritten.ts'];
+      const h = nwHarness((id) => {
+        co.head = D;
+        return nwPassing(id);
+      });
+      h.deps.git = fakeGit(() => co);
+      expect(await main(NW, h.deps)).toBe(1);
+      expect(h.records[0]!.text).toContain(`- Commit after the last call: ${D} - the checkout changed during the run`);
+    });
+
+    it('(PIN) a moved commit whose diff git cannot answer fails the run - no answer is no certificate', async () => {
+      const co = fakeCheckout(A);
+      co.diffStatus = 128;
+      const h = nwHarness((id) => {
+        co.head = D;
+        return nwPassing(id);
+      });
+      h.deps.git = fakeGit(() => co);
+      expect(await main(NW, h.deps)).toBe(1);
+      expect(h.records[0]!.text).toContain(`- Commit after the last call: ${D} - the checkout changed during the run`);
+    });
   });
 
   it('a record that cannot be written exits 1', async () => {
@@ -1342,6 +1482,32 @@ describe('main --baseline', () => {
       expect(text, c.id).toContain(`- Reason: ${c.id}: not measured on the branch (0 of 3 runs returned a result; needs 2)`);
       expect(text, c.id).toContain(`- Reason: ${c.id}: not measured on the baseline (0 of 3 runs returned a result; needs 2)`);
     }
+  });
+
+  // FW2-3 (code review R2-3): each side's dirty flag looks at app/src and
+  // app/scripts only, as the never-written run's does.
+  it('a doc modified on either side does not mark that side "(tracked files modified)"', async () => {
+    const branchSide = fakeCheckout('a'.repeat(40));
+    const baselineSide = fakeCheckout('b'.repeat(40));
+    branchSide.modified = ['docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/never-written-test.md'];
+    baselineSide.modified = ['docs/issues/README.md'];
+    const h = harness((id) => defaultCorrect(id));
+    h.deps.git = fakeGit((root) => (isBaseline(root) ? baselineSide : branchSide));
+    expect(await main(CMP, h.deps)).toBe(0);
+    const text = h.records[0]!.text;
+    expect(text).toMatch(new RegExp(`- Branch: .* @ ${'a'.repeat(40)}, prompt `));
+    expect(text).toMatch(new RegExp(`- Baseline: .* @ ${'b'.repeat(40)}, prompt `));
+  });
+
+  it('(PIN) measured code modified on a side still marks that side', async () => {
+    const baselineSide = fakeCheckout('b'.repeat(40));
+    baselineSide.modified = ['app/src/services/extraction/prompt.ts'];
+    const h = harness((id) => defaultCorrect(id));
+    h.deps.git = fakeGit((root) => (isBaseline(root) ? baselineSide : fakeCheckout('a'.repeat(40))));
+    expect(await main(CMP, h.deps)).toBe(0);
+    const text = h.records[0]!.text;
+    expect(text).toMatch(new RegExp(`- Branch: .* @ ${'a'.repeat(40)}, prompt `));
+    expect(text).toMatch(new RegExp(`- Baseline: .* @ ${'b'.repeat(40)} \\(tracked files modified\\), prompt `));
   });
 
   it('the baseline naming the measured checkout is a usage error', async () => {

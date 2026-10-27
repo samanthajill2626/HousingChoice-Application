@@ -305,6 +305,63 @@ AiRunDetail.tsx) and must run in order.
   `null`, so it is never cleared to absent. Spec D6 already reads off and
   absent the same.
 
+### Plan review round 1 rulings (adjudications: `plan-review/plan-adjudications.md`)
+
+Each is written through into the slice text at the changed step, marked
+`[PRnn]`. Where slice text and a ruling below still disagree, the ruling
+wins.
+
+- PR29 Every git command in this plan carries
+  `-C W:/tmp/wp1-b1-ranking-inputs`, and every commit is preceded by a
+  bare `git -C W:/tmp/wp1-b1-ranking-inputs status` read and the
+  MERGE_HEAD check (section 0). The S3/S4 commit blocks are rewritten in
+  the S1/S5 form.
+- PR30 The probe builds PROPERTIES SENT exactly as production does:
+  `SENT_BLOCK_PATH = 'app/src/services/extraction/sentPropertiesBlock.ts'`;
+  rows go through `selectSentRows` (newest 20, flyer = signed up), then
+  `renderSentPropertiesBlock` over `{ unit, sentAt, signedUp }` entries
+  joined from the case's displays; `filterNoteLines` is called with a
+  fixed `prefix` and read through `.append` (model lines are
+  `.append.slice(0, .modelCount)`). S6.4's test proves a signed-up line.
+- PR31 S4.3 updates BOTH whole-outcome pins in extractionApply.test.ts
+  (:207 and :268-279); S5.7 anchors on the post-S4 text and gives the full
+  post-S5 text of both.
+- PR32 S4.6's "verbatim rules" case does NOT assert the no-address bullet
+  (PR17: S5.5 owns it and its pin).
+- PR33 S6.6's fake-driver comment writes `<field key>`, never a list key;
+  S6.6's run command includes `test/tenantMatchingInputsReaders.test.ts`.
+- PR34 Everything S5 adds to the run detail goes in S4's "Notes lines"
+  region: `feedbackLines`, `unlabeledAddressLines` and the
+  `sentPropertiesFingerprint` as items after S4's rows. The region renders
+  when `notedLines > 0` OR any of `notesBelowFloor`, `notesDemoted`,
+  `feedbackLines`, `unlabeledAddressLines` is present (a present 0
+  renders as 0). S5.8's tests query `getByRole('region', { name: 'Notes lines' })`.
+  Nothing new goes in the header.
+- PR35 The probe's floor = `parseExtractionFactMinConfidence(env.EXTRACTION_FACT_MIN_CONFIDENCE)`
+  (S4.1's export), never a full `loadConfig`.
+- PR36 S3.8 also fixes `suggestionResolution.ts:46` ("passes 12"); the WI3
+  grep adds `\b12\b` over the same paths, each hit reviewed and recorded.
+- PR37 `secrets:sync` is struck from S6's handback items (PR22). The
+  RUNBOOK row says a blank `EXTRACTION_FACT_MIN_CONFIDENCE` reads as 0.7.
+- PR38 Precedence: section 4 rulings win over slice text; a ruling that
+  departs from spec TEXT (PR16, PR17, PR21, PR22, PR24, PR41) is listed for
+  Cameron at the launch gate, and his go is the approval. Section 1's "the
+  spec wins on any doubt" governs anything no ruling addresses.
+- PR39 The probe's price table rows are marked
+  `// unverified - Cameron confirms at the launch gate`; the record's cost
+  is informational and never a pass condition. The pin test checks the
+  table's shape and date, not the dollar values.
+- PR40 One new e2e spec runs, with `npm run e2e:session` live, as
+  `npm run e2e -w @housingchoice/e2e -- tests/<path>.spec.ts` (e2e
+  README:185-206 is the authority); the full suite only as `npm run e2e`
+  at S7.4.
+- PR41 Banned terms that are ordinary home or tenancy vocabulary as single
+  words (e.g. `black`, `white`, `grade`, `country`, `citizen`, `senior`,
+  `single`) become phrase forms (`black woman`, `I'm black`, `in 3rd
+  grade`, named countries, `US citizen`, `citizenship`, `senior citizen`,
+  `single mom`). S6.1 lists the final terms; the list is shown to Cameron
+  at the launch gate. The spec's zero-hit pass rule is unchanged.
+
 ### Hours (Cameron's hands-on hours; charter estimate 8-10)
 
 The unit is Cameron's own time - thinking, deciding, reviewing, talking to

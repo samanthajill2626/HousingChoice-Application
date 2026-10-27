@@ -13,7 +13,7 @@ import {
 import type { ExtractionResult } from '../src/adapters/extraction.js';
 import { createLogger, type Logger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
-import { applyExtraction, type ApplyDeps } from '../src/services/extraction/apply.js';
+import { applyExtraction, coerceField, type ApplyDeps } from '../src/services/extraction/apply.js';
 import type { OrgEntry } from '../src/lib/orgNames.js';
 import { buildStartingEntries } from '../src/lib/orgStartingList.js';
 import { normalizeSuggestionValue } from '../src/services/extraction/schema.js';
@@ -1529,5 +1529,42 @@ describe('applyExtraction - a list match honors dismissals of its other spelling
     expect(outcome.decisions[0]).toMatchObject({
       target: 'housingAuthority', outcome: 'dropped', dropReason: 'dismissed_before',
     });
+  });
+});
+
+// B1 spec D3: a tenant matching input coerces by its KIND (from the one list),
+// never by name. coerceField is pure and exported - the probe (spec D7) and
+// the accept path (suggestionResolution.ts coerceAccept) use the same rule.
+describe('coerceField - the tenant matching inputs by kind (B1 spec D3)', () => {
+  it('trims a text value and keeps one of exactly 500 characters', () => {
+    expect(coerceField('area_preference', '  Decatur or Tucker  ')).toEqual({ ok: true, value: 'Decatur or Tucker' });
+    const max = 'x'.repeat(500);
+    expect(coerceField('preferences_constraints', max)).toEqual({ ok: true, value: max });
+  });
+
+  it('DROPS (never truncates) a text value over 500 characters, and an empty one', () => {
+    expect(coerceField('accessibility_need', 'x'.repeat(501))).toMatchObject({ ok: false });
+    expect(coerceField('area_preference', '   ')).toMatchObject({ ok: false });
+    expect(coerceField('area_preference', undefined)).toMatchObject({ ok: false });
+  });
+
+  it('reads dollars with $, commas and spaces stripped, as a whole number 0..20000', () => {
+    expect(coerceField('max_tenant_portion', '$1,200')).toEqual({ ok: true, value: 1200 });
+    expect(coerceField('max_tenant_portion', ' 1 200 ')).toEqual({ ok: true, value: 1200 });
+    expect(coerceField('max_tenant_portion', '0')).toEqual({ ok: true, value: 0 });
+    expect(coerceField('max_tenant_portion', '20000')).toEqual({ ok: true, value: 20000 });
+  });
+
+  it('drops a fractional, negative, out-of-range or non-numeric dollar value (1200.50 is not rounded)', () => {
+    for (const raw of ['1200.50', '-5', '20001', 'about 1200', '', '$']) {
+      expect(coerceField('max_tenant_portion', raw), raw).toMatchObject({ ok: false });
+    }
+  });
+
+  it('(PIN) leaves the eight original fields exactly as they were', () => {
+    expect(coerceField('pets', 'x'.repeat(121))).toMatchObject({ ok: false });
+    expect(coerceField('pets', '  two cats ')).toEqual({ ok: true, value: 'two cats' });
+    expect(coerceField('voucherSize', '3')).toEqual({ ok: true, value: 3 });
+    expect(coerceField('porting', 'true')).toEqual({ ok: true, value: true });
   });
 });

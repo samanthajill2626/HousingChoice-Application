@@ -188,7 +188,10 @@ function norm(value: string | undefined): string | undefined {
 function withRecorded(profile: ExtractionProfileSnapshot, field: ExtractableField, recorded: string): void {
   if (field === 'voucherSize') profile.voucherSize = Number(recorded);
   else if (field === 'porting') profile.porting = recorded === 'true';
-  else profile[field] = recorded;
+  // Every other field is text. No case here records a tenant matching input
+  // yet; the never-written suite (B1 spec D7, S6) sets the dollars kind as the
+  // number toProfile gives it.
+  else Object.assign(profile, { [field]: recorded });
 }
 
 function buildInput(c: ProbeCase, orgListBlock: string): ExtractionInput {

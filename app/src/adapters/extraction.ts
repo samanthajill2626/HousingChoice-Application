@@ -21,6 +21,9 @@ import { FakeExtractionDriver } from './extractionFake.js';
 // Type-only import (erased at runtime) keeps the fake-driver no-runtime-cycle
 // rule intact - address.ts is a pure leaf and nothing here imports it at runtime.
 import type { ExtractionAddressParts } from '../services/extraction/address.js';
+// Type-only, erased at runtime: the one list of tenant matching inputs (B1
+// spec D1), a leaf that imports nothing.
+import type { TenantMatchingInputKey } from '../lib/tenantMatchingInputs.js';
 
 export interface TranscriptUtterance {
   /**
@@ -51,7 +54,9 @@ export type ExtractableField =
   | 'pets'
   | 'evictions'
   | 'tenure'
-  | 'porting';
+  | 'porting'
+  // B1 spec D1/D3: the tenant matching inputs, from their one list.
+  | TenantMatchingInputKey;
 
 export interface ExtractionFieldOp {
   op: 'none' | 'write' | 'suggest';

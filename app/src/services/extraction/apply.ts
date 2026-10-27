@@ -30,6 +30,12 @@ import {
 } from './address.js';
 import type { Logger } from '../../lib/logger.js';
 import type { DropReason } from './runTypes.js';
+import {
+  TENANT_MATCHING_DOLLARS_MAX,
+  TENANT_MATCHING_INPUTS,
+  TENANT_MATCHING_TEXT_MAX,
+  type TenantMatchingInputKind,
+} from '../../lib/tenantMatchingInputs.js';
 
 export interface ApplyDeps {
   contacts: Pick<ReturnType<typeof createContactsRepo>, 'getById' | 'update' | 'addPhone' | 'findByPhone'>;
@@ -88,18 +94,51 @@ const MONTHS = [
   'Dec',
 ] as const;
 
-type Coerced = { ok: true; value: unknown } | { ok: false; reason: string };
+export type Coerced = { ok: true; value: unknown } | { ok: false; reason: string };
+
+/** B1 spec D1/D3: each tenant matching input's kind, keyed by field, from the list. */
+const MATCHING_KIND: ReadonlyMap<string, TenantMatchingInputKind> = new Map(
+  TENANT_MATCHING_INPUTS.map((input) => [input.key, input.kind] as const),
+);
 
 /**
  * Coerce/validate a raw string op value per its field. Invalid -> ok:false
- * (caller skips + logs). voucherSize -> int 0..12; porting -> boolean;
+ * (caller skips + logs). PURE and exported: the accept path
+ * (suggestionResolution.ts coerceAccept) and the never-written probe (B1 spec
+ * D7) use this exact rule.
+ *
+ * A tenant matching input coerces by its KIND (B1 spec D3), never by name:
+ *   - text: trimmed; empty -> dropped; over TENANT_MATCHING_TEXT_MAX (the
+ *     staff cap) -> DROPPED, never truncated (an extraction value only fills
+ *     or replaces a field, so it has no reason to grow);
+ *   - dollars: `$`, commas and spaces stripped, then a whole number
+ *     0..TENANT_MATCHING_DOLLARS_MAX; anything else (1200.50 included) is
+ *     dropped, never rounded.
+ * The eight original fields: voucherSize -> int 0..12; porting -> boolean;
  * housingAuthority -> trimmed, whitespace-collapsed text <= 120 chars (the
  * field loop resolves it against the organization list); names/pets/
  * evictions/tenure -> non-empty trimmed string <= 120 chars.
  */
-function coerceField(field: ExtractableField, raw: string | undefined): Coerced {
+export function coerceField(field: ExtractableField, raw: string | undefined): Coerced {
   if (raw === undefined) return { ok: false, reason: 'no value supplied' };
   const trimmed = raw.trim();
+  const kind = MATCHING_KIND.get(field);
+  if (kind === 'text') {
+    if (trimmed.length === 0) return { ok: false, reason: 'empty after trim' };
+    if (trimmed.length > TENANT_MATCHING_TEXT_MAX) {
+      return { ok: false, reason: `exceeds ${TENANT_MATCHING_TEXT_MAX} chars` };
+    }
+    return { ok: true, value: trimmed };
+  }
+  if (kind === 'dollars') {
+    const digits = trimmed.replace(/[$,\s]/g, '');
+    if (!/^\d+$/.test(digits)) return { ok: false, reason: 'not a whole dollar amount' };
+    const dollars = Number(digits);
+    if (dollars > TENANT_MATCHING_DOLLARS_MAX) {
+      return { ok: false, reason: `exceeds ${TENANT_MATCHING_DOLLARS_MAX}` };
+    }
+    return { ok: true, value: dollars };
+  }
   switch (field) {
     case 'voucherSize': {
       if (!/^\d+$/.test(trimmed)) return { ok: false, reason: 'voucherSize is not a digit string' };
@@ -136,8 +175,8 @@ function coerceField(field: ExtractableField, raw: string | undefined): Coerced 
 /** Which fields a contact of this type may have written/suggested. */
 function fieldApplies(field: ExtractableField, type: ContactType): boolean {
   if (NAME_FIELDS.includes(field)) return type === 'tenant' || type === 'unknown';
-  // Remaining (voucherSize/housingAuthority/pets/evictions/tenure/porting) are
-  // tenant facts.
+  // Remaining (voucherSize/housingAuthority/pets/evictions/tenure/porting and
+  // the tenant matching inputs, B1 spec D3) are tenant facts.
   return type === 'tenant';
 }
 

@@ -64,6 +64,14 @@ export interface ApplyOutcome {
   suggested: string[];
   /** Count of note lines appended. */
   notedLines: number;
+  /**
+   * WP1 B1 spec D5.3: the bare text (no `[Auto - <date>]` prefix) of each line
+   * appended this run, model lines then system lines, exactly as joined into
+   * `notes`; [] when nothing was appended or the write failed, so
+   * `notedLines === appendedLines.length`. The job counts feedback lines over
+   * it. Contact PII by design: never logged.
+   */
+  appendedLines: string[];
   /** Model note lines dropped below the confidence floor (B1 spec D4). */
   notesBelowFloor: number;
   /** Note lines a demoted run withheld (B1 spec D4); 0 when not demoted. */
@@ -887,6 +895,7 @@ export async function applyExtraction(
   // the system lines, the five-line cap and the demotion rule. This block only
   // reads the snapshot and writes what it returns.
   let notedLines = 0;
+  let appendedLines: string[] = [];
   // Read-modify-write on the ctx.contact snapshot. This can lose a concurrent
   // human notes edit made between the snapshot read and this write; the race
   // is ACCEPTED (single scalar attribute, low write frequency) rather than
@@ -910,8 +919,9 @@ export async function applyExtraction(
     try {
       await deps.contacts.update(contactId, { notes: nextNotes });
       notedLines = filtered.append.length;
-      // The model lines really appended are filtered.append.slice(0,
-      // filtered.modelCount) - counted here, after the write landed (S5).
+      // WP1 B1 spec D5.3 (S5 C4): every line appended, model then system,
+      // exactly as joined into nextNotes - the job counts feedback lines over it.
+      appendedLines = filtered.append;
     } catch (err) {
       logger.warn({ contactId, err }, 'extraction notes append failed');
     }
@@ -923,7 +933,7 @@ export async function applyExtraction(
   }
 
   return {
-    wrote, suggested, notedLines,
+    wrote, suggested, notedLines, appendedLines,
     notesBelowFloor: filtered.belowFloor, notesDemoted: filtered.demoted,
     displaced, decisions,
   };

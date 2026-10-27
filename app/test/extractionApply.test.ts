@@ -214,7 +214,7 @@ describe('applyExtraction - field writes (items 1-3)', () => {
   it('op:none does nothing', async () => {
     const { deps, records } = makeDeps();
     const outcome = await run(deps, makeContact(), { fields: { pets: { op: 'none' } } });
-    expect(outcome).toEqual({ wrote: [], suggested: [], notedLines: 0, notesBelowFloor: 0, notesDemoted: 0, displaced: [], decisions: [] });
+    expect(outcome).toEqual({ wrote: [], suggested: [], notedLines: 0, notesBelowFloor: 0, notesDemoted: 0, appendedLines: [], displaced: [], decisions: [] });
     expect(records.updates).toHaveLength(0);
     expect(records.emits).toHaveLength(0);
   });
@@ -281,6 +281,7 @@ describe('applyExtraction - type gating (item 1)', () => {
       notedLines: 0,
       notesBelowFloor: 0,
       notesDemoted: 0,
+      appendedLines: [],
       displaced: [],
       decisions: [
         { target: 'firstName', outcome: 'dropped', dropReason: 'wrong_contact_type', proposedValue: 'Pat' },
@@ -1801,5 +1802,61 @@ describe('applyExtraction - Notes lines through filterNoteLines (B1 spec D4)', (
     });
     expect(outcome.notedLines).toBe(0);
     expect(records.updates).toHaveLength(0);
+  });
+});
+
+// WP1 B1 spec D5.3: the job counts feedback lines over what apply APPENDED, so
+// apply reports the appended lines themselves - bare text, no prefix, exactly
+// the lines joined into notes. A feedback line is an ordinary Notes line: it
+// passes the D4 path unchanged (no new filter, no shape check, no rewrite).
+describe('applyExtraction - appendedLines (WP1 B1 spec D5.3)', () => {
+  const FEEDBACK = '123 Main St, Decatur: on the fence - likes the yard, worried about the commute';
+
+  it('carries the bare text of each appended line, model lines then system lines; a free-form feedback line unchanged', async () => {
+    const { deps, records } = makeDeps({
+      findByPhone: async () => makeContact({ contactId: 'other', type: 'tenant' }),
+    });
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: {},
+      phoneAddition: { phone: '555-010-9999' },
+      noteLines: [
+        { text: FEEDBACK, confidence: 0.9 },
+        { text: 'Works nights downtown', confidence: 0.8 },
+      ],
+    });
+    const system = 'Mentioned number +15550109999 which belongs to another contact';
+    expect(outcome.appendedLines).toEqual([FEEDBACK, 'Works nights downtown', system]);
+    expect(outcome.notedLines).toBe(3);
+    const noteUpdate = records.updates.find((u) => typeof u.patch['notes'] === 'string');
+    expect(noteUpdate!.patch['notes']).toBe(
+      [FEEDBACK, 'Works nights downtown', system].map((line) => `[Auto - Jul 16] ${line}`).join('\n'),
+    );
+  });
+
+  it('leaves out a line the retry guard finds already in the notes', async () => {
+    const { deps } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant', notes: `[Auto - Jul 15] ${FEEDBACK}` }), {
+      fields: {},
+      noteLines: [
+        { text: FEEDBACK, confidence: 0.9 },
+        { text: 'Works nights downtown', confidence: 0.9 },
+      ],
+    });
+    expect(outcome.appendedLines).toEqual(['Works nights downtown']);
+    expect(outcome.notedLines).toBe(1);
+  });
+
+  it('is empty when the notes write fails - nothing was appended', async () => {
+    const { deps } = makeDeps({
+      updateImpl: async () => {
+        throw new Error('contacts down');
+      },
+    });
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: {},
+      noteLines: [{ text: FEEDBACK, confidence: 0.9 }],
+    });
+    expect(outcome.appendedLines).toEqual([]);
+    expect(outcome.notedLines).toBe(0);
   });
 });

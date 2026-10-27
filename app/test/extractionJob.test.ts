@@ -2243,3 +2243,67 @@ describe('runDueExtractions - the PROPERTIES SENT block (WP1 B1 spec D5.1)', () 
     expect([...new Set(touched)].sort()).toEqual(['listingSends.listByContact', 'units.getDisplaysByIds']);
   });
 });
+
+describe('runDueExtractions - feedback counts (WP1 B1 spec D5.3)', () => {
+  /** A client text carrying the fake driver's EXTRACT marker (S4 noteLine shape). */
+  function extractMsg(lines: Array<{ text: string; confidence: number }>) {
+    return msg(10, 'inbound', `EXTRACT:${JSON.stringify({ noteLines: lines })}`);
+  }
+
+  it('counts, over the APPENDED lines, those naming a sent property and those with an unlabeled street address', async () => {
+    const feedback = '123 Main St., Decatur: on the fence - likes the yard, wants to see other homes first';
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [extractMsg([
+        { text: feedback, confidence: 0.9 },
+        { text: 'Asked whether 77 Pine Rd takes pets', confidence: 0.9 },
+        { text: 'Works nights downtown', confidence: 0.9 },
+      ])],
+      contact: tenantContact(), conversation: convWith('c1'),
+      ...withSends(),
+    });
+    await runDueExtractions(NOW, h.deps);
+    // The free-form feedback line lands verbatim - no shape check, no rewrite.
+    expect(h.contactsUpdate).toHaveBeenCalledWith('c1', {
+      notes: [feedback, 'Asked whether 77 Pine Rd takes pets', 'Works nights downtown']
+        .map((line) => `[Auto - Jul 17] ${line}`).join('\n'),
+    });
+    expect(h.runs[0]).toMatchObject({ outcome: 'applied', notedLines: 3, feedbackLines: 1, unlabeledAddressLines: 1 });
+  });
+
+  it('counts only what was appended: a line already in the notes, or below the confidence floor, is not counted', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [extractMsg([
+        { text: '123 Main St, Decatur: on the fence', confidence: 0.9 },
+        { text: '9 Oak Ave Apt 2, Atlanta: likes it', confidence: 0.5 },
+        { text: 'Works nights downtown', confidence: 0.9 },
+      ])],
+      contact: tenantContactWith({ notes: '[Auto - Jul 16] 123 Main St, Decatur: on the fence' }),
+      conversation: convWith('c1'),
+      ...withSends(),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]).toMatchObject({ notedLines: 1, feedbackLines: 0, unlabeledAddressLines: 0 });
+  });
+
+  it('a run that appends nothing records both counts as 0', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+      ...withSends(),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]).toMatchObject({ outcome: 'no_op', notedLines: 0, feedbackLines: 0, unlabeledAddressLines: 0 });
+  });
+
+  it('records no counts on a FAILED model call - nothing was applied', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+      ...withSends(),
+      driver: { kind: 'fake', extract: async () => ({ ok: false, meta: { driver: 'fake' }, failure: 'driver', message: 'boom' }) },
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]!.feedbackLines).toBeUndefined();
+    expect(h.runs[0]!.unlabeledAddressLines).toBeUndefined();
+  });
+});

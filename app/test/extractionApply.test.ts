@@ -1649,3 +1649,67 @@ describe('applyExtraction - the tenant matching inputs (B1 spec D3)', () => {
     ]);
   });
 });
+
+// B1 spec D3: for the three TEXT tenant matching inputs "write" means "fill an
+// empty field" and nothing else. An added fact is a Notes line (D4); only a
+// `suggest` (a contradiction) creates a suggestion. So the model never
+// rewrites staff text live and suggestions do not churn on rewordings.
+describe('applyExtraction - a write never rewrites a filled text field (B1 spec D3)', () => {
+  it('drops a write on a NON-EMPTY text field as text_field_filled - not a write, not a suggestion', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant', area_preference: 'Marietta' }), {
+      fields: { area_preference: { op: 'write', value: 'Marietta or Smyrna', reason: 'added Smyrna' } },
+    });
+    expect(outcome.wrote).toEqual([]);
+    expect(outcome.suggested).toEqual([]);
+    expect(records.updates).toHaveLength(0);
+    expect(records.suggestions).toHaveLength(0);
+    expect(outcome.decisions).toEqual([{
+      target: 'area_preference', outcome: 'dropped', dropReason: 'text_field_filled',
+      proposedValue: 'Marietta or Smyrna', reason: 'added Smyrna',
+    }]);
+  });
+
+  it('drops it under inferred-role content too, and keeps it OUT of the Layer-3 demotion audit', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await applyExtraction(deps, {
+      orgEntries: ORG_ENTRIES,
+      contact: makeContact({ type: 'tenant', preferences_constraints: 'no apartments' }),
+      conversationId: CONV,
+      cursorTsMsgId: 'ts-9',
+      result: { fields: { preferences_constraints: { op: 'write', value: 'no apartments, needs a yard' } } },
+      hasInferredRoleContent: true,
+    });
+    expect(outcome.suggested).toEqual([]);
+    expect(records.suggestions).toHaveLength(0);
+    expect(outcome.decisions[0]).toMatchObject({ outcome: 'dropped', dropReason: 'text_field_filled' });
+    expect(outcome.decisions[0]?.demotedFrom).toBeUndefined();
+    expect(records.audits.find((a) => a.type === 'ai_extraction_demoted')).toBeUndefined();
+  });
+
+  it('(PIN) a whitespace-only stored value is empty: the write fills it', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant', accessibility_need: '   ' }), {
+      fields: { accessibility_need: { op: 'write', value: 'ground floor' } },
+    });
+    expect(outcome.wrote).toEqual(['accessibility_need']);
+    expect(records.updates[0]!.patch['accessibility_need']).toBe('ground floor');
+  });
+
+  it('(PIN) the dollars field keeps the pets rule: a same-fact write on a filled value lands', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant', max_tenant_portion: 1100 }), {
+      fields: { max_tenant_portion: { op: 'write', value: '1,200', reason: 'corrected' } },
+    });
+    expect(outcome.wrote).toEqual(['max_tenant_portion']);
+    expect(records.updates[0]!.patch['max_tenant_portion']).toBe(1200);
+  });
+
+  it('(PIN) a suggest on a filled text field still suggests - a contradiction is a suggestion', async () => {
+    const { deps } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant', area_preference: 'Marietta' }), {
+      fields: { area_preference: { op: 'suggest', value: 'Decatur' } },
+    });
+    expect(outcome.suggested).toEqual(['area_preference']);
+  });
+});

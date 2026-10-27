@@ -180,6 +180,11 @@ function fieldApplies(field: ExtractableField, type: ContactType): boolean {
   return type === 'tenant';
 }
 
+/** A stored text value that holds something (whitespace-only reads as empty). */
+function isFilledText(value: unknown): boolean {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
 /** `[Auto - Jul 16]` - month/day (UTC, deterministic) from deps.now(). */
 function autoPrefix(nowIso: string): string {
   const d = new Date(nowIso);
@@ -252,6 +257,24 @@ export async function applyExtraction(
         target: field,
         outcome: 'dropped',
         dropReason: 'wrong_contact_type',
+        ...(fieldOp.value !== undefined && { proposedValue: fieldOp.value }),
+        ...(fieldOp.reason !== undefined && { reason: fieldOp.reason }),
+      });
+      continue;
+    }
+
+    // B1 spec D3: for a TEXT tenant matching input, op "write" means "fill an
+    // EMPTY field" and nothing else. A write on a filled one is dropped - not
+    // demoted to a suggestion, and so never in `demotedFields` (the Layer-3
+    // audit): an added fact belongs in a Notes line, and a contradiction comes
+    // as a `suggest`. Checked BEFORE coercion, so its reason always wins. The
+    // dollars kind keeps the pets rule (a same-fact write lands).
+    if (fieldOp.op === 'write' && MATCHING_KIND.get(field) === 'text' && isFilledText(contact[field])) {
+      logger.debug({ contactId, field }, 'extraction write on a filled text field dropped');
+      decide({
+        target: field,
+        outcome: 'dropped',
+        dropReason: 'text_field_filled',
         ...(fieldOp.value !== undefined && { proposedValue: fieldOp.value }),
         ...(fieldOp.reason !== undefined && { reason: fieldOp.reason }),
       });

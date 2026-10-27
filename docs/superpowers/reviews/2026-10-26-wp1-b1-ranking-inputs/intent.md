@@ -14,8 +14,9 @@ cut from main @d0e2c2d8.
 Phase: SPEC GATE (fourth pass). Spec rev 8 (round 5 folded in, 9 findings accepted; Cameron asked for the round). Rev 7 was: the fixed-shape reaction line
 is withdrawn for free-form FEEDBACK LINES naming the property, and B2's
 properties seen carries each property's feedback lines under it (charter
-section 20, item 7). No further design-review round (cap reached; rev 7
-is Cameron's simplification). Waiting on Cameron to pass the gate on
+section 20, item 7). Round 5 ran past the cap at Cameron's request
+("Do another review after the changes we've made"); a confirming round 6
+is his call at the gate. Waiting on Cameron to pass the gate on
 rev 8. Next after his go: offer compaction gate A, write the plan with
 the honest hours estimate, plan review, mission block, launch gate.
 Nothing in flight.

@@ -62,7 +62,6 @@ import { isCaseworkerContact } from './caseworkerRole.js';
 import { useContactVocabulary } from './useContactVocabulary.js';
 import {
   TENANT_MATCHING_INPUTS,
-  TENANT_MATCHING_TEXT_MAX,
   buildTenantMatchingPatch,
   tenantMatchingFormValues,
 } from './tenantMatchingInputs.js';
@@ -923,7 +922,11 @@ export function ContactEditForm({
                 (htmlFor) so the portion's "$" stays out of its name. The
                 portion takes step="any" and no min / max ON PURPOSE: native
                 validation would refuse a bad value in the browser's words
-                first, and spec D2 wants the server's (C3). */}
+                first, and spec D2 wants the server's (C3). The text controls
+                take no maxLength for the same reason (FW-12, R1 CONF-6): a
+                cap would cut a long paste silently - and count the
+                surrounding spaces the trim drops - so an over-long value
+                reaches Save and the server's own copy instead. */}
             {TENANT_MATCHING_INPUTS.map((input) => {
               const id = `${matchingId}-${input.key}`;
               const value = matching[input.key] ?? '';
@@ -941,7 +944,6 @@ export function ContactEditForm({
                       value={value}
                       onChange={(e) => onChange(e.target.value)}
                       rows={3}
-                      maxLength={TENANT_MATCHING_TEXT_MAX}
                     />
                   ) : input.control === 'dollars' ? (
                     <span className={styles.dollarsRow}>
@@ -967,7 +969,6 @@ export function ContactEditForm({
                       className={styles.input}
                       value={value}
                       onChange={(e) => onChange(e.target.value)}
-                      maxLength={TENANT_MATCHING_TEXT_MAX}
                       autoComplete="off"
                     />
                   )}

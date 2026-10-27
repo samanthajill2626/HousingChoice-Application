@@ -2134,8 +2134,24 @@ describe('ContactEditForm - the tenant matching inputs (WP1 B1 spec D2)', () => 
     expect(portion.parentElement).toHaveTextContent('$');
     for (const label of ['Area preference', 'Accessibility need', 'Preferences and constraints']) {
       expect(screen.getByLabelText(label)).toHaveAccessibleName(label);
-      expect(screen.getByLabelText(label)).toHaveAttribute('maxlength', '500');
+      // FW-12 (R1 CONF-6): no native cap - an over-long value reaches Save
+      // and the server's own copy instead of a silent cut.
+      expect(screen.getByLabelText(label)).not.toHaveAttribute('maxlength');
     }
+  });
+
+  it("an over-long text value stops Save with the server's own message; the surrounding spaces do not count", async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...TENANT });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    const area = screen.getByLabelText('Area preference');
+    fireEvent.change(area, { target: { value: 'x'.repeat(501) } });
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Area preference must be 500 characters or fewer.');
+    expect(updateContact).not.toHaveBeenCalled();
+    fireEvent.change(area, { target: { value: `  ${'x'.repeat(500)}  ` } });
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('k1', { area_preference: 'x'.repeat(500) }));
   });
 
   it('prefills the stored values (the portion as a number)', () => {

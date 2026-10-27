@@ -1790,6 +1790,26 @@ describe('applyExtraction - Notes lines through filterNoteLines (B1 spec D4)', (
     expect(records.updates[0]!.patch['notes']).toBe(`${earlier}\n[Auto - Jul 16] 12 Oak St, Decatur: likes it`);
   });
 
+  it('writes a flip back to an EARLIER date\'s exact words under this run\'s prefix (FW3-1, R2-1)', async () => {
+    const { deps, records } = makeDeps();
+    const earlier = '[Auto - Jul 10] 412 Oak Ave, Decatur: on the fence\n[Auto - Jul 12] 412 Oak Ave, Decatur: likes it';
+    const outcome = await run(deps, makeContact({ type: 'tenant', notes: earlier }), {
+      fields: {}, noteLines: [note('412 Oak Ave, Decatur: on the fence')],
+    });
+    expect(outcome.appendedLines).toEqual(['412 Oak Ave, Decatur: on the fence']);
+    expect(records.updates[0]!.patch['notes']).toBe(`${earlier}\n[Auto - Jul 16] 412 Oak Ave, Decatur: on the fence`);
+  });
+
+  it('writes a line the model copied with an old prefix under ONE prefix, and drops a same-day echo (FW3-1, R3-4)', async () => {
+    const { deps, records } = makeDeps();
+    const earlier = '[Auto - Jul 10] works nights downtown\n[Auto - Jul 16] has a car';
+    const outcome = await run(deps, makeContact({ type: 'tenant', notes: earlier }), {
+      fields: {}, noteLines: [note('[Auto - Jul 10] works nights downtown'), note('[Auto - Jul 16] has a car')],
+    });
+    expect(outcome.appendedLines).toEqual(['works nights downtown']);
+    expect(records.updates[0]!.patch['notes']).toBe(`${earlier}\n[Auto - Jul 16] works nights downtown`);
+  });
+
   it('a demoted run appends NO line of either kind and emits nothing for notes', async () => {
     const { deps, records } = makeDeps({ findByPhone: async () => makeContact({ contactId: 'other', type: 'tenant' }) });
     const outcome = await applyExtraction(deps, {
@@ -1845,8 +1865,9 @@ describe('applyExtraction - appendedLines (WP1 B1 spec D5.3)', () => {
   });
 
   it('leaves out a line the retry guard finds already in the notes', async () => {
+    // Was a Jul 15 line; FW3-1 (R3-adjudications): the guard drops a model line written the SAME day (this run's Jul 16).
     const { deps } = makeDeps();
-    const outcome = await run(deps, makeContact({ type: 'tenant', notes: `[Auto - Jul 15] ${FEEDBACK}` }), {
+    const outcome = await run(deps, makeContact({ type: 'tenant', notes: `[Auto - Jul 16] ${FEEDBACK}` }), {
       fields: {},
       noteLines: [
         { text: FEEDBACK, confidence: 0.9 },

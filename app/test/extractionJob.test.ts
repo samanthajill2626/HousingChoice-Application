@@ -2279,7 +2279,8 @@ describe('runDueExtractions - feedback counts (WP1 B1 spec D5.3)', () => {
         { text: '9 Oak Ave Apt 2, Atlanta: likes it', confidence: 0.5 },
         { text: 'Works nights downtown', confidence: 0.9 },
       ])],
-      contact: tenantContactWith({ notes: '[Auto - Jul 16] 123 Main St, Decatur: on the fence' }),
+      // Was a Jul 16 line; FW3-1 (R3-adjudications): the guard drops a model line written the SAME day (this run's Jul 17).
+      contact: tenantContactWith({ notes: '[Auto - Jul 17] 123 Main St, Decatur: on the fence' }),
       conversation: convWith('c1'),
       ...withSends(),
     });

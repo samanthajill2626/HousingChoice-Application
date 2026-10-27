@@ -217,9 +217,22 @@ function autoPrefix(nowIso: string): string {
 
 /**
  * A line's leading autoPrefix, whatever its date - the shape lib/caseworkers.ts
- * AUTO_PREFIX also reads. The retry guard removes it before comparing lines.
+ * AUTO_PREFIX also reads. filterNoteLines removes it from a model line before
+ * the retry guard and the write, and from both sides of a system line's
+ * comparison (FW3-1).
  */
 const LEADING_AUTO_PREFIX = /^\[Auto - [^\]]+\]/;
+
+/**
+ * The line trimmed, with EVERY leading autoPrefix removed (FW3-1, code review
+ * R3-4): a model that copies a notes line copies its prefix too - even a
+ * doubled one - and this run writes its own, so the box never gets two.
+ */
+function withoutAutoPrefix(line: string): string {
+  let out = line.trim();
+  while (LEADING_AUTO_PREFIX.test(out)) out = out.replace(LEADING_AUTO_PREFIX, '').trim();
+  return out;
+}
 
 /** What filterNoteLines needs. Every field is plain data - the function is pure. */
 export interface NoteLineFilterInput {
@@ -238,9 +251,9 @@ export interface NoteLineFilterInput {
   existingNotes: string;
   /**
    * The `[Auto - <MMM D>]` prefix this run appends with (autoPrefix). The
-   * retry guard does not read it since FW2-1 - it removes ANY date's prefix
-   * from an existing line - but the field stays REQUIRED: the probe's seam
-   * passes a fixed one (plan PR30).
+   * retry guard compares a model line AS THIS RUN WRITES IT, `<prefix> <line>`
+   * (FW3-1), so the prefix's date is what limits that guard to the same day.
+   * The probe's seam passes a fixed one (plan PR30).
    */
   prefix: string;
   /** hasInferredRoleContent: a demoted run appends no line (charter 6.4). */
@@ -269,9 +282,11 @@ function clampConfidence(raw: unknown): number {
  * probe (spec D7) both call it, so the fake driver's parser bypass skips
  * nothing. In order:
  *
- *  1. Clamp: text trimmed and cut to MAX_NOTE_CHARS; confidence to 0..1 (a
- *     non-number reads as 0). An item that is not an object with string text
- *     is dropped uncounted (only the fake driver can deliver one).
+ *  1. Clamp: text trimmed, every leading `[Auto - <date>]` the model copied
+ *     from the notes removed (FW3-1: this run writes its own; never a double
+ *     prefix), and cut to MAX_NOTE_CHARS; confidence to 0..1 (a non-number
+ *     reads as 0). An item that is not an object with string text is dropped
+ *     uncounted (only the fake driver can deliver one).
  *  2. Floor FIRST: a model item below `floor` is dropped and counted.
  *  3. Blank lines and POSTAL lines are dropped. The postal filter drops ONLY
  *     a line that starts with "Current address" and carries a digit - the
@@ -284,17 +299,27 @@ function clampConfidence(raw: unknown): number {
  *  4. The retry guard (adversarial F1), BEFORE the cap (B1 WI5):
  *     applyExtraction runs BEFORE repo.complete(), so a complete() failure
  *     re-arms the SAME due row and the retry re-extracts the identical
- *     transcript against a contact that already carries run 1's line. It
- *     compares WHOLE lines (FW2-1, code review R2-1): a candidate is dropped
- *     when an existing line, its leading `[Auto - <date>]` prefix removed and
- *     both sides trimmed, EQUALS it - model AND system lines - so a retry on
- *     the same or a later date appends nothing, a verbatim repeat is not
- *     written twice, and a duplicate never takes a cap slot. A candidate that
- *     spans lines must match a run of whole lines. A line merely CONTAINED in
- *     a longer one is KEPT: "12 Oak St, ..." inside "112 Oak St, ...", or a
- *     change of mind whose words an earlier line contains, is new feedback
- *     (spec D5.2). A flip back to EXACTLY an earlier line's words is still
- *     dropped; the prompt asks for a change of mind worded as a change.
+ *     transcript minutes later, against a contact that already carries run
+ *     1's lines. That retry is the guard's one purpose (FW3-1, code review R3:
+ *     the retry guard decided). It compares WHOLE lines, each trimmed (FW2-1);
+ *     a candidate that spans lines must match a run of whole lines.
+ *     - A MODEL line is dropped only when, AS THIS RUN WRITES IT
+ *       (`<prefix> <line>`), it equals lines already in the notes. The prefix
+ *       carries the run's date, so this drops the same-day retry (and a
+ *       same-day re-emission of the same words). A line equal to one from an
+ *       EARLIER date, or to a bare staff line, is written: a change of mind
+ *       back to earlier words is a new line (spec D5.2), and a lost change of
+ *       mind costs more than a repeated line.
+ *     - A SYSTEM line (apply's own text, which changes no meaning) is dropped
+ *       when it equals a line of ANY date, the prefix removed on both sides,
+ *       so it is not repeated on every run.
+ *     A line merely CONTAINED in a longer one is KEPT: "12 Oak St, ..." inside
+ *     "112 Oak St, ...", or a change of mind whose words an earlier line
+ *     contains, is new feedback. Accepted costs (R3-adjudications): a retry
+ *     that crosses UTC midnight appends its lines once more; a model line
+ *     repeated verbatim on a later date is written again; a second run the
+ *     same day that flips back to that day's words is dropped. A dropped line
+ *     never takes a cap slot.
  *  5. System lines are appended after the model lines; they carry no
  *     confidence and are never floored.
  *  6. The cap: at most MAX_NOTE_LINES, model lines first.
@@ -303,14 +328,17 @@ function clampConfidence(raw: unknown): number {
  */
 export function filterNoteLines(input: NoteLineFilterInput): NoteLineFilterResult {
   const isPostal = (line: string): boolean => /^current address\b/i.test(line) && /\d/.test(line);
-  // Rule 4 over whole lines: every line fenced by '\n' on both sides, so one
-  // includes() matches only a run of WHOLE lines, never part of one.
+  // Rule 4 over whole lines: every line trimmed and fenced by '\n' on both
+  // sides, so one includes() matches only a run of WHOLE lines, never part of one.
+  const physical = (text: string): string[] => text.split('\n').map((part) => part.trim());
   const fenced = (lines: readonly string[]): string => `\n${lines.join('\n')}\n`;
-  const existingLines = fenced(
-    input.existingNotes.split('\n').map((line) => line.trim().replace(LEADING_AUTO_PREFIX, '').trim()),
-  );
-  const alreadyPresent = (line: string): boolean =>
-    existingLines.includes(fenced(line.split('\n').map((part) => part.trim())));
+  const existing = physical(input.existingNotes);
+  // A model line, as this run writes it, against the lines as stored: the same date only.
+  const storedLines = fenced(existing);
+  const modelPresent = (line: string): boolean => storedLines.includes(fenced(physical(`${input.prefix} ${line}`)));
+  // A system line against every line with its prefix removed: any date.
+  const unprefixedLines = fenced(existing.map(withoutAutoPrefix));
+  const systemPresent = (line: string): boolean => unprefixedLines.includes(fenced(physical(line).map(withoutAutoPrefix)));
 
   let belowFloor = 0;
   const model: string[] = [];
@@ -318,17 +346,17 @@ export function filterNoteLines(input: NoteLineFilterInput): NoteLineFilterResul
     if (typeof item !== 'object' || item === null || Array.isArray(item)) continue;
     const { text, confidence } = item as { text?: unknown; confidence?: unknown };
     if (typeof text !== 'string') continue;
-    const line = text.trim().slice(0, MAX_NOTE_CHARS).trim();
+    const line = withoutAutoPrefix(text).slice(0, MAX_NOTE_CHARS).trim();
     if (clampConfidence(confidence) < input.floor) {
       belowFloor += 1;
       continue;
     }
-    if (line.length === 0 || isPostal(line) || alreadyPresent(line)) continue;
+    if (line.length === 0 || isPostal(line) || modelPresent(line)) continue;
     model.push(line);
   }
   const system = input.systemLines
     .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !isPostal(line) && !alreadyPresent(line));
+    .filter((line) => line.length > 0 && !isPostal(line) && !systemPresent(line));
 
   const append = [...model, ...system].slice(0, MAX_NOTE_LINES);
   if (input.demoted) return { append: [], modelCount: 0, belowFloor, demoted: append.length };

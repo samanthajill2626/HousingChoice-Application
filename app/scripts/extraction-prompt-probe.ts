@@ -281,11 +281,12 @@ export function labelOf(m: BranchModules, p: SentProperty): string | undefined {
 }
 
 /**
- * The fixed `[Auto - <MMM D>]` prefix the probe hands filterNoteLines (PR30).
- * filterNoteLines requires one, but its retry guard no longer reads it
- * (FW2-1: it compares whole lines with ANY date's prefix removed), so the
- * value changes no written line; it is the autoPrefix of the never-written
- * transcript's date (2026-10-20, buildNeverWrittenInput).
+ * The fixed `[Auto - <MMM D>]` prefix the probe hands filterNoteLines (PR30):
+ * the autoPrefix of the never-written transcript's date (2026-10-20,
+ * buildNeverWrittenInput). The retry guard compares a model line as this run
+ * writes it, under this prefix (FW3-1), so a case's profile-notes line under
+ * it is a same-day line the guard drops, and an earlier date's line is
+ * written again - as in production.
  */
 export const PROBE_NOTE_PREFIX = '[Auto - Oct 20]';
 

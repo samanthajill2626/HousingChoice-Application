@@ -120,3 +120,34 @@ closed at its cap.
 Totals: 4 rounds, 48 findings (round 1 merged 33 to 22), all accepted, 0
 rejected; rounds 1 and 2 changed decisions; the human's gate redesign
 withdrew the stored-reaction mechanism between rounds 3 and 4.
+
+## Round 5 (2026-10-26) - past the cap, at Cameron's request
+
+Rev 7 (Cameron's free-form feedback lines, charter section 20 item 7)
+was reviewed again because Cameron asked for it ("Do another review after
+the changes we've made"). Reviewer A continued (round5-reviewer-a.md, 9
+findings: 5 medium, 4 low). R5-3 was verified in the code:
+`getDisplaysByIds` swallows a failed chunk and drops unprocessed keys
+(unitsRepo.ts:663-668, :1303-1310); the contacts repo's `requireComplete`
+(contactsRepo.ts:776-810) is the precedent. `listByContact` pages to
+exhaustion and throws (listingSendsRepo.ts:486-492), so only the units
+read needed the fix. Spec rev 8.
+
+| # | Finding | Verdict | Decision changed | Resolution in rev 8 |
+|---|---|---|---|---|
+| R5-1 | labelMatches over- and under-matches | ACCEPT | yes (function contract) | Fold `.` `,` `#`, case and spacing on both sides; boundary-anchored match. Abbreviations deliberately NOT folded (speculative; the model copies the label and R5-2's count shows misses). |
+| R5-2 | A missed attach becomes feedback on every home; labels drift | ACCEPT | yes (new count) | `unlabeledAddressLines` run-record count (street-suffix pattern, narrower than the suggested number-then-word, which would count "3 bedrooms"); label drift on an address edit noted for B2. |
+| R5-3 | "Failed units read fails the run" not buildable on a best-effort read | ACCEPT | yes (repo option) | `requireComplete` on `getDisplaysByIds`, throwing `IncompleteBatchReadError`; extraction passes it; other callers unchanged. |
+| R5-4 | D7 "no" control contradicts D5.2 | ACCEPT | no | The no is tied to the home; a separate untied-place control must name no sent property. |
+| R5-5 | Whole-line attach moves staff-typed lines under one home | ACCEPT as a B2 note | no | D5.4 notes it, with the two options, to raise with Cameron at B2. |
+| R5-6 | Label edge cases | ACCEPT | no | Empty line 1 or city -> no label, left out of the block; identical labels for different units noted for B2. |
+| R5-7 | Fail-the-run rationale names the wrong mechanism, omits a cost | ACCEPT | no | Rationale is the reconcile rule; the attempt-cap cost is stated. |
+| R5-8 | Block adds a path into the empty tenant-address field | ACCEPT | no | D7 control: a tenant with no stored address talking about a sent home produces no address op. |
+| R5-9 | Stale status line and charter item 6 wording | ACCEPT | no | Status updated; charter item 7 supersedes item 6's wording. |
+
+Rejected: none. Decisions changed: R5-1, R5-2 and R5-3, all tightenings
+of the rev 7 mechanism (no surface removed, no charter decision moved).
+Whether a confirming round 6 runs is Cameron's call at the gate.
+
+Totals: 5 rounds, 57 findings (round 1 merged 33 to 22), all accepted, 0
+rejected.

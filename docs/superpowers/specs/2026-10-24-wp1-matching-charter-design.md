@@ -1153,7 +1153,8 @@ date; this list is the index.
      the age rule lets the property bubble back up. No Maybe button
      (section 4).
   7. Reaction lines lose their fixed shape (supersedes the shape in item
-     4). Cameron: "Why do we care if the 'maybe' is lowercase and in the
+     4 and the `maybe` reaction-line wording in item 6: a maybe is now
+     feedback saying the tenant is unsure, section 4). Cameron: "Why do we care if the 'maybe' is lowercase and in the
      fixed shape? I thought the whole point was to use llm capabilities to
      save info about the response to a property, and use that info in
      future rankings." A FEEDBACK LINE is a free-form Notes line that

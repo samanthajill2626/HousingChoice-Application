@@ -1,6 +1,6 @@
 # WP1 B1 Ranking inputs - design
 
-Status: DRAFT revision 7 (2026-10-26), at the spec gate. Revs 2-4 folded
+Status: DRAFT revision 8 (2026-10-26), at the spec gate. Revs 2-4 folded
 in design review rounds 1-3 (40 findings, all accepted); rev 6 folded in
 round 4, the last allowed (8 findings, all precision edits; the review is
 closed). Rev 5 followed Cameron's first spec-gate redesign (charter
@@ -9,10 +9,9 @@ and the staff remove control are WITHDRAWN. Rev 7 follows his second
 (charter section 20, item 7): the fixed-shape reaction line is withdrawn
 too. What a tenant says about a property sent to them is a FEEDBACK LINE,
 an ordinary free-form Notes line that names the property; B1 adds no
-shape check. Rev 7 is a simplification decided by Cameron at the gate, so
-it gets no further design-review round (the cap is reached); the plan
-review and the plan-blind code review cover it. Q1 and Q2 are answered
-(section 8). Adjudications:
+shape check. At Cameron's request rev 7 got a fifth design-review round
+past the usual cap; rev 8 folds it in (9 findings, all accepted). Q1 and
+Q2 are answered (section 8). Adjudications:
 `docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/design-review/adjudications.md`.
 Charter: docs/superpowers/specs/2026-10-24-wp1-matching-charter-design.md.
 This slice implements charter sections 6.4 (extraction as the reading
@@ -276,14 +275,28 @@ home, so B2 can put it under that home on the tenant card.
 
 The label: a new pure function `propertyLabel(unit)` in a leaf module
 (`app/src/lib/propertyLabel.ts`) returns `<address line 1>[ <address line
-2>], <city>`, one line (the `toSingleLine` defense, prompt.ts:157-167).
-Line 2 is included when present, because units in one building share
-line 1 and differ only in line 2 (lib/address.ts:24). B1 uses it for the
-block; B2's card uses the SAME function to find the Notes lines that name
-each seen property (charter 6.4 amended), so the two can never disagree
-on a property's name. It also exports `labelMatches(line, label)`: true
-when the line contains the label after folding case and collapsing
-whitespace. B1 uses it only to count (D5.3); B2 uses it to attach.
+2>], <city>`, one line (the `toSingleLine` defense, prompt.ts:157-167),
+or `undefined` when line 1 or the city is empty after trimming (such a
+property is left out of the block, so no degenerate label like
+", Decatur" can match half the Notes box). Line 2 is included when
+present, because units in one building share line 1 and differ only in
+line 2 (lib/address.ts:24). B1 uses it for the block; B2's card uses the
+SAME function to find the Notes lines that name each seen property
+(charter 6.4 amended), so the two can never disagree on a property's
+name.
+
+It also exports `labelMatches(line, label)`. Both sides are folded the
+same way: lowercase, the characters `.` `,` `#` removed, runs of
+whitespace collapsed to one space, trimmed. The folded label must then
+occur in the folded line at a BOUNDARY: at the start of the line or
+after a character that is not a letter or digit, and ending at the end
+of the line or before a character that is not a letter or digit. So
+"12 Main St, Decatur" does not match inside "112 Main St, Decatur",
+"123 Main St." matches "123 Main St", and "123 Main St, Apt 2, Decatur"
+matches the label "123 Main St Apt 2, Decatur". Abbreviations are NOT
+folded ("St" and "Street", "#2" and "Apt 2" differ): the model is told to
+copy the label, and the D5.3 count makes a miss visible. B1 uses
+`labelMatches` only to count (D5.3); B2 uses it to attach.
 
 For every contact extraction runs on (tenant and unknown: a flyer lead is
 often still `unknown`, listingSendsRepo.ts:141-142), the job reads
@@ -291,8 +304,15 @@ often still `unknown`, listingSendsRepo.ts:141-142), the job reads
 listingSendsRepo.ts:235-237): any row with a counted share, flyer
 sign-ups included (the tenant may react to a flyer property too), and
 legacy rows with `sentAt`. Newest 20 by `sentAt`. Addresses come from the
-units repo's existing BatchGet projection (unitsRepo.ts:1293); a unit
-that no longer resolves is skipped.
+units repo's BatchGet projection `getDisplaysByIds` (unitsRepo.ts:663,
+:1293), which is BEST-EFFORT today: a failed chunk or a key left
+unprocessed is dropped with a warn and never throws
+(unitsRepo.ts:1303-1310), indistinguishable from a deleted unit. B1 adds
+an `opts?: { requireComplete?: boolean }` to it, the contacts repo's
+precedent (contactsRepo.ts:776-810): with `requireComplete` a failed
+chunk or an unread key throws `IncompleteBatchReadError`. Extraction
+passes it. A key the read COMPLETED without finding (a unit that no
+longer exists) is skipped; existing callers are unchanged.
 
 It renders a PROPERTIES SENT block, built like the organization list block
 (orgListBlock.ts): once per run, before TRANSCRIPT, fingerprinted into the
@@ -305,11 +325,17 @@ identical are rendered once.
 - Budget 4,000 characters; over budget, the oldest-sent properties are
   dropped first, with a warn.
 - No rows: `PROPERTIES SENT: none`.
-- A failed `listByContact` or units read FAILS THE RUN, exactly as a failed
-  organization-list read does (jobs/extraction.ts:563-568): the row is
-  retried under the existing attempt count. (Continuing without the list
-  would let the model record feedback without naming the home, and the
-  retry guard would then keep that unattachable line.)
+- A failed `listByContact` (it pages to exhaustion and throws,
+  listingSendsRepo.ts:486-492) or an incomplete units read FAILS THE RUN,
+  exactly as a failed organization-list read does
+  (jobs/extraction.ts:563-568): the row is retried under the existing
+  attempt count. Why: without the list the model writes feedback without
+  the label, and the prompt's reconcile rule (prompt.ts:112-115) then
+  treats that unattachable line as already recorded, so the properly
+  named line never follows. The cost, accepted: a read that keeps failing
+  stops extraction for the whole conversation (fields and Notes lines
+  too) after `MAX_EXTRACTION_ATTEMPTS` (jobs/extraction.ts:54, :759), as a
+  persistent org-list failure does today.
 - A property dropped by the 20-row or character limit cannot be named
   from the block; feedback on it is still written, and may name it as the
   tenant did. Accepted: the limits keep the newest sends, which are the
@@ -355,9 +381,14 @@ five-line cap, the demotion rule (a demoted run appends no line), the
 `[Auto - <date>]` prefix, and today's postal filter (lines starting
 "current address" with a digit, apply.ts:720-722).
 
-- Run record: a `feedbackLines` count, the appended lines for which
-  `labelMatches` is true against any block label, shown in the run detail
-  beside `notedLines`. A count only; nothing is dropped or rewritten by it.
+- Run record, two counts shown in the run detail beside `notedLines`:
+  `feedbackLines`, the appended lines for which `labelMatches` is true
+  against any block label; and `unlabeledAddressLines`, the appended lines
+  that match no block label but contain a street address (a number
+  followed by a word, `\b\d+[a-z]?\s+[a-z]`, case-insensitive). The
+  second makes an attach miss visible: feedback whose home was named
+  some other way would otherwise read as general feedback on every
+  property (charter 6.2). Counts only; nothing is dropped or rewritten.
 - Never a status: a feedback line never sets `declined`, an outcome or the
   contact status (charter 6.3; WP3 owns an engine-read decline).
 
@@ -372,10 +403,22 @@ five-line cap, the demotion rule (a demoted run appends no line), the
   B2's tenant card (charter 6.2 amended), using `propertyLabel` and
   `labelMatches`. B1's list is extraction input only.
 - No Maybe button (charter 4 amended).
-- Note for B2: the `[Auto - <date>]` prefix carries no year
-  (apply.ts:144-149). B2 ages a maybe from stored facts (the declined
-  record's `at`, the send dates in properties seen), never from the line
-  prefix. A line naming two seen properties attaches under both.
+- Notes for B2 (charter 6.2 consequences B1's contract hands it; each
+  is B2's to decide, the first with Cameron):
+  - Attaching works on WHOLE lines and cannot tell an `[Auto - ...]` line
+    from a staff-typed one. A long staff line ("Called 10/3, prefers 3BR,
+    no stairs; showed her 123 Main St, Decatur") would move its general
+    facts under one home. Options: attach only `[Auto - ...]` lines, or
+    keep an attached line in the general section too. Raise it to
+    Cameron at B2.
+  - A label follows the unit's CURRENT address; a later address edit
+    detaches earlier lines, which then read as general feedback.
+  - A line naming two seen properties attaches under both; two
+    different units with identical labels (no line 2 recorded) attach
+    the same lines.
+  - The `[Auto - <date>]` prefix carries no year (apply.ts:144-149). B2
+    ages a maybe from stored facts (the declined record's `at`, the send
+    dates in properties seen), never from the line prefix.
 
 ### D6. Priority: an on/off switch on the property
 
@@ -439,10 +482,15 @@ be written: household size (a line), tenant portion (the field),
 accessibility need (the field), an assistance animal (a line), a plain
 matching fact ("works nights downtown", a line), and feedback on a sent
 property: an unsure tenant ("maybe, I'm on the fence, I want to see other
-places first"), a no with its reason ("I don't like that part of town"),
-and a yes. Detection of a feedback control is by MEANING, not by string:
-the script passes it automatically when a written line names the right
-property (`labelMatches`, D5.1); whether the line says what the tenant
+places first"), a no tied to the home ("no to the Oak Ave one, I don't
+like that part of town"), and a yes. Two more controls: feedback about a
+place NOT tied to a home ("I don't want to live near Memorial Drive")
+must produce a line that names NO sent property; and a tenant with no
+stored address who talks about a sent home must produce NO address op.
+Detection of a feedback control is by MEANING, not by string: the script
+passes it automatically when a written line names the right property
+(`labelMatches`, D5.1), or for the untied case when a line is written
+and none names a sent property; whether the line says what the tenant
 meant (an unsure tenant reads as unsure, not as a no) is Cameron's
 judgment, made in the sign-off from the record, which prints each
 feedback case's message, the gist expected, and the lines written.
@@ -510,10 +558,12 @@ Detection and record:
   demoted line now silences (Q1); B2's tenant card (feedback lines under
   each seen property, through `propertyLabel` and `labelMatches`).
 - listing_sends and units: READ only, by the extraction job (D5.1), for
-  tenant and unknown contacts; a read failure fails the run. No write, no
+  tenant and unknown contacts; a read failure fails the run. The units
+  repo gains the `requireComplete` option on `getDisplaysByIds`; its
+  existing callers do not pass it and are unchanged. No write, no
   new attribute, no `shares_op` change.
 - The AI run record and its readers: new counts (`notesBelowFloor`,
-  `notesDemoted`, `feedbackLines`) and
+  `notesDemoted`, `feedbackLines`, `unlabeledAddressLines`) and
   `sentPropertiesFingerprint`, shown in the run detail.
 - Unit `priority`. Writers: unit create, unit PATCH. Readers:
   ListingDetail, the edit and New forms. Never: flyer, cards.
@@ -544,14 +594,20 @@ Detection and record:
   appended); config fail-fast on `0`, `1.5`, `abc`; system lines bypass
   the floor; a demoted run appends no line of either kind; retry guard;
   run record counts.
-- D5: `propertyLabel` (line 2 when present, flattened) and
-  `labelMatches` (case and spacing folded; a different line 2 does not
-  match); block lists listed rows newest 20 for tenant and unknown
+- D5: `propertyLabel` (line 2 when present, flattened, `undefined` on an
+  empty line 1 or city) and `labelMatches` (case, `.` `,` `#` and spacing
+  folded; boundary: 12 Main does not match in 112 Main; "St." matches
+  "St"; the extra-comma line-2 form matches; a different line 2 does not
+  match); `getDisplaysByIds` with `requireComplete` throws on a failed
+  chunk and on an unprocessed key, and without it behaves as today; an
+  incomplete units read fails the run instead of dropping a property; block lists listed rows newest 20 for tenant and unknown
   contacts (flyer sign-ups as "signed up", missing unit skipped,
   identical labels once), budget drop oldest first, TRANSCRIPT drop,
   "none" for no rows; a read failure fails the run; the transcript render
   and per-message hash are unchanged; a free-form feedback line passes
-  `filterNoteLines` unchanged and is counted in `feedbackLines`; no
+  `filterNoteLines` unchanged and is counted in `feedbackLines`; a line
+  with a street address matching no label is counted in
+  `unlabeledAddressLines`; no
   listing_sends write anywhere in the extraction path. D3: a write on a filled text field is dropped, not
   suggested, and not in demotedFields.
 - D6: boolean validation rejects strings; legacy string reads off; New and

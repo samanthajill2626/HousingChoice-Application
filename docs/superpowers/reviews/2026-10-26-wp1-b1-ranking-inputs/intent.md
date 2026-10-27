@@ -11,17 +11,17 @@ cut from main @d0e2c2d8.
 
 ## STATE
 
-Phase: SPEC GATE PASSED on rev 8 (Cameron 2026-10-26, no round 6).
-Next: compaction gate A, then write the plan. Before the gate pass:
-SPEC GATE (fourth pass). Spec rev 8 (round 5 folded in, 9 findings accepted; Cameron asked for the round). Rev 7 was: the fixed-shape reaction line
-is withdrawn for free-form FEEDBACK LINES naming the property, and B2's
-properties seen carries each property's feedback lines under it (charter
-section 20, item 7). Round 5 ran past the cap at Cameron's request
-("Do another review after the changes we've made"); a confirming round 6
-is his call at the gate. Waiting on Cameron to pass the gate on
-rev 8. Next after his go: offer compaction gate A, write the plan with
-the honest hours estimate, plan review, mission block, launch gate.
-Nothing in flight.
+Phase: PLAN WRITING (spec rev 8 APPROVED 2026-10-26; compaction gate A
+taken, manual /compact 230k -> 112k). Plan:
+docs/superpowers/plans/2026-10-26-wp1-b1-ranking-inputs.md - sections
+0-4 (binding, planner) committed, incl. the hours table (5.5-8.5 h total,
+~3-3.5 h of it design already spent). In flight: four opus drafters
+writing slice sections to .superpowers/sdd/plan-draft-{S1-S2,S3-S4,S5,S6}.md
+(findings, if any, to plan-drafts/). Next: assemble the drafts into plan
+sections 5-10, write section 11 (S7 e2e, gates, the gate-run command
+sheet), commit, then plan adversarial review round 1 (two opus
+reviewers, spec + plan), adjudicate, mission block, launch gate.
+Registered with compact-resume (--persist) until mission end.
 
 ## What Cameron asked for (verbatim where wording matters)
 

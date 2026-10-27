@@ -292,6 +292,7 @@ function makeHarness(opts: {
     events: applyEvents,
     logger: opts.logger ?? silentLogger,
     now: () => NOW,
+    factMinConfidence: 0.7,
   };
 
   const orgListRepo = opts.orgListRepo ?? { get: vi.fn(async () => orgListItem()) };

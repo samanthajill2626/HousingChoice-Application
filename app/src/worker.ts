@@ -493,6 +493,8 @@ if (config.aiExtractionEnabled) {
       events: appEvents,
       logger,
       now: () => new Date().toISOString(),
+      // B1 spec D4: the Notes line confidence floor, from config.
+      factMinConfidence: config.extractionFactMinConfidence,
     },
     config,
     logger,

@@ -167,6 +167,7 @@ function makeHarness(opts: { dueRows: DueExtractionItem[]; messages: MessageItem
     events: { emit: vi.fn() },
     logger,
     now: () => NOW,
+    factMinConfidence: 0.7,
   };
   const deps: ExtractionJobDeps = {
     repo,

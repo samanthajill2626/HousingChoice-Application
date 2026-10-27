@@ -5,7 +5,8 @@
 //     per-field `<field>_source` provenance and auditing from/to;
 //   - queue a pending SUGGESTION when the model flagged a genuine conflict, or
 //     for status-advance / type-classification / a novel phone number;
-//   - append secondary facts to the contact's notes.
+//   - append Notes lines to the contact's notes - every value rule (clamp,
+//     confidence floor, retry guard, cap, demotion) is filterNoteLines.
 //
 // Every side-effect is BEST-EFFORT (try/catch + log): a suggestion failure must
 // never abort a field write, and a notes failure must never lose a suggestion.
@@ -47,6 +48,13 @@ export interface ApplyDeps {
   events: { emit(name: string, payload: unknown): void };
   logger: Logger;
   now(): string; // ISO
+  /**
+   * EXTRACTION_FACT_MIN_CONFIDENCE (lib/config.ts, B1 spec D4): the floor
+   * filterNoteLines applies to model note lines. REQUIRED, so a missed
+   * construction site (worker.ts, routes/dev.ts, the test harnesses) is a
+   * typecheck failure, never a silently unfloored run.
+   */
+  factMinConfidence: number;
 }
 
 export interface ApplyOutcome {
@@ -56,6 +64,10 @@ export interface ApplyOutcome {
   suggested: string[];
   /** Count of note lines appended. */
   notedLines: number;
+  /** Model note lines dropped below the confidence floor (B1 spec D4). */
+  notesBelowFloor: number;
+  /** Note lines a demoted run withheld (B1 spec D4); 0 when not demoted. */
+  notesDemoted: number;
   /** Earlier run suggestions this apply pass replaced. */
   displaced: Array<{ target: string; runId: string; createdAt: string }>;
   /** One entry per target written, suggested, or discarded. Note lines are not targets. */
@@ -869,42 +881,38 @@ export async function applyExtraction(
   }
 
   // --- 8. noteLines --------------------------------------------------------
+  // Every value rule lives in filterNoteLines (B1 spec D4, PR4): clamp, the
+  // confidence floor, the postal filter, the F1 retry guard (before the cap),
+  // the system lines, the five-line cap and the demotion rule. This block only
+  // reads the snapshot and writes what it returns.
   let notedLines = 0;
-  // Addresses are a structured target now - a model that still narrates one into
-  // noteLines is overridden deterministically (spec SS5); the prompt forbids it,
-  // this filter makes the ban belt-and-braces. The digit requirement keeps the
-  // filter to POSTAL lines (a street/zip always carries one) so digit-free
-  // housing-STATUS facts ("Current address is unstable, couch-surfing") survive.
-  const rawNotes = [...(result.noteLines ?? []), ...noteStrings].filter(
-    (line) => !(/^current address\b/i.test(line.trim()) && /\d/.test(line)),
-  );
-  const cleaned = rawNotes.map((line) => line.trim()).filter((line) => line.length > 0).slice(0, MAX_NOTE_LINES);
-  if (cleaned.length > 0) {
-    const prefix = autoPrefix(at);
-    // Read-modify-write on the ctx.contact snapshot. This can lose a concurrent
-    // human notes edit made between the snapshot read and this write; the race
-    // is ACCEPTED (single scalar attribute, low write frequency) rather than
-    // paying for an optimistic-concurrency retry loop on a low-stakes field.
-    const existing = typeof contact.notes === 'string' ? contact.notes.trim() : '';
-    // Belt-and-braces idempotency guard (adversarial F1): applyExtraction runs
-    // BEFORE repo.complete(), so a complete() failure re-arms the SAME due row and
-    // the retry re-extracts the identical transcript against a contact that already
-    // carries run 1's appended line. Drop any candidate whose formatted
-    // `[Auto - <date>] <line>` OR bare `<line>` is already present verbatim in the
-    // current notes, so the retry appends nothing (the deterministic FAKE driver
-    // double-appends every time otherwise; the anthropic driver only usually does).
-    const toAppend = cleaned.filter(
-      (line) => !existing.includes(`${prefix} ${line}`) && !existing.includes(line),
-    );
-    if (toAppend.length > 0) {
-      const joined = toAppend.map((line) => `${prefix} ${line}`).join('\n');
-      const nextNotes = existing.length > 0 ? `${existing}\n${joined}` : joined;
-      try {
-        await deps.contacts.update(contactId, { notes: nextNotes });
-        notedLines = toAppend.length;
-      } catch (err) {
-        logger.warn({ contactId, err }, 'extraction notes append failed');
-      }
+  // Read-modify-write on the ctx.contact snapshot. This can lose a concurrent
+  // human notes edit made between the snapshot read and this write; the race
+  // is ACCEPTED (single scalar attribute, low write frequency) rather than
+  // paying for an optimistic-concurrency retry loop on a low-stakes field.
+  const existing = typeof contact.notes === 'string' ? contact.notes.trim() : '';
+  const prefix = autoPrefix(at);
+  const filtered = filterNoteLines({
+    modelLines: result.noteLines,
+    systemLines: noteStrings,
+    floor: deps.factMinConfidence,
+    existingNotes: existing,
+    prefix,
+    demoted: ctx.hasInferredRoleContent === true,
+  });
+  if (filtered.demoted > 0) {
+    logger.debug({ contactId, withheld: filtered.demoted }, 'extraction note lines withheld (unknown-speaker window)');
+  }
+  if (filtered.append.length > 0) {
+    const joined = filtered.append.map((line) => `${prefix} ${line}`).join('\n');
+    const nextNotes = existing.length > 0 ? `${existing}\n${joined}` : joined;
+    try {
+      await deps.contacts.update(contactId, { notes: nextNotes });
+      notedLines = filtered.append.length;
+      // The model lines really appended are filtered.append.slice(0,
+      // filtered.modelCount) - counted here, after the write landed (S5).
+    } catch (err) {
+      logger.warn({ contactId, err }, 'extraction notes append failed');
     }
   }
 
@@ -913,7 +921,11 @@ export async function applyExtraction(
     deps.events.emit('suggestion.updated', { contactId });
   }
 
-  return { wrote, suggested, notedLines, displaced, decisions };
+  return {
+    wrote, suggested, notedLines,
+    notesBelowFloor: filtered.belowFloor, notesDemoted: filtered.demoted,
+    displaced, decisions,
+  };
 }
 
 /**

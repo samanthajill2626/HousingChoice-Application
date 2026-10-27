@@ -14,6 +14,7 @@
 import type {
   ExtractableField,
   ExtractionFieldOp,
+  ExtractionNoteLine,
   ExtractionResult,
   SuggestedContactKind,
 } from '../../adapters/extraction.js';
@@ -114,9 +115,19 @@ export const EXTRACTION_SCHEMA: Record<string, unknown> = {
       },
       required: ['phone', 'label', 'reason'],
     },
+    // B1 spec D4: each line carries the model's confidence; both keys required
+    // (zero optional parameters). The floor is applied in apply.ts.
     noteLines: {
       type: 'array',
-      items: { type: 'string' },
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          text: { type: 'string' },
+          confidence: { type: 'number' },
+        },
+        required: ['text', 'confidence'],
+      },
     },
     // Layer-2 role attribution for `Speaker N` (unknown) call lines. Modeled as
     // an ARRAY OF PAIRS, not a dynamic-key map: structured outputs require
@@ -158,8 +169,8 @@ export const EXTRACTION_SCHEMA: Record<string, unknown> = {
 };
 
 const MAX_REASON_CHARS = 200;
-const MAX_NOTE_CHARS = 200;
-const MAX_NOTE_LINES = 5;
+/** B1 spec D4: the parser keeps at most this many noteLines; it filters no value. */
+const MAX_PARSED_NOTE_LINES = 20;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -258,11 +269,17 @@ export function parseExtractionText(text: string): ExtractionResult {
     }
   }
 
+  // B1 spec D4: keep up to MAX_PARSED_NOTE_LINES STRUCTURALLY valid items - an
+  // object with a string text and a number confidence - unmodified. No value
+  // filtering here: clamping, the floor, the guard and the cap are
+  // apply.ts filterNoteLines, which the fake driver's bypass also reaches.
   if (Array.isArray(root.noteLines)) {
-    const lines = root.noteLines
-      .filter((line): line is string => typeof line === 'string' && line.trim().length > 0)
-      .slice(0, MAX_NOTE_LINES)
-      .map((line) => clamp(line, MAX_NOTE_CHARS));
+    const lines: ExtractionNoteLine[] = [];
+    for (const item of root.noteLines) {
+      if (lines.length >= MAX_PARSED_NOTE_LINES) break;
+      if (!isRecord(item) || typeof item.text !== 'string' || typeof item.confidence !== 'number') continue;
+      lines.push({ text: item.text, confidence: item.confidence });
+    }
     if (lines.length > 0) result.noteLines = lines;
   }
 

@@ -81,6 +81,12 @@ export type SuggestedContactKind =
   | 'property_manager'
   | 'partner';
 
+/** One model Notes line (B1 spec D4): the line and how sure the model is (0..1). */
+export interface ExtractionNoteLine {
+  text: string;
+  confidence: number;
+}
+
 export interface ExtractionResult {
   fields: Partial<Record<ExtractableField, ExtractionFieldOp>>;
   statusAdvance?: { suggest: boolean; reason?: string };
@@ -89,7 +95,9 @@ export interface ExtractionResult {
   /** The client's current address as structured parts (parsed from the wire's
    *  all-required address block; absent when op "none" or no usable parts). */
   address?: ExtractionAddress;
-  noteLines?: string[];
+  /** B1 spec D4: up to 20 structurally valid lines, unfiltered. Every value
+   *  rule (clamp, floor, guard, cap, demotion) is apply.ts filterNoteLines. */
+  noteLines?: ExtractionNoteLine[];
   // The model's role attribution for `Speaker N`-labeled (unknown) call lines:
   // each Speaker label mapped to client/staff/uncertain (spec Layer 2). Keyed by
   // the raw label (e.g. "Speaker 1"). Absent when the window had no unknown

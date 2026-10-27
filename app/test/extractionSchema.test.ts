@@ -131,7 +131,7 @@ describe('parseExtractionText', () => {
       statusAdvance: { suggest: true, reason: 'voucher in hand' },
       typeSuggestion: { value: 'tenant', reason: 'seeking a home' },
       phoneAddition: { phone: '+14045551234', label: 'cell', reason: 'her other number' },
-      noteLines: ['Has a stairs concern'],
+      noteLines: [{ text: 'Has a stairs concern', confidence: 0.9 }],
     };
     expect(parseExtractionText(JSON.stringify(payload))).toEqual(payload);
   });
@@ -163,18 +163,49 @@ describe('parseExtractionText', () => {
     expect(unsupported.typeSuggestion).toBeUndefined();
   });
 
-  it('clamps 7 noteLines to 5 and truncates long strings to 200 chars', () => {
+  // B1 spec D4: the parser keeps up to 20 STRUCTURALLY valid noteLines and does
+  // no value filtering - the 200-char clamp, the confidence clamp, the floor and
+  // the five-line cap all live in apply.ts filterNoteLines.
+  it('keeps up to 20 { text, confidence } noteLines, unclamped; reasons still clamp to 200', () => {
     const long = 'x'.repeat(250);
-    const seven = Array.from({ length: 7 }, (_unused, i) => `note ${i} ${long}`);
+    const many = Array.from({ length: 25 }, (_unused, i) => ({ text: `note ${i} ${long}`, confidence: 5 }));
     const parsed = parseExtractionText(
       JSON.stringify({
         fields: { pets: { op: 'write', value: 'yes', reason: long } },
-        noteLines: seven,
+        noteLines: many,
       }),
     );
-    expect(parsed.noteLines).toHaveLength(5);
-    for (const line of parsed.noteLines ?? []) expect(line.length).toBeLessThanOrEqual(200);
+    expect(parsed.noteLines).toHaveLength(20);
+    expect(parsed.noteLines?.[0]).toEqual({ text: `note 0 ${long}`, confidence: 5 });
     expect(parsed.fields.pets?.reason?.length).toBeLessThanOrEqual(200);
+  });
+
+  it('drops a noteLine that is not { text: string, confidence: number } - and nothing else', () => {
+    const parsed = parseExtractionText(JSON.stringify({
+      noteLines: [
+        { text: 'kept', confidence: 0.8 },
+        'a legacy string',
+        { text: 'no confidence' },
+        { text: 3, confidence: 1 },
+        { text: 'string confidence', confidence: '0.9' },
+        null,
+        { text: '   ', confidence: 0.9 },
+      ],
+    }));
+    expect(parsed.noteLines).toEqual([{ text: 'kept', confidence: 0.8 }, { text: '   ', confidence: 0.9 }]);
+  });
+
+  it('the schema states the { text, confidence } item, both required', () => {
+    const props = EXTRACTION_SCHEMA['properties'] as Record<string, unknown>;
+    expect(props['noteLines']).toEqual({
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { text: { type: 'string' }, confidence: { type: 'number' } },
+        required: ['text', 'confidence'],
+      },
+    });
   });
 
   it('drops unknown field keys and defaults missing fields to {}', () => {
@@ -186,7 +217,7 @@ describe('parseExtractionText', () => {
     expect(parsed.fields.pets).toEqual({ op: 'write', value: 'yes' });
     expect((parsed.fields as Record<string, unknown>).bogusField).toBeUndefined();
 
-    expect(parseExtractionText(JSON.stringify({ noteLines: ['hi'] })).fields).toEqual({});
+    expect(parseExtractionText(JSON.stringify({ noteLines: [{ text: 'hi', confidence: 0.9 }] })).fields).toEqual({});
   });
 
   it('ignores field ops with an invalid op enum', () => {

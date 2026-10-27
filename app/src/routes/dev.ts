@@ -769,6 +769,8 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
           events: appEvents,
           logger: log,
           now: () => new Date().toISOString(),
+          // B1 spec D4: the Notes line confidence floor, from config.
+          factMinConfidence: config.extractionFactMinConfidence,
         },
         config,
         logger: log,

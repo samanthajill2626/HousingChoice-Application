@@ -28,6 +28,11 @@ function makeContact(overrides: Partial<ContactItem> = {}): ContactItem {
   return { contactId: 'c1', type: 'tenant', ...overrides };
 }
 
+/** A model Notes line (B1 spec D4). 0.9 clears the default 0.7 floor. */
+function note(text: string, confidence = 0.9): { text: string; confidence: number } {
+  return { text, confidence };
+}
+
 interface StubRecords {
   updates: Array<{ id: string; patch: Record<string, unknown> }>;
   suggestions: SuggestionItem[];
@@ -43,6 +48,8 @@ function makeDeps(opts: {
   updateImpl?: (id: string, patch: Record<string, unknown>) => Promise<ContactItem>;
   /** Tombstoned values as `target#normValue` pairs (hasDismissal stub). */
   dismissedValues?: string[];
+  /** EXTRACTION_FACT_MIN_CONFIDENCE for this run (B1 spec D4); default 0.7. */
+  factMinConfidence?: number;
 } = {}): { deps: ApplyDeps; records: StubRecords; logger: Logger; logCapture: ReturnType<typeof createLogCapture> } {
   const records: StubRecords = { updates: [], suggestions: [], audits: [], emits: [] };
   const logCapture = createLogCapture();
@@ -99,7 +106,10 @@ function makeDeps(opts: {
     }),
   };
 
-  const deps: ApplyDeps = { contacts, extraction, audit, events, logger, now: () => NOW };
+  const deps: ApplyDeps = {
+    contacts, extraction, audit, events, logger, now: () => NOW,
+    factMinConfidence: opts.factMinConfidence ?? 0.7,
+  };
   return { deps, records, logger, logCapture };
 }
 
@@ -204,7 +214,7 @@ describe('applyExtraction - field writes (items 1-3)', () => {
   it('op:none does nothing', async () => {
     const { deps, records } = makeDeps();
     const outcome = await run(deps, makeContact(), { fields: { pets: { op: 'none' } } });
-    expect(outcome).toEqual({ wrote: [], suggested: [], notedLines: 0, displaced: [], decisions: [] });
+    expect(outcome).toEqual({ wrote: [], suggested: [], notedLines: 0, notesBelowFloor: 0, notesDemoted: 0, displaced: [], decisions: [] });
     expect(records.updates).toHaveLength(0);
     expect(records.emits).toHaveLength(0);
   });
@@ -269,6 +279,8 @@ describe('applyExtraction - type gating (item 1)', () => {
       wrote: [],
       suggested: [],
       notedLines: 0,
+      notesBelowFloor: 0,
+      notesDemoted: 0,
       displaced: [],
       decisions: [
         { target: 'firstName', outcome: 'dropped', dropReason: 'wrong_contact_type', proposedValue: 'Pat' },
@@ -649,7 +661,7 @@ describe('applyExtraction - noteLines (item 8)', () => {
     const { deps, records } = makeDeps();
     const outcome = await run(deps, makeContact({ type: 'tenant' }), {
       fields: {},
-      noteLines: ['a', 'b', 'c', 'd', 'e', 'f', 'g'],
+      noteLines: ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((text) => note(text)),
     });
     expect(outcome.notedLines).toBe(5);
     const notes = records.updates[0]!.patch['notes'] as string;
@@ -662,7 +674,7 @@ describe('applyExtraction - noteLines (item 8)', () => {
     const { deps } = makeDeps();
     const outcome = await run(deps, makeContact({ type: 'tenant' }), {
       fields: {},
-      noteLines: ['  ', '', 'real fact'],
+      noteLines: ['  ', '', 'real fact'].map((text) => note(text)),
     });
     expect(outcome.notedLines).toBe(1);
   });
@@ -671,7 +683,7 @@ describe('applyExtraction - noteLines (item 8)', () => {
     const { deps, records } = makeDeps();
     const outcome = await run(deps, makeContact({ type: 'tenant', notes: 'existing note' }), {
       fields: {},
-      noteLines: ['new fact'],
+      noteLines: [note('new fact')],
     });
     expect(outcome.notedLines).toBe(1);
     expect(records.updates[0]!.patch['notes']).toBe('existing note\n[Auto - Jul 16] new fact');
@@ -683,7 +695,7 @@ describe('applyExtraction - noteLines (item 8)', () => {
     // identical transcript. The guard must drop the already-present line so the
     // second run writes no notes (notedLines 0) - no double-append (F1).
     const { deps, records } = makeDeps();
-    const result: ExtractionResult = { fields: {}, noteLines: ['stairs are a problem'] };
+    const result: ExtractionResult = { fields: {}, noteLines: [note('stairs are a problem')] };
 
     const first = await run(deps, makeContact({ type: 'tenant', notes: 'seed note' }), result);
     expect(first.notedLines).toBe(1);
@@ -708,7 +720,7 @@ describe('applyExtraction - emit + best-effort isolation (items 9-10)', () => {
     await run(deps, makeContact({ type: 'tenant', status: 'onboarding' }), {
       fields: { pets: { op: 'write', value: 'dog' } },
       statusAdvance: { suggest: true },
-      noteLines: ['likes the neighborhood'],
+      noteLines: [note('likes the neighborhood')],
     });
     const emits = records.emits.filter((e) => e.name === 'suggestion.updated');
     expect(emits).toHaveLength(1);
@@ -785,7 +797,12 @@ describe('applyExtraction - inferred-role demotion (spec Layer 3)', () => {
     expect(records.emits.filter((e) => e.name === 'suggestion.updated')).toHaveLength(1);
   });
 
-  it('leaves native suggestions and notes appends untouched under the flag (no demotion audit)', async () => {
+  // B1 spec D4 / charter 6.4 ("appends no lines"), Cameron's spec-gate answer
+  // Q1: a demoted run now appends NO Notes line. This case used to pin the
+  // opposite ("notes are additive - the append still lands directly"). The
+  // consequence Q1 accepted: an AI caseworker note (lib/caseworkers.ts
+  // hasAiCaseworkerNote) is not written from such a window (WI6).
+  it('leaves native suggestions untouched under the flag, appends NO note line, and counts it (no demotion audit)', async () => {
     const { deps, records } = makeDeps();
     const contact = makeContact({ type: 'tenant', voucherSize: 2 });
     const outcome = await applyExtraction(deps, {
@@ -795,7 +812,7 @@ describe('applyExtraction - inferred-role demotion (spec Layer 3)', () => {
       cursorTsMsgId: 'ts-9',
       result: {
         fields: { voucherSize: { op: 'suggest', value: '3', reason: 'voucher reissued as a 3-bedroom' } },
-        noteLines: ['likes the neighborhood'],
+        noteLines: [note('likes the neighborhood')],
       },
       hasInferredRoleContent: true,
     });
@@ -807,10 +824,10 @@ describe('applyExtraction - inferred-role demotion (spec Layer 3)', () => {
       currentValue: '2',
       suggestedValue: '3',
     });
-    // Notes are additive - the append still lands directly.
-    expect(outcome.notedLines).toBe(1);
-    const noteUpdate = records.updates.find((u) => typeof u.patch['notes'] === 'string');
-    expect(noteUpdate!.patch['notes']).toContain('[Auto - Jul 16] likes the neighborhood');
+    // A demoted run appends no line - withheld and counted, never written.
+    expect(outcome.notedLines).toBe(0);
+    expect(outcome.notesDemoted).toBe(1);
+    expect(records.updates.find((u) => typeof u.patch['notes'] === 'string')).toBeUndefined();
     // No write op was present, so no demotion audit fires.
     expect(records.audits.find((a) => a.type === 'ai_extraction_demoted')).toBeUndefined();
   });
@@ -1049,7 +1066,7 @@ describe('applyExtraction - address (ninth target)', () => {
     const { deps, records } = makeDeps();
     const outcome = await run(deps, makeContact({ type: 'tenant' }), {
       fields: {},
-      noteLines: ['Current address: 1 Main St', 'Has a service dog'],
+      noteLines: [note('Current address: 1 Main St'), note('Has a service dog')],
     });
 
     expect(outcome.notedLines).toBe(1);
@@ -1066,8 +1083,8 @@ describe('applyExtraction - address (ninth target)', () => {
     const outcome = await run(deps, makeContact({ type: 'tenant' }), {
       fields: {},
       noteLines: [
-        'Current address is unstable, couch-surfing with family',
-        'Current address: 535 Seal Pl NE, Atlanta',
+        note('Current address is unstable, couch-surfing with family'),
+        note('Current address: 535 Seal Pl NE, Atlanta'),
       ],
     });
 
@@ -1257,7 +1274,7 @@ describe('applyExtraction - per-target decisions for the run log', () => {
   it('does NOT record a decision for a filtered note line (note lines are not targets)', async () => {
     const { deps } = makeDeps();
     const out = await run(deps, makeContact({ type: 'tenant' }), {
-      fields: {}, noteLines: ['Current address is 1 Main St 30303', 'stairs are fine'],
+      fields: {}, noteLines: [note('Current address is 1 Main St 30303'), note('stairs are fine')],
     });
     expect(out.decisions).toEqual([]);
     expect(out.notedLines).toBe(1);
@@ -1711,5 +1728,78 @@ describe('applyExtraction - a write never rewrites a filled text field (B1 spec 
       fields: { area_preference: { op: 'suggest', value: 'Decatur' } },
     });
     expect(outcome.suggested).toEqual(['area_preference']);
+  });
+});
+
+// B1 spec D4: applyExtraction appends exactly what filterNoteLines returns, the
+// floor arriving through ApplyDeps from config.
+describe('applyExtraction - Notes lines through filterNoteLines (B1 spec D4)', () => {
+  it('drops a line below the floor, keeps one AT it, and reports the count', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: {}, noteLines: [note('below the floor', 0.69), note('at the floor', 0.7)],
+    });
+    expect(outcome.notedLines).toBe(1);
+    expect(outcome.notesBelowFloor).toBe(1);
+    expect(records.updates[0]!.patch['notes']).toBe('[Auto - Jul 16] at the floor');
+  });
+
+  it('applies the floor before the five-line cap: seven lines, first five below -> two land', async () => {
+    const { deps, records } = makeDeps();
+    const lines = [1, 2, 3, 4, 5].map((n) => note(`low ${n}`, 0.2)).concat([note('high 6'), note('high 7')]);
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), { fields: {}, noteLines: lines });
+    expect(outcome.notedLines).toBe(2);
+    expect(outcome.notesBelowFloor).toBe(5);
+    expect(records.updates[0]!.patch['notes']).toBe('[Auto - Jul 16] high 6\n[Auto - Jul 16] high 7');
+  });
+
+  it('reads the floor from ApplyDeps: a system line bypasses it, a model line does not', async () => {
+    const { deps, records } = makeDeps({
+      factMinConfidence: 1,
+      findByPhone: async () => makeContact({ contactId: 'other', type: 'tenant' }),
+    });
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: {}, noteLines: [note('nearly sure', 0.99)], phoneAddition: { phone: '555-010-9999' },
+    });
+    expect(outcome.notedLines).toBe(1);
+    expect(outcome.notesBelowFloor).toBe(1);
+    expect(records.updates[0]!.patch['notes']).toBe('[Auto - Jul 16] Mentioned number +15550109999 which belongs to another contact');
+  });
+
+  it('a guarded duplicate no longer takes a cap slot (WI5)', async () => {
+    // Whole words: the bare-line guard would match a single letter inside "seed".
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant', notes: 'seed\n[Auto - Jul 16] alpha' }), {
+      fields: {}, noteLines: ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot'].map((text) => note(text)),
+    });
+    expect(outcome.notedLines).toBe(5);
+    expect(records.updates[0]!.patch['notes']).toBe(
+      'seed\n[Auto - Jul 16] alpha\n[Auto - Jul 16] bravo\n[Auto - Jul 16] charlie\n[Auto - Jul 16] delta\n[Auto - Jul 16] echo\n[Auto - Jul 16] foxtrot',
+    );
+  });
+
+  it('a demoted run appends NO line of either kind and emits nothing for notes', async () => {
+    const { deps, records } = makeDeps({ findByPhone: async () => makeContact({ contactId: 'other', type: 'tenant' }) });
+    const outcome = await applyExtraction(deps, {
+      orgEntries: ORG_ENTRIES,
+      contact: makeContact({ type: 'tenant' }),
+      conversationId: CONV,
+      cursorTsMsgId: 'ts-9',
+      result: { fields: {}, noteLines: [note('works nights downtown')], phoneAddition: { phone: '555-010-9999' } },
+      hasInferredRoleContent: true,
+    });
+    expect(outcome.notedLines).toBe(0);
+    expect(outcome.notesDemoted).toBe(2);
+    expect(records.updates).toHaveLength(0);
+    expect(records.emits).toHaveLength(0);
+  });
+
+  it('drops a legacy string item without throwing (only the fake driver can deliver one, WI1)', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: {}, noteLines: ['a legacy string line'] as unknown as ExtractionResult['noteLines'],
+    });
+    expect(outcome.notedLines).toBe(0);
+    expect(records.updates).toHaveLength(0);
   });
 });

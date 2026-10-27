@@ -122,7 +122,7 @@ describe('fake driver', () => {
         {
           tsMsgId: '2026-07-16T10:00:00.000Z#s1',
           speaker: 'client',
-          text: 'EXTRACT:{"noteLines":["stairs are fine"]}',
+          text: 'EXTRACT:{"noteLines":[{"text":"stairs are fine","confidence":0.9}]}',
           at: '2026-07-16T10:00:00.000Z',
           channel: 'sms',
         },
@@ -130,8 +130,8 @@ describe('fake driver', () => {
     };
     await expect(driver.extract(input)).resolves.toEqual({
       ok: true,
-      meta: { driver: 'fake', promptFingerprint: fingerprint, rawText: '{"noteLines":["stairs are fine"]}' },
-      result: { fields: {}, noteLines: ['stairs are fine'] },
+      meta: { driver: 'fake', promptFingerprint: fingerprint, rawText: '{"noteLines":[{"text":"stairs are fine","confidence":0.9}]}' },
+      result: { fields: {}, noteLines: [{ text: 'stairs are fine', confidence: 0.9 }] },
     });
   });
 

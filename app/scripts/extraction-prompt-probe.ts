@@ -54,10 +54,13 @@
  *               off there - adapters/extraction.ts).
  *   --repo      measure ANOTHER checkout's driver and prompt instead of this one's.
  *   --baseline  ALSO run the default suite on this checkout (normally a checkout
- *               of main) and compare: FAIL when any case's ok count is 2 or more
- *               below the baseline's, the total is more than 2 below it, or the
- *               measured side truncates. A failing comparison re-runs both sides
- *               once; the second result counts.
+ *               of main) and compare: FAIL when any case is not measured on
+ *               either side (fewer than 2 of its 3 calls returned a result - a
+ *               refused, truncated, unparsed or failed call is no measurement),
+ *               any case's ok count is 2 or more below the baseline's, the
+ *               total is more than 2 below it, or the measured side truncates.
+ *               A failing comparison re-runs both sides once; the second
+ *               result counts.
  *   --out       APPEND this run's record (Markdown) to the file, creating it.
  *               With --baseline or --suite never-written only (refused on the
  *               plain default suite, which writes no record).
@@ -590,6 +593,8 @@ function printDefaultTable(
 
 export interface SideScore {
   okByCase: Record<string, number>;
+  /** FW-1: per case, the runs whose call returned a result (any verdict but `failed`). */
+  measuredByCase: Record<string, number>;
   totalOk: number;
   truncations: number;
   totals: Record<Verdict, number>;
@@ -604,8 +609,18 @@ export interface Comparison {
   totalDelta: number;
 }
 
+/**
+ * FW-1 (code review R1 ADV-1): a comparison case needs at least this many of
+ * its GATE_RUNS runs MEASURED - the call returned a result, so a refusal, a
+ * truncation, a parse or a driver failure is not one - on EACH side, or it is
+ * "not measured" and the comparison FAILS. The never-written suite's bar
+ * (MIN_GRADED_RUNS): a side that measured nothing must never read as a pass.
+ */
+export const MIN_MEASURED_RUNS = MIN_GRADED_RUNS;
+
 export function scoreSide(cases: readonly ProbeCase[], runs: number, outcomes: readonly RunOutcome[]): SideScore {
   const okByCase: Record<string, number> = {};
+  const measuredByCase: Record<string, number> = {};
   const totals: Record<Verdict, number> = { ok: 0, missed: 0, wrong: 0, failed: 0 };
   let inputTokens = 0;
   let outputTokens = 0;
@@ -613,6 +628,7 @@ export function scoreSide(cases: readonly ProbeCase[], runs: number, outcomes: r
   cases.forEach((c, ci) => {
     const mine = outcomes.slice(ci * runs, (ci + 1) * runs);
     okByCase[c.id] = mine.filter((o) => o.verdict === 'ok').length;
+    measuredByCase[c.id] = mine.filter((o) => o.verdict !== 'failed').length;
     for (const o of mine) {
       totals[o.verdict] += 1;
       inputTokens += o.inputTokens;
@@ -620,12 +636,26 @@ export function scoreSide(cases: readonly ProbeCase[], runs: number, outcomes: r
       if (o.verdict === 'failed' && o.said === 'truncated') truncations += 1;
     }
   });
-  return { okByCase, totalOk: totals.ok, truncations, totals, inputTokens, outputTokens };
+  return { okByCase, measuredByCase, totalOk: totals.ok, truncations, totals, inputTokens, outputTokens };
 }
 
-/** FAIL when a case's ok count is 2 or more below the baseline's, the total is MORE than 2 below, or the branch truncated. */
+/**
+ * FAIL when a case is not measured on either side (FW-1: fewer than
+ * MIN_MEASURED_RUNS of its GATE_RUNS runs returned a result), a case's ok
+ * count is 2 or more below the baseline's, the total is MORE than 2 below, or
+ * the branch truncated.
+ */
 export function compareDefaultSuites(branch: SideScore, baseline: SideScore): Comparison {
   const reasons: string[] = [];
+  const ids = [...new Set([...Object.keys(branch.okByCase), ...Object.keys(baseline.okByCase)])];
+  for (const id of ids) {
+    for (const [where, s] of [['branch', branch], ['baseline', baseline]] as const) {
+      const measured = s.measuredByCase[id] ?? 0;
+      if (measured < MIN_MEASURED_RUNS) {
+        reasons.push(`${id}: not measured on the ${where} (${measured} of ${GATE_RUNS} runs returned a result; needs ${MIN_MEASURED_RUNS})`);
+      }
+    }
+  }
   const caseDrops = Object.keys(baseline.okByCase)
     .map((id) => ({ id, branch: branch.okByCase[id] ?? 0, baseline: baseline.okByCase[id] ?? 0 }))
     .filter((d) => d.baseline - d.branch >= 2);
@@ -681,7 +711,8 @@ export function renderComparisonRecord(r: {
   out.push(`- Branch: ${asciiSafe(b.root)} @ ${b.commit}${b.dirty ? ' (tracked files modified)' : ''}, prompt ${b.fingerprint}`);
   out.push(`- Baseline: ${asciiSafe(m.root)} @ ${m.commit}${m.dirty ? ' (tracked files modified)' : ''}, prompt ${m.fingerprint}`);
   out.push(
-    `- Rule (spec D7): ${GATE_RUNS} runs per case per side; FAIL when any case's ok count is 2 or more below the baseline's,`
+    `- Rule (spec D7): ${GATE_RUNS} runs per case per side; FAIL when any case is not measured on either side`
+      + ` (fewer than ${MIN_MEASURED_RUNS} of its ${GATE_RUNS} calls returned a result), any case's ok count is 2 or more below the baseline's,`
       + ' the total ok count is more than 2 below it, or the branch truncates; one re-run of both sides is allowed.',
     '',
   );

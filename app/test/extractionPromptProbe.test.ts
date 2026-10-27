@@ -24,10 +24,13 @@ import {
   keyTail,
   main,
   parseProbeArgs,
+  scoreSide,
   type BaseModules,
   type BranchModules,
   type ProbeCliDeps,
+  type RunOutcome,
   type SideScore,
+  type Verdict,
 } from '../scripts/extraction-prompt-probe.js';
 
 const base: BaseModules = { extraction, prompt, orgList, starting, logger, sentBlock };
@@ -926,9 +929,14 @@ describe('main --suite never-written', () => {
   });
 });
 
-function side(okByCase: Record<string, number>, truncations = 0): SideScore {
+/** A side every one of whose runs returned a result (all GATE_RUNS measured per case), unless `measuredByCase` says otherwise. */
+function side(okByCase: Record<string, number>, truncations = 0, measuredByCase?: Record<string, number>): SideScore {
   const totalOk = Object.values(okByCase).reduce((n, x) => n + x, 0);
-  return { okByCase, totalOk, truncations, totals: { ok: totalOk, missed: 0, wrong: 0, failed: truncations }, inputTokens: 0, outputTokens: 0 };
+  return {
+    okByCase,
+    measuredByCase: measuredByCase ?? Object.fromEntries(Object.keys(okByCase).map((id) => [id, GATE_RUNS])),
+    totalOk, truncations, totals: { ok: totalOk, missed: 0, wrong: 0, failed: truncations }, inputTokens: 0, outputTokens: 0,
+  };
 }
 
 describe('compareDefaultSuites - the spec D7 thresholds', () => {
@@ -950,6 +958,51 @@ describe('compareDefaultSuites - the spec D7 thresholds', () => {
 
   it('a branch truncation fails the comparison', () => {
     expect(compareDefaultSuites(side({ a: 3 }, 1), side({ a: 3 })).pass).toBe(false);
+  });
+});
+
+// FW-1 (code review R1 ADV-1): a failed call - refusal, truncation, parse,
+// driver - is not a measurement. A case needs 2 of its 3 runs MEASURED on EACH
+// side, or the comparison fails: two sides that both measured nothing (an
+// expired key, a mistyped --model, an outage) must never read as a pass.
+describe('compareDefaultSuites - a case needs 2 measured runs on each side (FW-1)', () => {
+  const one = DEFAULT_CASES[0]!;
+  const runOf = (verdict: Verdict, said = verdict === 'failed' ? 'driver' : 'none'): RunOutcome =>
+    ({ verdict, said, inputTokens: 0, outputTokens: 0 });
+  const sideOf = (...runs: RunOutcome[]): SideScore => scoreSide([one], GATE_RUNS, runs);
+  const allFailed = (): SideScore => sideOf(runOf('failed'), runOf('failed'), runOf('failed'));
+  const notMeasured = (where: 'branch' | 'baseline', n = 0) =>
+    `${one.id}: not measured on the ${where} (${n} of 3 runs returned a result; needs 2)`;
+
+  it('fails when BOTH sides failed every call', () => {
+    const c = compareDefaultSuites(allFailed(), allFailed());
+    expect(c.pass).toBe(false);
+    expect(c.reasons).toEqual([notMeasured('branch'), notMeasured('baseline')]);
+  });
+
+  it('fails when the baseline failed every call, though the branch missed every run', () => {
+    const c = compareDefaultSuites(sideOf(runOf('missed'), runOf('missed'), runOf('missed')), allFailed());
+    expect(c.pass).toBe(false);
+    expect(c.reasons).toEqual([notMeasured('baseline')]);
+  });
+
+  it('fails when the branch failed every call, though the baseline was not ok often enough to show a drop', () => {
+    const c = compareDefaultSuites(allFailed(), sideOf(runOf('ok'), runOf('wrong'), runOf('wrong')));
+    expect(c.pass).toBe(false);
+    expect(c.reasons).toEqual([notMeasured('branch')]);
+  });
+
+  it('baseline truncations count against its measured runs', () => {
+    const truncated = runOf('failed', 'truncated');
+    const c = compareDefaultSuites(sideOf(runOf('ok'), runOf('ok'), runOf('ok')), sideOf(runOf('ok'), truncated, truncated));
+    expect(c.pass).toBe(false);
+    expect(c.reasons).toEqual([notMeasured('baseline', 1)]);
+  });
+
+  it('one failed call of three on a side is still measured (2 of 3)', () => {
+    const c = compareDefaultSuites(sideOf(runOf('ok'), runOf('ok'), runOf('failed')), sideOf(runOf('failed'), runOf('ok'), runOf('ok')));
+    expect(c.pass).toBe(true);
+    expect(c.reasons).toEqual([]);
   });
 });
 
@@ -990,6 +1043,22 @@ describe('main --baseline', () => {
     const text = h.records[0]!.text;
     expect(text).toContain('Attempt 1 - FAIL');
     expect(text).toContain('Attempt 2 - PASS');
+  });
+
+  // FW-1 (R1 ADV-1): the merge gate never passes on nothing measured.
+  it('a run whose every call fails on both sides FAILS after the one re-run (exit 1), with a FAIL record', async () => {
+    const h = harness(() => failed('driver'));
+    expect(await main(CMP, h.deps)).toBe(1);
+    expect(h.inputs).toHaveLength(DEFAULT_CASES.length * GATE_RUNS * 2 * 2);
+    expect(h.records).toHaveLength(1);
+    const text = h.records[0]!.text;
+    expect(text).toContain('- Verdict: FAIL (after 2 attempt(s))');
+    expect(text).toContain('Attempt 1 - FAIL');
+    expect(text).toContain('Attempt 2 - FAIL');
+    for (const c of DEFAULT_CASES) {
+      expect(text, c.id).toContain(`- Reason: ${c.id}: not measured on the branch (0 of 3 runs returned a result; needs 2)`);
+      expect(text, c.id).toContain(`- Reason: ${c.id}: not measured on the baseline (0 of 3 runs returned a result; needs 2)`);
+    }
   });
 
   it('the baseline naming the measured checkout is a usage error', async () => {

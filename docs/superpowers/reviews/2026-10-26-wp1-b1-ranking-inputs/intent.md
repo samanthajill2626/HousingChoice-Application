@@ -11,13 +11,15 @@ cut from main @d0e2c2d8.
 
 ## STATE
 
-Phase: LAUNCH GATE (2026-10-27). Plan review CLOSED after round 5, a
-narrow confirming pass on f8c202f4 + 774fa8f4: no defects. Spec rev 10,
-plan v6 (PR1-PR58). Grader defaults confirmed by Cameron; sex covers
-sexual orientation and gender identity (PR58). Nothing in flight. Ask the
-launch pick as TEXT: Go AUTO / Go MANUAL / Revise.
-Next on a Go: compaction gate B, then AUTO dispatch of
-abt:build-orchestrator with mission-block.md verbatim (or MANUAL prompt).
+Phase: GO AUTO picked (2026-10-27), compaction gate B. Cameron: "Yes,
+let's go auto with 55-minute watchdog timers." Plan review CLOSED after
+round 5 (no defects). Spec rev 10, plan v6 (PR1-PR58). Nothing in flight
+yet except the compaction watcher.
+NEXT: dispatch abt:build-orchestrator in the background with
+mission-block.md verbatim as its prompt, then arm watchdog checkpoints
+every 55 minutes (Cameron's pick; the 1-hour cache ceiling) and start the
+mirror. Supervise; at handback run the gates on a quiet tree and the two
+independent reviewers (spec-conformance, plan-blind adversarial).
 Registered with compact-resume (--persist) until mission end.
 
 ## What Cameron asked for (verbatim where wording matters)
@@ -149,6 +151,9 @@ amendment, and then file the issue and write the spec."
   you want to do one more final review before we go?" -> planner chose
   yes on sexual orientation and gender identity (PR58); a narrow plan
   review round 5 on the unreviewed edits.
+
+- 2026-10-27, after round 5 (no defects): "Yes, let's go auto with
+  55-minute watchdog timers." -> launch mode AUTO, watchdog 55 min.
 
 ## Why
 

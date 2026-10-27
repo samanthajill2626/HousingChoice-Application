@@ -76,6 +76,7 @@
  * The cases are worded DIFFERENTLY from the prompt's own examples on purpose:
  * a case that repeats an example only proves the model can echo it.
  */
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -89,12 +90,29 @@ import type {
   ExtractionFieldOp,
   ExtractionInput,
   ExtractionProfileSnapshot,
+  ExtractionResult,
+  StructuredOutputCall,
+  StructuredOutputRequest,
   TranscriptUtterance,
 } from '../src/adapters/extraction.js';
 import type { ListingSendItem } from '../src/repos/listingSendsRepo.js';
 import type { UnitDisplayItem } from '../src/repos/unitsRepo.js';
 import type { SentPropertyEntry } from '../src/services/extraction/sentPropertiesBlock.js';
-import { GATE_RUNS, type SentProperty } from './extractionProbeNeverWritten.js';
+import {
+  CONTROL_MIN_PASSES,
+  EXCLUDED_KINDS,
+  EXCLUDED_KIND_DESCRIPTIONS,
+  GATE_RUNS,
+  GRADER_SCHEMA,
+  GRADER_SYSTEM_PROMPT,
+  MIN_GRADED_RUNS,
+  PRICE_TABLE,
+  SENT_PROPERTIES,
+  buildGraderUserContent,
+  type GraderItem,
+  type NeverWrittenCase,
+  type SentProperty,
+} from './extractionProbeNeverWritten.js';
 
 export const SCRIPT_NAME = 'extraction-prompt-probe';
 
@@ -247,7 +265,57 @@ export function labelOf(m: BranchModules, p: SentProperty): string | undefined {
   return m.label.propertyLabel({ address: sentDisplay(p).address });
 }
 
-// (S6.3 adds the S4 seams writtenLines and factFloor here.)
+/**
+ * The fixed `[Auto - <MMM D>]` prefix the probe hands filterNoteLines (PR30).
+ * filterNoteLines requires one: its retry guard looks for `<prefix> <line>`
+ * in the existing notes. The value only matters when a case's profile carries
+ * notes; it is the autoPrefix of the never-written transcript's date
+ * (2026-10-20, buildNeverWrittenInput).
+ */
+export const PROBE_NOTE_PREFIX = '[Auto - Oct 20]';
+
+/**
+ * S4.2: the lines production would append - its PURE filter (clamp, floor,
+ * postal filter, retry guard, cap; spec D4) with no system lines and no
+ * demotion. The model lines are `append.slice(0, modelCount)` (with no
+ * system lines that is all of `append`). The probe never filters a line
+ * itself (plan PR4).
+ */
+export function writtenLines(
+  m: BranchModules,
+  result: ExtractionResult,
+  existingNotes: string,
+  floor: number,
+): { lines: string[]; belowFloor: number } {
+  const out = m.apply.filterNoteLines({
+    modelLines: result.noteLines,
+    systemLines: [],
+    floor,
+    existingNotes,
+    prefix: PROBE_NOTE_PREFIX,
+    demoted: false,
+  });
+  return { lines: out.append.slice(0, out.modelCount), belowFloor: out.belowFloor };
+}
+
+/**
+ * S4.1 (PR35): the floor, parsed by PRODUCTION's own pure parser
+ * (`parseExtractionFactMinConfidence`: blank or absent = 0.7, otherwise a
+ * finite 0 < x <= 1, else it throws) - never a full loadConfig.
+ */
+export function factFloor(m: BranchModules, env: NodeJS.ProcessEnv): number {
+  return m.config.parseExtractionFactMinConfidence(env.EXTRACTION_FACT_MIN_CONFIDENCE);
+}
+
+/** Every sent property's production label, by unitId (a property production leaves out has none). */
+export function sentLabels(m: BranchModules): Map<string, string> {
+  const labels = new Map<string, string>();
+  for (const p of SENT_PROPERTIES) {
+    const l = labelOf(m, p);
+    if (l !== undefined) labels.set(p.unitId, l);
+  }
+  return labels;
+}
 
 // ---------------------------------------------------------------------------
 // The default suite (tracker #32) - behavior unchanged.
@@ -503,6 +571,501 @@ function printDefaultTable(
     + ` | tokens in ${inputTokens}, out ${outputTokens}`,
   );
   return { totals, inputTokens, outputTokens };
+}
+
+// ---------------------------------------------------------------------------
+// The never-written suite (spec D7 rev 9) - pure scoring, the grader's answer
+// and the record. There are no banned-word lists: ONE grader call per run
+// judges every item (S6.4 makes the call; this section builds the request and
+// applies the answer).
+// ---------------------------------------------------------------------------
+
+export interface NeverWrittenContext {
+  modules: BranchModules;
+  floor: number;
+  /** unitId -> production label, for every sent property in the block. */
+  labels: ReadonlyMap<string, string>;
+}
+
+export interface FieldProposal {
+  field: string;
+  op: 'write' | 'suggest';
+  /** The value the model proposed - what the grader judges. */
+  raw: string;
+  coercedOk: boolean;
+  coercedValue?: unknown;
+  /** "<value>" or "dropped (<reason>)", for the record. */
+  coerced: string;
+}
+
+/** One thing the grader judges, with its verdict once the grader's answer is applied. */
+export interface JudgedItem extends GraderItem {
+  source: 'line' | 'field';
+  /** The field key, on a field item. */
+  field?: string;
+  /** Absent until a grader answer is applied, and on an ungraded run. */
+  verdict?: 'excluded' | 'clean';
+  /** The excluded kind ('unspecified' when the grader named none); 'none' when clean. */
+  kind?: string;
+  reason?: string;
+}
+
+/**
+ * not-scored  the extraction call failed: nothing to judge, and the run is not scored.
+ * not-needed  no line written and no field value proposed: no grader call (spec
+ *             D7); counts as graded (plan section 10, decision 10).
+ * pending     items exist and no grader answer has been applied.
+ * graded      the grader answered and its output parsed: every item has a verdict.
+ * ungraded    the grader call failed or its output did not parse (spec D7).
+ */
+export type Grading = 'not-scored' | 'not-needed' | 'pending' | 'graded' | 'ungraded';
+
+export interface NeverWrittenRun {
+  ok: boolean;
+  failure?: 'refusal' | 'parse' | 'truncated' | 'driver';
+  message?: string;
+  /** The lines production would append, after its filters. */
+  written: string[];
+  belowFloor: number;
+  fields: FieldProposal[];
+  addressOp: boolean;
+  /** This run met the case's expectation (an excluded case: the call was scored). */
+  passed: boolean;
+  /** Every written line, then every proposed field value - what the grader judges. */
+  items: JudgedItem[];
+  grading: Grading;
+  /** Why the run is ungraded. */
+  graderFailure?: string;
+  inputTokens: number;
+  outputTokens: number;
+  graderInputTokens: number;
+  graderOutputTokens: number;
+}
+
+export interface CaseVerdict {
+  id: string;
+  pass: boolean;
+  reasons: string[];
+  passedRuns: number;
+  /** Runs both scored and graded (or with nothing to judge). */
+  gradedRuns: number;
+  ungradedRuns: number;
+  /** Written lines judged excluded - each fails the case. */
+  excludedLines: number;
+  /** Field values judged excluded - reported, never failing. */
+  excludedFields: number;
+  truncations: number;
+}
+
+export interface SuiteVerdict {
+  pass: boolean;
+  reasons: string[];
+  excludedLines: number;
+  excludedFields: number;
+  truncations: number;
+  ungradedRuns: number;
+}
+
+function meets(
+  c: NeverWrittenCase,
+  written: readonly string[],
+  fields: readonly FieldProposal[],
+  addressOp: boolean,
+  ctx: NeverWrittenContext,
+): boolean {
+  const e = c.expect;
+  const namesSent = (l: string): boolean => [...ctx.labels.values()].some((label) => ctx.modules.label.labelMatches(l, label));
+  switch (e.kind) {
+    case 'nothing-excluded':
+      return true; // the grader's verdicts are separate and count for every case
+    case 'line':
+      return written.some((l) => e.pattern.test(l));
+    case 'field':
+      return fields.some(
+        (f) =>
+          f.field === e.field &&
+          f.coercedOk &&
+          (e.equals === undefined || f.coercedValue === e.equals) &&
+          (e.pattern === undefined || e.pattern.test(String(f.coercedValue))),
+      );
+    case 'feedback': {
+      const label = ctx.labels.get(e.unitId);
+      return label !== undefined && written.some((l) => ctx.modules.label.labelMatches(l, label));
+    }
+    case 'untied-feedback':
+      return written.length > 0 && !written.some(namesSent);
+    case 'no-address-op':
+      return !addressOp;
+  }
+}
+
+/** One extraction call, scored through the PRODUCTION filters (filterNoteLines, coerceField). Not yet graded. */
+export function evaluateRun(c: NeverWrittenCase, call: ExtractionCall, ctx: NeverWrittenContext): NeverWrittenRun {
+  const inputTokens = call.meta.usage?.inputTokens ?? 0;
+  const outputTokens = call.meta.usage?.outputTokens ?? 0;
+  const noGrader = { graderInputTokens: 0, graderOutputTokens: 0 };
+  if (!call.ok) {
+    return {
+      ok: false, failure: call.failure, message: call.message, written: [], belowFloor: 0, fields: [],
+      addressOp: false, passed: false, items: [], grading: 'not-scored', inputTokens, outputTokens, ...noGrader,
+    };
+  }
+  const existingNotes = typeof c.profile?.notes === 'string' ? c.profile.notes : '';
+  const { lines, belowFloor } = writtenLines(ctx.modules, call.result, existingNotes, ctx.floor);
+  const labelOfField = new Map<string, string>(ctx.modules.inputs.TENANT_MATCHING_INPUTS.map((i) => [i.key, i.label] as const));
+  const fields: FieldProposal[] = ctx.modules.inputs.TENANT_MATCHING_INPUTS.flatMap((input) => {
+    const op = call.result.fields[input.key as ExtractableField];
+    if (op === undefined || op.op === 'none') return [];
+    const coerced = ctx.modules.apply.coerceField(input.key as ExtractableField, op.value);
+    return [{
+      field: input.key,
+      op: op.op,
+      raw: op.value ?? '',
+      coercedOk: coerced.ok,
+      ...(coerced.ok && { coercedValue: coerced.value }),
+      coerced: coerced.ok ? String(coerced.value) : `dropped (${coerced.reason})`,
+    }];
+  });
+  const items: JudgedItem[] = [
+    ...lines.map((text, i): JudgedItem => ({ id: `line-${i + 1}`, type: 'Notes line', text, source: 'line' })),
+    ...fields.map((f): JudgedItem => ({
+      id: `field-${f.field}`,
+      type: `${labelOfField.get(f.field) ?? f.field} (field value)`,
+      text: f.raw,
+      source: 'field',
+      field: f.field,
+    })),
+  ];
+  const addressOp = call.result.address !== undefined;
+  return {
+    ok: true, written: lines, belowFloor, fields, addressOp,
+    passed: meets(c, lines, fields, addressOp, ctx),
+    items, grading: items.length === 0 ? 'not-needed' : 'pending',
+    inputTokens, outputTokens, ...noGrader,
+  };
+}
+
+/** What the grader is sent for a run's items: id, type and text only. */
+export function graderItemsOf(run: NeverWrittenRun): GraderItem[] {
+  return run.items.map(({ id, type, text }) => ({ id, type, text }));
+}
+
+/** The grader request (spec D7): the pinned prompt and schema, the planted fact (or none) and the items - never the conversation. */
+export function graderRequest(c: NeverWrittenCase, items: readonly GraderItem[]): StructuredOutputRequest {
+  return { system: GRADER_SYSTEM_PROMPT, user: buildGraderUserContent(c.plantedFact, items), schema: GRADER_SCHEMA };
+}
+
+export type GraderParse =
+  | { ok: true; verdicts: Map<string, { verdict: 'excluded' | 'clean'; kind: string; reason: string }> }
+  | { ok: false; message: string };
+
+/**
+ * The grader's answer: exactly one verdict per item id. An "excluded" verdict
+ * naming no known kind is KEPT, as kind "unspecified" (a leak is never dropped
+ * for a missing label); anything else malformed leaves the run ungraded (plan
+ * section 10, decision 11).
+ */
+export function parseGraderOutput(text: string, ids: readonly string[]): GraderParse {
+  const bad = (message: string): GraderParse => ({ ok: false, message });
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (err) {
+    return bad(`not JSON (${err instanceof Error ? err.message : String(err)})`);
+  }
+  const list = typeof raw === 'object' && raw !== null ? (raw as { verdicts?: unknown }).verdicts : undefined;
+  if (!Array.isArray(list)) return bad('no verdicts array');
+  const want = new Set(ids);
+  const verdicts = new Map<string, { verdict: 'excluded' | 'clean'; kind: string; reason: string }>();
+  for (const entry of list) {
+    if (typeof entry !== 'object' || entry === null) return bad('a verdict entry is not an object');
+    const { id, verdict, kind, reason } = entry as Record<string, unknown>;
+    if (typeof id !== 'string' || !want.has(id)) return bad(`unknown item id ${JSON.stringify(id)}`);
+    if (verdicts.has(id)) return bad(`item ${id} judged twice`);
+    if (verdict !== 'excluded' && verdict !== 'clean') return bad(`item ${id}: verdict ${JSON.stringify(verdict)}`);
+    const known = typeof kind === 'string' && (EXCLUDED_KINDS as readonly string[]).includes(kind);
+    verdicts.set(id, {
+      verdict,
+      kind: verdict === 'clean' ? 'none' : known ? (kind as string) : 'unspecified',
+      reason: typeof reason === 'string' && reason.trim().length > 0 ? reason.trim() : '(no reason given)',
+    });
+  }
+  const missing = ids.filter((id) => !verdicts.has(id));
+  if (missing.length > 0) return bad(`no verdict for ${missing.join(', ')}`);
+  return { ok: true, verdicts };
+}
+
+/** Applies one grader call's result to a run: every item gets a verdict, or the run is ungraded (spec D7). */
+export function applyGrade(run: NeverWrittenRun, call: StructuredOutputCall): NeverWrittenRun {
+  const tokens = { graderInputTokens: call.usage?.inputTokens ?? 0, graderOutputTokens: call.usage?.outputTokens ?? 0 };
+  if (!call.ok) {
+    return { ...run, ...tokens, grading: 'ungraded', graderFailure: `grader call failed (${call.failure}): ${call.message}` };
+  }
+  const parsed = parseGraderOutput(call.text, run.items.map((i) => i.id));
+  if (!parsed.ok) return { ...run, ...tokens, grading: 'ungraded', graderFailure: `grader output did not parse: ${parsed.message}` };
+  return { ...run, ...tokens, grading: 'graded', items: run.items.map((i) => ({ ...i, ...parsed.verdicts.get(i.id)! })) };
+}
+
+/**
+ * sha256 (first 12 hex, the extraction fingerprint's length) of everything
+ * fixed in a grader request: the system prompt, the schema and the
+ * user-content shape. In the record beside the extraction prompt fingerprint;
+ * a change after a passing run requires a new run (spec D7).
+ */
+export function graderPromptFingerprint(): string {
+  const sample = buildGraderUserContent('<planted fact>', [{ id: '<id>', type: '<type>', text: '<text>' }]);
+  return createHash('sha256')
+    .update([GRADER_SYSTEM_PROMPT, JSON.stringify(GRADER_SCHEMA), sample].join('\n'))
+    .digest('hex')
+    .slice(0, 12);
+}
+
+/**
+ * Spec D7 per case: no written line judged excluded, no truncation, at least
+ * MIN_GRADED_RUNS runs scored and graded, and a control met in 2 of 3. A field
+ * value judged excluded is counted, never a reason.
+ */
+export function judgeCase(c: NeverWrittenCase, runs: readonly NeverWrittenRun[]): CaseVerdict {
+  const reasons: string[] = [];
+  const judged = runs.flatMap((r) => (r.grading === 'graded' ? r.items : []));
+  const excludedLines = judged.filter((i) => i.source === 'line' && i.verdict === 'excluded').length;
+  const excludedFields = judged.filter((i) => i.source === 'field' && i.verdict === 'excluded').length;
+  const truncations = runs.filter((r) => r.failure === 'truncated').length;
+  const gradedRuns = runs.filter((r) => r.ok && (r.grading === 'graded' || r.grading === 'not-needed')).length;
+  const ungradedRuns = runs.filter((r) => r.ok && (r.grading === 'ungraded' || r.grading === 'pending')).length;
+  const passedRuns = runs.filter((r) => r.passed).length;
+  if (excludedLines > 0) reasons.push(`${excludedLines} written line(s) judged to state an excluded fact`);
+  if (truncations > 0) reasons.push(`${truncations} truncated call(s) - raise MAX_OUTPUT_TOKENS and re-run`);
+  if (gradedRuns < MIN_GRADED_RUNS) {
+    reasons.push(`only ${gradedRuns} of ${runs.length} runs were scored and graded (needs ${MIN_GRADED_RUNS}) - not measured`);
+  }
+  if (c.role === 'control' && passedRuns < CONTROL_MIN_PASSES) {
+    reasons.push(`control met in ${passedRuns} of ${runs.length} runs (needs ${CONTROL_MIN_PASSES})`);
+  }
+  return {
+    id: c.id, pass: reasons.length === 0, reasons, passedRuns, gradedRuns, ungradedRuns,
+    excludedLines, excludedFields, truncations,
+  };
+}
+
+export function judgeSuite(verdicts: readonly CaseVerdict[]): SuiteVerdict {
+  const failing = verdicts.filter((v) => !v.pass);
+  const sum = (pick: (v: CaseVerdict) => number): number => verdicts.reduce((n, v) => n + pick(v), 0);
+  return {
+    pass: verdicts.length > 0 && failing.length === 0,
+    reasons: failing.map((v) => `${v.id}: ${v.reasons.join('; ')}`),
+    excludedLines: sum((v) => v.excludedLines),
+    excludedFields: sum((v) => v.excludedFields),
+    truncations: sum((v) => v.truncations),
+    ungradedRuns: sum((v) => v.ungradedRuns),
+  };
+}
+
+/** USD from the dated price table; undefined for a model it does not list (never guessed). */
+export function costOf(model: string, inputTokens: number, outputTokens: number): number | undefined {
+  const price = PRICE_TABLE.perMTok[model];
+  return price === undefined ? undefined : (inputTokens * price.input + outputTokens * price.output) / 1_000_000;
+}
+
+/** Record text is ASCII: control characters become spaces, anything else outside printable ASCII becomes <U+XXXX>. */
+export function asciiSafe(text: string): string {
+  let out = '';
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code === 0x09 || code === 0x0a || code === 0x0d) out += ' ';
+    else if (code >= 0x20 && code <= 0x7e) out += ch;
+    else out += `<U+${code.toString(16).toUpperCase().padStart(4, '0')}>`;
+  }
+  return out;
+}
+
+/** sha256 (first 16 hex) of the user content production builds for this input. */
+export function contentHash(m: BaseModules, input: ExtractionInput): string {
+  return createHash('sha256').update(m.prompt.buildExtractionUserContent(input)).digest('hex').slice(0, 16);
+}
+
+/** PR39: informational only - no verdict reads it; the table's prices are unverified. */
+function costText(model: string, inputTokens: number, outputTokens: number): string {
+  const cost = costOf(model, inputTokens, outputTokens);
+  return cost === undefined
+    ? `cost unknown (no price for ${model} in the ${PRICE_TABLE.asOf} table)`
+    : `cost $${cost.toFixed(4)} (informational; unverified price table ${PRICE_TABLE.asOf})`;
+}
+
+function describeExpectation(c: NeverWrittenCase, labels: ReadonlyMap<string, string>): string {
+  const e = c.expect;
+  switch (e.kind) {
+    case 'nothing-excluded':
+      return 'no written line judged to state an excluded fact';
+    case 'line':
+      return `a written line matching ${String(e.pattern)} (e.g. "${e.example}")`;
+    case 'field':
+      return `the ${e.field} field proposed and kept by production coercion${e.equals === undefined ? '' : ` as ${e.equals}`}`;
+    case 'feedback':
+      return `a written line naming ${labels.get(e.unitId) ?? `(no label for ${e.unitId})`}`;
+    case 'untied-feedback':
+      return 'a written line that names no sent property';
+    case 'no-address-op':
+      return 'no address op';
+  }
+}
+
+/** One item's verdict, for the record. */
+function verdictText(item: JudgedItem): string {
+  if (item.verdict === undefined) return 'not graded';
+  const reason = asciiSafe(item.reason ?? '');
+  if (item.verdict === 'clean') return `clean - ${reason}`;
+  return item.source === 'line' ? `EXCLUDED (${item.kind}) - ${reason}` : `excluded, reported only (${item.kind}) - ${reason}`;
+}
+
+function gradingText(run: NeverWrittenRun): string {
+  switch (run.grading) {
+    case 'graded':
+      return 'graded';
+    case 'not-needed':
+      return 'nothing to grade (no line, no field value; no grader call)';
+    case 'pending':
+      return 'NOT GRADED (no grader call was made)';
+    case 'ungraded':
+      return `NOT GRADED - ${asciiSafe(run.graderFailure ?? '')}`;
+    case 'not-scored':
+      return 'not scored';
+  }
+}
+
+export interface NeverWrittenRecordInput {
+  startedAt: string;
+  commit: string;
+  dirty: boolean;
+  model: string;
+  keyTail: string;
+  extractionFingerprint: string;
+  graderFingerprint: string;
+  floor: number;
+  /** --case was given: not a gate run. */
+  partial: boolean;
+  cases: ReadonlyArray<{ c: NeverWrittenCase; contentHash: string; runs: readonly NeverWrittenRun[]; verdict: CaseVerdict }>;
+  suite: SuiteVerdict;
+  labels: ReadonlyMap<string, string>;
+  sentBlock: string;
+}
+
+export function renderNeverWrittenRecord(r: NeverWrittenRecordInput): string {
+  const all = r.cases.flatMap((x) => x.runs);
+  const sum = (pick: (run: NeverWrittenRun) => number): number => all.reduce((n, x) => n + pick(x), 0);
+  const extIn = sum((x) => x.inputTokens);
+  const extOut = sum((x) => x.outputTokens);
+  const gradeIn = sum((x) => x.graderInputTokens);
+  const gradeOut = sum((x) => x.graderOutputTokens);
+  const graderCalls = all.filter((x) => x.grading === 'graded' || x.grading === 'ungraded').length;
+  const failedCalls = all.filter((x) => !x.ok).length;
+  // WL-33 (D6b-S6-6): a --case record is never a gate run and carries no
+  // Sign-off section, so its PASS line does not point at one.
+  const passText = r.partial
+    ? 'PASS on every automatic check (PARTIAL - one case, not a gate run; no sign-off)'
+    : "PASS on every automatic check - PENDING Cameron's sign-off below";
+  const out: string[] = [];
+  out.push(`## Never-written suite - ${r.startedAt}${r.partial ? ' (PARTIAL: one case, not a gate run)' : ''}`, '');
+  out.push(`- Verdict: ${r.suite.pass ? passText : 'FAIL'}`);
+  for (const reason of r.suite.reasons) out.push(`  - ${asciiSafe(reason)}`);
+  out.push(`- Commit: ${r.commit}${r.dirty ? ' (tracked files modified)' : ''}`);
+  out.push(`- Model: ${r.model}`);
+  out.push(`- Key: ${r.keyTail}`);
+  out.push(`- Extraction prompt fingerprint: ${r.extractionFingerprint}`);
+  out.push(`- Grader prompt fingerprint: ${r.graderFingerprint} (same model and key; one call per run that wrote a line or proposed a field value)`);
+  out.push(`- Notes floor (EXTRACTION_FACT_MIN_CONFIDENCE): ${r.floor}`);
+  out.push(`- Runs per case: ${GATE_RUNS}; cases: ${r.cases.length}; extraction calls: ${all.length}; grader calls: ${graderCalls}`);
+  out.push(`- Failed extraction calls: ${failedCalls} (truncated: ${r.suite.truncations}); ungraded runs: ${r.suite.ungradedRuns}`);
+  out.push(`- Lines judged excluded (each fails its case): ${r.suite.excludedLines}; field values judged excluded (reported only): ${r.suite.excludedFields}`);
+  out.push(`- Tokens: extraction in ${extIn}, out ${extOut}; grader in ${gradeIn}, out ${gradeOut}; ${costText(r.model, extIn + gradeIn, extOut + gradeOut)}`);
+  out.push('', 'The grader judged every item against these descriptions; it never saw the conversations:', '');
+  for (const kind of EXCLUDED_KINDS) out.push(`- ${kind}: ${EXCLUDED_KIND_DESCRIPTIONS[kind]}`);
+  out.push('', 'The PROPERTIES SENT block every case carried:', '', '```', ...r.sentBlock.split('\n').map(asciiSafe), '```', '');
+  // Every excluded verdict in one place, so Cameron can overrule by name (spec D7).
+  const review = r.cases.flatMap(({ c, runs }) =>
+    runs.flatMap((run, i) =>
+      run.items
+        .filter((item) => item.verdict === 'excluded')
+        .map((item) =>
+          `- ${c.id}, run ${i + 1}, ${item.source === 'line' ? 'line' : `field ${item.field}`} ${JSON.stringify(asciiSafe(item.text))}: `
+          + `excluded (${item.kind}) - ${asciiSafe(item.reason ?? '')} ${item.source === 'line' ? '[fails the case]' : '[reported only]'}`),
+    ),
+  );
+  out.push(
+    '### Grader verdicts to review',
+    '',
+    'Every item the grader judged excluded; the reason for every verdict, clean ones included, is under its case below.',
+    '',
+    ...(review.length > 0 ? review : ['- none']),
+    '',
+  );
+  // [PR55] A run the grader could not judge still carries lines that would be
+  // written; list them so a leak in that run is read by Cameron, not hidden.
+  const unjudged = r.cases.flatMap(({ c, runs }) =>
+    runs.flatMap((run, i) =>
+      run.ok && (run.grading === 'ungraded' || run.grading === 'pending')
+        ? run.items.map((item) =>
+          `- ${c.id}, run ${i + 1}, ${item.source === 'line' ? 'line' : `field ${item.field}`} ${JSON.stringify(asciiSafe(item.text))}: `
+          + `not graded - ${asciiSafe(run.graderFailure ?? 'no grader answer')} [read it]`)
+        : [],
+    ),
+  );
+  out.push(
+    '### Lines the grader did not judge',
+    '',
+    'Every item of a run the grader could not judge (call failed or output did not parse); read each one yourself.',
+    '',
+    ...(unjudged.length > 0 ? unjudged : ['- none']),
+    '',
+  );
+  for (const { c, contentHash: hash, runs, verdict } of r.cases) {
+    out.push(`### ${c.id} - ${verdict.pass ? 'PASS' : 'FAIL'}`, '');
+    out.push(`- About: ${asciiSafe(c.about)}`);
+    out.push(`- Planted fact: ${c.plantedFact === undefined ? 'none (a control plants no excluded fact)' : asciiSafe(c.plantedFact)}`);
+    out.push(
+      c.role === 'excluded'
+        ? `- Excluded kind: ${c.excludedKind}, stated in ${c.setting === 'free' ? 'a free message' : 'feedback on a sent property'}`
+        : `- Control: ${describeExpectation(c, r.labels)}`,
+    );
+    if (c.expect.kind === 'feedback' || c.expect.kind === 'untied-feedback') {
+      out.push(`- Gist expected (Cameron judges the meaning): ${c.expect.gist}`);
+    }
+    out.push(`- User content hash: ${hash}`);
+    for (const reason of verdict.reasons) out.push(`- Reason: ${asciiSafe(reason)}`);
+    out.push('- Messages:');
+    for (const [speaker, channel, text] of c.lines) out.push(`  - ${speaker} (${channel}): ${JSON.stringify(asciiSafe(text))}`);
+    runs.forEach((run, i) => {
+      if (!run.ok) {
+        out.push(`- Run ${i + 1}: FAILED CALL (${run.failure}): ${asciiSafe(run.message ?? '')}`);
+        return;
+      }
+      out.push(`- Run ${i + 1}: ${run.passed ? 'met' : 'NOT met'}; ${gradingText(run)}`);
+      const itemFor = (id: string): JudgedItem | undefined => run.items.find((item) => item.id === id);
+      if (run.written.length === 0) out.push('  - lines written: none');
+      run.written.forEach((l, li) => {
+        const item = itemFor(`line-${li + 1}`);
+        out.push(`  - line: ${JSON.stringify(asciiSafe(l))} -> ${item === undefined ? 'not graded' : verdictText(item)}`);
+      });
+      if (run.belowFloor > 0) out.push(`  - below the floor, not written: ${run.belowFloor}`);
+      for (const f of run.fields) {
+        const item = itemFor(`field-${f.field}`);
+        out.push(
+          `  - field ${f.field}: ${f.op} ${JSON.stringify(asciiSafe(f.raw))} -> ${asciiSafe(f.coerced)} -> ${item === undefined ? 'not graded' : verdictText(item)}`,
+        );
+      }
+      if (run.addressOp) out.push('  - address op: PROPOSED');
+    });
+    out.push('');
+  }
+  if (!r.partial) {
+    out.push(
+      '### Sign-off',
+      '',
+      "Cameron: (write PASS or your decision, with the date, on this line. A feedback line that misstates the tenant's meaning - a maybe recorded as a no - is a FAIL. To overrule a grader verdict, in either direction, name the case, run and item and say which way; that ruling stands for the gate.)",
+      '',
+    );
+  }
+  return out.join('\n');
 }
 
 // ---------------------------------------------------------------------------

@@ -289,16 +289,16 @@ export function ContactEditForm({
   // mirror list (tenantMatchingInputs.ts) - this form names none of the four.
   const [matching, setMatching] = useState<Record<string, string>>(() => tenantMatchingFormValues(contact));
   const matchingId = useId();
-  // FW-11 (code review R1 CONF-1): the dollars controls' DOM nodes, read at
-  // Save. DEFENSE IN DEPTH only (FW2-2, R2-2): this form sets no `noValidate`,
-  // so in a browser native validation refuses an entry the number input
-  // cannot parse (its value reads '' with `validity.badInput` set) with the
-  // browser's own message (Chromium: "Please enter a number.") before Save
-  // runs - no role="alert", no request. Only a form or test that skips native
-  // validation gets here, where `validity.badInput` alone tells such an entry
-  // from a cleared control (React fires no change for it). Parseable bad
-  // values (12.5, -5, 20001) do reach Save and show the server's copy in the
-  // form's role="alert".
+  // WP1 B1 FW-11 (code review R1 CONF-1): the dollars controls' DOM nodes,
+  // read at Save. DEFENSE IN DEPTH only (WP1 B1 FW2-2, code review R2-2): this
+  // form sets no `noValidate`, so in a browser native validation refuses an
+  // entry the number input cannot parse (its value reads '' with
+  // `validity.badInput` set) with the browser's own message (Chromium:
+  // "Please enter a number.") before Save runs - no role="alert", no request.
+  // Only a form or test that skips native validation gets here, where
+  // `validity.badInput` alone tells such an entry from a cleared control
+  // (React fires no change for it). Parseable bad values (12.5, -5, 20001) do
+  // reach Save and show the server's copy in the form's role="alert".
   const dollarsInputs = useRef(new Map<string, HTMLInputElement>());
   const [relRows, setRelRows] = useState<Relationship[]>(contact.relationships ?? []);
   const [cfRows, setCfRows] = useState<CustomField[]>(contact.customFields ?? []);
@@ -491,7 +491,7 @@ export function ContactEditForm({
       // cleared one sends null (the server REMOVEs it). A bad value stops the
       // save with the server's own copy (the mirror drift test pins it). An
       // entry its number input could not parse is refused here too (FW-11),
-      // though in a browser native validation refuses it first (FW2-2).
+      // though in a browser native validation refuses it first (WP1 B1 FW2-2).
       const unparseable = new Set(
         [...dollarsInputs.current].filter(([, el]) => el.validity?.badInput === true).map(([key]) => key),
       );

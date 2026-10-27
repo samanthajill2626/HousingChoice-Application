@@ -387,7 +387,9 @@ as follows:
   appends). Sam fixes or removes a wrong line by editing the Notes box,
   as today; a line removed by hand can return only if a later message
   states it again.
-- Never written as a Notes line: race, color, religion, sex, national
+- Never written as a Notes line: race, color, religion, sex (including
+  sexual orientation and gender identity; AMENDED 2026-10-27, section 20
+  item 11), national
   origin, familial facts beyond household size, and disability or
   medical facts other than the stated accessibility need and an
   assistance animal. The same list governs feedback lines (the last
@@ -480,7 +482,8 @@ written by different presses (another anchor's Update rewrites a shared
 pair); that mixed provenance is accepted.
 
 Fair housing: the rubric states that protected characteristics (race,
-color, religion, sex, national origin, familial status, disability) never
+color, religion, sex including sexual orientation and gender identity,
+national origin, familial status, disability) never
 lower a score. Disability enters only for the tenant's benefit: their own
 stated accessibility need matched to the property, and an accommodation
 (below) that lifts a requirement. A requirement about the tenant's credit or
@@ -1198,3 +1201,8 @@ date; this list is the index.
      because the intelligence lives in the model. That's what we're
      trying to lean into." He reviews the grader's verdicts in his
      sign-off and may overrule one (section 6.4).
+  11. "Sex" on the never-written list (section 6.4) and in the rubric's
+     protected characteristics (section 7) covers sexual orientation and
+     gender identity, as HUD reads the Fair Housing Act. Cameron left the
+     call to the planner: "For two, I'll leave that up to you." The B1
+     never-written test plants one sexual-orientation case.

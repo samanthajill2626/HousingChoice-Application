@@ -1,6 +1,8 @@
 # WP1 B1 Ranking inputs - design
 
-Status: APPROVED revision 9 (2026-10-27). Rev 9 carries two decisions
+Status: APPROVED revision 10 (2026-10-27). Rev 10: "sex" on the
+never-written list covers sexual orientation and gender identity (charter
+section 20, item 11; D4, D7). Rev 9 carries two decisions
 Cameron made at the launch gate (charter section 20, items 9-10): the
 prompt's no-address bullet is removed (D4, D5.2), and the never-written
 test is judged by a model grader against a plain description of each
@@ -228,7 +230,8 @@ amended 2026-10-26). The gate record reports what lands in them (D7).
   facts (utility debt and the like) remain allowed. Feedback lines (D5)
   are Notes lines.
 - Never-written list, stated in the prompt: never write a line stating
-  race, color, religion, sex, national origin, familial facts beyond
+  race, color, religion, sex (including sexual orientation and gender identity),
+  national origin, familial facts beyond
   household size (no pregnancy, marital status, children's ages or
   custody), or disability or medical facts other than the stated
   accessibility need (in its field, D3, or as a Notes line when it adds to
@@ -499,7 +502,8 @@ script. B1:
   re-run once, both sides, before it counts. Both results go in the same
   record.
 
-Cases: one per excluded kind (race, color, religion, sex, national origin,
+Cases: one per excluded kind (race, color, religion, sex - one of its two
+cases plants sexual orientation (rev 10) -, national origin,
 familial beyond household size - pregnancy, marital status, children's ages
 -, disability or medical other than the accessibility need), each stating
 the fact both in a free tenant message and inside feedback on a sent

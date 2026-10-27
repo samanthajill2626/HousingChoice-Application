@@ -1123,6 +1123,16 @@ export function asciiSafe(text: string): string {
   return out;
 }
 
+/** A commit and its dirty flag, as the record prints them. */
+function commitText(g: { commit: string; dirty: boolean }): string {
+  return `${g.commit}${g.dirty ? ' (tracked files modified)' : ''}`;
+}
+
+/** FW-6 (code review R1 ADV-11): the commit or the dirty flag read after the last call differs from the one read before the first. */
+export function checkoutChanged(before: { commit: string; dirty: boolean }, after: { commit: string; dirty: boolean }): boolean {
+  return before.commit !== after.commit || before.dirty !== after.dirty;
+}
+
 /** sha256 (first 16 hex) of the user content production builds for this input. */
 export function contentHash(m: BaseModules, input: ExtractionInput): string {
   return createHash('sha256').update(m.prompt.buildExtractionUserContent(input)).digest('hex').slice(0, 16);
@@ -1184,8 +1194,11 @@ function gradingText(run: NeverWrittenRun): string {
 
 export interface NeverWrittenRecordInput {
   startedAt: string;
+  /** The commit and dirty flag read BEFORE the first call (FW-6). */
   commit: string;
   dirty: boolean;
+  /** FW-6: the same, read again after the last call; a difference is printed (and fails the run). */
+  after?: { commit: string; dirty: boolean };
   model: string;
   keyTail: string;
   extractionFingerprint: string;
@@ -1217,7 +1230,10 @@ export function renderNeverWrittenRecord(r: NeverWrittenRecordInput): string {
   out.push(`## Never-written suite - ${r.startedAt}${r.partial ? ' (PARTIAL: one case, not a gate run)' : ''}`, '');
   out.push(`- Verdict: ${r.suite.pass ? passText : 'FAIL'}`);
   for (const reason of r.suite.reasons) out.push(`  - ${asciiSafe(reason)}`);
-  out.push(`- Commit: ${r.commit}${r.dirty ? ' (tracked files modified)' : ''}`);
+  out.push(`- Commit: ${commitText(r)}`);
+  if (r.after !== undefined && checkoutChanged(r, r.after)) {
+    out.push(`- Commit after the last call: ${commitText(r.after)} - the checkout changed during the run`);
+  }
   out.push(`- Model: ${r.model}`);
   out.push(`- Key: ${r.keyTail}`);
   out.push(`- Extraction prompt fingerprint: ${r.extractionFingerprint}`);
@@ -1575,6 +1591,10 @@ async function runNeverWritten(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string)
   }
   const model = a.model!; // parseProbeArgs refuses the suite without one
   const root = path.resolve(deps.ownRoot);
+  // FW-6 (code review R1 ADV-11): the commit the record certifies is read
+  // BEFORE the code is loaded and the first call made, and again after the
+  // last call; a change fails the run.
+  const gitBefore = deps.gitInfo(root);
   const m = await deps.loadBranchModules(root);
   const floor = factFloor(m, deps.env);
   const orgListBlock = startingOrgListBlock(m);
@@ -1622,18 +1642,23 @@ async function runNeverWritten(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string)
     }),
   );
   const runs = await pool(jobs, a.concurrency);
+  const gitAfter = deps.gitInfo(root);
+  const changed = checkoutChanged(gitBefore, gitAfter);
   const perCase = cases.map((c, ci) => {
     const mine = runs.slice(ci * GATE_RUNS, (ci + 1) * GATE_RUNS);
     return { c, contentHash: contentHash(m, inputs[ci]!), runs: mine, verdict: judgeCase(c, mine) };
   });
-  const suite = judgeSuite(perCase.map((p) => p.verdict));
+  const judged = judgeSuite(perCase.map((p) => p.verdict));
+  const changeReason = `the checkout changed during the run (${commitText(gitBefore)} before the first call, `
+    + `${commitText(gitAfter)} after the last) - re-run it on a checkout nothing changes`;
+  const suite: SuiteVerdict = changed ? { ...judged, pass: false, reasons: [...judged.reasons, changeReason] } : judged;
   deps.print('');
   for (const p of perCase) {
     deps.print(`  ${p.verdict.pass ? 'PASS' : 'FAIL'}  ${p.c.id}${p.verdict.reasons.length > 0 ? ` - ${p.verdict.reasons.join('; ')}` : ''}`);
   }
-  const git = deps.gitInfo(root);
+  if (changed) deps.print(`  FAIL  ${changeReason}`);
   deps.appendRecord(a.out!, renderNeverWrittenRecord({
-    startedAt, commit: git.commit, dirty: git.dirty, model, keyTail: keyTail(apiKey),
+    startedAt, commit: gitBefore.commit, dirty: gitBefore.dirty, after: gitAfter, model, keyTail: keyTail(apiKey),
     extractionFingerprint, graderFingerprint, floor, partial: a.caseId !== undefined,
     cases: perCase, suite, labels, sentBlock,
   }));
@@ -1646,7 +1671,8 @@ async function runNeverWritten(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string)
       ? partial
         ? 'PASS on every automatic check (PARTIAL - one case, not a gate run; no sign-off).'
         : "PASS on every automatic check. The gate still needs Cameron's written sign-off in the record, where he may overrule any grader verdict."
-      : `FAIL: ${suite.reasons.length} case(s) - see the record.${partial ? ' (PARTIAL - one case, not a gate run.)' : ''}`,
+      : `FAIL: ${judged.reasons.length} case(s)${changed ? ', and the checkout changed during the run' : ''} - see the record.`
+        + (partial ? ' (PARTIAL - one case, not a gate run.)' : ''),
   );
   return suite.pass ? 0 : 1;
 }

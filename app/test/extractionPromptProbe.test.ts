@@ -1071,6 +1071,46 @@ describe('main --suite never-written', () => {
     expect(fail.printed.join('\n')).toContain('PARTIAL - one case (--case control-feedback-unsure), not a gate run');
   });
 
+  // FW-6 (code review R1 ADV-11): the record certifies the commit that was
+  // MEASURED - read before the first call and again after the last.
+  it('reads the commit and dirty flag before the first extraction call and again after the last', async () => {
+    const events: string[] = [];
+    const h = nwHarness((id) => {
+      events.push('extract');
+      return nwPassing(id);
+    });
+    h.deps.gitInfo = () => {
+      events.push('git');
+      return { commit: 'a'.repeat(40), dirty: false };
+    };
+    expect(await main(NW, h.deps)).toBe(0);
+    expect(events[0]).toBe('git');
+    expect(events[events.length - 1]).toBe('git');
+    expect(events.filter((e) => e === 'git')).toHaveLength(2);
+    expect(h.records[0]!.text).not.toContain('changed during the run');
+  });
+
+  it('a commit that changes during the run fails it (exit 1), and the record shows both', async () => {
+    const h = nwHarness((id) => nwPassing(id));
+    let reads = 0;
+    h.deps.gitInfo = () => ({ commit: (reads++ === 0 ? 'a' : 'c').repeat(40), dirty: false });
+    expect(await main(NW, h.deps)).toBe(1);
+    const text = h.records[0]!.text;
+    expect(text).toContain('- Verdict: FAIL');
+    expect(text).toContain(`- Commit: ${'a'.repeat(40)}\n`);
+    expect(text).toContain(`- Commit after the last call: ${'c'.repeat(40)} - the checkout changed during the run`);
+    expect(text).toContain(`  - the checkout changed during the run (${'a'.repeat(40)} before the first call, ${'c'.repeat(40)} after the last) - re-run it on a checkout nothing changes`);
+    expect(h.printed.join('\n')).toContain('FAIL  the checkout changed during the run');
+  });
+
+  it('tracked files modified during the run fail it too', async () => {
+    const h = nwHarness((id) => nwPassing(id));
+    let reads = 0;
+    h.deps.gitInfo = () => ({ commit: 'a'.repeat(40), dirty: reads++ > 0 });
+    expect(await main(NW, h.deps)).toBe(1);
+    expect(h.records[0]!.text).toContain(`- Commit after the last call: ${'a'.repeat(40)} (tracked files modified) - the checkout changed during the run`);
+  });
+
   it('a record that cannot be written exits 1', async () => {
     const h = nwHarness((id) => nwPassing(id));
     h.deps.appendRecord = () => {

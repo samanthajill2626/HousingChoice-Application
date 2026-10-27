@@ -315,11 +315,17 @@ function clampConfidence(raw: unknown): number {
  *       so it is not repeated on every run.
  *     A line merely CONTAINED in a longer one is KEPT: "12 Oak St, ..." inside
  *     "112 Oak St, ...", or a change of mind whose words an earlier line
- *     contains, is new feedback. Accepted costs (R3-adjudications): a retry
- *     that crosses UTC midnight appends its lines once more; a model line
- *     repeated verbatim on a later date is written again; a second run the
- *     same day that flips back to that day's words is dropped. A dropped line
- *     never takes a cap slot.
+ *     contains, is new feedback. Accepted costs (R3- and R4-adjudications): a
+ *     retry that crosses UTC midnight appends its lines once more; a model
+ *     line repeated verbatim on a later date is written again; a second run
+ *     the same day that flips back to that day's words is dropped; a retry of
+ *     a run that hit the cap appends the lines the cap kept out of run 1, at
+ *     most another MAX_NOTE_LINES (spec D4 puts this guard BEFORE the cap, so
+ *     the lines run 1 wrote are dropped here and no longer take cap slots);
+ *     and "same day" means the same month and day of ANY year (the prefix,
+ *     `[Auto - <MMM D>]`, carries no year), so a flip back to identical words
+ *     on an exact anniversary is dropped. A dropped line never takes a cap
+ *     slot.
  *  5. System lines are appended after the model lines; they carry no
  *     confidence and are never floored.
  *  6. The cap: at most MAX_NOTE_LINES, model lines first.

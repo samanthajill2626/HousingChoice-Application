@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
@@ -364,5 +367,22 @@ describe('AiRunsSection - Notes lines', () => {
     const notes = screen.getByRole('region', { name: 'Notes lines' });
     expect(notes).toHaveTextContent('0 appended');
     expect(notes).toHaveTextContent('0 below the confidence floor');
+  });
+});
+
+// Self-QA SQA-1 (WP1 B1): the Notes lines region lists the 64-character
+// properties-sent fingerprint, one unbroken token, in the narrow detail
+// column. The unit tests run with `css: false`, so no test can measure
+// layout; this source pin keeps the wrap rule in place (the
+// Timeline.styles.test.ts mechanism; the e2e run-detail case measures it).
+describe('AiRunsSection.module.css .countList (WP1 B1 self-QA SQA-1)', () => {
+  it('breaks a long unbroken value instead of spilling past the region', () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'AiRunsSection.module.css'), 'utf8').replace(
+      /\/\*[\s\S]*?\*\//g,
+      '',
+    );
+    const match = css.match(/(?:^|\n|\})\.countList\s*\{([^}]*)\}/);
+    expect(match, 'missing CSS rule for .countList').not.toBeNull();
+    expect(match?.[1] ?? '').toMatch(/overflow-wrap:\s*anywhere/);
   });
 });

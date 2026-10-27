@@ -683,4 +683,10 @@ test('feedback: a line naming a sent property lands in the Notes box and is coun
   await expect(notesLines.getByText('1 appended', { exact: true })).toBeVisible();
   await expect(notesLines.getByText('Feedback lines: 1', { exact: true })).toBeVisible();
   await expect(notesLines.getByText('Unlabeled address lines: 0', { exact: true })).toBeVisible();
+  // Self-QA SQA-1 (WP1 B1): the 64-character fingerprint is one unbroken
+  // token; in the narrow detail column it must wrap inside the region, never
+  // spill past it (unit tests run css:false, so only a browser can measure).
+  await expect(notesLines.getByText(/^Properties sent fingerprint: [0-9a-f]{64}$/)).toBeVisible();
+  const spill = await notesLines.evaluate((el) => el.scrollWidth - el.clientWidth);
+  expect(spill, 'the Notes lines region scrolls sideways').toBeLessThanOrEqual(1);
 });

@@ -21,6 +21,7 @@ import {
   SEEN_MESSAGE_CHAR_CAP,
   TRUNCATION_MARKER,
   runDueExtractions,
+  toProfile,
   type ExtractionJobDeps,
 } from '../src/jobs/extraction.js';
 import type {
@@ -1929,5 +1930,46 @@ describe('runDueExtractions - apply resolves against the list the run read (spec
     expect(h.runs[0]!.decisions['housingAuthority']).toMatchObject({
       proposedOp: 'write', outcome: 'dropped', dropReason: 'agency_not_authority', verdict: 'not_presented',
     });
+  });
+});
+
+// B1 spec D3: the model reconciles the four against CURRENT PROFILE, so the
+// profile must carry them - text kinds as strings, the dollars kind as a number.
+describe('toProfile - the tenant matching inputs (B1 spec D3)', () => {
+  it('carries each text input as a string and the dollars input as a number', () => {
+    const profile = toProfile(tenantContactWith({
+      area_preference: 'Decatur or Tucker',
+      max_tenant_portion: 1200,
+      accessibility_need: 'ground floor',
+      preferences_constraints: 'no apartments',
+    }));
+    expect(profile).toMatchObject({
+      area_preference: 'Decatur or Tucker',
+      max_tenant_portion: 1200,
+      accessibility_need: 'ground floor',
+      preferences_constraints: 'no apartments',
+    });
+  });
+
+  it('omits an unset or empty input, and a dollars value that is not a number', () => {
+    const profile = toProfile(tenantContactWith({
+      area_preference: '',
+      max_tenant_portion: '1200' as unknown as number,
+    }));
+    expect('area_preference' in profile).toBe(false);
+    expect('max_tenant_portion' in profile).toBe(false);
+    expect('accessibility_need' in profile).toBe(false);
+  });
+
+  it('reaches the model and the run record (names only)', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')],
+      contact: tenantContactWith({ area_preference: 'Decatur', max_tenant_portion: 900 }),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.seen[0]!.profile).toMatchObject({ area_preference: 'Decatur', max_tenant_portion: 900 });
+    expect(h.runs[0]!.profileFieldsPopulated).toEqual(expect.arrayContaining(['area_preference', 'max_tenant_portion']));
+    expect(h.runs[0]!.profileFieldsPopulated!.join(',')).not.toContain('Decatur');
   });
 });

@@ -23,7 +23,7 @@ import { FakeExtractionDriver } from './extractionFake.js';
 import type { ExtractionAddressParts } from '../services/extraction/address.js';
 // Type-only, erased at runtime: the one list of tenant matching inputs (B1
 // spec D1), a leaf that imports nothing.
-import type { TenantMatchingInputKey } from '../lib/tenantMatchingInputs.js';
+import type { TENANT_MATCHING_INPUTS, TenantMatchingInputKey } from '../lib/tenantMatchingInputs.js';
 
 export interface TranscriptUtterance {
   /**
@@ -98,7 +98,18 @@ export interface ExtractionResult {
   speakerRoles?: Record<string, 'client' | 'staff' | 'uncertain'>;
 }
 
-export interface ExtractionProfileSnapshot {
+/**
+ * The tenant matching inputs on the profile (B1 spec D1/D3): text kinds as
+ * strings, the dollars kind as a whole number - the types toProfile gives them.
+ * Mapped from the one list, so no reader names the four.
+ */
+export type TenantMatchingProfile = {
+  [Entry in (typeof TENANT_MATCHING_INPUTS)[number] as Entry['key']]?: Entry['kind'] extends 'dollars'
+    ? number
+    : string;
+};
+
+export interface ExtractionProfileSnapshot extends TenantMatchingProfile {
   contactType: string;
   status?: string;
   firstName?: string;

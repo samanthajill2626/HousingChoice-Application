@@ -49,6 +49,7 @@ import { parseExtractionOps } from '../services/extraction/schema.js';
 import type { OrgEntry } from '../lib/orgNames.js';
 import type { OrgListRepo } from '../repos/orgListRepo.js';
 import { renderOrgListBlock } from '../services/extraction/orgListBlock.js';
+import { TENANT_MATCHING_INPUTS } from '../lib/tenantMatchingInputs.js';
 
 /** Consecutive failures before an item is PARKED (no further auto-retries). */
 export const MAX_EXTRACTION_ATTEMPTS = 5;
@@ -160,6 +161,19 @@ export function toProfile(contact: ContactItem): ExtractionProfileSnapshot {
   const tenure = str(contact['tenure']);
   if (tenure !== undefined) profile.tenure = tenure;
   if (typeof contact.porting === 'boolean') profile.porting = contact.porting;
+  // B1 spec D3: the tenant matching inputs, by kind, from their one list - so
+  // the model reconciles a new fact against what is already recorded.
+  const matching: Record<string, string | number> = {};
+  for (const input of TENANT_MATCHING_INPUTS) {
+    const raw = contact[input.key];
+    if (input.kind === 'dollars') {
+      if (typeof raw === 'number') matching[input.key] = raw;
+    } else {
+      const text = str(raw);
+      if (text !== undefined) matching[input.key] = text;
+    }
+  }
+  Object.assign(profile, matching);
   const notes = str(contact['notes']);
   if (notes !== undefined) profile.notes = notes;
   // Single-line current address for reconciliation (object doc -> formatted

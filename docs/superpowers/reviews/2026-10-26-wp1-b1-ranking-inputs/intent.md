@@ -11,15 +11,17 @@ cut from main @d0e2c2d8.
 
 ## STATE
 
-Phase: GO AUTO picked (2026-10-27), compaction gate B. Cameron: "Yes,
-let's go auto with 55-minute watchdog timers." Plan review CLOSED after
-round 5 (no defects). Spec rev 10, plan v6 (PR1-PR58). Nothing in flight
-yet except the compaction watcher.
-NEXT: dispatch abt:build-orchestrator in the background with
-mission-block.md verbatim as its prompt, then arm watchdog checkpoints
-every 55 minutes (Cameron's pick; the 1-hour cache ceiling) and start the
-mirror. Supervise; at handback run the gates on a quiet tree and the two
-independent reviewers (spec-conformance, plan-blind adversarial).
+Phase: BUILD (AUTO), dispatched 2026-10-27 ~15:28 UTC after compaction
+gate B (Cameron typed /compact). Cameron: "Yes, let's go auto with
+55-minute watchdog timers." Spec rev 10, plan v6 (PR1-PR58).
+In flight: abt:build-orchestrator (background, mission-block.md verbatim);
+watchdog (checkpoint every 55 min, stall at 25 min quiet, terminal on a
+ledger STATUS line); mirror to .superpowers/sdd/live.log.
+NEXT: supervise (wake protocol, escalation ladder; failure budget 0 used).
+At handback: re-ground in the whole replay, run the gates on a quiet tree,
+dispatch the two independent reviewers on opus (spec-conformance,
+plan-blind adversarial), verdict. The never-written gate run stays
+Cameron's (testing key, claude-sonnet-5-5).
 Registered with compact-resume (--persist) until mission end.
 
 ## What Cameron asked for (verbatim where wording matters)

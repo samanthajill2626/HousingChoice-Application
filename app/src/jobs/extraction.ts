@@ -49,6 +49,13 @@ import { parseExtractionOps } from '../services/extraction/schema.js';
 import type { OrgEntry } from '../lib/orgNames.js';
 import type { OrgListRepo } from '../repos/orgListRepo.js';
 import { renderOrgListBlock } from '../services/extraction/orgListBlock.js';
+import type { ListingSendsRepo } from '../repos/listingSendsRepo.js';
+import type { UnitDisplayItem, UnitsRepo } from '../repos/unitsRepo.js';
+import {
+  renderSentPropertiesBlock,
+  selectSentRows,
+  type SentPropertyEntry,
+} from '../services/extraction/sentPropertiesBlock.js';
 import { TENANT_MATCHING_INPUTS } from '../lib/tenantMatchingInputs.js';
 
 /** Consecutive failures before an item is PARKED (no further auto-retries). */
@@ -107,6 +114,19 @@ export interface ExtractionJobDeps {
    * extractionJobDraftGuard) supply a fake.
    */
   orgListRepo: Pick<OrgListRepo, 'get'>;
+  /**
+   * WP1 B1 spec D5.1: the PROPERTIES SENT block's two reads, made ONCE per run
+   * after the skip gates, for tenant and unknown contacts alike - the
+   * contact's listed listing_sends rows, then the units' labels through a
+   * COMPLETE batch read (`requireComplete`). READ ONLY: the extraction path
+   * never writes listing_sends (no reaction is stored, charter 6.3 amended).
+   * A failed read of either FAILS THE RUN like the organization list read.
+   * REQUIRED, like `orgListRepo`, so a missed construction site is a
+   * typecheck failure: worker.ts, routes/dev.ts, and the extractionJob and
+   * extractionJobDraftGuard harnesses.
+   */
+  listingSends: Pick<ListingSendsRepo, 'listByContact'>;
+  units: Pick<UnitsRepo, 'getDisplaysByIds'>;
   /**
    * The run-log writer. REQUIRED so a missed construction site is a typecheck
    * failure, not a silently empty log. All three sites must supply it:
@@ -328,6 +348,8 @@ export interface RunDraft {
   promptFingerprint?: string;
   /** sha256 hex of the organization list block this run sent (spec 2026-10-06 D8). */
   orgListFingerprint?: string;
+  /** sha256 hex of the PROPERTIES SENT block this run sent (WP1 B1 spec D5.1). */
+  sentPropertiesFingerprint?: string;
   usage?: { inputTokens: number; outputTokens: number };
   window?: RunWindow;
   profileFieldsPopulated?: string[];
@@ -598,10 +620,51 @@ async function processRow(
   // Before the call, so a FAILED call still records which list it was sent.
   draft.orgListFingerprint = orgBlock.fingerprint;
 
+  // WP1 B1 spec D5.1: the PROPERTIES SENT block - the properties staff sent
+  // this contact (or it signed up for through a flyer), each named by its
+  // label, so a feedback noteLine can name the property it is about. Read ONCE
+  // per run, after every skip gate, for tenant and unknown contacts. A failed
+  // read - listByContact, or a units read that could not fetch every key -
+  // FAILS THE RUN like the organization list read above: without the labels
+  // the model writes feedback it cannot name, and the reconcile rule then
+  // treats that line as already recorded, so the named line never follows. A
+  // unit the read COMPLETED without finding (it no longer exists) is skipped.
+  let sentEntries: SentPropertyEntry[];
+  try {
+    const sent = selectSentRows(await deps.listingSends.listByContact(contact.contactId));
+    const unitsById = sent.length === 0
+      ? new Map<string, UnitDisplayItem>()
+      : await deps.units.getDisplaysByIds(sent.map((row) => row.unitId), { requireComplete: true });
+    sentEntries = sent.flatMap((row) => {
+      const unit = unitsById.get(row.unitId);
+      return unit === undefined ? [] : [{ unit, sentAt: row.sentAt, signedUp: row.signedUp }];
+    });
+  } catch (err) {
+    return failed('repo', err);
+  }
+  const sentBlock = renderSentPropertiesBlock(sentEntries);
+  // Counts only, never a label (spec D5.1: each drop WARNs).
+  if (sentBlock.dropped.transcript > 0) {
+    logger.warn(
+      { conversationId, droppedProperties: sentBlock.dropped.transcript },
+      'extraction: a sent property label holds the word TRANSCRIPT - left out of the block',
+    );
+  }
+  if (sentBlock.dropped.budget > 0) {
+    logger.warn(
+      { conversationId, droppedProperties: sentBlock.dropped.budget },
+      'extraction: properties sent over the prompt budget - oldest left out',
+    );
+  }
+  // Before the call, so a FAILED call still records which block it was sent.
+  draft.sentPropertiesFingerprint = sentBlock.fingerprint;
+
   const profile = toProfile(contact);
   const profileFields = draftPiece(logger, draft, () => profileFieldNames(profile));
   if (profileFields !== undefined) draft.profileFieldsPopulated = profileFields;
-  const call = await driver.extract({ transcript, profile, orgListBlock: orgBlock.text, sentPropertiesBlock: '' });
+  const call = await driver.extract({
+    transcript, profile, orgListBlock: orgBlock.text, sentPropertiesBlock: sentBlock.text,
+  });
   draft.driver = call.meta.driver;
   if (call.meta.model !== undefined) draft.model = call.meta.model;
   if (call.meta.promptFingerprint !== undefined) draft.promptFingerprint = call.meta.promptFingerprint;
@@ -683,6 +746,7 @@ async function recordRun(deps: ExtractionJobDeps, outcome: RunOutcome, draft: Ru
       ...(draft.model !== undefined && { model: draft.model }),
       ...(draft.promptFingerprint !== undefined && { promptFingerprint: draft.promptFingerprint }),
       ...(draft.orgListFingerprint !== undefined && { orgListFingerprint: draft.orgListFingerprint }),
+      ...(draft.sentPropertiesFingerprint !== undefined && { sentPropertiesFingerprint: draft.sentPropertiesFingerprint }),
       ...(draft.usage !== undefined && { usage: draft.usage }),
       ...(draft.window !== undefined && { window: draft.window }),
       ...(draft.profileFieldsPopulated !== undefined && { profileFieldsPopulated: draft.profileFieldsPopulated }),

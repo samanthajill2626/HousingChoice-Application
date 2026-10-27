@@ -172,6 +172,9 @@ function makeHarness(opts: { dueRows: DueExtractionItem[]; messages: MessageItem
   const deps: ExtractionJobDeps = {
     repo,
     orgListRepo: { get: vi.fn(async () => ORG_LIST_ITEM) },
+    // WP1 B1 spec D5.1: no sends, so no units read.
+    listingSends: { listByContact: vi.fn(async () => []) },
+    units: { getDisplaysByIds: vi.fn(async () => new Map()) },
     aiRuns: {
       beginFinalization: vi.fn(async () => true),
       putRun: vi.fn(async (r: AiRunRecordInput) => {

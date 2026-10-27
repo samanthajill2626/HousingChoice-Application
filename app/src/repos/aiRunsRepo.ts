@@ -56,6 +56,11 @@ export interface AiRunRecord {
    *  D8); absent on runs that skipped before reading the list. putRun spreads
    *  its input, so no write change. Dashboard twin: AiRunRecordView (S11). */
   orgListFingerprint?: string;
+  /** sha256 hex of the PROPERTIES SENT block the run sent (WP1 B1 spec D5.1);
+   *  absent on runs that exited before reading the sends, and on every run
+   *  recorded before B1. putRun spreads its input, so no write change.
+   *  Dashboard twin: AiRunRecordView. */
+  sentPropertiesFingerprint?: string;
   usage?: RunUsage;
   window?: RunWindow;
   profileFieldsPopulated?: string[];

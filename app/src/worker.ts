@@ -456,6 +456,8 @@ if (config.aiExtractionEnabled) {
   const { createAuditRepo } = await import('./repos/auditRepo.js');
   const { createExtractionDriver } = await import('./adapters/extraction.js');
   const { createOrgListRepo } = await import('./repos/orgListRepo.js');
+  const { createListingSendsRepo } = await import('./repos/listingSendsRepo.js');
+  const { createUnitsRepo } = await import('./repos/unitsRepo.js');
   const { appEvents } = await import('./lib/events.js');
   const { runDueExtractions } = await import('./jobs/extraction.js');
 
@@ -466,6 +468,9 @@ if (config.aiExtractionEnabled) {
     // The organization list (spec 2026-10-06 D8): the worker builds its own
     // repo (plan 3.4b); one consistent read per run.
     orgListRepo: createOrgListRepo({ logger }),
+    // WP1 B1 spec D5.1: the PROPERTIES SENT block's two READ-only reads.
+    listingSends: createListingSendsRepo({ logger }),
+    units: createUnitsRepo({ logger }),
     // AI run log (design 2026-08-06). Best-effort: a failed run-log write must
     // never fail an extraction run, re-arm a due row, or burn a retry attempt.
     aiRuns: createAiRunsRepo({ logger }),

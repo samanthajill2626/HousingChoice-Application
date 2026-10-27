@@ -211,3 +211,101 @@ that slice's text in the plan. The plan stays ASCII (tr check prints 0).
 - S7.2 test 4 now reads the counts inside the "Notes lines" region; the
   region's name comes from S4.5's `aria-label`, so S4.5 and S7.2 must keep
   that exact string.
+
+# Round 2 - amendments written through (PR43-PR46, PR38 amended)
+
+Plan v3 @647b91ba, edited in place (not committed). Line numbers are plan
+lines AFTER this edit. Findings: plan-review/round2-reviewer-a.md.
+
+## PR43 - one e2e session for S7.1-S7.3, then the commits
+
+- Section 11 preamble (14613-14652): the [PR40] block is rewritten as a
+  five-step sequence - after S6's final commit start ONE
+  `npm run e2e:session`; write and run S7.1-S7.3's specs against it with
+  no commit in between (why: the session's commit stamp vs `HEAD` in
+  e2e/support/preflight.ts:96-135, and `e2e:restart` does not re-stamp the
+  dashboard); a source fix = stop, fix, commit, fresh session, re-run;
+  then `npm run e2e:stop` and the three commits one task at a time. The
+  shared S7 commit form now says no session or suite may be running.
+- S7.1 (14659ff, run/commit 14680-14692), S7.2 (14694ff, 14728-14740), S7.3
+  (14742ff, 14755-14766): each Run step targets the same session and says
+  "do not commit yet"; each Commit step is step 4 of the sequence, FIRST /
+  SECOND / THIRD. S7.3's run ends with `npm run e2e:stop`. The
+  `npm run e2e:restart` advice is gone.
+
+## PR44 - two-layer banned-term detection
+
+- S6.1 Step 2 data module: header comment states both layers (11308-11316);
+  `expecting in` dropped from the union (11380); new `STRICT_TERMS` per
+  excluded kind, bare words included (11410-11444); `NeverWrittenCase`
+  gains `strictTerms?` (11497-11502); `excluded()` sets
+  `strictTerms: STRICT_TERMS[kind]` (11513). Controls never get one.
+- S6.1 Step 1 tests: imports `STRICT_TERMS`; `expecting in` joins the
+  no-bare-word list; "Expecting inspection Friday" joins the 13 home facts
+  (union still clean, 11162); three new cases (11169-11222): the strict
+  lists' shape and that every excluded case carries its kind's list while
+  no control carries any; each kind's strict list catches a bare-word
+  paraphrase the union misses; no strict term hits a correct line of its
+  own kind's cases (the self-test answer, the three labels, two clean
+  lines per kind).
+- S6.3 Step 1 tests (12706-12730): `it.each` over the reviewer's four
+  paraphrases ("...the street is mostly white", "the only Black
+  resident", "Expecting her first child", "Moved to the US two years
+  ago") - each FAILS its own case; "Black mold" fails the race case and
+  passes the religion case (strict is per case); a control's line with a
+  strict-only word ("young") passes (controls are on the union only). The
+  record test asserts the new strict-terms line (12881).
+- S6.3 Step 2: context doc (13025-13029); `evaluateRun` checks
+  union + the case's own strict terms, deduplicated, on lines and (report
+  only) fields (13139-13154); the record prints each excluded case's strict
+  terms (13285-13286).
+- S6 decision 4 (10951-10956) states the second layer.
+- Checked offline with node: every strict list is clean against its own
+  cases' self-test answer, labels and clean lines; each strict-only leak
+  hits its list and misses the union; the four reviewer paraphrases hit;
+  the 14 home facts still hit nothing in the union.
+
+## PR45 - one-space flattening named as the toSingleLine defense
+
+- S5 contradiction C7 (7731-7733): marked accepted.
+- S5.1 Step 1 (7866-7867): a comment line on the ONE-line test; S5.1
+  Step 3 module header (8007-8010): one line stating the flattening.
+
+## PR38 amended
+
+- Section 0 first bullet (22-26): the deviation list is now PR9, PR16,
+  PR17, PR21, PR22, PR23, PR24, PR25, PR41, PR44, PR45.
+
+## PR46 - the "appended" row, and PR42's test as code
+
+- S5.8 intro (10392-10399): the guard includes the fingerprint (PR42); the
+  "N appended" row shows only when a count is present or `notedLines > 0`.
+- S5.8 Step 1 (10465-10496): "fingerprint-only run" case asserts the
+  region, the fingerprint item, no "appended" text, one listitem; a PIN
+  case keeps "2 appended" for a pre-B1 run. Step 2 RED (10510-10516).
+- S5.8 Step 3c (10562-10585): the anchor is S4.5's four lines; new code
+  splits `counted` (the four counts) from `fingerprinted`, returns null
+  only when neither and `notedLines === 0`, and renders
+  `{counted || run.notedLines > 0 ? <li>... appended</li> : null}`. The
+  PR42 prose note now points at the test.
+- S4.5 Step 3b note (7301-7303) and the S4 cross-slice note (5838-5844):
+  S5.8's anchor is now four lines; the appended row is gated.
+
+## Not applied, or judgment calls
+
+- PR44 strict lists are my drafts (none given in the ruling beyond the
+  examples); Cameron sees them at the launch gate with the union. Bare
+  `due` was NOT added (the reviewer suggested it): it is whole-word for 3
+  characters and "due to the stairs" is a plausible clean line in the
+  pregnancy feedback case; `due in` and `on the way` cover it. `separat` is
+  not a prefix term (`separated` / `separation` only): "separate
+  bedrooms" is a plausible clean line in the marital-status cases.
+- Strict terms are also REPORTED on field values (never failing), like
+  the union.
+
+## New seams
+
+- None that block. Note: a model line in a feedback excluded case that
+  quotes a neutral word from the strict list of THAT kind (e.g. "light" in
+  a color case, "age" in a children's-ages case) now fails the case; that
+  is the intended trade, and the record names the term.

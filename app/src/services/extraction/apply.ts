@@ -78,7 +78,10 @@ export interface ApplyDecision {
 const NAME_FIELDS: readonly ExtractableField[] = ['firstName', 'lastName'];
 
 const MAX_TEXT_CHARS = 120;
+/** At most this many Notes lines are appended per run (model lines first). */
 const MAX_NOTE_LINES = 5;
+/** A Notes line's text is clamped to this many characters (B1 spec D4). */
+const MAX_NOTE_CHARS = 200;
 const MONTHS = [
   'Jan',
   'Feb',
@@ -190,6 +193,99 @@ function autoPrefix(nowIso: string): string {
   const d = new Date(nowIso);
   const month = MONTHS[d.getUTCMonth()] ?? 'Jan';
   return `[Auto - ${month} ${d.getUTCDate()}]`;
+}
+
+/** What filterNoteLines needs. Every field is plain data - the function is pure. */
+export interface NoteLineFilterInput {
+  /**
+   * result.noteLines AS RECEIVED. Typed unknown[] on purpose: the fake driver
+   * hands its marker payload over without parseExtractionText
+   * (adapters/extractionFake.ts:103, B1 WI1), so an item may be any shape.
+   */
+  modelLines: readonly unknown[] | undefined;
+  /** System lines (today only the phone-owned-by-other note): no confidence, never floored. */
+  systemLines: readonly string[];
+  /** EXTRACTION_FACT_MIN_CONFIDENCE (lib/config.ts), 0 < floor <= 1. */
+  floor: number;
+  /** The contact's current notes, trimmed ('' when none) - the retry guard's haystack. */
+  existingNotes: string;
+  /** The `[Auto - <MMM D>]` prefix this run appends with (autoPrefix). */
+  prefix: string;
+  /** hasInferredRoleContent: a demoted run appends no line (charter 6.4). */
+  demoted: boolean;
+}
+
+export interface NoteLineFilterResult {
+  /** Bare lines to append (no prefix): model lines first, then system lines, at most MAX_NOTE_LINES. */
+  append: string[];
+  /** How many leading entries of `append` are model lines - append.slice(0, modelCount). */
+  modelCount: number;
+  /** Model items dropped below the floor. */
+  belowFloor: number;
+  /** Lines a demoted run withheld; 0 when not demoted. */
+  demoted: number;
+}
+
+/** A model confidence clamped to 0..1; a non-number (or NaN/Infinity) reads as 0. */
+function clampConfidence(raw: unknown): number {
+  return typeof raw === 'number' && Number.isFinite(raw) ? Math.min(1, Math.max(0, raw)) : 0;
+}
+
+/**
+ * Every Notes line value rule (B1 spec D4) - the ONE place they live (PR4).
+ * PURE: no I/O, no clock, no logger. applyExtraction and the never-written
+ * probe (spec D7) both call it, so the fake driver's parser bypass skips
+ * nothing. In order:
+ *
+ *  1. Clamp: text trimmed and cut to MAX_NOTE_CHARS; confidence to 0..1 (a
+ *     non-number reads as 0). An item that is not an object with string text
+ *     is dropped uncounted (only the fake driver can deliver one).
+ *  2. Floor FIRST: a model item below `floor` is dropped and counted.
+ *  3. Blank lines and POSTAL lines are dropped. Addresses are a structured
+ *     target - a model that still narrates one is overridden (spec SS5); the
+ *     digit requirement keeps the filter to postal lines, so a digit-free
+ *     housing-status fact ("Current address is unstable, couch-surfing")
+ *     survives.
+ *  4. The retry guard (adversarial F1), BEFORE the cap (B1 WI5):
+ *     applyExtraction runs BEFORE repo.complete(), so a complete() failure
+ *     re-arms the SAME due row and the retry re-extracts the identical
+ *     transcript against a contact that already carries run 1's line. A
+ *     candidate whose formatted `<prefix> <line>` OR bare `<line>` is already
+ *     present verbatim is dropped - model AND system lines, as before - so the
+ *     retry appends nothing and a duplicate never takes a cap slot.
+ *  5. System lines are appended after the model lines; they carry no
+ *     confidence and are never floored.
+ *  6. The cap: at most MAX_NOTE_LINES, model lines first.
+ *  7. Demotion LAST: a demoted run (unknown-speaker content) appends no line
+ *     of either kind and reports how many it withheld (charter 6.4; spec Q1).
+ */
+export function filterNoteLines(input: NoteLineFilterInput): NoteLineFilterResult {
+  const { existingNotes, prefix } = input;
+  const isPostal = (line: string): boolean => /^current address\b/i.test(line) && /\d/.test(line);
+  const alreadyPresent = (line: string): boolean =>
+    existingNotes.includes(`${prefix} ${line}`) || existingNotes.includes(line);
+
+  let belowFloor = 0;
+  const model: string[] = [];
+  for (const item of input.modelLines ?? []) {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) continue;
+    const { text, confidence } = item as { text?: unknown; confidence?: unknown };
+    if (typeof text !== 'string') continue;
+    const line = text.trim().slice(0, MAX_NOTE_CHARS).trim();
+    if (clampConfidence(confidence) < input.floor) {
+      belowFloor += 1;
+      continue;
+    }
+    if (line.length === 0 || isPostal(line) || alreadyPresent(line)) continue;
+    model.push(line);
+  }
+  const system = input.systemLines
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !isPostal(line) && !alreadyPresent(line));
+
+  const append = [...model, ...system].slice(0, MAX_NOTE_LINES);
+  if (input.demoted) return { append: [], modelCount: 0, belowFloor, demoted: append.length };
+  return { append, modelCount: Math.min(model.length, MAX_NOTE_LINES), belowFloor, demoted: 0 };
 }
 
 export async function applyExtraction(

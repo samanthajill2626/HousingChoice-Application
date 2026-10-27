@@ -7,7 +7,17 @@
 // reconciliation rules below.
 import { createHash } from 'node:crypto';
 import type { ExtractionInput, TranscriptUtterance } from '../../adapters/extraction.js';
-import { EXTRACTION_SCHEMA } from './schema.js';
+import { EXTRACTABLE_FIELDS, EXTRACTION_SCHEMA } from './schema.js';
+import { TENANT_MATCHING_INPUTS } from '../../lib/tenantMatchingInputs.js';
+
+/** B1 spec D3: the text-kind tenant matching inputs, which collect facts over time. */
+const MATCHING_TEXT_KEYS = TENANT_MATCHING_INPUTS
+  .filter((input) => input.kind === 'text')
+  .map((input) => input.key);
+/** B1 spec D3: the dollars-kind tenant matching inputs. */
+const MATCHING_DOLLAR_KEYS = TENANT_MATCHING_INPUTS
+  .filter((input) => input.kind === 'dollars')
+  .map((input) => input.key);
 
 export function buildExtractionSystemPrompt(): string {
   return [
@@ -41,7 +51,7 @@ export function buildExtractionSystemPrompt(): string {
     '"none" for that field.',
     '',
     'OUTPUT SHAPE - every schema key is REQUIRED. Always emit ALL of: every one',
-    'of the eight field entries (use { "op": "none", "value": "", "reason": "" }',
+    `of the ${EXTRACTABLE_FIELDS.length} field entries (use { "op": "none", "value": "", "reason": "" }`,
     'when there is nothing to record for a field), statusAdvance (suggest false,',
     'reason "" when not applicable), typeSuggestion (value "none", reason "" when',
     'not applicable), phoneAddition (phone "", label "", reason "" when none),',
@@ -74,6 +84,20 @@ export function buildExtractionSystemPrompt(): string {
     '    record what they said (op "write"). Never answer op "none" merely',
     '    because an authority is missing from the list; a human confirms it.',
     '- porting value is the string "true" or "false".',
+    '- The tenant matching fields record what the client says about the home',
+    '  they want. Record only what the client states:',
+    ...TENANT_MATCHING_INPUTS.map((input) => `  - ${input.key}: ${input.promptGuidance}`),
+    `- ${MATCHING_TEXT_KEYS.join(', ')} collect several facts over time:`,
+    '  - When the field is empty, op "write" fills it.',
+    '  - When the field already holds a value, a new fact that ADDS to it without',
+    '    contradicting it (a second neighborhood, another constraint) is not a',
+    '    field op: write it as a noteLine instead.',
+    '  - Use op "suggest" only when the new fact CONTRADICTS the stored value (for',
+    '    example "now wants Decatur, not Marietta"), with the FULL replacement',
+    '    value, never only the new part.',
+    '  - Never use op "write" on one of these fields when it already holds a value.',
+    '    For these fields this replaces the "same fact in a better form" write.',
+    `- ${MATCHING_DOLLAR_KEYS.join(', ')} value is whole dollars per month as a digit string (for example "1200").`,
     '- statusAdvance.suggest is true ONLY when the client clearly states that their',
     '  voucher or RTA (request for tenancy approval) is now in hand or approved.',
     '- typeSuggestion is about the CURRENT external contact whose transcript lines',
@@ -105,8 +129,8 @@ export function buildExtractionSystemPrompt(): string {
     '- phoneAddition ONLY when the client states that another phone number is also',
     '  theirs.',
     '- noteLines are secondary facts about the client that no other output covers',
-    '  (for example: stairs are OK or a problem, when they last moved, household',
-    '  size, their rent portion, utility debt, other useful screening facts).',
+    '  (for example: when they last moved, household size, utility debt, other',
+    '  useful screening facts).',
     '  Profile notes lines beginning "[Auto - <date>]" are your own notes from',
     '  earlier runs.',
     '- RECONCILE every noteLine against the profile notes, the same way you',

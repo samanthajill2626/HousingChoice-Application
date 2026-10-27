@@ -657,3 +657,55 @@ describe('the ORGANIZATION LIST block in the user content (spec 2026-10-06 D8)',
     ].join('\n'));
   });
 });
+
+// B1 spec D3: the prompt's field guidance comes from the list's promptGuidance,
+// the text fields accumulate (an added fact goes to a noteLine), and no count
+// is hard-coded. C3: every asserted phrase lives INSIDE one prompt line.
+describe('the tenant matching fields in the system prompt (B1 spec D3)', () => {
+  const sys = buildExtractionSystemPrompt();
+  const lines = sys.split('\n');
+
+  it('counts the field entries from EXTRACTABLE_FIELDS - no stale "eight"', () => {
+    expect(sys).toContain(`of the ${EXTRACTABLE_FIELDS.length} field entries`);
+    expect(sys).not.toMatch(/\beight\b/i);
+  });
+
+  it('gives every tenant matching input its guidance from the list, one line each', () => {
+    for (const input of TENANT_MATCHING_INPUTS) {
+      expect(input.promptGuidance, input.key).not.toMatch(/[\r\n]/);
+      expect(lines, input.key).toContain(`  - ${input.key}: ${input.promptGuidance}`);
+    }
+  });
+
+  it('routes an added fact on a filled TEXT field to a noteLine; write only fills an empty one', () => {
+    const textKeys = TENANT_MATCHING_INPUTS.filter((input) => input.kind === 'text').map((input) => input.key);
+    const head = lines.find((line) => line.includes('collect several facts over time'));
+    expect(head).toBeDefined();
+    for (const key of textKeys) expect(head).toContain(key);
+    expect(sys).toContain('When the field is empty, op "write" fills it.');
+    expect(sys).toContain('field op: write it as a noteLine instead.');
+    expect(sys).toContain('Use op "suggest" only when the new fact CONTRADICTS the stored value');
+    expect(sys).toContain('Never use op "write" on one of these fields when it already holds a value.');
+  });
+
+  it('spells the dollars value as a whole-dollar digit string', () => {
+    const dollarKeys = TENANT_MATCHING_INPUTS.filter((input) => input.kind === 'dollars').map((input) => input.key);
+    const line = lines.find((candidate) => candidate.includes('whole dollars per month as a digit string'));
+    expect(line).toBeDefined();
+    for (const key of dollarKeys) expect(line).toContain(key);
+    expect(line).toContain('"1200"');
+  });
+
+  it('drops the noteLines examples the new fields now own', () => {
+    expect(sys).not.toContain('stairs are OK or a problem');
+    expect(sys).not.toContain('their rent portion');
+  });
+
+  it('stays ASCII', () => {
+    const bad = [...sys].filter((ch) => {
+      const code = ch.charCodeAt(0);
+      return !(code === 9 || code === 10 || code === 13 || (code >= 32 && code <= 126));
+    });
+    expect(bad).toEqual([]);
+  });
+});

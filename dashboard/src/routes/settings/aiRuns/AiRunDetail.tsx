@@ -58,6 +58,22 @@ function WindowMessages({ messages, full }: { messages: AiRunWindowMessage[]; fu
   </tbody></table></div>;
 }
 
+/**
+ * B1 spec D4: what happened to the run's Notes lines. Counts only - the lines
+ * themselves are in the Parsed result. A run recorded before B1 carries only
+ * notedLines; a run with nothing to report renders nothing. The region renders
+ * when a line was appended or any count is PRESENT (a present 0 renders as 0).
+ */
+function NotesLines({ run }: { run: AiRunDetailResponse['run'] }): React.JSX.Element | null {
+  const counted = run.notesBelowFloor !== undefined || run.notesDemoted !== undefined;
+  if (!counted && run.notedLines === 0) return null;
+  return <section className={styles.block} aria-label="Notes lines"><h4>Notes lines</h4><ul className={styles.countList}>
+    <li>{run.notedLines} appended</li>
+    {run.notesBelowFloor !== undefined ? <li>{run.notesBelowFloor} below the confidence floor</li> : null}
+    {run.notesDemoted !== undefined ? <li>{run.notesDemoted} withheld by the unknown-speaker rule</li> : null}
+  </ul></section>;
+}
+
 export function AiRunDetail({ detail, status, onRetry }: { detail: AiRunDetailResponse | undefined; status: 'idle' | 'loading' | 'ready' | 'error'; onRetry: () => void }): React.JSX.Element {
   if (status === 'loading') return <Spinner center />;
   if (status === 'error') return <div className={styles.error} role="alert"><p>We could not load this AI run.</p><button type="button" onClick={onRetry}>Retry</button></div>;
@@ -88,6 +104,7 @@ export function AiRunDetail({ detail, status, onRetry }: { detail: AiRunDetailRe
       {storedWindow.excluded.length ? <div role="region" aria-label="Excluded messages" className={styles.auditList}><h4>Excluded messages</h4><ul>{storedWindow.excluded.map((excluded) => <li key={excluded.tsMsgId}>{excluded.tsMsgId}: {excluded.cause}</li>)}</ul></div> : null}
     </section> : null}
     {decisions.length ? <section className={styles.block}><h4>Decision ledger</h4><div className={styles.tableWrap}><table className={styles.table} aria-label="Decisions"><thead><tr><th>Target</th><th>Proposed</th><th>Was</th><th>Outcome</th><th>Verdict</th><th>Reason</th></tr></thead><tbody>{decisions.map(([target, decision]) => <tr key={target}><td>{target}</td><td>{proposedDecisionValue(target, decision)}</td><td>{value(decision.previousValue)}</td><td>{humanizeEnum(decision.outcome)}</td><td>{humanizeEnum(decision.verdict)}</td><td>{reasonText(decision)}</td></tr>)}</tbody></table></div></section> : null}
+    <NotesLines run={run} />
     {run.rawText !== undefined ? <details className={styles.raw}><summary>Raw model response</summary><pre>{run.rawText}</pre></details> : null}
     {run.rawResult !== undefined ? <details className={styles.raw}><summary>Parsed result</summary><pre>{JSON.stringify(run.rawResult, null, 2)}</pre></details> : null}
   </section>;

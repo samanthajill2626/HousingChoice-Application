@@ -259,3 +259,37 @@ describe('AiRunsSection - the tenant matching inputs', () => {
     expect(within(row).getAllByRole('cell').at(-1)).toHaveTextContent(/^Field already filled$/);
   });
 });
+
+// B1 spec D4: what happened to a run's Notes lines - counts only.
+describe('AiRunsSection - Notes lines', () => {
+  it('shows the appended, below-floor and withheld counts of a run that reached apply', () => {
+    useAiRun.mockReturnValueOnce({ detail: { ...detail, run: { ...detail.run, notedLines: 2, notesBelowFloor: 3, notesDemoted: 0 } }, status: 'ready', retry: vi.fn() });
+    renderSection();
+    const notes = screen.getByRole('region', { name: 'Notes lines' });
+    expect(notes).toHaveTextContent('2 appended');
+    expect(notes).toHaveTextContent('3 below the confidence floor');
+    expect(notes).toHaveTextContent('0 withheld by the unknown-speaker rule');
+  });
+
+  it('shows only the appended count for a run recorded before the counts existed', () => {
+    useAiRun.mockReturnValueOnce({ detail: { ...detail, run: { ...detail.run, notedLines: 1 } }, status: 'ready', retry: vi.fn() });
+    renderSection();
+    const notes = screen.getByRole('region', { name: 'Notes lines' });
+    expect(notes).toHaveTextContent('1 appended');
+    expect(notes).not.toHaveTextContent('confidence floor');
+  });
+
+  it('(PIN) shows no Notes lines block when there is nothing to report', () => {
+    renderSection();
+    expect(screen.queryByRole('region', { name: 'Notes lines' })).not.toBeInTheDocument();
+  });
+
+  // PR34: a present 0 is reported, not hidden.
+  it('shows the region for a run whose counts are all 0', () => {
+    useAiRun.mockReturnValueOnce({ detail: { ...detail, run: { ...detail.run, notedLines: 0, notesBelowFloor: 0, notesDemoted: 0 } }, status: 'ready', retry: vi.fn() });
+    renderSection();
+    const notes = screen.getByRole('region', { name: 'Notes lines' });
+    expect(notes).toHaveTextContent('0 appended');
+    expect(notes).toHaveTextContent('0 below the confidence floor');
+  });
+});

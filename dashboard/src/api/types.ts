@@ -379,6 +379,12 @@ export interface AiRunRecordView {
   rawResult?: unknown;
   decisions: Partial<Record<string, AiRunDecision>>;
   notedLines: number;
+  /** B1 spec D4: model note lines dropped below the confidence floor. Absent
+   *  on runs that never reached apply and on runs recorded before B1.
+   *  Mirrors AiRunRecord in app/src/repos/aiRunsRepo.ts. */
+  notesBelowFloor?: number;
+  /** B1 spec D4: note lines a demoted (unknown-speaker) run withheld. */
+  notesDemoted?: number;
   expires_at?: number;
 }
 

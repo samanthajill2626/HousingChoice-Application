@@ -885,6 +885,9 @@ export function ListingDetail(): React.JSX.Element {
               />
             )}
             {deleted ? <span className={styles.deletedBadge}>Deleted</span> : null}
+            {/* WP1 B1 (spec D6): staff only. `=== true` is the only on test,
+                so a legacy stored string shows no pill. */}
+            {unit.priority === true ? <span className={styles.priorityBadge}>Priority</span> : null}
           </div>
           {facts ? <div className={styles.facts}>{facts}</div> : null}
         </div>
@@ -998,6 +1001,9 @@ export function ListingDetail(): React.JSX.Element {
                   )
                 }
               />
+              {/* WP1 B1 (spec D6): an on/off switch - off, absent and a
+                  legacy stored string all read No. */}
+              <KV k="Priority" v={unit.priority === true ? 'Yes' : 'No'} />
             </div>
           </Card>
 

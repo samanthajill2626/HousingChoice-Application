@@ -3339,3 +3339,27 @@ describe('ListingDetail - "Sent to" outcomes (last-heard-from spec 5.5)', () => 
     expect(screen.queryByRole('dialog', { name: 'Schedule a tour' })).not.toBeInTheDocument();
   });
 });
+
+describe('ListingDetail - Priority (WP1 B1 spec D6)', () => {
+  const header = (): HTMLElement => screen.getByRole('heading', { level: 1 }).closest('header') as HTMLElement;
+  const priorityRow = (): HTMLElement =>
+    within(cardTitled(/^Property details/)).getByText('Priority').parentElement as HTMLElement;
+
+  it('on: the details row reads Yes and a Priority pill sits beside the status', () => {
+    useListing.mockReturnValue({ ...READY, unit: { ...READY.unit!, priority: true } });
+    renderAt();
+    expect(priorityRow()).toHaveTextContent('Yes');
+    expect(within(header()).getByText('Priority')).toBeInTheDocument();
+  });
+
+  it.each([
+    ['off', false],
+    ['absent', undefined],
+    ['a legacy stored string', 'high' as never],
+  ])('%s: the row reads No and there is no pill', (_name, priority) => {
+    useListing.mockReturnValue({ ...READY, unit: { ...READY.unit!, priority } });
+    renderAt();
+    expect(priorityRow()).toHaveTextContent('No');
+    expect(within(header()).queryByText('Priority')).toBeNull();
+  });
+});

@@ -215,6 +215,12 @@ function autoPrefix(nowIso: string): string {
   return `[Auto - ${month} ${d.getUTCDate()}]`;
 }
 
+/**
+ * A line's leading autoPrefix, whatever its date - the shape lib/caseworkers.ts
+ * AUTO_PREFIX also reads. The retry guard removes it before comparing lines.
+ */
+const LEADING_AUTO_PREFIX = /^\[Auto - [^\]]+\]/;
+
 /** What filterNoteLines needs. Every field is plain data - the function is pure. */
 export interface NoteLineFilterInput {
   /**
@@ -228,9 +234,14 @@ export interface NoteLineFilterInput {
   systemLines: readonly string[];
   /** EXTRACTION_FACT_MIN_CONFIDENCE (lib/config.ts), 0 < floor <= 1. */
   floor: number;
-  /** The contact's current notes, trimmed ('' when none) - the retry guard's haystack. */
+  /** The contact's current notes, trimmed ('' when none) - the lines the retry guard compares against. */
   existingNotes: string;
-  /** The `[Auto - <MMM D>]` prefix this run appends with (autoPrefix). */
+  /**
+   * The `[Auto - <MMM D>]` prefix this run appends with (autoPrefix). The
+   * retry guard does not read it since FW2-1 - it removes ANY date's prefix
+   * from an existing line - but the field stays REQUIRED: the probe's seam
+   * passes a fixed one (plan PR30).
+   */
   prefix: string;
   /** hasInferredRoleContent: a demoted run appends no line (charter 6.4). */
   demoted: boolean;
@@ -273,10 +284,17 @@ function clampConfidence(raw: unknown): number {
  *  4. The retry guard (adversarial F1), BEFORE the cap (B1 WI5):
  *     applyExtraction runs BEFORE repo.complete(), so a complete() failure
  *     re-arms the SAME due row and the retry re-extracts the identical
- *     transcript against a contact that already carries run 1's line. A
- *     candidate whose formatted `<prefix> <line>` OR bare `<line>` is already
- *     present verbatim is dropped - model AND system lines, as before - so the
- *     retry appends nothing and a duplicate never takes a cap slot.
+ *     transcript against a contact that already carries run 1's line. It
+ *     compares WHOLE lines (FW2-1, code review R2-1): a candidate is dropped
+ *     when an existing line, its leading `[Auto - <date>]` prefix removed and
+ *     both sides trimmed, EQUALS it - model AND system lines - so a retry on
+ *     the same or a later date appends nothing, a verbatim repeat is not
+ *     written twice, and a duplicate never takes a cap slot. A candidate that
+ *     spans lines must match a run of whole lines. A line merely CONTAINED in
+ *     a longer one is KEPT: "12 Oak St, ..." inside "112 Oak St, ...", or a
+ *     change of mind whose words an earlier line contains, is new feedback
+ *     (spec D5.2). A flip back to EXACTLY an earlier line's words is still
+ *     dropped; the prompt asks for a change of mind worded as a change.
  *  5. System lines are appended after the model lines; they carry no
  *     confidence and are never floored.
  *  6. The cap: at most MAX_NOTE_LINES, model lines first.
@@ -284,10 +302,15 @@ function clampConfidence(raw: unknown): number {
  *     of either kind and reports how many it withheld (charter 6.4; spec Q1).
  */
 export function filterNoteLines(input: NoteLineFilterInput): NoteLineFilterResult {
-  const { existingNotes, prefix } = input;
   const isPostal = (line: string): boolean => /^current address\b/i.test(line) && /\d/.test(line);
+  // Rule 4 over whole lines: every line fenced by '\n' on both sides, so one
+  // includes() matches only a run of WHOLE lines, never part of one.
+  const fenced = (lines: readonly string[]): string => `\n${lines.join('\n')}\n`;
+  const existingLines = fenced(
+    input.existingNotes.split('\n').map((line) => line.trim().replace(LEADING_AUTO_PREFIX, '').trim()),
+  );
   const alreadyPresent = (line: string): boolean =>
-    existingNotes.includes(`${prefix} ${line}`) || existingNotes.includes(line);
+    existingLines.includes(fenced(line.split('\n').map((part) => part.trim())));
 
   let belowFloor = 0;
   const model: string[] = [];

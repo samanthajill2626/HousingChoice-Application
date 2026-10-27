@@ -1768,7 +1768,8 @@ describe('applyExtraction - Notes lines through filterNoteLines (B1 spec D4)', (
   });
 
   it('a guarded duplicate no longer takes a cap slot (WI5)', async () => {
-    // Whole words: the bare-line guard would match a single letter inside "seed".
+    // Whole words: written for the substring guard, which matched a single
+    // letter inside "seed". FW2-1 compares whole lines; the words stay.
     const { deps, records } = makeDeps();
     const outcome = await run(deps, makeContact({ type: 'tenant', notes: 'seed\n[Auto - Jul 16] alpha' }), {
       fields: {}, noteLines: ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot'].map((text) => note(text)),
@@ -1777,6 +1778,16 @@ describe('applyExtraction - Notes lines through filterNoteLines (B1 spec D4)', (
     expect(records.updates[0]!.patch['notes']).toBe(
       'seed\n[Auto - Jul 16] alpha\n[Auto - Jul 16] bravo\n[Auto - Jul 16] charlie\n[Auto - Jul 16] delta\n[Auto - Jul 16] echo\n[Auto - Jul 16] foxtrot',
     );
+  });
+
+  it('appends feedback on 12 Oak St beside an earlier line on 112 Oak St - the guard compares whole lines (FW2-1)', async () => {
+    const { deps, records } = makeDeps();
+    const earlier = '[Auto - Jul 10] 112 Oak St, Decatur: likes it';
+    const outcome = await run(deps, makeContact({ type: 'tenant', notes: earlier }), {
+      fields: {}, noteLines: [note('12 Oak St, Decatur: likes it')],
+    });
+    expect(outcome.appendedLines).toEqual(['12 Oak St, Decatur: likes it']);
+    expect(records.updates[0]!.patch['notes']).toBe(`${earlier}\n[Auto - Jul 16] 12 Oak St, Decatur: likes it`);
   });
 
   it('a demoted run appends NO line of either kind and emits nothing for notes', async () => {

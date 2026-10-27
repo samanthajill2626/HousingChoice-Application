@@ -64,8 +64,8 @@ describe('filterNoteLines - clamping and structure', () => {
 });
 
 describe('filterNoteLines - the retry guard, system lines and the cap', () => {
-  // Whole words, never single letters: the guard also matches a BARE line
-  // anywhere in the notes, so "d" would match inside "seed".
+  // Whole words, never single letters: written for the substring guard, under
+  // which "d" matched inside "seed". FW2-1 compares whole lines; the words stay.
   it('runs the retry guard BEFORE the cap, so a line already present takes no slot (WI5)', () => {
     const out = filterNoteLines(input({
       existingNotes: `seed note\n${PREFIX} alpha`,
@@ -95,6 +95,68 @@ describe('filterNoteLines - the retry guard, system lines and the cap', () => {
     const out = filterNoteLines(input({ modelLines: ['1', '2', '3', '4', '5'].map((text) => note(text)), systemLines: [SYSTEM] }));
     expect(out.append).toEqual(['1', '2', '3', '4', '5']);
     expect(out.modelCount).toBe(5);
+  });
+});
+
+// FW2-1 (code review R2-1): the retry guard compares WHOLE lines. A candidate
+// is dropped only when an existing Notes line - its leading `[Auto - <Mon D>]`
+// prefix removed, both sides trimmed - EQUALS it. A line merely CONTAINED in a
+// longer one is new feedback (spec D5.2: a change of mind is a new line).
+describe('filterNoteLines - the retry guard compares WHOLE lines (FW2-1)', () => {
+  it('appends feedback on 12 Oak St although an earlier line names 112 Oak St (R2-1 reproduction b)', () => {
+    const out = filterNoteLines(input({
+      existingNotes: '[Auto - Oct 20] 112 Oak St, Decatur: likes it',
+      modelLines: [note('12 Oak St, Decatur: likes it', 0.95)],
+    }));
+    expect(out.append).toEqual(['12 Oak St, Decatur: likes it']);
+  });
+
+  it('appends a change of mind whose words are CONTAINED in an earlier line (R2-1 reproduction a, contained form)', () => {
+    const out = filterNoteLines(input({
+      existingNotes: [
+        '[Auto - Oct 20] 412 Oak Ave, Decatur: likes it, worried about the commute',
+        '[Auto - Oct 22] 412 Oak Ave, Decatur: on the fence',
+      ].join('\n'),
+      modelLines: [note('412 Oak Ave, Decatur: likes it', 0.95)],
+    }));
+    expect(out.append).toEqual(['412 Oak Ave, Decatur: likes it']);
+  });
+
+  it('appends a line contained in a longer staff line - the accepted trade-off', () => {
+    const out = filterNoteLines(input({
+      existingNotes: 'Client works nights downtown and takes the bus',
+      modelLines: [note('works nights downtown')],
+    }));
+    expect(out.append).toEqual(['works nights downtown']);
+  });
+
+  it('(PIN) still drops a line identical to an earlier one under any date prefix, or a bare staff line, both sides trimmed', () => {
+    // R2-1 reproduction a VERBATIM: the Oct 27 line repeats the Oct 20 words
+    // exactly, so it stays dropped (R2 adjudications, For Cameron); the prompt
+    // asks the model to word a change of mind AS a change ("back on the fence").
+    const out = filterNoteLines(input({
+      existingNotes: [
+        '[Auto - Oct 20] 412 Oak Ave, Decatur: on the fence',
+        '[Auto - Oct 22] 412 Oak Ave, Decatur: likes it',
+        '  staff typed this line  ',
+      ].join('\n'),
+      modelLines: [
+        note('412 Oak Ave, Decatur: on the fence', 0.95),
+        note('staff typed this line'),
+        note('412 Oak Ave, Decatur: back on the fence', 0.95),
+      ],
+    }));
+    expect(out.append).toEqual(['412 Oak Ave, Decatur: back on the fence']);
+  });
+
+  it('(PIN) still drops a same-run retry (F1), a candidate holding a line break and a system line included', () => {
+    // A complete() failure re-extracts the SAME transcript against notes that
+    // already carry run 1's lines, each written as `<prefix> <line>`.
+    const runOne = ['stairs are a problem', 'toured on Monday\nliked the yard'];
+    const existingNotes = ['seed note', ...runOne.map((l) => `${PREFIX} ${l}`), `${PREFIX} ${SYSTEM}`].join('\n');
+    expect(filterNoteLines(input({ existingNotes, modelLines: runOne.map((text) => note(text)), systemLines: [SYSTEM] }))).toEqual({
+      append: [], modelCount: 0, belowFloor: 0, demoted: 0,
+    });
   });
 });
 

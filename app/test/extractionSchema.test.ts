@@ -864,6 +864,14 @@ describe('the system prompt and the PROPERTIES SENT block (WP1 B1 spec D5.1, D5.
     expect(sys).toContain('- Every other noteLine rule applies to feedback, the never-written list');
   });
 
+  // FW2-1 (code review R2-1): the retry guard drops a line identical to an
+  // earlier Notes line, so a change of mind must SAY it changed.
+  it('asks for a change of mind worded AS a change, since an identical line is never written again', () => {
+    expect(sys).toContain('a new noteLine that SAYS the view changed, e.g. "now likes it" or');
+    expect(sys).toContain('"back on the fence" - a line identical to an earlier notes line is');
+    expect(sys).toContain('never written again, so a change back worded as before is lost.');
+  });
+
   it('drops the no-address bullet; the address output still never takes a sent home', () => {
     expect(sys).not.toContain('Addresses NEVER go in noteLines');
     expect(sys).not.toContain('for address information.');

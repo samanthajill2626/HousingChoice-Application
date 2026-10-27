@@ -1,7 +1,7 @@
 // filterNoteLines - the ONE place for Notes line value rules (B1 spec D4, PR4).
 // Pure: the extraction job (through applyExtraction) and the never-written
 // probe (spec D7) both call it, and the fake driver's bypass of
-// parseExtractionText (adapters/extractionFake.ts:103, WI1) skips nothing,
+// parseExtractionText (adapters/extractionFake.ts, the marker merge; WI1) skips nothing,
 // because nothing here trusts the parser. Order: clamp -> floor (counted) ->
 // postal filter -> retry guard -> system lines -> five-line cap -> demotion.
 import { describe, expect, it } from 'vitest';

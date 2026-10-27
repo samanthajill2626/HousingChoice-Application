@@ -212,7 +212,8 @@ export interface NoteLineFilterInput {
   /**
    * result.noteLines AS RECEIVED. Typed unknown[] on purpose: the fake driver
    * hands its marker payload over without parseExtractionText
-   * (adapters/extractionFake.ts:103, B1 WI1), so an item may be any shape.
+   * (adapters/extractionFake.ts, the marker merge; B1 WI1), so an item may be
+   * any shape.
    */
   modelLines: readonly unknown[] | undefined;
   /** System lines (today only the phone-owned-by-other note): no confidence, never floored. */

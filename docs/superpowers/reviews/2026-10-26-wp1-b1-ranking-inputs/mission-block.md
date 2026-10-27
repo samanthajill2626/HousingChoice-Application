@@ -1,9 +1,9 @@
 # MISSION: WP1 B1 Ranking inputs (Amendment No. 1, slice 1 of 4)
 Worktree: W:\tmp\wp1-b1-ranking-inputs  Branch: feat/wp1-b1-ranking-inputs  (cut from main @d0e2c2d8)
 Profile: W:\tmp\wp1-b1-ranking-inputs\.claude\feature-mission.profile.md
-Spec: docs/superpowers/specs/2026-10-26-wp1-b1-ranking-inputs-design.md (rev 9, APPROVED)
-Plan: docs/superpowers/plans/2026-10-26-wp1-b1-ranking-inputs.md (v6; section 4 rulings PR1-PR57 win over slice text)
-Design review: spec R5 (57 findings, 0 rejected), plan R4 (29 findings, 0 rejected) - adjudications at
+Spec: docs/superpowers/specs/2026-10-26-wp1-b1-ranking-inputs-design.md (rev 10, APPROVED)
+Plan: docs/superpowers/plans/2026-10-26-wp1-b1-ranking-inputs.md (v6; section 4 rulings PR1-PR58 win over slice text)
+Design review: spec R5 (57 findings, 0 rejected), plan R5 (29 findings, 0 rejected; R5 a clean confirming pass) - adjudications at
   docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/design-review/adjudications.md and
   docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/plan-review/plan-adjudications.md
 Work map (strictly serial):

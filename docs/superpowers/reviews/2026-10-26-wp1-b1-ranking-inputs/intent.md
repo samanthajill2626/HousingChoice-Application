@@ -11,15 +11,11 @@ cut from main @d0e2c2d8.
 
 ## STATE
 
-Phase: LAUNCH GATE, final confirming review (2026-10-27). Cameron
-confirmed the grader's NOT EXCLUDED defaults (PR54) and left the "sex"
-question to the planner, who chose yes: sex covers sexual orientation and
-gender identity (PR58, spec rev 10, charter 20 item 11, commit 774fa8f4).
-Cameron asked for one more review before the go: plan review round 5, a
-narrow confirming pass by reviewer af771e6cd8245e18c (continued) on
-f8c202f4 + 774fa8f4, report to plan-review/round5-reviewer-a.md. In flight:
-that reviewer only. After it: adjudicate, commit, then ask the launch
-pick as TEXT (Go AUTO / Go MANUAL / Revise).
+Phase: LAUNCH GATE (2026-10-27). Plan review CLOSED after round 5, a
+narrow confirming pass on f8c202f4 + 774fa8f4: no defects. Spec rev 10,
+plan v6 (PR1-PR58). Grader defaults confirmed by Cameron; sex covers
+sexual orientation and gender identity (PR58). Nothing in flight. Ask the
+launch pick as TEXT: Go AUTO / Go MANUAL / Revise.
 Next on a Go: compaction gate B, then AUTO dispatch of
 abt:build-orchestrator with mission-block.md verbatim (or MANUAL prompt).
 Registered with compact-resume (--persist) until mission end.

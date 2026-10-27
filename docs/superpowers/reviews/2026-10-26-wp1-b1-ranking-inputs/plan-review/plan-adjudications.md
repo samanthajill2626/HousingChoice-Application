@@ -90,3 +90,11 @@ Round 4 is the hard cap. It changed one decision (R4-2, a review surface
 in the record), so per the cap rule the open items go to Cameron as a
 decision at the launch gate rather than a round 5: PR54's allowances and
 whether "sex" covers sexual orientation and gender identity.
+
+## Round 5 (2026-10-27) - narrow confirming pass, Cameron's request
+
+Cameron confirmed PR54's defaults, left the sex question to the planner
+(ruled yes: PR58, commit 774fa8f4) and asked for one more review before the
+go. Reviewer A, continued, checked only the unreviewed edits (f8c202f4
+PR54-PR57 and 774fa8f4 PR58): no defects. Nothing to adjudicate; no
+decision changed. Plan review CLOSED after 5 rounds.

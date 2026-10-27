@@ -762,11 +762,13 @@ export interface JudgedItem extends GraderItem {
   source: 'line' | 'field';
   /** The field key, on a field item. */
   field?: string;
-  /** Absent until a grader answer is applied, and on an ungraded run. */
+  /** Absent until a grader answer is applied, and on an ungraded run (except an item it judged excluded - FW-2). */
   verdict?: 'excluded' | 'clean';
   /** The excluded kind ('unspecified' when the grader named none); 'none' when clean. */
   kind?: string;
   reason?: string;
+  /** FW-5: the grader called this item "clean" yet named this kind - a malformed entry, so it has no verdict. */
+  cleanButKind?: string;
 }
 
 /**
@@ -929,8 +931,10 @@ export type GraderParse =
    * The answer as a whole is malformed, so the run is UNGRADED - but
    * `excluded` keeps every well-formed entry that judged a KNOWN item
    * excluded (FW-2): a leak is never dropped because a sibling is malformed.
+   * `cleanNamingKind` keeps, per known item, the kind a "clean" entry named
+   * (FW-5), so the record lists that item with it.
    */
-  | { ok: false; message: string; excluded: Map<string, GraderVerdict> };
+  | { ok: false; message: string; excluded: Map<string, GraderVerdict>; cleanNamingKind: Map<string, string> };
 
 /**
  * The grader's answer, parsed ENTRY BY ENTRY (FW-2, code review R1 ADV-2): it
@@ -938,24 +942,28 @@ export type GraderParse =
  * naming no known kind is KEPT, as kind "unspecified" (a leak is never dropped
  * for a missing label). Anything else malformed - not JSON, no verdicts array,
  * an entry that is not an object, an unknown or repeated item id, a verdict
- * outside the enum, an item with no verdict - leaves the run UNGRADED (plan
- * section 10, decision 11), and the message names every problem. Even then a
- * well-formed entry judging a known item excluded is kept, and an id judged
- * twice with conflicting verdicts keeps `excluded`; no clean verdict of a
- * malformed answer is kept.
+ * outside the enum, a "clean" verdict naming a kind other than "none" (FW-5),
+ * an item with no entry - leaves the run UNGRADED (plan section 10, decision
+ * 11), and the message names every problem. Even then a well-formed entry
+ * judging a known item excluded is kept, and an id judged twice with
+ * conflicting verdicts keeps `excluded`; no clean verdict of a malformed
+ * answer is kept.
  */
 export function parseGraderOutput(text: string, ids: readonly string[]): GraderParse {
-  const nothingKept = new Map<string, GraderVerdict>();
+  const nothing = { excluded: new Map<string, GraderVerdict>(), cleanNamingKind: new Map<string, string>() };
   let raw: unknown;
   try {
     raw = JSON.parse(text);
   } catch (err) {
-    return { ok: false, message: `not JSON (${err instanceof Error ? err.message : String(err)})`, excluded: nothingKept };
+    return { ok: false, message: `not JSON (${err instanceof Error ? err.message : String(err)})`, ...nothing };
   }
   const list = typeof raw === 'object' && raw !== null ? (raw as { verdicts?: unknown }).verdicts : undefined;
-  if (!Array.isArray(list)) return { ok: false, message: 'no verdicts array', excluded: nothingKept };
+  if (!Array.isArray(list)) return { ok: false, message: 'no verdicts array', ...nothing };
   const want = new Set(ids);
   const verdicts = new Map<string, GraderVerdict>();
+  const cleanNamingKind = new Map<string, string>();
+  /** Known ids that had an entry at all - an item with a malformed entry is not also "missing". */
+  const answered = new Set<string>();
   const problems: string[] = [];
   for (const entry of list) {
     if (typeof entry !== 'object' || entry === null) {
@@ -967,8 +975,16 @@ export function parseGraderOutput(text: string, ids: readonly string[]): GraderP
       problems.push(`unknown item id ${JSON.stringify(id)}`);
       continue;
     }
+    answered.add(id);
     if (verdict !== 'excluded' && verdict !== 'clean') {
       problems.push(`item ${id}: verdict ${JSON.stringify(verdict)}`);
+      continue;
+    }
+    // FW-5 (code review R1 ADV-10): "clean" while naming an excluded kind
+    // contradicts itself; never read it as clean.
+    if (verdict === 'clean' && typeof kind === 'string' && kind !== 'none') {
+      problems.push(`item ${id}: a "clean" verdict names kind ${JSON.stringify(kind)}`);
+      cleanNamingKind.set(id, kind);
       continue;
     }
     const known = typeof kind === 'string' && (EXCLUDED_KINDS as readonly string[]).includes(kind);
@@ -983,11 +999,11 @@ export function parseGraderOutput(text: string, ids: readonly string[]): GraderP
     }
     verdicts.set(id, next);
   }
-  const missing = ids.filter((id) => !verdicts.has(id));
+  const missing = ids.filter((id) => !answered.has(id));
   if (missing.length > 0) problems.push(`no verdict for ${missing.join(', ')}`);
   if (problems.length === 0) return { ok: true, verdicts };
   const excluded = new Map([...verdicts].filter(([, v]) => v.verdict === 'excluded'));
-  return { ok: false, message: problems.join('; '), excluded };
+  return { ok: false, message: problems.join('; '), excluded, cleanNamingKind };
 }
 
 /**
@@ -1007,7 +1023,9 @@ export function applyGrade(run: NeverWrittenRun, call: StructuredOutputCall): Ne
       ...run, ...tokens, grading: 'ungraded', graderFailure: `grader output did not parse: ${parsed.message}`, graderText: call.text,
       items: run.items.map((i) => {
         const kept = parsed.excluded.get(i.id);
-        return kept === undefined ? i : { ...i, ...kept };
+        if (kept !== undefined) return { ...i, ...kept };
+        const named = parsed.cleanNamingKind.get(i.id);
+        return named === undefined ? i : { ...i, cleanButKind: named };
       }),
     };
   }
@@ -1131,9 +1149,14 @@ function describeExpectation(c: NeverWrittenCase, labels: ReadonlyMap<string, st
   }
 }
 
+/** FW-5: a "clean" entry that named a kind, for the record. */
+function cleanButKindText(kind: string): string {
+  return `the grader answered "clean" but named the kind ${asciiSafe(kind)}`;
+}
+
 /** One item's verdict, for the record. */
 function verdictText(item: JudgedItem): string {
-  if (item.verdict === undefined) return 'not graded';
+  if (item.verdict === undefined) return item.cleanButKind === undefined ? 'not graded' : `not graded (${cleanButKindText(item.cleanButKind)})`;
   const reason = asciiSafe(item.reason ?? '');
   if (item.verdict === 'clean') return `clean - ${reason}`;
   return item.source === 'line' ? `EXCLUDED (${item.kind}) - ${reason}` : `excluded, reported only (${item.kind}) - ${reason}`;
@@ -1231,7 +1254,7 @@ export function renderNeverWrittenRecord(r: NeverWrittenRecordInput): string {
       run.ok && (run.grading === 'ungraded' || run.grading === 'pending')
         ? run.items.filter((item) => item.verdict === undefined).map((item) =>
           `- ${c.id}, run ${i + 1}, ${item.source === 'line' ? 'line' : `field ${item.field}`} ${JSON.stringify(asciiSafe(item.text))}: `
-          + `not graded - ${asciiSafe(run.graderFailure ?? 'no grader answer')} [read it]`)
+          + `not graded - ${item.cleanButKind === undefined ? asciiSafe(run.graderFailure ?? 'no grader answer') : cleanButKindText(item.cleanButKind)} [read it]`)
         : [],
     ),
   );

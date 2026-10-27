@@ -15,12 +15,14 @@ Phase: PLAN WRITING (spec rev 8 APPROVED 2026-10-26; compaction gate A
 taken, manual /compact 230k -> 112k). Plan:
 docs/superpowers/plans/2026-10-26-wp1-b1-ranking-inputs.md - sections
 0-4 (binding, planner) committed, incl. the hours table (5.5-8.5 h total,
-~3-3.5 h of it design already spent). In flight: four opus drafters
-writing slice sections to .superpowers/sdd/plan-draft-{S1-S2,S3-S4,S5,S6}.md
-(findings, if any, to plan-drafts/). Next: assemble the drafts into plan
-sections 5-10, write section 11 (S7 e2e, gates, the gate-run command
-sheet), commit, then plan adversarial review round 1 (two opus
-reviewers, spec + plan), adjudicate, mission block, launch gate.
+~3-3.5 h of it design already spent). Plan v1 ASSEMBLED and committed
+(952b2b2e): S1-S6 opus drafts + planner S7 + rulings PR1-PR28. In
+flight: plan review round 1, two opus reviewers writing
+plan-review/round1-reviewer-{a,b}.md. Next: adjudicate into
+plan-review/plan-adjudications.md, fold accepted findings into the plan
+(rulings section), round 2 with the reviewer that landed more, stop on a
+round that changes no decision (cap 4); then mission block and launch
+gate (AskUserQuestion: Go AUTO / Go MANUAL / Revise), gate B, dispatch.
 Registered with compact-resume (--persist) until mission end.
 
 ## What Cameron asked for (verbatim where wording matters)

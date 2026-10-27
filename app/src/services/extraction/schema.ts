@@ -319,7 +319,7 @@ function absentView(): ExtractionOpsView {
   return view;
 }
 
-/** All twelve targets absent. Frozen - callers must never mutate it. */
+/** All sixteen targets absent. Frozen - callers must never mutate it. */
 export const EMPTY_OPS_VIEW: ExtractionOpsView = Object.freeze(absentView());
 
 /** The clamped reason, when the raw value is a non-blank string. */
@@ -354,7 +354,7 @@ export function parseExtractionOps(rawText: string | undefined): ExtractionOpsVi
   }
   if (!isRecord(parsed)) return view;
 
-  // The eight scalars: fields.<name>.op, verbatim.
+  // The twelve scalars: fields.<name>.op, verbatim.
   const rawFields = isRecord(parsed.fields) ? parsed.fields : {};
   for (const field of EXTRACTABLE_FIELDS) {
     const rawOp = rawFields[field];

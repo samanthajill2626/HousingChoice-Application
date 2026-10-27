@@ -510,7 +510,7 @@ describe('journal sweep: one contact failing never abandons its siblings', () =>
         },
       ],
       recover: async (contactId) => {
-        // recoverAbandoned reads the contact's 12 journals with a consistent
+        // recoverAbandoned reads the contact's 16 journal keys with a consistent
         // BatchGet that sits in its for-of HEADER, outside its per-journal
         // try, so a throttled read propagates out of the call exactly here.
         if (contactId === 'second') throw new Error('batchget throttled');

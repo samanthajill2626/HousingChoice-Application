@@ -185,7 +185,7 @@ export const EMPTY_EXTRACTION: ExtractionResult = Object.freeze({ fields: {} }) 
 /**
  * Output-token ceiling for one extraction call.
  *
- * This budget must cover the WHOLE all-required wire object: eight field ops at
+ * This budget must cover the WHOLE all-required wire object: twelve field ops at
  * op+value+reason each, statusAdvance, typeSuggestion, phoneAddition, the
  * address parts block, noteLines, and one speakerRoles pair per `Speaker N`
  * label. A `voice` run is the largest of those by construction.

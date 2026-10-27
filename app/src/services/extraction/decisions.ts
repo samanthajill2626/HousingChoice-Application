@@ -6,7 +6,7 @@
 // (which fabricates evidence of evaluation, because apply's loop treats a
 // missing field and an explicit op:'none' identically), then splitting the
 // source by target (which still fabricates a decline whenever the downgrade at
-// schema.ts:215-219 fires). Reading rawText for ALL TWELVE targets is both
+// schema.ts:215-219 fires). Reading rawText for ALL SIXTEEN targets is both
 // simpler and the only correct option.
 //
 // JOIN RULES:

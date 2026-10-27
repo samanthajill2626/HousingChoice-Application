@@ -141,15 +141,15 @@ type MarkerOverrides = { fields?: Record<string, unknown> } & Record<
 // The fake driver returns marker JSON as rawText. Keep every marker schema-shaped
 // so parseExtractionOps sees explicit declines rather than absent fields.
 //
-// `fields` MERGES over the eight schema-shaped declines. A trailing
+// `fields` MERGES over the twelve schema-shaped declines. A trailing
 // `...overrides` spread used to REPLACE the merged map wholesale, so any call
-// that touched `fields` silently dropped the other seven declines and made
+// that touched `fields` silently dropped the other eleven declines and made
 // those targets ABSENT - which is how the not-addressed assertion below passed
 // for the wrong reason (conf P3-15).
 //
 // A `null` override OMITS its key, at either level. That is the ONLY way to
 // make a target genuinely not_addressed from a schema-shaped marker: a full
-// marker addresses all twelve (the eight `fields` plus address, statusAdvance,
+// marker addresses all sixteen (the twelve `fields` plus address, statusAdvance,
 // typeSuggestion, phoneAddition), and buildDecisions maps op 'none' to
 // no_finding and an absent key to not_addressed.
 function marker(overrides: MarkerOverrides = {}): Record<string, unknown> {
@@ -163,6 +163,11 @@ function marker(overrides: MarkerOverrides = {}): Record<string, unknown> {
       "evictions",
       "tenure",
       "porting",
+      // B1 spec D3: the tenant matching inputs are schema fields too.
+      "area_preference",
+      "max_tenant_portion",
+      "accessibility_need",
+      "preferences_constraints",
     ].map((field) => [field, { op: "none", value: "", reason: "" }]),
   );
   const { fields: fieldOverrides, ...rest } = overrides;
@@ -269,7 +274,7 @@ test("an applied run shows rehydrated text and every decision state", async ({
   await expect(decisionRow(page, "tenure")).toContainText(
     /no finding/i,
   );
-  // housingAuthority is one of the eight schema-shaped declines the helper
+  // housingAuthority is one of the twelve schema-shaped declines the helper
   // merges in. It reads "no finding" ONLY while that merge survives the
   // overrides spread; a regression there makes it "not addressed" again.
   await expect(decisionRow(page, "housingAuthority")).toContainText(

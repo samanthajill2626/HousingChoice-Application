@@ -1,13 +1,13 @@
 // Decision assembly (design 7.1). Sourced from rawText via parseExtractionOps,
 // NEVER from the parsed result - the parsed result cannot distinguish a decline
-// from a failure at any of the twelve targets.
+// from a failure at any of the sixteen targets.
 import { describe, expect, it, vi } from 'vitest';
 import { buildDecisions } from '../src/services/extraction/decisions.js';
 import { EMPTY_OPS_VIEW, parseExtractionOps } from '../src/services/extraction/schema.js';
 import { DECISION_TARGETS } from '../src/services/extraction/runTypes.js';
 
 describe('buildDecisions', () => {
-  it('covers all twelve targets, so "never mentioned" is answerable from the record alone', () => {
+  it('covers all sixteen targets, so "never mentioned" is answerable from the record alone', () => {
     const out = buildDecisions({ ops: EMPTY_OPS_VIEW, rawTextPresent: true, applyDecisions: [] });
     expect(Object.keys(out).sort()).toEqual([...DECISION_TARGETS].sort());
   });

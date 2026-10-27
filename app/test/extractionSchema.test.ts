@@ -574,7 +574,7 @@ describe('prompt builders', () => {
     // C3: assert substrings that live INSIDE one line (the prompt is lines joined
     // with '\n'), never a phrase that spans a line break.
     const sys = buildExtractionSystemPrompt();
-    // The reconciliation contract the eight scalar fields already have.
+    // The reconciliation contract the scalar fields already have.
     expect(sys).toContain('RECONCILE every noteLine against the profile notes');
     expect(sys).toMatch(/omit the line\. A fact learned again/);
     // The asymmetry the model was never told about: it cannot revise, only append,

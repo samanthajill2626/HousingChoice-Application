@@ -30,7 +30,7 @@ import { statusAllowlistFor } from '../lib/statusModel.js';
 import { checkScalarWrite, KINDS_FOR_FIELD, resolveOrgText, type OrgEntry } from '../lib/orgNames.js';
 import type { OrgNamesService } from './orgNames.js';
 
-// Spec 2026-10-12 D1: the seven tenant-only targets, exported here under the
+// Spec 2026-10-12 D1: the tenant-only targets (eleven since B1), exported under the
 // plan's binding name. Defined in extraction/runTypes.ts (a leaf module) so the
 // resolution repository can read it without importing this service.
 export { TENANT_ONLY_TARGETS };
@@ -45,7 +45,8 @@ const MAX_RESOLUTION_LOOPS = 6;
  * picked up by the next read (docs/issues/ai-run-log-recovery-hook-unbounded).
  *
  * This is now the DEFAULT rather than the only budget: recoverAbandoned takes
- * an optional maxAttempts, and the daily abandoned-journal sweep passes 12. The
+ * an optional maxAttempts, and the daily abandoned-journal sweep passes the
+ * DECISION_TARGETS count (sixteen since B1). The
  * rationale above is about a READ - a duty with no page to hold open does not
  * inherit it.
  */
@@ -105,9 +106,9 @@ export interface SuggestionResolutionService {
    * as well as a committed one. See `applyJournal`.
    *
    * `maxAttempts` overrides that per-call budget. It exists for the daily
-   * abandoned-journal sweep (log-hygiene spec 9.3), which passes 12 - the size
-   * of the closed DECISION_TARGETS key set - so a poison pair of
-   * persistently-failing journals cannot starve the other ten on a duty that
+   * abandoned-journal sweep (log-hygiene spec 9.3), which passes the size of
+   * the closed DECISION_TARGETS key set (sixteen since B1) - so a poison pair
+   * of persistently-failing journals cannot starve the rest on a duty that
    * has no page load to hold open. Omitted (the read path) keeps
    * MAX_RECOVERIES_PER_READ, so nothing about the contact page changes.
    */
@@ -731,7 +732,7 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
         // After the two free in-memory filters and before the first round trip,
         // so cheap skips never consume the budget and every journal that costs
         // IO does. ATTEMPTS, not successes: `recovered` only counts wins, so a
-        // contact whose journals keep failing would still walk all twelve keys
+        // contact whose journals keep failing would still walk all sixteen keys
         // per read - the cost the cap exists to bound.
         if (attempted >= budget) break;
         attempted += 1;

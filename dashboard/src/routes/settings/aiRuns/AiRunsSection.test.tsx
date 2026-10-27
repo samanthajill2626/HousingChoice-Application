@@ -109,12 +109,12 @@ describe('AiRunsSection', () => {
     expect(header).not.toHaveTextContent('contact-1');
   });
   it('counts what an operator scanning the log cares about, not a pending cross-tab', () => {
-    // `pending` is a VERDICT cross-tab over the same twelve targets the five
+    // `pending` is a VERDICT cross-tab over the same sixteen targets the five
     // outcome buckets already partition, so the old total double-counted every
-    // pending decision. Both of these rows summed to 12 under it - the column
+    // pending decision. Both of these rows summed to 16 under it - the column
     // could not tell "wrote a field" apart from "changed nothing".
-    const wroteOne: AiRunListRow = { ...row, runId: 'run-wrote', decisionCounts: { wrote: 1, suggested: 0, dropped: 0, no_finding: 0, not_addressed: 11, pending: 0 } };
-    const changedNothing: AiRunListRow = { ...row, runId: 'run-noop', outcome: 'no_op', decisionCounts: { wrote: 0, suggested: 0, dropped: 0, no_finding: 0, not_addressed: 12, pending: 0 } };
+    const wroteOne: AiRunListRow = { ...row, runId: 'run-wrote', decisionCounts: { wrote: 1, suggested: 0, dropped: 0, no_finding: 0, not_addressed: 15, pending: 0 } };
+    const changedNothing: AiRunListRow = { ...row, runId: 'run-noop', outcome: 'no_op', decisionCounts: { wrote: 0, suggested: 0, dropped: 0, no_finding: 0, not_addressed: 16, pending: 0 } };
     useAiRunList.mockReturnValueOnce({ rows: [wroteOne, changedNothing], status: 'ready', hasMore: false, loadingMore: false, loadMoreFailed: false, loadMore: vi.fn(), retry: vi.fn() });
     renderSection();
     const runs = within(screen.getByRole('list', { name: 'AI runs' })).getAllByRole('listitem');

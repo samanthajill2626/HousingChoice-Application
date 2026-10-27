@@ -2063,7 +2063,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       // The value comparison is CONFINED to `type` (frozen design 7.3): a human
       // triaging a contact to `landlord` after the model suggested `tenant` has
       // REJECTED that suggestion, so `type` must be judged on VALUE. For the
-      // other eleven targets a PATCH is a human edit that supersedes the
+      // other fifteen targets a PATCH is a human edit that supersedes the
       // suggestion regardless of value - generalizing the equality rule would
       // record edits that merely coincide with the model as acceptances and
       // corrupt the accuracy record this feature exists to produce.

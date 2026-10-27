@@ -228,7 +228,7 @@ export async function runJournalSweep(
       outcome.contactsVisited += 1;
       // PER-CONTACT ISOLATION. recoverAbandoned's own listJournals BatchGet
       // sits in its for-of HEADER, outside its per-journal try, so one
-      // throttled 12-key read used to propagate out of this loop into the
+      // throttled journal-key read used to propagate out of this loop into the
       // run-level catch and abandon EVERY remaining contact - and the cursor
       // was already persisted past their page, so they waited a full cursor
       // cycle for a transient blip. One bad contact is now a WARN plus a
@@ -250,7 +250,7 @@ export async function runJournalSweep(
         }
         if (stateChanged) events.emit('suggestion.updated', { contactId });
         if (!completedCleanly) continue; // budget cut - deferral, not poison
-        // POST-LOOP TRUTH CHECK on the contact's closed 12-key journal set.
+        // POST-LOOP TRUTH CHECK on the contact's closed journal key set (sixteen since B1).
         // Persistent actives past the gate = poison journals nothing will
         // scrub without attention -> ERROR (alarm). A failed READ here is
         // WARN - loud, not silent, not a false poison alarm.

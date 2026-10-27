@@ -11,16 +11,18 @@ cut from main @d0e2c2d8.
 
 ## STATE
 
-Phase: PLAN REVISION at the launch gate (2026-10-27). Cameron picked
-Revise: (1) remove the prompt's no-address bullet, (2) replace the
-never-written test's banned-word lists with a model grader. Spec rev 9
-and charter section 20 items 9-10 written. In flight: an opus agent
-redrafting plan S6 (grader) to .superpowers/sdd/plan-draft-S6-grader.md;
-planner rewrites S5.5 + section 4 (PR50+, superseding PR17, PR21's
-banned-union clause, PR41, PR44, PR48, PR49) and the hours table. Then
-ONE focused plan-review round (round-3 reviewer continued if resumable,
-else one fresh opus reviewer on the changed parts), adjudicate, commit,
-and back to the launch gate as TEXT (Go AUTO / Go MANUAL / Revise).
+Phase: LAUNCH GATE again (2026-10-27), after Cameron's revision: spec
+rev 9 (22b562bc), charter 20 items 9-10, plan v6 (S5.5 deletes the
+no-address bullet; S6 redrafted for a model grader; PR50-PR57). Plan
+review round 4 (the cap): 5 findings, all accepted. OPEN for Cameron at
+the gate (PR54): the grader's NOT EXCLUDED defaults (pronoun for the
+tenant, household members by relationship, a mobility aid stated for the
+need) and whether "sex" covers sexual orientation and gender identity
+(planner recommends yes, in the prompt's never-written list AND the
+grader description; that is a charter 6.4 list change). His answer is
+written into S6.1 (and S4.6 + charter 6.4 if orientation is added)
+before dispatch. Ask as TEXT: Go AUTO / Go MANUAL / Revise, plus those
+answers. Nothing in flight.
 Next on a Go: compaction gate B, then AUTO dispatch of
 abt:build-orchestrator with mission-block.md verbatim (or MANUAL prompt).
 Registered with compact-resume (--persist) until mission end.

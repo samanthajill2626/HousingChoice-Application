@@ -64,3 +64,29 @@ round 4.
 | R3-1 | MEDIUM | S7.2 test 4 and S7.5 open the AI run detail, which is admin-only (aiRuns.ts:137); the file's devLogin is the VA user (dev.ts:326, :333-336) | ACCEPT - PR47: that step dev-logs in as `founder@example.com`, as ai-run-log.spec.ts does | no |
 | R3-2 | MEDIUM | Strict lists miss bare-number ages ("Two kids (4 and 11)") and "U.S." / "United States" / "America" | ACCEPT - PR48: each children's-ages case carries its literal ages as strict terms; national origin adds `u.s`, `united states`, `the states`, `america`; the term-shape check allows `.` | no |
 | R3-3 | LOW | `expecting`, `tone`, `light`, `condition` are likely in a correct line of their own case | ACCEPT - PR49: `expecting` narrowed to `expecting a` / `expecting her` / `expecting his` / `expecting their`; `tone`, `light`, `condition` dropped | no |
+
+## Round 4 (plan v5 @0823dd21; reviewer A continued) - the launch-gate revision, at the cap
+
+Cameron revised two decisions at the launch gate (spec rev 9; charter
+section 20 items 9-10): the no-address prompt bullet is deleted (PR50) and
+a model grader replaces the banned-word lists (PR51; S6 redrafted by a
+fresh opus drafter, assembled by the planner; PR52 fixes a pre-existing
+dry-run print mismatch the drafter found). Round 4 reviewed that revision.
+Report: plan-review/round4-reviewer-a.md (5 findings). Accepted 5,
+rejected 0. The reviewer confirmed S5.5's RED reason, the adapter seam
+(SDK only in adapters/extraction.ts, stubbed in its one test), no test
+reaching the network, the S6.1-S6.4 names against the S6.2 harness, the
+2-of-3 bar, and the call/cost arithmetic.
+
+| # | Sev | Finding | Ruling | Decision changed? |
+|---|---|---|---|---|
+| R4-1 | MEDIUM | The grader allows a pronoun, so a sex-case line "She lives alone ..." grades clean; no Cameron ruling allows it | ACCEPT - PR54: kept as a DEFAULT and put to Cameron at the launch gate with the other allowances | no (his call at the gate) |
+| R4-2 | MEDIUM | An ungraded run's lines are never shown to Cameron; a leak there still reads PASS on every automatic check | ACCEPT - PR55: "Lines the grader did not judge" section, a test, gate step 2 sends him there | yes (a record surface added) |
+| R4-3 | LOW | "my mom" (household control) and "I use a wheelchair" (accessibility control) sit on an unaddressed boundary; one flip fails the gate | ACCEPT - PR54: both stated as allowed in the grader prompt, defaults for Cameron at the gate | no |
+| R4-4 | LOW | S6.10 Step 5 expects one `createStructuredOutputClient` probe line; S6.4's header adds a second | ACCEPT - PR56 | no |
+| R4-5 | LOW | The S5 coverage map still names the own-address rule | ACCEPT - PR57 | no |
+
+Round 4 is the hard cap. It changed one decision (R4-2, a review surface
+in the record), so per the cap rule the open items go to Cameron as a
+decision at the launch gate rather than a round 5: PR54's allowances and
+whether "sex" covers sexual orientation and gender identity.

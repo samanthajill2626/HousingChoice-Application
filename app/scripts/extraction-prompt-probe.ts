@@ -1216,6 +1216,9 @@ export interface GitInfo {
  */
 export const MEASURED_PATHS: readonly string[] = ['app/src', 'app/scripts'];
 
+/** The commit a read prints when git refused it or could not start. */
+const GIT_FAILED = 'unknown (git failed)';
+
 /** HEAD, and whether a TRACKED file under MEASURED_PATHS is modified (FW2-3). */
 export function gitInfoOf(git: GitRunner, root: string): GitInfo {
   try {
@@ -1225,7 +1228,7 @@ export function gitInfoOf(git: GitRunner, root: string): GitInfo {
   } catch {
     // git itself could not run: reported as below.
   }
-  return { commit: 'unknown (git failed)', dirty: false };
+  return { commit: GIT_FAILED, dirty: false };
 }
 
 /**
@@ -1750,6 +1753,16 @@ async function runNeverWritten(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string)
     deps.print('');
     deps.print('Dry run: nothing was sent.');
     return 0;
+  }
+  // FW3-3 (code review R3-2): a commit git could not read before the first
+  // call certifies nothing (spec D7: the record carries the commit), so the
+  // run fails here, before any paid call. An unreadable AFTER read fails the
+  // run below as a change (measuredCodeChanged).
+  if (gitBefore.commit === GIT_FAILED) {
+    deps.print('');
+    deps.print('FAIL: git could not read the commit - no certificate. Nothing was sent and no record written;');
+    deps.print(`re-run where git can read ${root}.`);
+    return 1;
   }
   const ctx: NeverWrittenContext = { modules: m, floor, labels };
   const driver = deps.createDriver(m, { model, apiKey, root });

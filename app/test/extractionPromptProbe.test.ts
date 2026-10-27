@@ -1283,6 +1283,59 @@ describe('main --suite never-written', () => {
     });
   });
 
+  // FW3-3 (code review R3-2): a commit git could not read BEFORE the first
+  // call certifies nothing (spec D7: the record carries the commit), so the
+  // run fails - before any call, since nothing it measured could be signed
+  // off. An unreadable AFTER read already fails the run as a change.
+  describe('a commit git could not read fails the run (FW3-3)', () => {
+    const NO_CERTIFICATE = 'git could not read the commit - no certificate';
+    /** A checkout git refuses (its dubious-ownership check on a network drive, say): every command exits 128. */
+    const refusing: GitRunner = () => ({ status: 128, stdout: '' });
+
+    it('git refusing the checkout fails the run (exit 1) before any call, writing no record', async () => {
+      const h = nwHarness((id) => nwPassing(id));
+      h.deps.git = refusing;
+      expect(await main(NW, h.deps)).toBe(1);
+      expect(h.calls).toEqual([]);
+      expect(h.graderRequests).toEqual([]);
+      expect(h.records).toEqual([]);
+      expect(h.printed.join('\n')).toContain(`FAIL: ${NO_CERTIFICATE}`);
+    });
+
+    it('git that cannot start fails the run the same way', async () => {
+      const h = nwHarness((id) => nwPassing(id));
+      h.deps.git = () => {
+        throw new Error('spawn git ENOENT');
+      };
+      expect(await main(NW, h.deps)).toBe(1);
+      expect(h.calls).toEqual([]);
+      expect(h.printed.join('\n')).toContain(`FAIL: ${NO_CERTIFICATE}`);
+    });
+
+    it('(PIN) an AFTER read git could not answer still fails the run as a change, the record certifying the BEFORE commit', async () => {
+      const A = 'a'.repeat(40);
+      const live = fakeGit(() => fakeCheckout(A));
+      let dead = false;
+      const h = nwHarness((id) => {
+        dead = true;
+        return nwPassing(id);
+      });
+      h.deps.git = (root, args) => (dead ? refusing(root, args) : live(root, args));
+      expect(await main(NW, h.deps)).toBe(1);
+      const text = h.records[0]!.text;
+      expect(text).toContain(`- Commit: ${A}\n`);
+      expect(text).toContain('- Commit after the last call: unknown (git failed) - the checkout changed during the run');
+      expect(text).not.toContain(NO_CERTIFICATE);
+    });
+
+    it('(PIN) a dry run sends nothing and certifies nothing, so an unreadable git does not fail it', async () => {
+      const h = nwHarness(() => ok({}), allClean, {});
+      h.deps.git = refusing;
+      expect(await main(['--suite', 'never-written', '--model', 'claude-sonnet-5-5', '--dry-run'], h.deps)).toBe(0);
+      expect(h.printed.join('\n')).toContain('Dry run: nothing was sent.');
+    });
+  });
+
   it('a record that cannot be written exits 1', async () => {
     const h = nwHarness((id) => nwPassing(id));
     h.deps.appendRecord = () => {

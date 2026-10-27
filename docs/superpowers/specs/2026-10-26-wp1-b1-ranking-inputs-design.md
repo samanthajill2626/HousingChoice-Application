@@ -384,8 +384,11 @@ five-line cap, the demotion rule (a demoted run appends no line), the
 - Run record, two counts shown in the run detail beside `notedLines`:
   `feedbackLines`, the appended lines for which `labelMatches` is true
   against any block label; and `unlabeledAddressLines`, the appended lines
-  that match no block label but contain a street address (a number
-  followed by a word, `\b\d+[a-z]?\s+[a-z]`, case-insensitive). The
+  that match no block label but contain a street address: a house number,
+  one to four words, then a street suffix (st, street, ave, avenue, rd,
+  road, dr, drive, ln, lane, ct, court, blvd, boulevard, way, pl, place,
+  cir, circle, pkwy, parkway, hwy, highway, ter, terrace, trl, trail),
+  case-insensitive, so "prefers 3 bedrooms" is not counted. The
   second makes an attach miss visible: feedback whose home was named
   some other way would otherwise read as general feedback on every
   property (charter 6.2). Counts only; nothing is dropped or rewritten.

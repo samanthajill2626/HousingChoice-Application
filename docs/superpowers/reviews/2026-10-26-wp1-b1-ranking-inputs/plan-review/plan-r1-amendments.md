@@ -309,3 +309,78 @@ lines AFTER this edit. Findings: plan-review/round2-reviewer-a.md.
   quotes a neutral word from the strict list of THAT kind (e.g. "light" in
   a color case, "age" in a children's-ages case) now fails the case; that
   is the intended trade, and the record names the term.
+
+# Round 3 - amendments written through (PR47-PR49)
+
+Plan v4 @3ed495fe, edited in place (not committed). Line numbers are plan
+lines AFTER this edit. Findings: plan-review/round3-reviewer-a.md.
+
+## PR47 - the AI run detail needs an admin login
+
+- S7.2 test 4 (14783ff, the login text 14810-14835): the tenant, send and
+  card checks stay on the file's VA `devLogin`; before the run detail the
+  test signs in as `founder@example.com` with a `devLoginAs` helper copied
+  from e2e/tests/dashboard-next/ai-run-log.spec.ts:18-25 (POST
+  /auth/dev-login `{ email }`, goto `/`, `expectTodayReady` - already
+  imported in conversation-fact-extraction.spec.ts:8), then opens the run
+  as ai-run-log.spec.ts:207-219 does (scoped `/settings/ai-runs` URL,
+  heading "AI run log", the one row in list "AI runs", region "AI run
+  detail", then region "Notes lines"). Only this test switches identity.
+  Cites checked: aiRuns.ts:137 `requireRole('admin')`, dev.ts:326 default
+  `va@example.com`.
+- S7.5 (14908ff): the run-detail self-QA check dev-logs in as
+  `founder@example.com` the same way.
+
+## PR48 - literal ages, U.S. spellings, '.' in terms
+
+- S6.1 Step 2: STRICT_TERMS doc comment (11479-11490) states the PR48 and
+  PR49 rules; national origin adds `u.s`, `united states`, `the states`,
+  `america` (11499); `excluded()` gains an `extraStrict` argument
+  (11579-11598; `strictTerms` = the kind's list then the extras); the
+  children's-ages free case passes `4 and 11`, `4 and an 11`,
+  `four and eleven` (11631), the feedback case `3 and 5`, `3 and a 5`,
+  `three and five` (11651).
+- Matcher check: termPattern (S6.3, 13166) escapes the term and adds an
+  end boundary only for terms of 3 characters or fewer, so a bare `4`
+  would be a whole word and hit "Wants 4 bedrooms" - a correct line of
+  that case. The ages are therefore phrases from the case messages; none
+  is a bare digit (a test pins that no case carries `4`).
+- S6.1 Step 1: both term-shape regexes allow `.` (11143, 11199); the test
+  helper `strictHitsIn` now escapes the term like termPattern (11190); the
+  excluded-case check reads "starts with its kind's list" instead of
+  equals (extras allowed); new case (11214-11230): the children's-ages
+  cases carry their ages, and "Two kids (4 and 11)", "kids 3 and 5",
+  "Moved to the U.S. ...", "Came to America ...", "Moved to the United
+  States ..." and "Expecting her first child" hit their own case's list.
+  The clean-line test (11251-11281) now runs each excluded CASE's full
+  list (kind + extras) and adds "Two kids; wants 3 or 4 bedrooms with a
+  yard" as a clean children's-ages line.
+- S6.3 Step 1 it.each (12793-12797): adds "Two kids (4 and 11)" and the
+  feedback-case "kids 3 and 5" (each FAILS its own case), "Moved to the
+  U.S. two years ago" (`u.s`) and "Came to America two years ago"
+  (`america`); the title now carries id and text (rows repeat an id).
+- S6 decision 4 (10968-10973).
+- Checked offline with node against the final lists: no strict false hit
+  on any case's self-test answer, labels or clean lines; every new
+  must-hit line hits.
+
+## PR49 - narrower strict terms
+
+- S6.1 Step 2: pregnancy `expecting` -> `expecting a`, `expecting her`,
+  `expecting his`, `expecting their` (11502); color drops `tone`, `light`
+  (11496); medical drops `condition` (11515). Header comment and decision
+  4 say `expecting her`.
+- Tests updated: S6.3's pregnancy row expects term `expecting her`; S6.1
+  adds clean lines "Expecting to move in by March", "...the landlord's
+  tone was cold", "...home is in good condition" and asserts none of
+  `expecting`, `tone`, `light`, `condition` is a strict term. No other
+  test referenced the dropped terms (the color leak uses `dark`, the
+  medical leak `treatment`).
+
+## Not applied, or judgment calls
+
+- None not applied. Judgment: the extra age phrasings (`4 and an 11`,
+  `four and eleven`, `3 and a 5`, `three and five`) follow the reviewer's
+  list; ages written another way ("an 11 and a 4") still pass the strict
+  layer - the union's `year old` / `ages` / `kids are` catch some of
+  those. These lists go to Cameron at the launch gate (PR38).

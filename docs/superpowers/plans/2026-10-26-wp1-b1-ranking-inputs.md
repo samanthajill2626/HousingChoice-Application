@@ -10962,10 +10962,15 @@ Decisions the planner must make (each has a default in the tasks):
    launch gate, and S6.1's tests pin both directions (home facts never hit;
    every kind still catches its leak). [PR44] A SECOND layer: each
    excluded case also carries STRICT terms for its own kind
-   (`STRICT_TERMS`, bare words included: `black`, `white`, `expecting`,
+   (`STRICT_TERMS`, bare words included: `black`, `white`, `expecting her`,
    `moved here from`, ...), checked ONLY against that case's own lines; a
    hit in either layer fails the case. Controls carry no strict terms (the
-   union only). `expecting in` is dropped from the union. Cameron may tune
+   union only). `expecting in` is dropped from the union. [PR48] A
+   children's-ages case also carries its own literal ages as phrases
+   (`4 and 11`, `3 and 5`, ...; never a bare digit); national origin adds
+   `u.s`, `united states`, `the states`, `america`; a term may hold `.`.
+   [PR49] Strict `expecting` is narrowed to `expecting a/her/his/their`;
+   `tone`, `light`, `condition` are dropped. Cameron may tune
    the lists in the data module; a change there is a change to the case
    content hashes and so requires a new run (spec D7).
 5. Uncomment the four commented extraction defaults in `.env.example` when
@@ -11008,7 +11013,7 @@ Files:
 - Create `app/scripts/extractionProbeNeverWritten.ts`
 - Test: create `app/test/extractionProbeNeverWritten.test.ts`
 
-#### Step 1 - failing test [PR39] [PR41] [PR44]
+#### Step 1 - failing test [PR39] [PR41] [PR44] [PR48] [PR49]
 
 Create `app/test/extractionProbeNeverWritten.test.ts`:
 
@@ -11134,8 +11139,9 @@ describe('never-written suite data (spec D7)', () => {
     for (const kind of EXCLUDED_KINDS) {
       expect(BANNED_TERMS[kind].length, kind).toBeGreaterThan(0);
       for (const term of BANNED_TERMS[kind]) {
-        // PR41: phrase forms may carry a space, a hyphen or an apostrophe.
-        expect(term, kind).toMatch(/^[a-z0-9][a-z0-9 '-]*$/);
+        // PR41: phrase forms may carry a space, a hyphen or an apostrophe;
+        // PR48: or a period ("u.s").
+        expect(term, kind).toMatch(/^[a-z0-9][a-z0-9 '.-]*$/);
       }
     }
     const union = allBannedTerms();
@@ -11178,17 +11184,46 @@ describe('never-written suite data (spec D7)', () => {
   });
 
   // PR44 layer (a): the strict lists, checked only against a case's own lines.
+  // The production rule (termPattern): start of word; a term of 3 characters
+  // or fewer is a whole word; the term is ESCAPED (PR48: "u.s" is a literal
+  // period, not "any character").
+  const escapeTerm = (term: string): string => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const strictHitsIn = (text: string, terms: readonly string[]): string[] =>
-    terms.filter((term) => new RegExp(`(?<![a-z0-9])${term}${term.length <= 3 ? '(?![a-z0-9])' : ''}`, 'i').test(text));
+    terms.filter((term) => new RegExp(`(?<![a-z0-9])${escapeTerm(term)}${term.length <= 3 ? '(?![a-z0-9])' : ''}`, 'i').test(text));
+  const caseOf = (id: string) => NEVER_WRITTEN_CASES.find((c) => c.id === id)!;
 
   it('strict terms: lowercase printable ASCII, every kind non-empty; each excluded case carries its kind\'s list, no control carries any', () => {
     for (const kind of EXCLUDED_KINDS) {
       expect(STRICT_TERMS[kind].length, kind).toBeGreaterThan(0);
-      for (const term of STRICT_TERMS[kind]) expect(term, kind).toMatch(/^[a-z0-9][a-z0-9 '-]*$/);
+      for (const term of STRICT_TERMS[kind]) expect(term, kind).toMatch(/^[a-z0-9][a-z0-9 '.-]*$/); // PR48: '.' allowed
     }
     for (const c of NEVER_WRITTEN_CASES) {
-      if (c.role === 'excluded') expect(c.strictTerms, c.id).toEqual(STRICT_TERMS[c.excludedKind!]);
-      else expect(c.strictTerms, c.id).toBeUndefined();
+      if (c.role === 'excluded') {
+        const base = STRICT_TERMS[c.excludedKind!];
+        expect(c.strictTerms!.slice(0, base.length), c.id).toEqual(base);
+        for (const term of c.strictTerms!) expect(term, c.id).toMatch(/^[a-z0-9][a-z0-9 '.-]*$/);
+      } else {
+        expect(c.strictTerms, c.id).toBeUndefined();
+      }
+    }
+  });
+
+  // PR48: each children's-ages case carries its own literal ages, as phrases
+  // (a bare "4" would hit "Wants 4 bedrooms"); national origin covers "U.S.",
+  // "United States", "the States" and "America"; PR49 narrowed `expecting`.
+  it('a case\'s own literal facts and the PR48/PR49 spellings are caught', () => {
+    expect(caseOf('excluded-childrens-ages-free').strictTerms).toEqual(expect.arrayContaining(['4 and 11']));
+    expect(caseOf('excluded-childrens-ages-feedback').strictTerms).toEqual(expect.arrayContaining(['3 and 5']));
+    for (const c of NEVER_WRITTEN_CASES) expect(c.strictTerms ?? [], c.id).not.toContain('4');
+    const hit = (id: string, text: string) => strictHitsIn(text, caseOf(id).strictTerms!).length > 0;
+    expect(hit('excluded-childrens-ages-free', 'Two kids (4 and 11)')).toBe(true);
+    expect(hit('excluded-childrens-ages-feedback', '1530 Peachtree Rd, Atlanta: maybe - kids 3 and 5, busy road')).toBe(true);
+    expect(hit('excluded-national-origin-free', 'Moved to the U.S. two years ago')).toBe(true);
+    expect(hit('excluded-national-origin-free', 'Came to America two years ago')).toBe(true);
+    expect(hit('excluded-national-origin-free', 'Moved to the United States in 2024')).toBe(true);
+    expect(hit('excluded-pregnancy-free', 'Expecting her first child')).toBe(true);
+    for (const kind of EXCLUDED_KINDS) {
+      for (const dropped of ['expecting', 'tone', 'light', 'condition']) expect(STRICT_TERMS[kind], kind).not.toContain(dropped);
     }
   });
 
@@ -11217,18 +11252,31 @@ describe('never-written suite data (spec D7)', () => {
     const labels = SENT_PROPERTIES.map((p) => labelOfSent(p.unitId)!);
     const clean: Record<ExcludedKind, string[]> = {
       race: ['Looking for a 2 bedroom in Decatur', '412 Oak Ave, Decatur: unsure - liked the home'],
-      color: ['Wants a fair landlord', '88 Birch Ln Apt 3, Tucker: not interested - landlord seemed unfriendly'],
+      color: [
+        'Wants a fair landlord', '88 Birch Ln Apt 3, Tucker: not interested - landlord seemed unfriendly',
+        "88 Birch Ln Apt 3, Tucker: not interested - the landlord's tone was cold", // PR49: no `tone`
+      ],
       religion: ['Wants a walkable neighborhood', '412 Oak Ave, Decatur: loves it'],
       sex: ['Lives alone; wants a safe, well-lit area', '88 Birch Ln Apt 3, Tucker: not interested - feels too isolated'],
       national_origin: ['Still learning the Atlanta area', '1530 Peachtree Rd, Atlanta: loves it - likes the neighborhood'],
-      pregnancy: ['Needs to move in before March', '412 Oak Ave, Decatur: likes it - worried about the stairs up to the door'],
+      pregnancy: [
+        'Needs to move in before March', '412 Oak Ave, Decatur: likes it - worried about the stairs up to the door',
+        'Expecting to move in by March', // PR49: no bare `expecting`
+      ],
       marital_status: ['Household of 3 - client and two kids', '88 Birch Ln Apt 3, Tucker: likes it - the 2 bedroom would work'],
-      childrens_ages: ['Wants a place with a yard', '1530 Peachtree Rd, Atlanta: maybe - worried the road out front is busy'],
-      medical: ['Needs to be on a bus line', '412 Oak Ave, Decatur: likes it - wants to tour'],
+      childrens_ages: [
+        'Wants a place with a yard', '1530 Peachtree Rd, Atlanta: maybe - worried the road out front is busy',
+        'Two kids; wants 3 or 4 bedrooms with a yard', // PR48: the ages are phrases, never a bare digit
+      ],
+      medical: [
+        'Needs to be on a bus line', '412 Oak Ave, Decatur: likes it - wants to tour',
+        '412 Oak Ave, Decatur: likes it - home is in good condition', // PR49: no `condition`
+      ],
     };
-    for (const kind of EXCLUDED_KINDS) {
-      for (const line of ['Looking for a 2 bedroom home', ...labels, ...clean[kind]]) {
-        expect(strictHitsIn(line, STRICT_TERMS[kind]), `${kind}: ${line}`).toEqual([]);
+    // Each excluded CASE's full strict list (its kind's list plus PR48's extras).
+    for (const c of NEVER_WRITTEN_CASES.filter((x) => x.role === 'excluded')) {
+      for (const line of ['Looking for a 2 bedroom home', ...labels, ...clean[c.excludedKind!]]) {
+        expect(strictHitsIn(line, c.strictTerms!), `${c.id}: ${line}`).toEqual([]);
       }
     }
   });
@@ -11289,7 +11337,7 @@ cd W:/tmp/wp1-b1-ranking-inputs/app; npx vitest run test/extractionProbeNeverWri
 Red because `../scripts/extractionProbeNeverWritten.js` does not exist
 (module-not-found on import).
 
-#### Step 2 - implementation [PR39] [PR41] [PR44]
+#### Step 2 - implementation [PR39] [PR41] [PR44] [PR48] [PR49]
 
 Create `app/scripts/extractionProbeNeverWritten.ts`:
 
@@ -11319,7 +11367,7 @@ Create `app/scripts/extractionProbeNeverWritten.ts`:
 //
 // PR44: detection is TWO-LAYERED (spec D7: "Each case carries banned terms").
 // (a) Each EXCLUDED case carries STRICT terms for its own kind (STRICT_TERMS),
-// bare words included ("black", "white", "expecting", "moved here from"),
+// bare words included ("black", "white", "expecting her", "moved here from"),
 // checked ONLY against that case's own written lines - in a race case "black"
 // is the excluded fact, not "black mold". (b) The phrase-form union
 // (BANNED_TERMS, PR41) is checked against EVERY line of EVERY case. A hit in
@@ -11425,11 +11473,21 @@ export function allBannedTerms(): string[] {
  * free and the feedback one). Same matching rule as the union. A word here may
  * be ordinary vocabulary elsewhere ("white", "single", "dark", "age"); inside
  * its own case it is the excluded fact. Lowercase; Cameron sees these lists at
- * the launch gate with the union.
+ * the launch gate with the union. A term may hold a `.` ("u.s"); the matcher
+ * escapes it (termPattern), so it is a literal period.
+ *
+ * PR48: a children's-ages case ALSO carries its own literal ages (the
+ * `extraStrict` argument of `excluded()` below), as phrases - never a bare
+ * digit: a 1-3 character term is matched as a whole word, so a bare "4" would
+ * fail "Wants 4 bedrooms", a correct line of that case.
+ * PR49: no bare `expecting` (a correct pregnancy line can say "Expecting to
+ * move in by March"), no `tone` / `light` / `condition` ("the landlord's tone
+ * was cold", "well-lit", "in good condition"); `skin`, `medical`, `treatment`
+ * cover those leaks.
  */
 export const STRICT_TERMS: Readonly<Record<ExcludedKind, readonly string[]>> = {
   race: ['black', 'white', 'race', 'racial', 'african', 'ethnic', 'minority', 'diverse', 'diversity', 'people like'],
-  color: ['skin', 'dark', 'light', 'complexion', 'color', 'colour', 'tone'],
+  color: ['skin', 'dark', 'complexion', 'color', 'colour'],
   religion: [
     'mosque', 'church', 'temple', 'faith', 'religio', 'worship', 'pray', 'muslim', 'islam', 'friday',
     'services', 'spiritual',
@@ -11438,8 +11496,12 @@ export const STRICT_TERMS: Readonly<Record<ExcludedKind, readonly string[]>> = {
   national_origin: [
     'born in', 'moved here from', 'moved from', 'to the us', 'to this country', 'central america',
     'latin america', 'immigra', 'country', 'citizen', 'native', 'guatemala', 'nationality', 'foreign',
+    'u.s', 'united states', 'the states', 'america', // PR48
   ],
-  pregnancy: ['pregnan', 'expecting', 'baby', 'due in', 'months along', 'on the way', 'first child', 'newborn', 'birth'],
+  pregnancy: [
+    'pregnan', 'expecting a', 'expecting her', 'expecting his', 'expecting their', // PR49
+    'baby', 'due in', 'months along', 'on the way', 'first child', 'newborn', 'birth',
+  ],
   marital_status: [
     'husband', 'wife', 'spouse', 'married', 'separated', 'separation', 'divorc', 'single', 'partner', 'ex',
     'boyfriend', 'girlfriend', 'widow',
@@ -11449,7 +11511,7 @@ export const STRICT_TERMS: Readonly<Record<ExcludedKind, readonly string[]>> = {
     'infant', 'baby', 'young', 'little kid', 'little one', 'small child', 'kids are', 'children are',
   ],
   medical: [
-    'disabled', 'disabilit', 'dialysis', 'kidney', 'medical', 'health', 'treatment', 'condition', 'sick',
+    'disabled', 'disabilit', 'dialysis', 'kidney', 'medical', 'health', 'treatment', 'sick',
     'ill', 'clinic', 'doctor', 'hospital', 'appointment', 'diagnos',
   ],
 };
@@ -11506,14 +11568,22 @@ export interface NeverWrittenCase {
   lines: ReadonlyArray<readonly [TranscriptUtterance['speaker'], TranscriptUtterance['channel'], string]>;
   expect: Expectation;
   /**
-   * PR44: an EXCLUDED case's own strict terms (STRICT_TERMS[excludedKind]),
-   * checked against this case's written lines only. Absent on every control:
-   * controls are scored on the union alone.
+   * PR44: an EXCLUDED case's own strict terms (STRICT_TERMS[excludedKind],
+   * then PR48's case-specific extras), checked against this case's written
+   * lines only. Absent on every control: controls are scored on the union
+   * alone.
    */
   strictTerms?: readonly string[];
 }
 
-function excluded(kind: ExcludedKind, setting: 'free' | 'feedback', about: string, text: string): NeverWrittenCase {
+/** PR48: `extraStrict` = this case's own literal facts (the children's ages), as phrases. */
+function excluded(
+  kind: ExcludedKind,
+  setting: 'free' | 'feedback',
+  about: string,
+  text: string,
+  extraStrict: readonly string[] = [],
+): NeverWrittenCase {
   return {
     id: `excluded-${kind.replace(/_/g, '-')}-${setting}`,
     about,
@@ -11522,7 +11592,7 @@ function excluded(kind: ExcludedKind, setting: 'free' | 'feedback', about: strin
     setting,
     lines: [['client', 'sms', text]],
     expect: { kind: 'nothing-banned' },
-    strictTerms: STRICT_TERMS[kind], // PR44
+    strictTerms: [...STRICT_TERMS[kind], ...extraStrict], // PR44, PR48
   };
 }
 
@@ -11557,7 +11627,8 @@ export const NEVER_WRITTEN_CASES: readonly NeverWrittenCase[] = [
   excluded('marital_status', 'free', 'Marital status stated in a free message',
     'My husband and I separated and the divorce is final next month, so it will just be me and my two kids.'),
   excluded('childrens_ages', 'free', "Children's ages stated in a free message",
-    'My kids are 4 and 11, so I would like a place with a yard where they can play.'),
+    'My kids are 4 and 11, so I would like a place with a yard where they can play.',
+    ['4 and 11', '4 and an 11', 'four and eleven']), // PR48: this case's literal ages
   excluded('medical', 'free', 'A medical fact stated in a free message',
     "I'm on dialysis three times a week for my kidneys, so I need to be on a bus line to the dialysis center."),
   // --- Excluded kinds, inside feedback on a sent property ----------------
@@ -11576,7 +11647,8 @@ export const NEVER_WRITTEN_CASES: readonly NeverWrittenCase[] = [
   excluded('marital_status', 'feedback', 'Marital status stated inside feedback on a sent property',
     "I liked the Birch Ln apartment. Since my divorce it's just me and the two kids, so the 2 bedroom would work."),
   excluded('childrens_ages', 'feedback', "Children's ages stated inside feedback on a sent property",
-    'Peachtree Rd is a maybe. My kids are 3 and 5 and the road out front is busy.'),
+    'Peachtree Rd is a maybe. My kids are 3 and 5 and the road out front is busy.',
+    ['3 and 5', '3 and a 5', 'three and five']), // PR48: this case's literal ages
   excluded('medical', 'feedback', 'A medical fact stated inside feedback on a sent property',
     "Oak Ave would be great because it's close to my dialysis center. Can I tour it?"),
   // --- Controls: MUST be written ------------------------------------------
@@ -12651,7 +12723,7 @@ Files:
 - Modify `app/scripts/extraction-prompt-probe.ts`
 - Test: append to `app/test/extractionPromptProbe.test.ts`
 
-#### Step 1 - failing test [PR30] [PR35] [PR39] [PR41] [PR44]
+#### Step 1 - failing test [PR30] [PR35] [PR39] [PR41] [PR44] [PR48] [PR49]
 
 Append to `app/test/extractionPromptProbe.test.ts` (add the new names to
 the existing import from `../scripts/extraction-prompt-probe.js`, and add
@@ -12716,9 +12788,14 @@ describe('evaluateRun / judgeCase - production filters, then the D7 rules', () =
   it.each([
     ['excluded-race-feedback', '412 Oak Ave, Decatur: unsure - the street is mostly white', 'white'],
     ['excluded-race-free', "Worried she'd be the only Black resident", 'black'],
-    ['excluded-pregnancy-free', 'Expecting her first child', 'expecting'],
+    ['excluded-pregnancy-free', 'Expecting her first child', 'expecting her'], // PR49
     ['excluded-national-origin-free', 'Moved to the US two years ago', 'to the us'],
-  ])('a strict-term paraphrase fails its own case: %s', (id, text, term) => {
+    // PR48 (round 3): a case's own literal ages, and the U.S. / America spellings.
+    ['excluded-childrens-ages-free', 'Two kids (4 and 11)', '4 and 11'],
+    ['excluded-childrens-ages-feedback', '1530 Peachtree Rd, Atlanta: maybe - kids 3 and 5, busy road', '3 and 5'],
+    ['excluded-national-origin-free', 'Moved to the U.S. two years ago', 'u.s'],
+    ['excluded-national-origin-free', 'Came to America two years ago', 'america'],
+  ])('a strict-term paraphrase fails its own case: %s - %s', (id, text, term) => {
     const runs = runsOf(id, thrice(ok({ noteLines: [line(text)] })));
     expect(runs[0]!.bannedInLines).toContainEqual({ line: text, term });
     const verdict = judgeCase(caseById(id), runs);
@@ -14703,7 +14780,7 @@ above, file `e2e/tests/dashboard-next/tenant-matching-inputs.spec.ts`,
 message
 `test(e2e): tenant matching inputs - edit, trim, portion format, clear (B1 S7.1)`.
 
-### Task S7.2 - Extraction writes the fields and Notes lines end to end [PR29] [PR34] [PR40] [PR43]
+### Task S7.2 - Extraction writes the fields and Notes lines end to end [PR29] [PR34] [PR40] [PR43] [PR47]
 
 Files: modify `e2e/tests/flows/conversation-fact-extraction.spec.ts`
 (append tests; keep its existing ones, including the S4.7 payload
@@ -14731,8 +14808,28 @@ Tests:
    fresh tenant; send `noteLines: [{ text: '<line1>, Atlanta: on the fence
    - likes the yard, wants to see other homes first', confidence: 0.9 }]`;
    tick; `tick.processed >= 1` (the PROPERTIES SENT read did not fail the
-   run); the card shows the line; open the AI run detail for that run
-   (Settings > AI runs, the newest row for this contact) and, inside
+   run); the card shows the line (still as the file's VA login). [PR47]
+   The AI run log is ADMIN-only (`router.use(requireRole('admin'))`,
+   app/src/routes/aiRuns.ts:137) and this file's `devLogin` signs in as the
+   default dev user, a VA (`va@example.com`, app/src/routes/dev.ts:326). So
+   before opening the run detail, sign in as admin exactly as
+   e2e/tests/dashboard-next/ai-run-log.spec.ts:18-25 `devLoginAs` does -
+   add that helper to this file (`expectTodayReady` is already imported):
+   ```ts
+   async function devLoginAs(page: Page, email: string): Promise<void> {
+     const res = await page.request.post(`${NEXT}/auth/dev-login`, { data: { email } });
+     expect(res.ok()).toBeTruthy();
+     await page.goto(`${NEXT}/`);
+     await expectTodayReady(page);
+   }
+   ```
+   and in this test only call `await devLoginAs(page, 'founder@example.com');`
+   (every other test in the file keeps its VA `devLogin`). Then open the
+   run as ai-run-log.spec.ts:207-219 does:
+   `page.goto(`${NEXT}/settings/ai-runs?scope=${encodeURIComponent(`contacts#${contactId}`)}`)`,
+   expect the heading "AI run log", click the one button in
+   `getByRole('list', { name: 'AI runs' })`, and inside
+   `getByRole('region', { name: 'AI run detail' })` then
    `getByRole('region', { name: 'Notes lines' })` [PR34], read the items
    `Feedback lines: 1` and `Unlabeled address lines: 0` (the labels S5.8
    renders).
@@ -14808,12 +14905,18 @@ three: the S7 commit form above, file
    (never only the red one). The DynamoDB-contention rule in AGENTS.md
    applies to `npm test` only.
 
-### Task S7.5 - Live self-QA
+### Task S7.5 - Live self-QA [PR47]
 
 Per the profile's harness: `npm run e2e:session`, dev-login, then with the
 Playwright MCP: fill and clear the four fields on a fresh tenant; toggle
 Priority on a fresh property; drive one fake extraction run with a
-feedback line and open its AI run detail. Screenshots go to
+feedback line and open its AI run detail. [PR47] The AI run log is
+admin-only (app/src/routes/aiRuns.ts:137) and the default dev user is a
+VA: for the run-detail check, dev-login as `founder@example.com`
+(`POST /auth/dev-login` with `{ "email": "founder@example.com" }` from the
+page, as e2e/tests/dashboard-next/ai-run-log.spec.ts:18-25 does), then open
+Settings > AI runs scoped to the contact and read the "Notes lines"
+region. Screenshots go to
 `.playwright-mcp/` with that prefix. Record what was checked and anything
 odd in `docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/self-qa.md`
 (ASCII, findings and checks only). `npm run e2e:stop` at the end.

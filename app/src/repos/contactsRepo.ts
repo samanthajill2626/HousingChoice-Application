@@ -687,9 +687,12 @@ export class IncompleteBatchReadError extends Error {
   constructor(
     public readonly unprocessed: number,
     public readonly requested: number,
+    /** The table read, for the message only (WP1 B1: unitsRepo.getDisplaysByIds
+     *  raises it too). Defaults to contacts, so every contacts caller reads as before. */
+    table = 'contacts',
   ) {
     super(
-      `contacts batch read incomplete: ${unprocessed} of ${requested} keys unread ` +
+      `${table} batch read incomplete: ${unprocessed} of ${requested} keys unread ` +
         'after retries; the caller requires a complete read',
     );
     this.name = 'IncompleteBatchReadError';

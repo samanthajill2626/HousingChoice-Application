@@ -46,7 +46,7 @@ import {
   rosterContactIds,
   type RosterContactsRead,
 } from '../lib/propertyContact.js';
-import { isDeleted as isContactDeleted } from './contactsRepo.js';
+import { IncompleteBatchReadError, isDeleted as isContactDeleted } from './contactsRepo.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
 /**
@@ -661,12 +661,21 @@ export interface UnitsRepo {
   getById(unitId: string, opts?: { consistentRead?: boolean }): Promise<UnitItem | undefined>;
   /**
    * Batch-read the display fields (unitId, address) of many units by primary
-   * key - BEST-EFFORT, like contactsRepo.getDisplaysByIds: 100-key chunks,
-   * UnprocessedKeys retried, keys still unread after the retries (or a chunk
-   * whose request failed) are dropped with a WARN (counts only). A short map
-   * is a missing LABEL, never an error. Soft-deleted units still answer.
+   * key - BEST-EFFORT by default, like contactsRepo.getDisplaysByIds: 100-key
+   * chunks, UnprocessedKeys retried, keys still unread after the retries (or a
+   * chunk whose request failed) are dropped with a WARN (counts only). A short
+   * map is a missing LABEL, never an error. Soft-deleted units still answer.
+   *
+   * `requireComplete` (WP1 B1 spec D5.1; the contactsRepo batchGetByIds
+   * precedent): an incomplete READ throws instead and nothing is WARNed - a
+   * chunk whose request failed rethrows that error, keys still unprocessed
+   * after the retries throw IncompleteBatchReadError. A key the read completed
+   * without finding (a unit that does not exist) is still just absent. Only
+   * the extraction job's PROPERTIES SENT read passes it, because there a
+   * dropped unit is a property the model cannot name; every other caller keeps
+   * the best-effort default.
    */
-  getDisplaysByIds(unitIds: string[]): Promise<Map<string, UnitDisplayItem>>;
+  getDisplaysByIds(unitIds: string[], opts?: { requireComplete?: boolean }): Promise<Map<string, UnitDisplayItem>>;
   /**
    * SET-merge update: only the supplied fields are written; omitted fields are
    * LEFT as stored (never blanked) — the same no-overwrite contract as
@@ -1274,7 +1283,7 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
     },
 
     // TODO(units-contacts-batchget-walk-duplicated): one shared walk with its twin, contactsRepo's private batchGetByIds.
-    async getDisplaysByIds(unitIds) {
+    async getDisplaysByIds(unitIds, opts) {
       const found = new Map<string, UnitDisplayItem>();
       // BatchGetItem REJECTS duplicate keys; callers may repeat an id.
       const uniqueIds = [...new Set(unitIds)];
@@ -1303,11 +1312,17 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
             keys = (response.UnprocessedKeys?.[table]?.Keys ?? []) as Array<{ unitId: string }>;
           }
         } catch (err) {
+          // A thrown chunk is an unread chunk. Rethrow only where short is not
+          // survivable (the contactsRepo batchGetByIds rule).
+          if (opts?.requireComplete === true) throw err;
           log.warn({ err, chunkKeys: keys.length }, 'units: BatchGet chunk failed - keys dropped');
         }
         unprocessed += keys.length;
       }
       if (unprocessed > 0) {
+        if (opts?.requireComplete === true) {
+          throw new IncompleteBatchReadError(unprocessed, uniqueIds.length, 'units');
+        }
         log.warn({ unprocessed, requested: uniqueIds.length }, 'units: BatchGet left keys unprocessed after retries');
       }
       return found;

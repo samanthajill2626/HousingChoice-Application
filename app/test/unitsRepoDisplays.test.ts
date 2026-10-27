@@ -11,6 +11,7 @@
 import { BatchGetCommand, type BatchGetCommandInput, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { describe, expect, it } from 'vitest';
 import { createLogger } from '../src/lib/logger.js';
+import { IncompleteBatchReadError } from '../src/repos/contactsRepo.js';
 import { createUnitsRepo } from '../src/repos/unitsRepo.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
@@ -155,5 +156,67 @@ describe('unitsRepo.getDisplaysByIds (stub client)', () => {
 
     expect(requests).toEqual([]);
     expect(found.size).toBe(0);
+  });
+});
+
+// WP1 B1 spec D5.1 (plan watch item WI8): `requireComplete`, the contactsRepo
+// batchGetByIds precedent. An incomplete READ throws - a failed chunk rethrows
+// its own error, keys still unread after the retries throw
+// IncompleteBatchReadError - and nothing is WARNed. A key the table answered
+// with NO row is a complete read of an absent unit. The default stays
+// best-effort for every other caller.
+describe('unitsRepo.getDisplaysByIds - requireComplete (WP1 B1 D5.1)', () => {
+  it('keys still unread after the retries throw IncompleteBatchReadError naming the units table; no WARN', async () => {
+    const { doc, requests } = stubDoc((keys) => ({ served: keys.slice(0, -1), unprocessed: keys.slice(-1) }));
+    const { units, capture } = makeRepo(doc);
+
+    const err = await units.getDisplaysByIds(unitIds(3), { requireComplete: true }).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(IncompleteBatchReadError);
+    expect(err).toMatchObject({ unprocessed: 1, requested: 3 });
+    expect((err as Error).message).toMatch(/^units batch read incomplete: 1 of 3 keys unread/);
+    // The first request plus the same three retries as the default path.
+    expect(requests).toHaveLength(4);
+    expect(capture.atLevel(40)).toEqual([]);
+  });
+
+  it('a chunk whose request THROWS rethrows that error and reads no further chunk; no WARN', async () => {
+    const { doc, requests } = stubDoc((keys, call) => (call === 2 ? 'throw' : { served: keys }));
+    const { units, capture } = makeRepo(doc);
+
+    await expect(units.getDisplaysByIds(unitIds(250), { requireComplete: true })).rejects.toThrow(
+      'stub: the request failed',
+    );
+
+    expect(requests.map((r) => keysOf(r).length)).toEqual([100, 100]);
+    expect(capture.atLevel(40)).toEqual([]);
+  });
+
+  it('(PIN) a key the table answered with NO row is a complete read: absent, never a throw', async () => {
+    const { doc } = stubDoc((keys) => ({ served: keys.filter((k) => k.unitId !== 'unit-001') }));
+    const { units } = makeRepo(doc);
+
+    const found = await units.getDisplaysByIds(unitIds(3), { requireComplete: true });
+
+    expect([...found.keys()].sort()).toEqual(['unit-000', 'unit-002']);
+  });
+
+  it('(PIN) WI8: without requireComplete (absent, {} or false) an unread key is dropped with a WARN, never a throw', async () => {
+    for (const opts of [undefined, {}, { requireComplete: false }]) {
+      const { doc } = stubDoc((keys) => ({ served: keys.slice(0, -1), unprocessed: keys.slice(-1) }));
+      const { units, capture } = makeRepo(doc);
+
+      const found = await units.getDisplaysByIds(unitIds(3), opts);
+
+      expect(found.size).toBe(2);
+      expect(capture.atLevel(40)).toHaveLength(1);
+    }
+  });
+
+  it('(PIN) the contacts message is unchanged when no table is named', () => {
+    expect(new IncompleteBatchReadError(1, 2).message).toMatch(/^contacts batch read incomplete: 1 of 2 keys unread/);
   });
 });

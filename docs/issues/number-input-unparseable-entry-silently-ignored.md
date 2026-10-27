@@ -3,7 +3,8 @@ id: number-input-unparseable-entry-silently-ignored
 title: Property and contact number inputs silently ignore an entry the browser cannot parse
 type: bug
 severity: low
-status: open
+status: wontfix
+resolved: 2026-10-27
 area: dashboard
 created: 2026-10-27
 refs: dashboard/src/routes/listing/ListingEditForm.tsx:161, dashboard/src/routes/listing/UnitCreateForm.tsx:487, dashboard/src/routes/contact/ContactEditForm.tsx:435
@@ -30,3 +31,15 @@ pre-existing inputs were left alone as out of B1's scope.
 Save) and refuse with the field's existing "must be a number" message, as
 FW-11 does for the portion; one shared helper for the property and contact
 forms.
+
+**Resolution (2026-10-27).** Not a bug in a browser - filed in error from a
+jsdom-only reproduction. None of these forms sets `noValidate`
+(ListingEditForm.tsx:309, UnitCreateForm.tsx:418, ContactEditForm.tsx:692),
+so the browser's own constraint validation treats an entry it cannot parse
+(`validity.badInput`) as invalid, shows its own message ("Please enter a
+number.") and never fires the form's submit handler; nothing is saved and
+nothing is silently dropped. Observed in Chromium 155 by the WP1 B1 R2
+review (R2-2); Firefox reports badInput as a validity error the same way.
+jsdom gates submit only on its own validity, so a test that stubs
+`validity.badInput` reaches the handler where a browser never would. The B1
+portion input keeps its FW-11 check only as defense in depth.

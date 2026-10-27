@@ -362,6 +362,10 @@ export interface AiRunRecordView {
    *  (spec 2026-10-06 D8; plan 3.10). Absent when the run exited at a skip
    *  gate before reading the list. */
   orgListFingerprint?: string;
+  /** sha256 hex of the PROPERTIES SENT block the run's prompt carried (WP1 B1
+   *  spec D5.1). Absent on a run that exited before reading the sends, and on
+   *  every run recorded before B1. */
+  sentPropertiesFingerprint?: string;
   usage?: { inputTokens: number; outputTokens: number };
   window?: {
     detail: 'light' | 'full'; cursor: string; newestTsMsgId?: string; hasInferredRoleContent?: boolean;
@@ -385,6 +389,11 @@ export interface AiRunRecordView {
   notesBelowFloor?: number;
   /** B1 spec D4: note lines a demoted (unknown-speaker) run withheld. */
   notesDemoted?: number;
+  /** WP1 B1 spec D5.3: of the appended lines, those naming a property in the
+   *  PROPERTIES SENT block, and those carrying a street address that names
+   *  none. Absent on runs that never reached apply and on runs before B1. */
+  feedbackLines?: number;
+  unlabeledAddressLines?: number;
   expires_at?: number;
 }
 

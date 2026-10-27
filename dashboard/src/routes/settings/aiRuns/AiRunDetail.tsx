@@ -63,14 +63,25 @@ function WindowMessages({ messages, full }: { messages: AiRunWindowMessage[]; fu
  * themselves are in the Parsed result. A run recorded before B1 carries only
  * notedLines; a run with nothing to report renders nothing. The region renders
  * when a line was appended or any count is PRESENT (a present 0 renders as 0).
+ * WP1 B1 spec D5.1 / D5.3 (PR34, PR42, PR46): it also carries the feedback
+ * counts (feedbackLines, unlabeledAddressLines) and the PROPERTIES SENT block's
+ * fingerprint; a run carrying only the fingerprint (it read the sends, then
+ * failed before apply) shows that item alone, with no "appended" row.
  */
 function NotesLines({ run }: { run: AiRunDetailResponse['run'] }): React.JSX.Element | null {
-  const counted = run.notesBelowFloor !== undefined || run.notesDemoted !== undefined;
-  if (!counted && run.notedLines === 0) return null;
+  // Any S4/S5 count present = apply ran (PR46); the fingerprint alone = the
+  // run read the sends and failed before apply (PR42).
+  const counted = run.notesBelowFloor !== undefined || run.notesDemoted !== undefined
+    || run.feedbackLines !== undefined || run.unlabeledAddressLines !== undefined;
+  const fingerprinted = run.sentPropertiesFingerprint !== undefined;
+  if (!counted && !fingerprinted && run.notedLines === 0) return null;
   return <section className={styles.block} aria-label="Notes lines"><h4>Notes lines</h4><ul className={styles.countList}>
-    <li>{run.notedLines} appended</li>
+    {counted || run.notedLines > 0 ? <li>{run.notedLines} appended</li> : null}
     {run.notesBelowFloor !== undefined ? <li>{run.notesBelowFloor} below the confidence floor</li> : null}
     {run.notesDemoted !== undefined ? <li>{run.notesDemoted} withheld by the unknown-speaker rule</li> : null}
+    {run.feedbackLines !== undefined ? <li>Feedback lines: {run.feedbackLines}</li> : null}
+    {run.unlabeledAddressLines !== undefined ? <li>Unlabeled address lines: {run.unlabeledAddressLines}</li> : null}
+    {run.sentPropertiesFingerprint ? <li>Properties sent fingerprint: {run.sentPropertiesFingerprint}</li> : null}
   </ul></section>;
 }
 

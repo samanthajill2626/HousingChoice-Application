@@ -246,6 +246,79 @@ describe('AiRunsSection - the organization list', () => {
     renderSection();
     expect(screen.queryByText(/Organization list fingerprint/)).not.toBeInTheDocument();
   });
+
+  // WP1 B1 spec D5.1 / D5.3 (PR34): the PROPERTIES SENT block's fingerprint
+  // and the two feedback counts are items in the "Notes lines" region, after
+  // S4's counts. Nothing new goes in the header.
+  it('shows the properties sent fingerprint and the feedback counts in the Notes lines region', () => {
+    const sentPropertiesFingerprint = 'a'.repeat(64);
+    useAiRun.mockReturnValueOnce({
+      detail: { ...detail, run: { ...detail.run, notedLines: 3, notesBelowFloor: 0, notesDemoted: 0, sentPropertiesFingerprint, feedbackLines: 2, unlabeledAddressLines: 1 } },
+      status: 'ready',
+      retry: vi.fn(),
+    });
+    renderSection();
+    const notes = within(screen.getByRole('region', { name: 'Notes lines' }));
+    expect(notes.getByText('Feedback lines: 2')).toBeInTheDocument();
+    expect(notes.getByText('Unlabeled address lines: 1')).toBeInTheDocument();
+    expect(notes.getByText(`Properties sent fingerprint: ${sentPropertiesFingerprint}`)).toBeInTheDocument();
+    const header = screen.getByRole('heading', { name: /run run-1/i }).parentElement as HTMLElement;
+    expect(header).not.toHaveTextContent('Properties sent fingerprint');
+  });
+
+  // The guard widens (PR34): a run whose ONLY B1 counts are the two feedback
+  // counts, both 0, with notedLines 0, still renders the region.
+  it('shows a zero count as 0, not as missing', () => {
+    useAiRun.mockReturnValueOnce({
+      detail: { ...detail, run: { ...detail.run, notedLines: 0, feedbackLines: 0, unlabeledAddressLines: 0 } },
+      status: 'ready',
+      retry: vi.fn(),
+    });
+    renderSection();
+    const notes = within(screen.getByRole('region', { name: 'Notes lines' }));
+    expect(notes.getByText('Feedback lines: 0')).toBeInTheDocument();
+    expect(notes.getByText('Unlabeled address lines: 0')).toBeInTheDocument();
+  });
+
+  // PR42 / PR46: a run that read the sends and then failed before apply
+  // carries only the fingerprint (recordRun writes notedLines 0: the job's
+  // failed-call path sets it to 0 and recordRun defaults it with `?? 0`). The
+  // region shows the fingerprint item alone: no "appended" row, because apply
+  // never ran.
+  it('shows a fingerprint-only run as the fingerprint item alone, with no appended row', () => {
+    const sentPropertiesFingerprint = 'b'.repeat(64);
+    useAiRun.mockReturnValueOnce({
+      detail: { ...detail, run: { ...detail.run, notedLines: 0, sentPropertiesFingerprint } },
+      status: 'ready',
+      retry: vi.fn(),
+    });
+    renderSection();
+    const region = screen.getByRole('region', { name: 'Notes lines' });
+    const notes = within(region);
+    expect(notes.getByText(`Properties sent fingerprint: ${sentPropertiesFingerprint}`)).toBeInTheDocument();
+    expect(region).not.toHaveTextContent('appended');
+    expect(notes.getAllByRole('listitem')).toHaveLength(1);
+  });
+
+  // PR46: a run recorded before B1 that appended a line still shows the
+  // appended row (no counts, notedLines > 0).
+  it('keeps the appended row for a pre-B1 run that appended a line', () => {
+    useAiRun.mockReturnValueOnce({
+      detail: { ...detail, run: { ...detail.run, notedLines: 2 } },
+      status: 'ready',
+      retry: vi.fn(),
+    });
+    renderSection();
+    expect(within(screen.getByRole('region', { name: 'Notes lines' })).getByText('2 appended')).toBeInTheDocument();
+  });
+
+  it('(PIN) a run recorded before B1 shows no properties sent line and no feedback counts', () => {
+    renderSection();
+    expect(screen.queryByRole('region', { name: 'Notes lines' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Properties sent fingerprint/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Feedback lines/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Unlabeled address lines/)).not.toBeInTheDocument();
+  });
 });
 
 // B1 spec D3: a write on a filled text field is a labelled drop, never a raw token.

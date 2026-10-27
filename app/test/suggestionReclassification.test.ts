@@ -242,9 +242,12 @@ describe('D1 change 1: the accept plan reads the contact consistently', () => {
 });
 
 describe('D1 change 2: a tenant-only accept on a contact not typed tenant is refused before the claim', () => {
-  it('names exactly the seven tenant-only targets', () => {
+  // B1 spec D3: the four tenant matching inputs are tenant facts, so they join
+  // the seven. The drift guard below fails if a new target is left unclassified.
+  it('names exactly the eleven tenant-only targets', () => {
     expect([...TENANT_ONLY_TARGETS].sort()).toEqual([
-      'evictions', 'housingAuthority', 'pets', 'porting', 'status', 'tenure', 'voucherSize',
+      'accessibility_need', 'area_preference', 'evictions', 'housingAuthority', 'max_tenant_portion',
+      'pets', 'porting', 'preferences_constraints', 'status', 'tenure', 'voucherSize',
     ]);
   });
 

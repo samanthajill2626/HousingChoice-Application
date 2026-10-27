@@ -1126,7 +1126,7 @@ describe('runDueExtractions - the run log envelope', () => {
       await runDueExtractions(NOW, h.deps);
       expect(h.runs[0]).toMatchObject({ outcome: 'failed', error: { kind: failure } });
       expect(h.runs[0]!.window!.detail).toBe('full');
-      expect(Object.keys(h.runs[0]!.decisions)).toHaveLength(12);
+      expect(Object.keys(h.runs[0]!.decisions)).toHaveLength(16);
       expect(h.runs[0]!.rawText).toBe('{broken');
     }
   });

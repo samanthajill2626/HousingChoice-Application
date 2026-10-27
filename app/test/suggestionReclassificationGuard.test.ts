@@ -16,7 +16,11 @@ import {
 } from '../src/repos/suggestionResolutionRepo.js';
 import { createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 
-const TENANT_ONLY = ['housingAuthority', 'voucherSize', 'pets', 'evictions', 'tenure', 'porting', 'status'];
+const TENANT_ONLY = [
+  'housingAuthority', 'voucherSize', 'pets', 'evictions', 'tenure', 'porting', 'status',
+  // B1 spec D3: the tenant matching inputs are tenant-only too.
+  'area_preference', 'max_tenant_portion', 'accessibility_need', 'preferences_constraints',
+];
 
 function journal(target: string, plan: ResolutionReplayPlan): ActiveSuggestionResolution {
   return {

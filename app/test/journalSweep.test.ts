@@ -132,7 +132,8 @@ describe('journal sweep: constants are the operator-approved values', () => {
     expect(MAX_RECOVERY_CALLS_PER_RUN).toBe(100);
     expect(MAX_SCAN_PAGES).toBe(20);
     expect(SCAN_PAGE_LIMIT).toBe(200);
-    expect(SWEEP_MAX_ATTEMPTS_PER_CALL).toBe(12);
+    // B1 spec D3: the closed DECISION_TARGETS key set is sixteen.
+    expect(SWEEP_MAX_ATTEMPTS_PER_CALL).toBe(16);
   });
 });
 

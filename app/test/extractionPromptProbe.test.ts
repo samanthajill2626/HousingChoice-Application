@@ -22,6 +22,7 @@ import {
   DEFAULT_CASES,
   canonicalRoot,
   compareDefaultSuites,
+  endpointOf,
   keyTail,
   main,
   parseProbeArgs,
@@ -66,11 +67,13 @@ interface Harness {
   errors: string[];
   records: Array<{ file: string; text: string }>;
   inputs: ExtractionInput[];
+  /** Every extraction call in the order it was made: the driver's root and the case. */
+  calls: Array<{ root: string; caseId: string }>;
   driversCreated: string[];
 }
 
 function harness(answer: Answer, env: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: KEY }): Harness {
-  const h: Harness = { deps: {}, printed: [], errors: [], records: [], inputs: [], driversCreated: [] };
+  const h: Harness = { deps: {}, printed: [], errors: [], records: [], inputs: [], calls: [], driversCreated: [] };
   const counts = new Map<string, number>();
   h.deps = {
     env,
@@ -90,6 +93,7 @@ function harness(answer: Answer, env: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: K
         extract: async (input) => {
           h.inputs.push(input);
           const id = caseIdOf(input);
+          h.calls.push({ root: opts.root, caseId: id });
           const key = `${opts.root}|${id}`;
           const nth = counts.get(key) ?? 0;
           counts.set(key, nth + 1);
@@ -208,7 +212,9 @@ describe('main - the default suite (behavior kept)', () => {
 
   it('every request carries the production ORGANIZATION LIST and PROPERTIES SENT blocks', async () => {
     const h = harness((id) => defaultCorrect(id));
-    await main(['--model', 'claude-sonnet-5-5', '--runs', '1'], h.deps);
+    expect(await main(['--model', 'claude-sonnet-5-5', '--runs', '1'], h.deps)).toBe(0);
+    // FW-10 (R1 ADV-15): never vacuous - one request per case was checked.
+    expect(h.inputs).toHaveLength(DEFAULT_CASES.length);
     for (const input of h.inputs) {
       const content = prompt.buildExtractionUserContent(input);
       expect(content).toContain('ORGANIZATION LIST');
@@ -326,6 +332,8 @@ describe('evaluateRun - the production filters, then the items the grader judges
     expect(req.user.startsWith(`PLANTED FACT: ${c.plantedFact!}\n`)).toBe(true);
     expect(req.user).not.toContain(c.lines[0]![2]);
     expect(graderRequest(caseById('control-plain-fact'), []).user.startsWith('PLANTED FACT: none\n')).toBe(true);
+    // FW-9 (R1 ADV-8): not "none" for the control whose message names a therapist.
+    expect(graderRequest(caseById('control-assistance-animal'), []).user.startsWith(`PLANTED FACT: ${caseById('control-assistance-animal').plantedFact!}\n`)).toBe(true);
   });
 
   it('a run with nothing to judge needs no grader call and counts as graded', () => {
@@ -669,6 +677,7 @@ describe('cost and the record', () => {
       dirty: false,
       model: 'claude-sonnet-5-5',
       keyTail: '...wxyz',
+      endpoint: endpointOf({}),
       extractionFingerprint: prompt.extractionPromptFingerprint(),
       graderFingerprint: graderPromptFingerprint(),
       floor: 0.7,
@@ -896,8 +905,11 @@ describe('main --suite never-written', () => {
     for (const c of NEVER_WRITTEN_CASES.filter((x) => x.role === 'excluded')) {
       expect(h.graderRequests.filter((r) => r.user.startsWith(planted(c.id))), c.id).toHaveLength(GATE_RUNS);
     }
-    const gradedControls = NEVER_WRITTEN_CASES.filter((x) => x.role === 'control' && x.expect.kind !== 'no-address-op').length;
-    expect(h.graderRequests.filter((r) => r.user.startsWith('PLANTED FACT: none\n'))).toHaveLength(gradedControls * GATE_RUNS);
+    // FW-9 (R1 ADV-8): the assistance-animal control tells the grader about
+    // its therapist; every other graded control plants none.
+    expect(h.graderRequests.filter((r) => r.user.startsWith(planted('control-assistance-animal')))).toHaveLength(GATE_RUNS);
+    const plantsNone = NEVER_WRITTEN_CASES.filter((x) => x.role === 'control' && x.expect.kind !== 'no-address-op' && x.plantedFact === undefined).length;
+    expect(h.graderRequests.filter((r) => r.user.startsWith('PLANTED FACT: none\n'))).toHaveLength(plantsNone * GATE_RUNS);
   });
 
   // PR30: the block goes through production selectSentRows (the flyer share
@@ -1071,6 +1083,24 @@ describe('main --suite never-written', () => {
     expect(fail.printed.join('\n')).toContain('PARTIAL - one case (--case control-feedback-unsure), not a gate run');
   });
 
+  // FW-7 (code review R1 ADV-7): one tolerated ungraded run passes the gate,
+  // but neither the console nor the Verdict line may read as a bare PASS.
+  it('the console and the Verdict line state ungraded runs and the lines they hold', async () => {
+    let seen = 0;
+    const h = nwHarness((id) => nwPassing(id), (items, req) =>
+      (req.user.startsWith(planted('excluded-medical-free')) && seen++ < 1
+        ? { ok: false, failure: 'refusal', message: 'stub refusal' }
+        : allClean(items)));
+    expect(await main(NW, h.deps)).toBe(0);
+    const note = "1 ungraded run(s) holding 1 line(s) - read them under 'Lines the grader did not judge'";
+    expect(h.records[0]!.text).toContain(`- Verdict: PASS on every automatic check - PENDING Cameron's sign-off below; ${note}`);
+    expect(h.printed).toContain(`${note}.`);
+    const clean = nwHarness((id) => nwPassing(id));
+    expect(await main(NW, clean.deps)).toBe(0);
+    expect(clean.records[0]!.text).not.toContain('ungraded run(s) holding');
+    expect(clean.printed.join('\n')).not.toContain('ungraded run(s) holding');
+  });
+
   // FW-6 (code review R1 ADV-11): the record certifies the commit that was
   // MEASURED - read before the first call and again after the last.
   it('reads the commit and dirty flag before the first extraction call and again after the last', async () => {
@@ -1135,6 +1165,49 @@ describe('main --suite never-written', () => {
 });
 
 /** A side every one of whose runs returned a result (all GATE_RUNS measured per case), unless `measuredByCase` says otherwise. */
+// FW-8 (code review R1 ADV-12): the SDK reads ANTHROPIC_BASE_URL and
+// ANTHROPIC_AUTH_TOKEN from the environment, so the gate prints and records
+// where its calls go - the base URL's host only, and whether a bearer token is
+// set, never a value. Every env here is injected; nothing reads process.env.
+describe('the API endpoint is printed and recorded (FW-8)', () => {
+  const PROXY_ENV = {
+    ANTHROPIC_API_KEY: KEY,
+    ANTHROPIC_BASE_URL: 'https://probe-user:probe-pass@proxy.example.test:8443/v1?token=probe-query',
+    ANTHROPIC_AUTH_TOKEN: 'probe-bearer-value',
+  };
+  const leaks = ['probe-user', 'probe-pass', 'probe-query', 'probe-bearer-value', '/v1'];
+
+  it('endpointOf: the host only, or default; whether a bearer token is set', () => {
+    expect(endpointOf({})).toEqual({ baseUrlHost: 'default', authToken: 'no' });
+    expect(endpointOf({ ANTHROPIC_BASE_URL: '  ', ANTHROPIC_AUTH_TOKEN: '' })).toEqual({ baseUrlHost: 'default', authToken: 'no' });
+    expect(endpointOf(PROXY_ENV)).toEqual({ baseUrlHost: 'proxy.example.test:8443 (from ANTHROPIC_BASE_URL)', authToken: 'yes' });
+    expect(endpointOf({ ANTHROPIC_BASE_URL: 'not a url' }).baseUrlHost).toBe('ANTHROPIC_BASE_URL is set but is not a URL');
+  });
+
+  it('the never-written suite prints and records it, and nothing of the values', async () => {
+    const h = nwHarness((id) => nwPassing(id), allClean, PROXY_ENV);
+    expect(await main(NW, h.deps)).toBe(0);
+    const printed = h.printed.join('\n');
+    expect(printed).toContain('  endpoint  proxy.example.test:8443 (from ANTHROPIC_BASE_URL); ANTHROPIC_AUTH_TOKEN set: yes');
+    expect(h.records[0]!.text).toContain('- API endpoint: proxy.example.test:8443 (from ANTHROPIC_BASE_URL); ANTHROPIC_AUTH_TOKEN set: yes');
+    for (const leak of leaks) {
+      expect(printed, leak).not.toContain(leak);
+      expect(h.records[0]!.text, leak).not.toContain(leak);
+    }
+  });
+
+  it('the comparison prints and records it; the plain suite prints it', async () => {
+    const cmp = harness((id) => defaultCorrect(id), PROXY_ENV);
+    expect(await main(CMP, cmp.deps)).toBe(0);
+    expect(cmp.printed.join('\n')).toContain('  endpoint  proxy.example.test:8443 (from ANTHROPIC_BASE_URL); ANTHROPIC_AUTH_TOKEN set: yes');
+    expect(cmp.records[0]!.text).toContain('- API endpoint: proxy.example.test:8443 (from ANTHROPIC_BASE_URL); ANTHROPIC_AUTH_TOKEN set: yes');
+    for (const leak of leaks) expect(cmp.records[0]!.text, leak).not.toContain(leak);
+    const plain = harness((id) => defaultCorrect(id));
+    expect(await main(['--model', 'claude-sonnet-5-5', '--runs', '1'], plain.deps)).toBe(0);
+    expect(plain.printed).toContain('  endpoint  default; ANTHROPIC_AUTH_TOKEN set: no');
+  });
+});
+
 function side(okByCase: Record<string, number>, truncations = 0, measuredByCase?: Record<string, number>): SideScore {
   const totalOk = Object.values(okByCase).reduce((n, x) => n + x, 0);
   return {
@@ -1220,6 +1293,11 @@ describe('main --baseline', () => {
     expect(await main(CMP, h.deps)).toBe(0);
     expect(h.driversCreated).toHaveLength(2);
     expect(h.inputs).toHaveLength(DEFAULT_CASES.length * GATE_RUNS * 2);
+    // FW-10 (R1 ADV-15): the calls go case by case, run by run, branch then
+    // baseline, so time-of-day drift hits both sides alike.
+    expect(h.calls.map((call) => `${isBaseline(call.root) ? 'baseline' : 'branch'} ${call.caseId}`)).toEqual(
+      DEFAULT_CASES.flatMap((c) => Array.from({ length: GATE_RUNS }, () => [`branch ${c.id}`, `baseline ${c.id}`]).flat()),
+    );
     const text = h.records[0]!.text;
     expect(text).toContain('Default suite, branch vs baseline');
     expect(text).toContain(`${'a'.repeat(40)}`);

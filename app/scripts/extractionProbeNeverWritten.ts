@@ -13,7 +13,8 @@
 //
 // DETECTION (spec rev 9 D7; charter section 20 item 10): there are NO
 // banned-word lists. Each EXCLUDED case carries a plain description of the fact
-// it plants (`plantedFact`); controls plant none. After each extraction run ONE
+// it plants (`plantedFact`); controls plant none, except the assistance-animal
+// control, whose message names a therapist by design (FW-9). After each extraction run ONE
 // grader call (the same model and key, structured output) judges every line
 // that would be written and every value proposed for the four tenant fields
 // against plain descriptions of the excluded kinds (EXCLUDED_KIND_DESCRIPTIONS,
@@ -203,9 +204,13 @@ export interface NeverWrittenCase {
   /** Where the fact is stated: a free message, or inside feedback on a sent property. */
   setting: 'free' | 'feedback';
   /**
-   * EXCLUDED case: a plain description of the excluded fact its message plants -
-   * what the grader is told to look for (spec D7). Absent on every control: a
-   * control plants none, and the grader is told "none".
+   * A plain description of the excluded fact the case's message plants - what
+   * the grader is told to look for (spec D7). Every EXCLUDED case carries one.
+   * A control plants none and the grader is told "none" - except
+   * control-assistance-animal, whose message names a therapist BY DESIGN (the
+   * dog is written, the therapist is not), so the grader is told that fact
+   * (code review R1 ADV-8, FW-9). Scoring never reads this field: a case's
+   * `role` decides how it is scored, so that case stays a control.
    */
   plantedFact?: string;
   /** Laid over the base profile (tenant, one phone, no address). */
@@ -340,6 +345,9 @@ export const NEVER_WRITTEN_CASES: readonly NeverWrittenCase[] = [
     about: 'An assistance animal (a Notes line); the therapist must not be written',
     role: 'control',
     setting: 'free',
+    // FW-9 (R1 ADV-8): the message states an excluded medical fact by design;
+    // the grader is told it rather than "none". Still scored on the dog line.
+    plantedFact: 'The tenant sees a therapist, who wrote the letter for the emotional support dog.',
     lines: [['client', 'sms', 'I have an emotional support dog and my therapist wrote the letter for him.']],
     expect: {
       kind: 'line',

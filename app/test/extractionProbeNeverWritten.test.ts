@@ -71,19 +71,26 @@ describe('never-written suite data (spec D7)', () => {
 
   // Spec D7: "Each excluded case carries a PLAIN DESCRIPTION of the fact it
   // plants ... Control cases plant none." Distinct, so a grader request can
-  // be traced to its case by its PLANTED FACT line.
-  it('every excluded case plants one described fact, all distinct; no control plants any', () => {
+  // be traced to its case by its PLANTED FACT line. FW-9 (code review R1
+  // ADV-8): the one control whose message names an excluded fact by design -
+  // the assistance animal's therapist - tells the grader so, and stays a
+  // control (scored on the dog line).
+  it('every excluded case plants one described fact; of the controls only the assistance animal does (its therapist); all distinct', () => {
     const facts: string[] = [];
     for (const c of NEVER_WRITTEN_CASES) {
-      if (c.role === 'excluded') {
+      if (c.role === 'excluded' || c.id === 'control-assistance-animal') {
         expect(c.plantedFact, c.id).toMatch(/^The tenant\b.*\.$/);
         facts.push(c.plantedFact!);
       } else {
         expect(c.plantedFact, c.id).toBeUndefined();
       }
     }
-    expect(facts).toHaveLength(EXCLUDED_KINDS.length * 2);
+    expect(facts).toHaveLength(EXCLUDED_KINDS.length * 2 + 1);
     expect(new Set(facts).size).toBe(facts.length);
+    const animal = NEVER_WRITTEN_CASES.find((c) => c.id === 'control-assistance-animal')!;
+    expect(animal.role).toBe('control');
+    expect(animal.expect.kind).toBe('line');
+    expect(animal.plantedFact).toMatch(/therapist/);
   });
 
   it('carries every control the spec names, once', () => {

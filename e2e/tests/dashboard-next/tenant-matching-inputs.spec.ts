@@ -61,7 +61,7 @@ test('tenant matching inputs: staff fill the four fields, a text value is trimme
   // through the label span's parent, so the value is checked against ITS label.
   const row = (label: string): Locator => intake.getByText(label, { exact: true }).locator('..');
 
-  // --- 1. Four rows, labelled exactly, each BLANK on a fresh tenant. ---
+  // --- 1. Four rows, labeled exactly, each BLANK on a fresh tenant. ---
   for (const label of MATCHING_LABELS) {
     await expect(row(label), label).toHaveText(`${label}${BLANK}`);
   }

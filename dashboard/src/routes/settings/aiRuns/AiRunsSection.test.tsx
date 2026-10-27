@@ -321,7 +321,7 @@ describe('AiRunsSection - the organization list', () => {
   });
 });
 
-// B1 spec D3: a write on a filled text field is a labelled drop, never a raw token.
+// B1 spec D3: a write on a filled text field is a labeled drop, never a raw token.
 describe('AiRunsSection - the tenant matching inputs', () => {
   it('labels a write dropped on a filled text field', () => {
     useAiRun.mockReturnValueOnce({ detail: { ...detail, run: { ...detail.run, decisions: {

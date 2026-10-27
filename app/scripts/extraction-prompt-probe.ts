@@ -108,6 +108,7 @@ import type {
   StructuredOutputRequest,
   TranscriptUtterance,
 } from '../src/adapters/extraction.js';
+import { TENANT_MATCHING_INPUTS } from '../src/lib/tenantMatchingInputs.js';
 import type { ListingSendItem } from '../src/repos/listingSendsRepo.js';
 import type { UnitDisplayItem } from '../src/repos/unitsRepo.js';
 import type { SentPropertyEntry } from '../src/services/extraction/sentPropertiesBlock.js';
@@ -172,7 +173,7 @@ const BASE_PATHS = {
   starting: 'app/src/lib/orgStartingList.ts',
   logger: 'app/src/lib/logger.ts',
 } as const;
-/** S5.3's module (PR30). Its presence is how a checkout is recognised as WP1 B1. */
+/** S5.3's module (PR30). Its presence is how a checkout is recognized as WP1 B1. */
 const SENT_BLOCK_PATH = 'app/src/services/extraction/sentPropertiesBlock.ts';
 const BRANCH_PATHS = {
   apply: 'app/src/services/extraction/apply.ts',
@@ -449,12 +450,20 @@ function norm(value: string | undefined): string | undefined {
   return value === undefined ? undefined : value.trim().toLowerCase();
 }
 
+/**
+ * FW-15 (code review R1 CONF-7): the WP1 B1 inputs of the `dollars` kind, found
+ * through THIS checkout's list (a leaf module) - the probe names none of them.
+ */
+const DOLLARS_INPUTS: ReadonlySet<string> = new Set(
+  TENANT_MATCHING_INPUTS.filter((i) => i.kind === 'dollars').map((i) => i.key),
+);
+
 /** Place a recorded value on the profile in the type the job's toProfile gives it. */
 function withRecorded(profile: ExtractionProfileSnapshot, field: ExtractableField, recorded: string): void {
   if (field === 'voucherSize') profile.voucherSize = Number(recorded);
   else if (field === 'porting') profile.porting = recorded === 'true';
-  // The WP1 B1 dollars field is a number on the profile; every other field is text.
-  else (profile as unknown as Record<string, unknown>)[field] = field === 'max_tenant_portion' ? Number(recorded) : recorded;
+  // A WP1 B1 dollars input is a number on the profile; every other field is text.
+  else (profile as unknown as Record<string, unknown>)[field] = DOLLARS_INPUTS.has(field) ? Number(recorded) : recorded;
 }
 
 /** tsMsgId carries the case id (never rendered into the prompt) so a stub driver can tell cases apart. */
@@ -539,6 +548,45 @@ export function keyTail(key: string | undefined): string {
   if (key === undefined || key.length === 0) return '(not set)';
   if (key.length < 8) return '(set, too short to show)';
   return `...${key.slice(-4)}`;
+}
+
+/** FW-8: where the API calls go, as printed - never a credential or a value beyond the URL's host. */
+export interface Endpoint {
+  /** The host of ANTHROPIC_BASE_URL (with "(from ANTHROPIC_BASE_URL)"), or "default". */
+  baseUrlHost: string;
+  /** Whether ANTHROPIC_AUTH_TOKEN is set - never its value. */
+  authToken: 'yes' | 'no';
+}
+
+/**
+ * FW-8 (code review R1 ADV-12): the SDK reads ANTHROPIC_BASE_URL and
+ * ANTHROPIC_AUTH_TOKEN from the environment when the client is given none, so
+ * a proxy or mock left in the shell would silently redirect both the
+ * extraction and the grader calls. Read from the INJECTED env: the base URL's
+ * host only (never its path, query or credentials), and whether a bearer
+ * token is set.
+ */
+export function endpointOf(env: NodeJS.ProcessEnv): Endpoint {
+  const raw = env.ANTHROPIC_BASE_URL?.trim() ?? '';
+  let baseUrlHost = 'default';
+  if (raw.length > 0) {
+    try {
+      baseUrlHost = `${new URL(raw).host || '(no host)'} (from ANTHROPIC_BASE_URL)`;
+    } catch {
+      baseUrlHost = 'ANTHROPIC_BASE_URL is set but is not a URL';
+    }
+  }
+  return { baseUrlHost: asciiSafe(baseUrlHost), authToken: (env.ANTHROPIC_AUTH_TOKEN ?? '').trim().length > 0 ? 'yes' : 'no' };
+}
+
+/** FW-8: the console line every suite prints under its key. */
+function endpointConsoleLine(e: Endpoint): string {
+  return `  endpoint  ${e.baseUrlHost}; ANTHROPIC_AUTH_TOKEN set: ${e.authToken}`;
+}
+
+/** FW-8: the record line both records carry under the key. */
+function endpointRecordLine(e: Endpoint): string {
+  return `- API endpoint: ${e.baseUrlHost}; ANTHROPIC_AUTH_TOKEN set: ${e.authToken}`;
 }
 
 function selectCases<T extends { id: string }>(all: readonly T[], id: string | undefined): readonly T[] | undefined {
@@ -703,6 +751,8 @@ export function renderComparisonRecord(r: {
   attempts: readonly ComparisonAttempt[];
   /** FW-3: --case was given - one case, not a gate run; the section never counts. */
   partial: boolean;
+  /** FW-8: where both sides' calls went. */
+  endpoint: Endpoint;
 }): string {
   const final = r.attempts[r.attempts.length - 1]!;
   const out: string[] = [];
@@ -711,7 +761,7 @@ export function renderComparisonRecord(r: {
     `- Verdict: ${final.comparison.pass ? 'PASS' : 'FAIL'} (after ${r.attempts.length} attempt(s))`
       + (r.partial ? ' - PARTIAL (one case, not a gate run; it never counts)' : ''),
   );
-  out.push(`- Model: ${r.model}`, `- Key: ${r.keyTail}`);
+  out.push(`- Model: ${r.model}`, `- Key: ${r.keyTail}`, endpointRecordLine(r.endpoint));
   const [b, m] = r.sides;
   out.push(`- Branch: ${asciiSafe(b.root)} @ ${b.commit}${b.dirty ? ' (tracked files modified)' : ''}, prompt ${b.fingerprint}`);
   out.push(`- Baseline: ${asciiSafe(m.root)} @ ${m.commit}${m.dirty ? ' (tracked files modified)' : ''}, prompt ${m.fingerprint}`);
@@ -818,6 +868,8 @@ export interface CaseVerdict {
   /** Runs both scored and graded (or with nothing to judge). */
   gradedRuns: number;
   ungradedRuns: number;
+  /** FW-7: the items of those runs that carry no verdict - what "Lines the grader did not judge" lists. */
+  ungradedItems: number;
   /** Written lines judged excluded - each fails the case. */
   excludedLines: number;
   /** Field values judged excluded - reported, never failing. */
@@ -832,6 +884,8 @@ export interface SuiteVerdict {
   excludedFields: number;
   truncations: number;
   ungradedRuns: number;
+  /** FW-7: see CaseVerdict.ungradedItems. */
+  ungradedItems: number;
 }
 
 function meets(
@@ -1065,7 +1119,9 @@ export function judgeCase(c: NeverWrittenCase, runs: readonly NeverWrittenRun[])
   const excludedFields = judged.filter((i) => i.source === 'field' && i.verdict === 'excluded').length;
   const truncations = runs.filter((r) => r.failure === 'truncated').length;
   const gradedRuns = runs.filter((r) => r.ok && (r.grading === 'graded' || r.grading === 'not-needed')).length;
-  const ungradedRuns = runs.filter((r) => r.ok && (r.grading === 'ungraded' || r.grading === 'pending')).length;
+  const ungraded = runs.filter((r) => r.ok && (r.grading === 'ungraded' || r.grading === 'pending'));
+  const ungradedRuns = ungraded.length;
+  const ungradedItems = ungraded.reduce((n, r) => n + r.items.filter((i) => i.verdict === undefined).length, 0);
   const passedRuns = runs.filter((r) => r.passed).length;
   if (excludedLines > 0) reasons.push(`${excludedLines} written line(s) judged to state an excluded fact`);
   if (truncations > 0) reasons.push(`${truncations} truncated call(s) - raise MAX_OUTPUT_TOKENS and re-run`);
@@ -1076,7 +1132,7 @@ export function judgeCase(c: NeverWrittenCase, runs: readonly NeverWrittenRun[])
     reasons.push(`control met in ${passedRuns} of ${runs.length} runs (needs ${CONTROL_MIN_PASSES})`);
   }
   return {
-    id: c.id, pass: reasons.length === 0, reasons, passedRuns, gradedRuns, ungradedRuns,
+    id: c.id, pass: reasons.length === 0, reasons, passedRuns, gradedRuns, ungradedRuns, ungradedItems,
     excludedLines, excludedFields, truncations,
   };
 }
@@ -1091,7 +1147,20 @@ export function judgeSuite(verdicts: readonly CaseVerdict[]): SuiteVerdict {
     excludedFields: sum((v) => v.excludedFields),
     truncations: sum((v) => v.truncations),
     ungradedRuns: sum((v) => v.ungradedRuns),
+    ungradedItems: sum((v) => v.ungradedItems),
   };
+}
+
+/**
+ * FW-7 (code review R1 ADV-7): ungraded runs stated beside the verdict, on the
+ * console and in the record ('' when there are none). One tolerated ungraded
+ * run never fails the gate (spec D7: one grader call per run, no retry), so
+ * its lines are Cameron's to read.
+ */
+export function ungradedNote(s: Pick<SuiteVerdict, 'ungradedRuns' | 'ungradedItems'>): string {
+  return s.ungradedRuns === 0
+    ? ''
+    : `${s.ungradedRuns} ungraded run(s) holding ${s.ungradedItems} line(s) - read them under 'Lines the grader did not judge'`;
 }
 
 /** USD from the dated price table; undefined for a model it does not list (never guessed). */
@@ -1201,6 +1270,8 @@ export interface NeverWrittenRecordInput {
   after?: { commit: string; dirty: boolean };
   model: string;
   keyTail: string;
+  /** FW-8: where the extraction and grader calls went. */
+  endpoint: Endpoint;
   extractionFingerprint: string;
   graderFingerprint: string;
   floor: number;
@@ -1228,7 +1299,8 @@ export function renderNeverWrittenRecord(r: NeverWrittenRecordInput): string {
     : "PASS on every automatic check - PENDING Cameron's sign-off below";
   const out: string[] = [];
   out.push(`## Never-written suite - ${r.startedAt}${r.partial ? ' (PARTIAL: one case, not a gate run)' : ''}`, '');
-  out.push(`- Verdict: ${r.suite.pass ? passText : 'FAIL'}`);
+  const ungraded = ungradedNote(r.suite);
+  out.push(`- Verdict: ${r.suite.pass ? passText : 'FAIL'}${ungraded === '' ? '' : `; ${ungraded}`}`);
   for (const reason of r.suite.reasons) out.push(`  - ${asciiSafe(reason)}`);
   out.push(`- Commit: ${commitText(r)}`);
   if (r.after !== undefined && checkoutChanged(r, r.after)) {
@@ -1236,6 +1308,7 @@ export function renderNeverWrittenRecord(r: NeverWrittenRecordInput): string {
   }
   out.push(`- Model: ${r.model}`);
   out.push(`- Key: ${r.keyTail}`);
+  out.push(endpointRecordLine(r.endpoint));
   out.push(`- Extraction prompt fingerprint: ${r.extractionFingerprint}`);
   out.push(`- Grader prompt fingerprint: ${r.graderFingerprint} (same model and key; one call per run that wrote a line or proposed a field value)`);
   out.push(`- Notes floor (EXTRACTION_FACT_MIN_CONFIDENCE): ${r.floor}`);
@@ -1290,7 +1363,11 @@ export function renderNeverWrittenRecord(r: NeverWrittenRecordInput): string {
   for (const { c, contentHash: hash, runs, verdict } of r.cases) {
     out.push(`### ${c.id} - ${verdict.pass ? 'PASS' : 'FAIL'}`, '');
     out.push(`- About: ${asciiSafe(c.about)}`);
-    out.push(`- Planted fact: ${c.plantedFact === undefined ? 'none (a control plants no excluded fact)' : asciiSafe(c.plantedFact)}`);
+    out.push(
+      `- Planted fact: ${c.plantedFact === undefined ? 'none (a control plants no excluded fact)' : asciiSafe(c.plantedFact)}`
+        // FW-9: a control whose message states an excluded fact by design.
+        + (c.role === 'control' && c.plantedFact !== undefined ? ' (stated in this control by design; it is still scored as a control)' : ''),
+    );
     out.push(
       c.role === 'excluded'
         ? `- Excluded kind: ${c.excludedKind}, stated in ${c.setting === 'free' ? 'a free message' : 'feedback on a sent property'}`
@@ -1561,6 +1638,7 @@ async function runDefault(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string): Pro
   deps.print(`  checkout  ${root}`);
   deps.print(`  model     ${model}`);
   deps.print(`  key       ${keyTail(apiKey)}`);
+  deps.print(endpointConsoleLine(endpointOf(deps.env)));
   deps.print(`  prompt    ${m.prompt.extractionPromptFingerprint()}`);
   deps.print(`  runs      ${runs} per case, ${cases.length} case(s), ${runs * cases.length} call(s)`);
   if (a.dryRun) {
@@ -1609,6 +1687,7 @@ async function runNeverWritten(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string)
   deps.print(`  checkout  ${root}`);
   deps.print(`  model     ${model}`);
   deps.print(`  key       ${keyTail(apiKey)}`);
+  deps.print(endpointConsoleLine(endpointOf(deps.env)));
   deps.print(`  prompt    ${extractionFingerprint}`);
   deps.print(`  grader    ${graderFingerprint} (same model and key; one call per run with a line or a field value)`);
   deps.print(`  floor     ${floor}`);
@@ -1658,7 +1737,7 @@ async function runNeverWritten(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string)
   }
   if (changed) deps.print(`  FAIL  ${changeReason}`);
   deps.appendRecord(a.out!, renderNeverWrittenRecord({
-    startedAt, commit: gitBefore.commit, dirty: gitBefore.dirty, after: gitAfter, model, keyTail: keyTail(apiKey),
+    startedAt, commit: gitBefore.commit, dirty: gitBefore.dirty, after: gitAfter, model, keyTail: keyTail(apiKey), endpoint: endpointOf(deps.env),
     extractionFingerprint, graderFingerprint, floor, partial: a.caseId !== undefined,
     cases: perCase, suite, labels, sentBlock,
   }));
@@ -1674,6 +1753,9 @@ async function runNeverWritten(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string)
       : `FAIL: ${judged.reasons.length} case(s)${changed ? ', and the checkout changed during the run' : ''} - see the record.`
         + (partial ? ' (PARTIAL - one case, not a gate run.)' : ''),
   );
+  // FW-7 (code review R1 ADV-7): never a bare PASS over a run the grader did not judge.
+  const ungraded = ungradedNote(suite);
+  if (ungraded !== '') deps.print(`${ungraded}.`);
   return suite.pass ? 0 : 1;
 }
 async function runComparison(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string): Promise<0 | 1 | 2> {
@@ -1702,6 +1784,7 @@ async function runComparison(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string): 
   deps.print(`  baseline  ${sides[1].root} @ ${sides[1].commit}, prompt ${sides[1].fingerprint}`);
   deps.print(`  model     ${model}`);
   deps.print(`  key       ${keyTail(apiKey)}`);
+  deps.print(endpointConsoleLine(endpointOf(deps.env)));
   const perAttempt = cases.length * GATE_RUNS * 2;
   deps.print(`  runs      ${GATE_RUNS} per case per side, ${cases.length} case(s), ${perAttempt} call(s); up to ${perAttempt * 2} with the one re-run`);
   if (a.caseId !== undefined) deps.print(`  partial   ${partialText(a.caseId)}`);
@@ -1738,7 +1821,9 @@ async function runComparison(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string): 
     if (attempt === 1) deps.print('The comparison failed; re-running both sides once (spec D7).');
   }
   const partial = a.caseId !== undefined;
-  deps.appendRecord(a.out!, renderComparisonRecord({ startedAt, model, keyTail: keyTail(apiKey), cases, sides, attempts, partial }));
+  deps.appendRecord(a.out!, renderComparisonRecord({
+    startedAt, model, keyTail: keyTail(apiKey), endpoint: endpointOf(deps.env), cases, sides, attempts, partial,
+  }));
   deps.print(`\nRecord appended to ${a.out}`);
   if (partial) deps.print(partialText(a.caseId!));
   return attempts[attempts.length - 1]!.comparison.pass ? 0 : 1;

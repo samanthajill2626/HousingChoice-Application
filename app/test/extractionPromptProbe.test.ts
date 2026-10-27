@@ -20,18 +20,21 @@ import * as prompt from '../src/services/extraction/prompt.js';
 import * as sentBlock from '../src/services/extraction/sentPropertiesBlock.js';
 import {
   DEFAULT_CASES,
+  compareDefaultSuites,
   keyTail,
   main,
   parseProbeArgs,
   type BaseModules,
   type BranchModules,
   type ProbeCliDeps,
+  type SideScore,
 } from '../scripts/extraction-prompt-probe.js';
 
 const base: BaseModules = { extraction, prompt, orgList, starting, logger, sentBlock };
 const branch: BranchModules = { ...base, sentBlock, apply, label, inputs, config };
 const KEY = 'sk-test-not-a-real-key-wxyz';
 const BRANCH_ROOT = 'W:/probe-test/branch';
+const BASELINE_ROOT = 'W:/probe-test/main';
 
 function ok(result: Partial<ExtractionResult>): ExtractionCall {
   return {
@@ -920,5 +923,85 @@ describe('main --suite never-written', () => {
     expect(printed).toContain(`grader    ${graderPromptFingerprint()}`);
     expect(printed).toContain(EXCLUDED_KIND_DESCRIPTIONS.religion);
     for (const c of NEVER_WRITTEN_CASES) expect(printed, c.id).toContain(`  planted   ${c.plantedFact ?? 'none'}`);
+  });
+});
+
+function side(okByCase: Record<string, number>, truncations = 0): SideScore {
+  const totalOk = Object.values(okByCase).reduce((n, x) => n + x, 0);
+  return { okByCase, totalOk, truncations, totals: { ok: totalOk, missed: 0, wrong: 0, failed: truncations }, inputTokens: 0, outputTokens: 0 };
+}
+
+describe('compareDefaultSuites - the spec D7 thresholds', () => {
+  it('fails when one case is 2 or more below the baseline', () => {
+    const c = compareDefaultSuites(side({ a: 1, b: 3 }), side({ a: 3, b: 3 }));
+    expect(c.pass).toBe(false);
+    expect(c.caseDrops).toEqual([{ id: 'a', branch: 1, baseline: 3 }]);
+  });
+
+  it('fails when the total is MORE than 2 below, though no case dropped 2', () => {
+    expect(compareDefaultSuites(side({ a: 2, b: 2, c: 2 }), side({ a: 3, b: 3, c: 3 })).pass).toBe(false);
+  });
+
+  it('passes within the bounds: total exactly 2 below, each case 1 below', () => {
+    const c = compareDefaultSuites(side({ a: 2, b: 2, c: 3 }), side({ a: 3, b: 3, c: 3 }));
+    expect(c.pass).toBe(true);
+    expect(c.totalDelta).toBe(-2);
+  });
+
+  it('a branch truncation fails the comparison', () => {
+    expect(compareDefaultSuites(side({ a: 3 }, 1), side({ a: 3 })).pass).toBe(false);
+  });
+});
+
+const CMP = ['--model', 'claude-sonnet-5-5', '--baseline', BASELINE_ROOT, '--out', 'rec.md'];
+const isBaseline = (root: string) => root.endsWith('main');
+
+describe('main --baseline', () => {
+  it('runs every default case 3 times on each side, interleaved, and passes (exit 0)', async () => {
+    const h = harness((id) => defaultCorrect(id));
+    expect(await main(CMP, h.deps)).toBe(0);
+    expect(h.driversCreated).toHaveLength(2);
+    expect(h.inputs).toHaveLength(DEFAULT_CASES.length * GATE_RUNS * 2);
+    const text = h.records[0]!.text;
+    expect(text).toContain('Default suite, branch vs baseline');
+    expect(text).toContain(`${'a'.repeat(40)}`);
+    expect(text).toContain(`${'b'.repeat(40)}`);
+    expect(text).toContain('Attempt 1 - PASS');
+    expect(text).not.toContain('Attempt 2');
+  });
+
+  it('a persistent regression against main fails after one re-run of both sides (exit 1)', async () => {
+    const h = harness((id, _nth, root) =>
+      !isBaseline(root) && id === 'states-voucher' ? ok({}) : defaultCorrect(id),
+    );
+    expect(await main(CMP, h.deps)).toBe(1);
+    expect(h.inputs).toHaveLength(DEFAULT_CASES.length * GATE_RUNS * 2 * 2);
+    const text = h.records[0]!.text;
+    expect(text).toContain('Attempt 1 - FAIL');
+    expect(text).toContain('Attempt 2 - FAIL');
+    expect(text).toMatch(/states-voucher: ok 0 on the branch vs 3 on the baseline/);
+  });
+
+  it('a regression the re-run does not repeat passes, and both attempts are recorded', async () => {
+    const h = harness((id, nth, root) =>
+      !isBaseline(root) && id === 'states-voucher' && nth < GATE_RUNS ? ok({}) : defaultCorrect(id),
+    );
+    expect(await main(CMP, h.deps)).toBe(0);
+    const text = h.records[0]!.text;
+    expect(text).toContain('Attempt 1 - FAIL');
+    expect(text).toContain('Attempt 2 - PASS');
+  });
+
+  it('the baseline naming the measured checkout is a usage error', async () => {
+    const h = harness((id) => defaultCorrect(id));
+    expect(await main(['--model', 'claude-sonnet-5-5', '--baseline', BRANCH_ROOT, '--out', 'rec.md'], h.deps)).toBe(2);
+    expect(h.driversCreated).toEqual([]);
+  });
+
+  it('a dry run calls nothing and writes nothing', async () => {
+    const h = harness(() => ok({}), {});
+    expect(await main(['--model', 'claude-sonnet-5-5', '--baseline', BASELINE_ROOT, '--dry-run'], h.deps)).toBe(0);
+    expect(h.driversCreated).toEqual([]);
+    expect(h.records).toEqual([]);
   });
 });

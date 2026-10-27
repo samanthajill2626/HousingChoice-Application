@@ -585,6 +585,123 @@ function printDefaultTable(
 }
 
 // ---------------------------------------------------------------------------
+// The default suite, branch vs baseline (spec D7).
+// ---------------------------------------------------------------------------
+
+export interface SideScore {
+  okByCase: Record<string, number>;
+  totalOk: number;
+  truncations: number;
+  totals: Record<Verdict, number>;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+export interface Comparison {
+  pass: boolean;
+  reasons: string[];
+  caseDrops: Array<{ id: string; branch: number; baseline: number }>;
+  totalDelta: number;
+}
+
+export function scoreSide(cases: readonly ProbeCase[], runs: number, outcomes: readonly RunOutcome[]): SideScore {
+  const okByCase: Record<string, number> = {};
+  const totals: Record<Verdict, number> = { ok: 0, missed: 0, wrong: 0, failed: 0 };
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let truncations = 0;
+  cases.forEach((c, ci) => {
+    const mine = outcomes.slice(ci * runs, (ci + 1) * runs);
+    okByCase[c.id] = mine.filter((o) => o.verdict === 'ok').length;
+    for (const o of mine) {
+      totals[o.verdict] += 1;
+      inputTokens += o.inputTokens;
+      outputTokens += o.outputTokens;
+      if (o.verdict === 'failed' && o.said === 'truncated') truncations += 1;
+    }
+  });
+  return { okByCase, totalOk: totals.ok, truncations, totals, inputTokens, outputTokens };
+}
+
+/** FAIL when a case's ok count is 2 or more below the baseline's, the total is MORE than 2 below, or the branch truncated. */
+export function compareDefaultSuites(branch: SideScore, baseline: SideScore): Comparison {
+  const reasons: string[] = [];
+  const caseDrops = Object.keys(baseline.okByCase)
+    .map((id) => ({ id, branch: branch.okByCase[id] ?? 0, baseline: baseline.okByCase[id] ?? 0 }))
+    .filter((d) => d.baseline - d.branch >= 2);
+  for (const d of caseDrops) reasons.push(`${d.id}: ok ${d.branch} on the branch vs ${d.baseline} on the baseline (2 or more below)`);
+  const totalDelta = branch.totalOk - baseline.totalOk;
+  if (totalDelta < -2) reasons.push(`total ok ${branch.totalOk} on the branch vs ${baseline.totalOk} on the baseline (more than 2 below)`);
+  if (branch.truncations > 0) reasons.push(`${branch.truncations} truncated call(s) on the branch`);
+  return { pass: reasons.length === 0, reasons, caseDrops, totalDelta };
+}
+
+interface ComparisonSide {
+  root: string;
+  m: BaseModules;
+  commit: string;
+  dirty: boolean;
+  fingerprint: string;
+  orgListBlock: string;
+  sentBlock: string;
+}
+
+interface ComparisonAttempt {
+  branch: SideScore;
+  baseline: SideScore;
+  comparison: Comparison;
+  outcomes: [RunOutcome[], RunOutcome[]];
+}
+
+function notOkLines(cases: readonly ProbeCase[], outcomes: readonly RunOutcome[]): string[] {
+  const lines: string[] = [];
+  cases.forEach((c, ci) => {
+    const mine = outcomes.slice(ci * GATE_RUNS, (ci + 1) * GATE_RUNS).filter((o) => o.verdict !== 'ok');
+    const seen = new Map<string, number>();
+    for (const o of mine) seen.set(`${o.verdict}: ${o.said}`, (seen.get(`${o.verdict}: ${o.said}`) ?? 0) + 1);
+    for (const [said, n] of seen) lines.push(`  - ${c.id} ${asciiSafe(said)} x${n}`);
+  });
+  return lines;
+}
+
+export function renderComparisonRecord(r: {
+  startedAt: string;
+  model: string;
+  keyTail: string;
+  cases: readonly ProbeCase[];
+  sides: readonly [ComparisonSide, ComparisonSide];
+  attempts: readonly ComparisonAttempt[];
+}): string {
+  const final = r.attempts[r.attempts.length - 1]!;
+  const out: string[] = [];
+  out.push(`## Default suite, branch vs baseline - ${r.startedAt}`, '');
+  out.push(`- Verdict: ${final.comparison.pass ? 'PASS' : 'FAIL'} (after ${r.attempts.length} attempt(s))`);
+  out.push(`- Model: ${r.model}`, `- Key: ${r.keyTail}`);
+  const [b, m] = r.sides;
+  out.push(`- Branch: ${asciiSafe(b.root)} @ ${b.commit}${b.dirty ? ' (tracked files modified)' : ''}, prompt ${b.fingerprint}`);
+  out.push(`- Baseline: ${asciiSafe(m.root)} @ ${m.commit}${m.dirty ? ' (tracked files modified)' : ''}, prompt ${m.fingerprint}`);
+  out.push(
+    `- Rule (spec D7): ${GATE_RUNS} runs per case per side; FAIL when any case's ok count is 2 or more below the baseline's,`
+      + ' the total ok count is more than 2 below it, or the branch truncates; one re-run of both sides is allowed.',
+    '',
+  );
+  r.attempts.forEach((a, i) => {
+    out.push(`### Attempt ${i + 1} - ${a.comparison.pass ? 'PASS' : 'FAIL'}`, '');
+    out.push('| case | branch ok | baseline ok |', '|---|---|---|');
+    for (const c of r.cases) out.push(`| ${c.id} | ${a.branch.okByCase[c.id] ?? 0}/${GATE_RUNS} | ${a.baseline.okByCase[c.id] ?? 0}/${GATE_RUNS} |`);
+    const max = r.cases.length * GATE_RUNS;
+    out.push(`| total | ${a.branch.totalOk}/${max} | ${a.baseline.totalOk}/${max} |`, '');
+    for (const reason of a.comparison.reasons) out.push(`- Reason: ${asciiSafe(reason)}`);
+    out.push('- Branch answers that were not ok:', ...notOkLines(r.cases, a.outcomes[0]));
+    out.push('- Baseline answers that were not ok:', ...notOkLines(r.cases, a.outcomes[1]));
+    out.push(`- Branch tokens: in ${a.branch.inputTokens}, out ${a.branch.outputTokens}; ${costText(r.model, a.branch.inputTokens, a.branch.outputTokens)}`);
+    out.push(`- Baseline tokens: in ${a.baseline.inputTokens}, out ${a.baseline.outputTokens}; ${costText(r.model, a.baseline.inputTokens, a.baseline.outputTokens)}`);
+    out.push('');
+  });
+  return out.join('\n');
+}
+
+// ---------------------------------------------------------------------------
 // The never-written suite (spec D7 rev 9) - pure scoring, the grader's answer
 // and the record. There are no banned-word lists: ONE grader call per run
 // judges every item (S6.4 makes the call; this section builds the request and
@@ -1299,7 +1416,6 @@ async function runDefault(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string): Pro
   return totals.wrong > 0 || totals.failed > 0 ? 1 : 0;
 }
 
-// Placeholders - S6.4 and S6.5 replace these two bodies.
 async function runNeverWritten(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string): Promise<0 | 1 | 2> {
   const cases = selectCases(NEVER_WRITTEN_CASES, a.caseId);
   if (cases === undefined) {
@@ -1377,9 +1493,67 @@ async function runNeverWritten(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string)
   );
   return suite.pass ? 0 : 1;
 }
-async function runComparison(_a: ProbeArgs, deps: ProbeCliDeps, _apiKey: string): Promise<0 | 1 | 2> {
-  deps.printError('--baseline is built in plan task S6.5');
-  return 1;
+async function runComparison(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string): Promise<0 | 1 | 2> {
+  const cases = selectCases(DEFAULT_CASES, a.caseId);
+  if (cases === undefined) return usage(deps, `No case "${a.caseId}". Cases: ${DEFAULT_CASES.map((c) => c.id).join(', ')}`);
+  const model = a.model!; // parseProbeArgs refuses --baseline without one
+  const roots = [path.resolve(a.repo ?? deps.ownRoot), path.resolve(a.baseline!)] as const;
+  if (roots[0] === roots[1]) return usage(deps, '--baseline names the same checkout as the measured side');
+  const startedAt = deps.now();
+  const sides = (await Promise.all(
+    roots.map(async (root): Promise<ComparisonSide> => {
+      const m = await deps.loadBaseModules(root);
+      const git = deps.gitInfo(root);
+      return {
+        root, m, commit: git.commit, dirty: git.dirty,
+        fingerprint: m.prompt.extractionPromptFingerprint(),
+        orgListBlock: startingOrgListBlock(m),
+        sentBlock: renderSentBlock(m, []),
+      };
+    }),
+  )) as unknown as [ComparisonSide, ComparisonSide];
+  deps.print('Extraction prompt probe - default suite, branch vs baseline (WP1 B1 merge gate, spec D7)');
+  deps.print(`  branch    ${sides[0].root} @ ${sides[0].commit}, prompt ${sides[0].fingerprint}`);
+  deps.print(`  baseline  ${sides[1].root} @ ${sides[1].commit}, prompt ${sides[1].fingerprint}`);
+  deps.print(`  model     ${model}`);
+  deps.print(`  key       ${keyTail(apiKey)}`);
+  const perAttempt = cases.length * GATE_RUNS * 2;
+  deps.print(`  runs      ${GATE_RUNS} per case per side, ${cases.length} case(s), ${perAttempt} call(s); up to ${perAttempt * 2} with the one re-run`);
+  if (a.dryRun) {
+    deps.print(''); // [PR52] its own blank line: the test matches the whole string
+    deps.print('Dry run: nothing was sent.');
+    return 0;
+  }
+  const drivers = sides.map((s) => deps.createDriver(s.m, { model, apiKey, root: s.root }));
+  const attempts: ComparisonAttempt[] = [];
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    // Interleaved (case, run, side) so time-of-day drift hits both sides alike.
+    const slots: Array<{ side: 0 | 1; index: number; run: () => Promise<RunOutcome> }> = [];
+    cases.forEach((c, ci) => {
+      const inputs = sides.map((s) => buildInput(c, s.orgListBlock, s.sentBlock));
+      for (let r = 0; r < GATE_RUNS; r += 1) {
+        for (const si of [0, 1] as const) {
+          slots.push({ side: si, index: ci * GATE_RUNS + r, run: async () => outcomeOf(c, await safeExtract(drivers[si]!, inputs[si]!)) });
+        }
+      }
+    });
+    const results = await pool(slots.map((s) => s.run), a.concurrency);
+    const bySide: [RunOutcome[], RunOutcome[]] = [new Array<RunOutcome>(cases.length * GATE_RUNS), new Array<RunOutcome>(cases.length * GATE_RUNS)];
+    slots.forEach((s, i) => {
+      bySide[s.side][s.index] = results[i]!;
+    });
+    const branchScore = scoreSide(cases, GATE_RUNS, bySide[0]);
+    const baselineScore = scoreSide(cases, GATE_RUNS, bySide[1]);
+    const comparison = compareDefaultSuites(branchScore, baselineScore);
+    attempts.push({ branch: branchScore, baseline: baselineScore, comparison, outcomes: bySide });
+    deps.print(`\nAttempt ${attempt}: ${comparison.pass ? 'PASS' : 'FAIL'} - branch ok ${branchScore.totalOk}, baseline ok ${baselineScore.totalOk}`);
+    for (const reason of comparison.reasons) deps.print(`  ${reason}`);
+    if (comparison.pass) break;
+    if (attempt === 1) deps.print('The comparison failed; re-running both sides once (spec D7).');
+  }
+  deps.appendRecord(a.out!, renderComparisonRecord({ startedAt, model, keyTail: keyTail(apiKey), cases, sides, attempts }));
+  deps.print(`\nRecord appended to ${a.out}`);
+  return attempts[attempts.length - 1]!.comparison.pass ? 0 : 1;
 }
 
 /**

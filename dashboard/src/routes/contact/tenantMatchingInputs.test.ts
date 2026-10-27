@@ -87,6 +87,18 @@ describe('buildTenantMatchingPatch (the edit form, spec D2)', () => {
     }
   });
 
+  // FW-11 (code review R1 CONF-1): a number input reports an entry it cannot
+  // parse as '' (validity.badInput) - never read as a clear, stored or not.
+  it("refuses an entry the control could not parse with the server's copy, never as a clear", () => {
+    const unparseable = new Set(['max_tenant_portion']);
+    for (const stored of [STORED, {}]) {
+      expect(buildTenantMatchingPatch({ ...tenantMatchingFormValues(stored), max_tenant_portion: '' }, stored, unparseable)).toEqual({
+        ok: false,
+        error: PORTION_ERROR,
+      });
+    }
+  });
+
   it("refuses text over 500 characters after the trim with the server's copy", () => {
     expect(buildTenantMatchingPatch({ preferences_constraints: 'x'.repeat(501) }, {})).toEqual({
       ok: false,

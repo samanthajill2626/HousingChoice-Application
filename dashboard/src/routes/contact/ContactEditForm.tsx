@@ -290,6 +290,11 @@ export function ContactEditForm({
   // mirror list (tenantMatchingInputs.ts) - this form names none of the four.
   const [matching, setMatching] = useState<Record<string, string>>(() => tenantMatchingFormValues(contact));
   const matchingId = useId();
+  // FW-11 (code review R1 CONF-1): the dollars controls' DOM nodes, read at
+  // Save. A number input reports text it cannot parse as '' in its value (and
+  // React fires no change for it), so only `validity.badInput` tells such an
+  // entry from a cleared control.
+  const dollarsInputs = useRef(new Map<string, HTMLInputElement>());
   const [relRows, setRelRows] = useState<Relationship[]>(contact.relationships ?? []);
   const [cfRows, setCfRows] = useState<CustomField[]>(contact.customFields ?? []);
   // Track whether the editors have been expanded (start collapsed to keep the
@@ -479,8 +484,12 @@ export function ContactEditForm({
       if (lifEligible !== (base['lifEligible'] === true)) patch.lifEligible = lifEligible;
       // WP1 B1 (spec D2): only the changed matching inputs, trimmed; a
       // cleared one sends null (the server REMOVEs it). A bad value stops the
-      // save with the server's own copy (the mirror drift test pins it).
-      const matchingPatch = buildTenantMatchingPatch(matching, base);
+      // save with the server's own copy (the mirror drift test pins it) - an
+      // entry its number input could not parse included (FW-11).
+      const unparseable = new Set(
+        [...dollarsInputs.current].filter(([, el]) => el.validity?.badInput === true).map(([key]) => key),
+      );
+      const matchingPatch = buildTenantMatchingPatch(matching, base, unparseable);
       if (!matchingPatch.ok) return { error: matchingPatch.error };
       Object.assign(patch, matchingPatch.patch);
       // Address: if ANY part changed, send the whole object (the server keeps only
@@ -939,6 +948,10 @@ export function ContactEditForm({
                       <span aria-hidden="true">$</span>
                       <input
                         id={id}
+                        ref={(el) => {
+                          if (el === null) dollarsInputs.current.delete(input.key);
+                          else dollarsInputs.current.set(input.key, el);
+                        }}
                         className={styles.input}
                         type="number"
                         inputMode="numeric"

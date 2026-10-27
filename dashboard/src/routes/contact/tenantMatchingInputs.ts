@@ -106,15 +106,22 @@ export function tenantMatchingFormValues(stored: Readonly<Record<string, unknown
  * entries whose TRIMMED value differs from the stored one; a cleared entry is
  * null (the server REMOVEs it). A bad value refuses the save with the
  * server's own copy (the drift test pins the two). A missing value reads as
- * empty.
+ * empty. `unparseable` names the dollars entries whose number input holds
+ * text it could not parse (`validity.badInput`): the input then reports '',
+ * so such an entry is refused with the server's copy, never read as a clear
+ * (code review R1 CONF-1, FW-11).
  */
 export function buildTenantMatchingPatch(
   values: Readonly<Record<string, string>>,
   stored: Readonly<Record<string, unknown>>,
+  unparseable: ReadonlySet<string> = new Set(),
 ): { ok: true; patch: TenantMatchingInputPatch } | { ok: false; error: string } {
   const before = tenantMatchingFormValues(stored);
   const patch: TenantMatchingInputPatch = {};
   for (const input of TENANT_MATCHING_INPUTS) {
+    if (input.kind === 'dollars' && unparseable.has(input.key)) {
+      return { ok: false, error: tenantMatchingDollarsInvalid(input.label) };
+    }
     const next = (values[input.key] ?? '').trim();
     if (next === (before[input.key] ?? '').trim()) continue;
     if (next === '') {

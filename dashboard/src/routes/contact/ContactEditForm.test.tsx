@@ -2193,4 +2193,34 @@ describe('ContactEditForm - the tenant matching inputs (WP1 B1 spec D2)', () => 
     expect(await screen.findByRole('alert')).toHaveTextContent(PORTION_ERROR);
     expect(updateContact).not.toHaveBeenCalled();
   });
+
+  // FW-11 (code review R1 CONF-1): an entry the number input cannot parse
+  // ("1e", "1.2.3", a typed "1,200" in some browsers) reads as '' in its
+  // value; only validity.badInput tells it from a cleared control. jsdom
+  // parses no typed text, so the control's validity is stubbed the way a
+  // browser reports such an entry.
+  function enterUnparseable(portion: HTMLElement): void {
+    Object.defineProperty(portion, 'validity', { configurable: true, value: { badInput: true } });
+    fireEvent.change(portion, { target: { value: '' } });
+  }
+
+  it("an unparseable portion over a stored one stops Save with the server's message - it never clears the value", async () => {
+    const user = userEvent.setup();
+    render(<ContactEditForm contact={MATCHED} onClose={vi.fn()} onSaved={vi.fn()} />);
+    enterUnparseable(screen.getByLabelText('Maximum tenant portion'));
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(PORTION_ERROR);
+    expect(updateContact).not.toHaveBeenCalled();
+  });
+
+  it("an unparseable portion with nothing stored stops Save with the server's message", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ContactEditForm contact={TENANT} onClose={onClose} onSaved={vi.fn()} />);
+    enterUnparseable(screen.getByLabelText('Maximum tenant portion'));
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(PORTION_ERROR);
+    expect(updateContact).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
 });

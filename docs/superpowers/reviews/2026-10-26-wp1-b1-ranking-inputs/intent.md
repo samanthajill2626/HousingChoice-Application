@@ -11,17 +11,17 @@ cut from main @d0e2c2d8.
 
 ## STATE
 
-Phase: BUILD (AUTO), dispatched 2026-10-27 ~15:28 UTC after compaction
-gate B (Cameron typed /compact). Cameron: "Yes, let's go auto with
-55-minute watchdog timers." Spec rev 10, plan v6 (PR1-PR58).
-In flight: abt:build-orchestrator (background, mission-block.md verbatim);
-watchdog (checkpoint every 55 min, stall at 25 min quiet, terminal on a
-ledger STATUS line); mirror to .superpowers/sdd/live.log.
-NEXT: supervise (wake protocol, escalation ladder; failure budget 0 used).
-At handback: re-ground in the whole replay, run the gates on a quiet tree,
-dispatch the two independent reviewers on opus (spec-conformance,
-plan-blind adversarial), verdict. The never-written gate run stays
-Cameron's (testing key, claude-sonnet-5-5).
+Phase: HANDBACK REVIEWED (2026-10-27 23:40 UTC). Build DONE (handback.md,
+c70a56c4; 0 recoveries). Planner gates all exit 0 at c70a56c4; two
+independent reviews adjudicated (planner-review/adjudications.md), no fix
+wave. Verdict: planner-review/planner-verdict.md - MERGE-READY PENDING
+Cameron's never-written gate run and two rulings: PC-1 (keep or revert the
+same-day Notes retry guard; planner recommends keep -> spec rev 11 + charter
+20 item 12, docs only) and PA-1 (re-confirm fields outside the list, with
+the "near my mosque" example; planner recommends keep for B1).
+Nothing in flight (orchestrator done, watchdog and mirror stopped).
+NEXT: on Cameron's rulings, apply any docs amendment; he runs
+gate-run-commands.md and signs off; he merges; unregister compact-resume.
 Registered with compact-resume (--persist) until mission end.
 
 ## What Cameron asked for (verbatim where wording matters)

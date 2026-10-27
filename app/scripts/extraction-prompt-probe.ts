@@ -1848,6 +1848,18 @@ async function runComparison(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string): 
     deps.print('Dry run: nothing was sent.');
     return 0;
   }
+  // FW4-1 (code review R4-1): FW3-3's rule on the other half of the gate - a
+  // side whose commit git could not read certifies nothing (spec D7: the
+  // record carries each side's commit), so the run fails here, before any
+  // driver is created or paid call made. Every such side is named: git absent
+  // from PATH, or refusing the drive both checkouts sit on, fails both.
+  const unreadable = sides.filter((s) => s.commit === GIT_FAILED).map((s) => s.root);
+  if (unreadable.length > 0) {
+    deps.print('');
+    for (const root of unreadable) deps.print(`FAIL: git could not read the commit of ${root} - no certificate.`);
+    deps.print(`Nothing was sent and no record written; re-run where git can read ${unreadable.join(' and ')}.`);
+    return 1;
+  }
   const drivers = sides.map((s) => deps.createDriver(s.m, { model, apiKey, root: s.root }));
   const attempts: ComparisonAttempt[] = [];
   for (let attempt = 1; attempt <= 2; attempt += 1) {

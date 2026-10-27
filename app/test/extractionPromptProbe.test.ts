@@ -5,6 +5,7 @@
 // or reads ANTHROPIC_API_KEY from process.env (WI16): every key below is a
 // fake string handed in through the injected env.
 import { createHash } from 'node:crypto';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import * as extraction from '../src/adapters/extraction.js';
 import type { ExtractionCall, ExtractionDriver, ExtractionInput, ExtractionResult } from '../src/adapters/extraction.js';
@@ -1563,6 +1564,68 @@ describe('main --baseline', () => {
     const text = h.records[0]!.text;
     expect(text).toMatch(new RegExp(`- Branch: .* @ ${'a'.repeat(40)}, prompt `));
     expect(text).toMatch(new RegExp(`- Baseline: .* @ ${'b'.repeat(40)} \\(tracked files modified\\), prompt `));
+  });
+
+  // FW4-1 (code review R4-1): FW3-3's rule on the other half of the gate - a
+  // side whose commit git could not read certifies nothing (spec D7: the
+  // record carries each side's commit), so the comparison fails before any
+  // driver is created or call made, and writes no record.
+  describe('a side whose commit git could not read fails the run (FW4-1)', () => {
+    const noCertificate = (root: string) => `FAIL: git could not read the commit of ${path.resolve(root)} - no certificate.`;
+    const NOTHING_SENT = 'Nothing was sent and no record written';
+    /** Git refusing the checkouts `refuses` picks (every command exits 128); the other side reads as usual. */
+    const refusingOn = (refuses: (root: string) => boolean): GitRunner => {
+      const live = fakeGit((root) => fakeCheckout((isBaseline(root) ? 'b' : 'a').repeat(40)));
+      return (root, args) => (refuses(root) ? { status: 128, stdout: '' } : live(root, args));
+    };
+
+    it('the branch side refusing fails the run (exit 1) before any driver or call, writing no record', async () => {
+      const h = harness((id) => defaultCorrect(id));
+      h.deps.git = refusingOn((root) => !isBaseline(root));
+      expect(await main(CMP, h.deps)).toBe(1);
+      expect(h.driversCreated).toEqual([]);
+      expect(h.calls).toEqual([]);
+      expect(h.records).toEqual([]);
+      const printed = h.printed.join('\n');
+      expect(printed).toContain(noCertificate(BRANCH_ROOT));
+      expect(printed).not.toContain(noCertificate(BASELINE_ROOT));
+      expect(printed).toContain(NOTHING_SENT);
+    });
+
+    it('the baseline side refusing fails the run the same way', async () => {
+      const h = harness((id) => defaultCorrect(id));
+      h.deps.git = refusingOn(isBaseline);
+      expect(await main(CMP, h.deps)).toBe(1);
+      expect(h.driversCreated).toEqual([]);
+      expect(h.calls).toEqual([]);
+      expect(h.records).toEqual([]);
+      const printed = h.printed.join('\n');
+      expect(printed).toContain(noCertificate(BASELINE_ROOT));
+      expect(printed).not.toContain(noCertificate(BRANCH_ROOT));
+      expect(printed).toContain(NOTHING_SENT);
+    });
+
+    it('git that cannot start fails the run, naming both sides', async () => {
+      const h = harness((id) => defaultCorrect(id));
+      h.deps.git = () => {
+        throw new Error('spawn git ENOENT');
+      };
+      expect(await main(CMP, h.deps)).toBe(1);
+      expect(h.driversCreated).toEqual([]);
+      expect(h.records).toEqual([]);
+      const printed = h.printed.join('\n');
+      expect(printed).toContain(noCertificate(BRANCH_ROOT));
+      expect(printed).toContain(noCertificate(BASELINE_ROOT));
+    });
+
+    it('(PIN) a dry run sends nothing and certifies nothing, so an unreadable git does not fail it', async () => {
+      const h = harness(() => ok({}), {});
+      h.deps.git = refusingOn(() => true);
+      expect(await main(['--model', 'claude-sonnet-5-5', '--baseline', BASELINE_ROOT, '--dry-run'], h.deps)).toBe(0);
+      expect(h.driversCreated).toEqual([]);
+      expect(h.records).toEqual([]);
+      expect(h.printed.join('\n')).toContain('Dry run: nothing was sent.');
+    });
   });
 
   it('the baseline naming the measured checkout is a usage error', async () => {

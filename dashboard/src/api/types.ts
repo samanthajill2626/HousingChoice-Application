@@ -316,6 +316,9 @@ export const AI_RUN_DROP_REASON_LABELS: Readonly<Record<string, string>> = {
   empty_value_at_parse: 'empty value at parse',
   // Spec 2026-10-06 D8: an agency name the model returned for housingAuthority.
   agency_not_authority: 'Agency, not a housing authority',
+  // B1 spec D3: a write on a text tenant matching input that already holds a
+  // value (an added fact goes to a Notes line instead).
+  text_field_filled: 'Field already filled',
 };
 
 /** A drop reason's label; a code this build does not know is humanized. */
@@ -2251,7 +2254,7 @@ export interface SuggestionItem {
   ownerContactId: string;
   /** Immutable server-minted identity for resolution fencing. */
   revision?: string;
-  /** One of the eight ExtractableField values, or 'status' | 'phone' | 'type' | 'address'. */
+  /** One of the twelve ExtractableField values, or 'status' | 'phone' | 'type' | 'address'. */
   target: string;
   currentValue?: string;
   suggestedValue: string;

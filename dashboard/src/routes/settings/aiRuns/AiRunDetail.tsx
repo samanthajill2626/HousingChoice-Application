@@ -1,6 +1,7 @@
 import { aiRunDropReasonLabel, type AiRunDetailResponse, type AiRunWindowMessage } from '../../../api/index.js';
 import { Spinner } from '../../../ui/index.js';
 import { suggestedContactKindLabel } from '../../contact/contactProfile.js';
+import { TENANT_MATCHING_INPUTS } from '../../contact/tenantMatchingInputs.js';
 import { aiRunContactLabel } from './contactLabel.js';
 import styles from './AiRunsSection.module.css';
 
@@ -32,14 +33,17 @@ function proposedDecisionValue(
 }
 
 /**
- * Mirrors DECISION_TARGETS in app/src/services/extraction/runTypes.ts:5-9 -
+ * Mirrors DECISION_TARGETS in app/src/services/extraction/runTypes.ts -
  * "Order is the display order". This package cannot import server code, and the
  * decisions map round-trips through an UNORDERED DynamoDB map attribute (it
- * comes back sorted), so the declared order has to be imposed here.
+ * comes back sorted), so the declared order has to be imposed here. The tenant
+ * matching inputs come from the dashboard mirror of their one list (B1 spec
+ * D1), whose drift test pins it to the app list, so the four are never named.
  */
 const DECISION_TARGET_ORDER: readonly string[] = [
   'firstName', 'lastName', 'voucherSize', 'housingAuthority',
   'pets', 'evictions', 'tenure', 'porting',
+  ...TENANT_MATCHING_INPUTS.map((input) => input.key),
   'address', 'status', 'type', 'phone',
 ];
 

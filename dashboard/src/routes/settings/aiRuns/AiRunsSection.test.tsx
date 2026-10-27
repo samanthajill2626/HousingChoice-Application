@@ -22,7 +22,7 @@ const row: AiRunListRow = { runId: 'run-1', sortKey: 's1', expired: false, start
 // it round-trips through an unordered DynamoDB map attribute, so the writer's
 // DECISION_TARGETS order is gone by the time the dashboard sees it. Building the
 // fixture in display order would make the ordering test unable to fail.
-const decisions: Record<string, AiRunDecision> = Object.fromEntries(['address','evictions','firstName','housingAuthority','lastName','pets','phone','porting','status','tenure','type','voucherSize'].map((target) => [target, { proposedOp: 'write', proposedValue: 'yes', outcome: 'wrote', verdict: 'auto_applied' }]));
+const decisions: Record<string, AiRunDecision> = Object.fromEntries(['accessibility_need','address','area_preference','evictions','firstName','housingAuthority','lastName','max_tenant_portion','pets','phone','porting','preferences_constraints','status','tenure','type','voucherSize'].map((target) => [target, { proposedOp: 'write', proposedValue: 'yes', outcome: 'wrote', verdict: 'auto_applied' }]));
 const detail: AiRunDetailResponse = { run: { runId: 'run-1', startedAt: '2026-08-07T10:00:00.000Z', finishedAt: '2026-08-07T10:00:01.000Z', durationMs: 4, conversationId: 'c1', contactId: 'contact-1', trigger: 'sms', outcome: 'applied', driver: 'fake', model: 'fake-v1', promptFingerprint: 'abcdef123456', usage: { inputTokens: 12, outputTokens: 4 }, decisions, notedLines: 0, window: { detail: 'full', cursor: 'x', windowCappedAtLimit: false, messages: [], excluded: [{ tsMsgId: 'old', cause: 'age_30d' }, { tsMsgId: 'budget', cause: 'char_budget' }], noContent: ['empty-call'] } }, contact: { firstName: 'Ada', lastName: 'Lovelace', phone: '+14040100007' }, window: { messages: [{ tsMsgId: 'm1', type: 'sms', direction: 'inbound', tier: 'new', truncated: true, chars: 12, hash: 'abc', hashStatus: 'mismatch', available: true, text: 'hello' }] } };
 
 function Location(): React.JSX.Element { return <output data-testid="location">{useLocation().search}</output>; }
@@ -84,13 +84,16 @@ describe('AiRunsSection', () => {
     expect(screen.getByRole('radio', { name: 'Contact: Empty Scope' })).toBeChecked();
   });
   it('shows the window with excluded causes and the no-content list', () => { renderSection(); expect(screen.getByRole('table', { name: 'Window messages' })).toBeInTheDocument(); expect(screen.getByRole('region', { name: 'Excluded messages' })).toHaveTextContent('age_30d'); expect(screen.getByRole('region', { name: 'Excluded messages' })).toHaveTextContent('char_budget'); expect(screen.getByRole('region', { name: 'No content' })).toHaveTextContent('empty-call'); });
-  it('shows every decision with its verdict', () => { renderSection(); const table = screen.getByRole('table', { name: 'Decisions' }); expect(within(table).getAllByRole('row')).toHaveLength(13); expect(screen.getByRole('row', { name: /^pets/ })).toHaveTextContent('auto applied'); });
+  it('shows every decision with its verdict', () => { renderSection(); const table = screen.getByRole('table', { name: 'Decisions' }); expect(within(table).getAllByRole('row')).toHaveLength(17); expect(screen.getByRole('row', { name: /^pets/ })).toHaveTextContent('auto applied'); });
   it('renders the ledger in the declared display order, not the map order the API returns', () => {
     renderSection();
     const body = within(screen.getByRole('table', { name: 'Decisions' })).getAllByRole('row').slice(1);
+    // B1 spec D3: the four tenant matching inputs sit after porting, in their
+    // list order (the dashboard mirror of app/src/lib/tenantMatchingInputs.ts).
     expect(body.map((tr) => within(tr).getAllByRole('cell')[0]?.textContent)).toEqual([
       'firstName', 'lastName', 'voucherSize', 'housingAuthority', 'pets', 'evictions',
-      'tenure', 'porting', 'address', 'status', 'type', 'phone',
+      'tenure', 'porting', 'area_preference', 'max_tenant_portion', 'accessibility_need',
+      'preferences_constraints', 'address', 'status', 'type', 'phone',
     ]);
   });
   it('shows WHEN the run happened in the detail header (spec section 9)', () => {
@@ -242,5 +245,17 @@ describe('AiRunsSection - the organization list', () => {
   it('(PIN) a run that never read the list (a skip) shows no organization list line', () => {
     renderSection();
     expect(screen.queryByText(/Organization list fingerprint/)).not.toBeInTheDocument();
+  });
+});
+
+// B1 spec D3: a write on a filled text field is a labelled drop, never a raw token.
+describe('AiRunsSection - the tenant matching inputs', () => {
+  it('labels a write dropped on a filled text field', () => {
+    useAiRun.mockReturnValueOnce({ detail: { ...detail, run: { ...detail.run, decisions: {
+      area_preference: { proposedOp: 'write', proposedValue: 'Marietta or Smyrna', outcome: 'dropped', verdict: 'not_presented', dropReason: 'text_field_filled' },
+    } } }, status: 'ready', retry: vi.fn() });
+    renderSection();
+    const row = screen.getByRole('row', { name: /^area_preference/ });
+    expect(within(row).getAllByRole('cell').at(-1)).toHaveTextContent(/^Field already filled$/);
   });
 });

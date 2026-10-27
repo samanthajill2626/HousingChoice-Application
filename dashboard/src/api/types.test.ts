@@ -357,6 +357,8 @@ const SERVER_DROP_REASONS = [
   'repo_error',
   'empty_value_at_parse',
   'agency_not_authority',
+  // B1 spec D3: a write on a filled text tenant matching input.
+  'text_field_filled',
 ];
 
 describe('AI run drop-reason labels', () => {

@@ -15,6 +15,7 @@ import {
 import { buildExtractionUserContent, renderUtteranceLine } from '../src/services/extraction/prompt.js';
 import { buildStartingEntries } from '../src/lib/orgStartingList.js';
 import { renderOrgListBlock } from '../src/services/extraction/orgListBlock.js';
+import { renderSentPropertiesBlock } from '../src/services/extraction/sentPropertiesBlock.js';
 import {
   buildFullRunWindow,
   buildLightRunWindow,
@@ -75,6 +76,7 @@ describe('hashRenderedMessage', () => {
       profile: { contactType: 'tenant', phones: [] },
       transcript,
       orgListBlock: ORG_BLOCK,
+      sentPropertiesBlock: '',
     });
     const body = user.slice(user.indexOf('TRANSCRIPT\n') + 'TRANSCRIPT\n'.length);
     const renderedLines = body.split('\n');
@@ -315,5 +317,34 @@ describe('buildFullRunWindow', () => {
       maxTranscriptAgeDays: null,
     });
     expect(window.windowParams!.maxTranscriptMessages).toBe(MAX_TRANSCRIPT_MESSAGES_MANUAL);
+  });
+});
+
+// WP1 B1 spec D5.1 (plan watch item WI2): the PROPERTIES SENT block changes
+// NOTHING about the transcript. The render and the per-message hash below are
+// LITERALS computed at main @d0e2c2d8 - a change to either breaks every stored
+// run's hash comparison (design 2026-08-06 section 6.1).
+describe('(PIN) WI2 - the PROPERTIES SENT block leaves the transcript render and the per-message hash byte-unchanged', () => {
+  const said = utt(SMS_ID, '2026-08-06T10:00:00.000Z', 'I like 123 Main St, Decatur\nwhen can I see it');
+  const reply = utt(CALL_ID, '2026-08-06T10:05:00.000Z', 'Sure, Friday works', { speaker: 'staff', channel: 'voice' });
+  const block = renderSentPropertiesBlock([
+    { unit: { address: { line1: '123 Main St', city: 'Decatur' } }, sentAt: '2026-08-01T09:00:00.000Z', signedUp: false },
+  ]);
+
+  it('renders each utterance to the same bytes and hashes it to the same 16 hex', () => {
+    expect(renderUtteranceLine(said)).toBe('2026-08-06T10:00:00.000Z [client/sms] I like 123 Main St, Decatur / when can I see it');
+    expect(renderUtteranceLine(reply)).toBe('2026-08-06T10:05:00.000Z [staff/voice] Sure, Friday works');
+    expect(hashRenderedMessage([said])).toBe('8804bb247bad2f59');
+    expect(hashRenderedMessage([reply])).toBe('f0196a44d5ac9368');
+  });
+
+  it('the request bytes after the TRANSCRIPT header are exactly the rendered lines, with or without the block', () => {
+    const profile = { contactType: 'tenant', phones: [] };
+    const withBlock = buildExtractionUserContent({ profile, transcript: [said, reply], orgListBlock: ORG_BLOCK, sentPropertiesBlock: block.text });
+    const without = buildExtractionUserContent({ profile, transcript: [said, reply], orgListBlock: ORG_BLOCK, sentPropertiesBlock: '' });
+    const body = (user: string): string => user.slice(user.indexOf('\nTRANSCRIPT\n') + '\nTRANSCRIPT\n'.length);
+    expect(withBlock).toContain(block.text);
+    expect(body(withBlock)).toBe(body(without));
+    expect(body(withBlock).split('\n')).toEqual([renderUtteranceLine(said), renderUtteranceLine(reply)]);
   });
 });

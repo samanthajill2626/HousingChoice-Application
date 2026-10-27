@@ -2,9 +2,9 @@
 //
 // The system prompt is the model contract; keep it verbatim and ASCII-only.
 // The user content lays out the CURRENT PROFILE (what we already know), then
-// the ORGANIZATION LIST block (spec 2026-10-06 D8), then a chronological
-// TRANSCRIPT, so the model can reconcile new facts against known ones per the
-// reconciliation rules below.
+// the ORGANIZATION LIST block (spec 2026-10-06 D8), then the PROPERTIES SENT
+// block (WP1 B1 spec D5.1), then a chronological TRANSCRIPT, so the model can
+// reconcile new facts against known ones per the reconciliation rules below.
 import { createHash } from 'node:crypto';
 import type { ExtractionInput, TranscriptUtterance } from '../../adapters/extraction.js';
 import { EXTRACTABLE_FIELDS, EXTRACTION_SCHEMA } from './schema.js';
@@ -230,5 +230,10 @@ export function buildExtractionUserContent(input: ExtractionInput): string {
   // header - every line after that header must be a rendered transcript line
   // (the run log hashes them), and the block never contains the word.
   const listBlock = input.orgListBlock.length > 0 ? [input.orgListBlock, ''] : [];
-  return ['CURRENT PROFILE', profileJson, '', ...listBlock, 'TRANSCRIPT', ...lines].join('\n');
+  // WP1 B1 spec D5.1: the PROPERTIES SENT block follows, still BEFORE the
+  // TRANSCRIPT header, for the same reason; it never holds the word either
+  // (sentPropertiesBlock.ts leaves such a line out). The transcript lines and
+  // so the run log's per-message hash are untouched.
+  const sentBlock = input.sentPropertiesBlock.length > 0 ? [input.sentPropertiesBlock, ''] : [];
+  return ['CURRENT PROFILE', profileJson, '', ...listBlock, ...sentBlock, 'TRANSCRIPT', ...lines].join('\n');
 }

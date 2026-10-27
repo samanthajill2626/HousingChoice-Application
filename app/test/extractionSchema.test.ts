@@ -17,6 +17,7 @@ import {
 import type { ExtractionInput } from '../src/adapters/extraction.js';
 import { buildStartingEntries, STARTING_ORG_LIST } from '../src/lib/orgStartingList.js';
 import { renderOrgListBlock } from '../src/services/extraction/orgListBlock.js';
+import { renderSentPropertiesBlock } from '../src/services/extraction/sentPropertiesBlock.js';
 
 // The structured-outputs contract: every object level carries
 // additionalProperties:false and NONE of the unsupported constraint keywords
@@ -482,6 +483,7 @@ describe('prompt builders', () => {
       profile: { contactType: 'tenant', phones: [] },
       transcript: [u],
       orgListBlock: '',
+      sentPropertiesBlock: '',
     });
     expect(user.endsWith(`\n${line}`)).toBe(true);
   });
@@ -548,6 +550,7 @@ describe('prompt builders', () => {
   it('user content carries the profile JSON then a chronological transcript', () => {
     const input: ExtractionInput = {
       orgListBlock: '',
+      sentPropertiesBlock: '',
       profile: { contactType: 'tenant', firstName: 'Ann', voucherSize: 2, phones: ['+14045550000'] },
       transcript: [
         { tsMsgId: '2026-07-16T10:01:00.000Z#s2', speaker: 'client', text: 'Hi there', at: '2026-07-16T10:01:00.000Z', channel: 'sms' },
@@ -570,6 +573,7 @@ describe('prompt builders', () => {
     // TRANSCRIPT line can start with a bracketed speaker tag (adversarial F2).
     const input: ExtractionInput = {
       orgListBlock: '',
+      sentPropertiesBlock: '',
       profile: { contactType: 'tenant', phones: ['+14045550000'] },
       transcript: [
         {
@@ -663,6 +667,7 @@ describe('the ORGANIZATION LIST block in the user content (spec 2026-10-06 D8)',
       profile: { contactType: 'tenant', phones: [] },
       transcript: [u],
       orgListBlock: block,
+      sentPropertiesBlock: '',
     });
     const header = user.indexOf('\nTRANSCRIPT\n');
     expect(user.indexOf(block)).toBeGreaterThan(-1);
@@ -678,6 +683,7 @@ describe('the ORGANIZATION LIST block in the user content (spec 2026-10-06 D8)',
       profile: { contactType: 'tenant', phones: [] },
       transcript: [u],
       orgListBlock: '',
+      sentPropertiesBlock: '',
     });
     expect(user).toBe([
       'CURRENT PROFILE',
@@ -780,5 +786,52 @@ describe('noteLines in the system prompt (B1 spec D4)', () => {
     expect(sys).toContain('Write a need as a feature of the home ("needs a ground floor"), never as a');
     expect(sys).toContain('diagnosis. Household size, the client\'s own rent portion and an assistance');
     expect(sys).toContain('animal are allowed. This is the never-written list.');
+  });
+});
+
+describe('the PROPERTIES SENT block in the user content (WP1 B1 spec D5.1)', () => {
+  const u = {
+    tsMsgId: '2026-07-16T10:00:00.000Z#s1',
+    speaker: 'client' as const,
+    text: 'I liked the Main St one',
+    at: '2026-07-16T10:00:00.000Z',
+    channel: 'sms' as const,
+  };
+  const org = 'ORGANIZATION LIST\nHousing authorities (test):\n- Alpha Housing Authority';
+  const sent = renderSentPropertiesBlock([
+    { unit: { address: { line1: '123 Main St', city: 'Decatur' } }, sentAt: '2026-07-15T10:00:00.000Z', signedUp: false },
+  ]).text;
+
+  it('sits after the ORGANIZATION LIST block and BEFORE the TRANSCRIPT header, which stays the first TRANSCRIPT in the content', () => {
+    const user = buildExtractionUserContent({
+      profile: { contactType: 'tenant', phones: [] },
+      transcript: [u],
+      orgListBlock: org,
+      sentPropertiesBlock: sent,
+    });
+    const header = user.indexOf('\nTRANSCRIPT\n');
+    expect(user.indexOf(sent)).toBeGreaterThan(-1);
+    expect(user.indexOf(org) + org.length).toBeLessThan(user.indexOf(sent));
+    expect(user.indexOf(sent) + sent.length).toBeLessThan(header);
+    expect(user.indexOf('TRANSCRIPT')).toBe(header + 1);
+    expect(user.endsWith(`\n${renderUtteranceLine(u)}`)).toBe(true);
+  });
+
+  it('carries "PROPERTIES SENT: none" when the contact has no sends', () => {
+    const user = buildExtractionUserContent({
+      profile: { contactType: 'tenant', phones: [] },
+      transcript: [u],
+      orgListBlock: '',
+      sentPropertiesBlock: renderSentPropertiesBlock([]).text,
+    });
+    expect(user).toBe([
+      'CURRENT PROFILE',
+      JSON.stringify({ contactType: 'tenant', phones: [] }, null, 2),
+      '',
+      'PROPERTIES SENT: none',
+      '',
+      'TRANSCRIPT',
+      renderUtteranceLine(u),
+    ].join('\n'));
   });
 });

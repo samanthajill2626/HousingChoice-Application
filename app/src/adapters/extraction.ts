@@ -144,6 +144,16 @@ export interface ExtractionInput {
    * list; '' renders no block. Drivers never log it.
    */
   orgListBlock: string;
+  /**
+   * The rendered PROPERTIES SENT block (WP1 B1 spec D5.1;
+   * services/extraction/sentPropertiesBlock.ts): the properties staff sent
+   * this contact, or it signed up for through a flyer, each named by its
+   * label, so a feedback noteLine can name the property. Placed in the user
+   * content after the ORGANIZATION LIST block and BEFORE the TRANSCRIPT
+   * header. The job always renders it ("PROPERTIES SENT: none" for no sends);
+   * '' renders no block (tests only). Drivers never log it.
+   */
+  sentPropertiesBlock: string;
 }
 
 /** Everything about the CALL, independent of whether it succeeded. */

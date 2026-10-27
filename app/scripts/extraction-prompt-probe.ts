@@ -205,7 +205,7 @@ function buildInput(c: ProbeCase, orgListBlock: string): ExtractionInput {
     text,
     at: new Date(start + i * 60_000).toISOString(),
   }));
-  return { transcript, profile, orgListBlock };
+  return { transcript, profile, orgListBlock, sentPropertiesBlock: '' };
 }
 
 function judge(c: ProbeCase, op: ExtractionFieldOp | undefined): Verdict {

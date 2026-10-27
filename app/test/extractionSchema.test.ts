@@ -864,12 +864,17 @@ describe('the system prompt and the PROPERTIES SENT block (WP1 B1 spec D5.1, D5.
     expect(sys).toContain('- Every other noteLine rule applies to feedback, the never-written list');
   });
 
-  // FW2-1 (code review R2-1): the retry guard drops a line identical to an
-  // earlier Notes line, so a change of mind must SAY it changed.
-  it('asks for a change of mind worded AS a change, since an identical line is never written again', () => {
-    expect(sys).toContain('a new noteLine that SAYS the view changed, e.g. "now likes it" or');
-    expect(sys).toContain('"back on the fence" - a line identical to an earlier notes line is');
-    expect(sys).toContain('never written again, so a change back worded as before is lost.');
+  // FW3-2 (code review R3-1): a change of mind still NAMES its home by copying
+  // its label - the one repetition the reconcile rule allows - and SAYS the
+  // view changed. Was FW2-1's "never written again" pin; that sentence is gone
+  // (R3-adjudications: the guard now writes a change back to earlier words).
+  it('asks for a change of mind that names the property by its label and says the view changed', () => {
+    expect(sys).toContain('a new noteLine that still NAMES the property by copying its label, then');
+    expect(sys).toContain('SAYS the view changed, e.g. "123 Main St, Decatur: now likes it" or');
+    expect(sys).toContain('"123 Main St, Decatur: back on the fence". The label is the one wording');
+    expect(sys).toContain('already in the notes that a noteLine may repeat.');
+    expect(sys).not.toContain('never written again');
+    expect(sys).not.toContain('a change back worded as before is lost');
   });
 
   it('drops the no-address bullet; the address output still never takes a sent home', () => {

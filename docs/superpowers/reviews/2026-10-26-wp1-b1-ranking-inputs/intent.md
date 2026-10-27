@@ -11,18 +11,15 @@ cut from main @d0e2c2d8.
 
 ## STATE
 
-Phase: LAUNCH GATE again (2026-10-27), after Cameron's revision: spec
-rev 9 (22b562bc), charter 20 items 9-10, plan v6 (S5.5 deletes the
-no-address bullet; S6 redrafted for a model grader; PR50-PR57). Plan
-review round 4 (the cap): 5 findings, all accepted. OPEN for Cameron at
-the gate (PR54): the grader's NOT EXCLUDED defaults (pronoun for the
-tenant, household members by relationship, a mobility aid stated for the
-need) and whether "sex" covers sexual orientation and gender identity
-(planner recommends yes, in the prompt's never-written list AND the
-grader description; that is a charter 6.4 list change). His answer is
-written into S6.1 (and S4.6 + charter 6.4 if orientation is added)
-before dispatch. Ask as TEXT: Go AUTO / Go MANUAL / Revise, plus those
-answers. Nothing in flight.
+Phase: LAUNCH GATE, final confirming review (2026-10-27). Cameron
+confirmed the grader's NOT EXCLUDED defaults (PR54) and left the "sex"
+question to the planner, who chose yes: sex covers sexual orientation and
+gender identity (PR58, spec rev 10, charter 20 item 11, commit 774fa8f4).
+Cameron asked for one more review before the go: plan review round 5, a
+narrow confirming pass by reviewer af771e6cd8245e18c (continued) on
+f8c202f4 + 774fa8f4, report to plan-review/round5-reviewer-a.md. In flight:
+that reviewer only. After it: adjudicate, commit, then ask the launch
+pick as TEXT (Go AUTO / Go MANUAL / Revise).
 Next on a Go: compaction gate B, then AUTO dispatch of
 abt:build-orchestrator with mission-block.md verbatim (or MANUAL prompt).
 Registered with compact-resume (--persist) until mission end.
@@ -150,6 +147,12 @@ amendment, and then file the issue and write the spec."
   the right thing,' or 'No, it's thinking that this unrelated fact is
   actually banned.' Let's make both those changes." -> charter section 20
   items 9-10, spec rev 9.
+
+- 2026-10-27, on the round-4 questions: "The grader defaults that you use
+  look good to me. For two, I'll leave that up to you. Based on that, do
+  you want to do one more final review before we go?" -> planner chose
+  yes on sexual orientation and gender identity (PR58); a narrow plan
+  review round 5 on the unreviewed edits.
 
 ## Why
 

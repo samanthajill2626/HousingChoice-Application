@@ -455,3 +455,36 @@ describe('anthropic driver - the PROPERTIES SENT block (WP1 B1 spec D5.1)', () =
     expect(String(sdk.lastRequest?.['system'])).not.toContain('- 123 Main St, Decatur - sent');
   });
 });
+
+describe('fake driver carries the WP1 B1 outputs through verbatim (WI1: value rules live in apply)', () => {
+  const fingerprint = expect.stringMatching(/^[0-9a-f]{12}$/) as unknown as string;
+
+  // (PIN) The four field ops and object noteLines - a feedback line naming a
+  // sent property and a line below the confidence floor - reach apply exactly
+  // as scripted. The fake drops nothing: filterNoteLines does that.
+  it('passes the four field ops and object noteLines through unchanged', async () => {
+    const payload = {
+      fields: {
+        area_preference: { op: 'write', value: 'Decatur or Tucker' },
+        max_tenant_portion: { op: 'suggest', value: '$900' },
+        accessibility_need: { op: 'write', value: 'Step-free entrance' },
+        preferences_constraints: { op: 'none' },
+      },
+      noteLines: [
+        { text: '412 Oak Ave, Decatur: on the fence - wants to see other homes first', confidence: 0.9 },
+        { text: 'Might have a cat', confidence: 0.4 },
+      ],
+    };
+    const json = JSON.stringify(payload);
+    const input: ExtractionInput = {
+      ...markerInput,
+      transcript: [{ ...markerInput.transcript[0]!, text: `EXTRACT:${json}` }],
+    };
+    const call = await createExtractionDriver({ driver: 'fake', model }).extract(input);
+    expect(call).toEqual({
+      ok: true,
+      meta: { driver: 'fake', promptFingerprint: fingerprint, rawText: json },
+      result: { fields: payload.fields, noteLines: payload.noteLines },
+    });
+  });
+});

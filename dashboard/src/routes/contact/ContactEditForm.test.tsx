@@ -28,6 +28,7 @@ vi.mock('./useContactVocabulary.js', () => ({
 }));
 
 import { CONTACT_TYPE_CHANGED_SAVE_COPY, ContactEditForm } from './ContactEditForm.js';
+import { TENANT_MATCHING_INPUTS } from './tenantMatchingInputs.js';
 
 const TENANT: Contact = {
   contactId: 'k1',
@@ -2097,5 +2098,99 @@ describe('ContactEditForm - one status list per type and the type-change rules (
       expect(updateContact).toHaveBeenCalledWith('L1', { status: 'parked', park_reason: 'Not a fit' }),
     );
     expect(setTenantStatus).not.toHaveBeenCalled();
+  });
+});
+
+describe('ContactEditForm - the tenant matching inputs (WP1 B1 spec D2)', () => {
+  const MATCHED: Contact = {
+    ...TENANT,
+    area_preference: 'Decatur',
+    max_tenant_portion: 900,
+    accessibility_need: 'No stairs',
+  };
+  const PORTION_ERROR = 'Maximum tenant portion must be a whole dollar amount from 0 to 20000.';
+
+  it('a tenant gets one control per input, in list order, after LIF eligible; a landlord gets none', () => {
+    const { unmount } = render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    const controls = TENANT_MATCHING_INPUTS.map((input) => screen.getByLabelText(input.label));
+    expect(controls.map((c) => c.tagName)).toEqual(['INPUT', 'INPUT', 'INPUT', 'TEXTAREA']);
+    const ordered = [screen.getByLabelText('LIF eligible'), ...controls];
+    for (let i = 1; i < ordered.length; i += 1) {
+      const before = ordered[i - 1];
+      const after = ordered[i];
+      if (before === undefined || after === undefined) throw new Error('a control is missing');
+      expect(before.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
+    unmount();
+    render(<ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={vi.fn()} />);
+    for (const input of TENANT_MATCHING_INPUTS) expect(screen.queryByLabelText(input.label)).toBeNull();
+  });
+
+  it('labels are exact - the portion is a number input with "$" beside it, outside its name', () => {
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    const portion = screen.getByLabelText('Maximum tenant portion');
+    expect(portion).toHaveAccessibleName('Maximum tenant portion');
+    expect(portion).toHaveAttribute('type', 'number');
+    expect(portion.parentElement).toHaveTextContent('$');
+    for (const label of ['Area preference', 'Accessibility need', 'Preferences and constraints']) {
+      expect(screen.getByLabelText(label)).toHaveAccessibleName(label);
+      expect(screen.getByLabelText(label)).toHaveAttribute('maxlength', '500');
+    }
+  });
+
+  it('prefills the stored values (the portion as a number)', () => {
+    render(<ContactEditForm contact={MATCHED} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(screen.getByLabelText('Area preference')).toHaveValue('Decatur');
+    expect(screen.getByLabelText('Maximum tenant portion')).toHaveValue(900);
+    expect(screen.getByLabelText('Accessibility need')).toHaveValue('No stairs');
+    expect(screen.getByLabelText('Preferences and constraints')).toHaveValue('');
+  });
+
+  it('PATCHes only the changed inputs, trimmed, the portion as a number', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...TENANT });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(screen.getByLabelText('Area preference'), '  Decatur or Tucker  ');
+    fireEvent.change(screen.getByLabelText('Maximum tenant portion'), { target: { value: '1200' } });
+    await user.type(screen.getByLabelText('Preferences and constraints'), 'Needs a yard');
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() =>
+      expect(updateContact).toHaveBeenCalledWith('k1', {
+        area_preference: 'Decatur or Tucker',
+        max_tenant_portion: 1200,
+        preferences_constraints: 'Needs a yard',
+      }),
+    );
+  });
+
+  it('a cleared input sends null; an untouched one never reaches the wire', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...TENANT });
+    render(<ContactEditForm contact={MATCHED} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.clear(screen.getByLabelText('Area preference'));
+    fireEvent.change(screen.getByLabelText('Maximum tenant portion'), { target: { value: '' } });
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() =>
+      expect(updateContact).toHaveBeenCalledWith('k1', { area_preference: null, max_tenant_portion: null }),
+    );
+  });
+
+  it('a change only in surrounding spaces is no change - nothing is sent', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ContactEditForm contact={MATCHED} onClose={onClose} onSaved={vi.fn()} />);
+    await user.type(screen.getByLabelText('Area preference'), '   ');
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    expect(updateContact).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['12.5', '20001', '-5'])("a portion of %s stops Save with the server's own message (spec D2)", async (bad) => {
+    const user = userEvent.setup();
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText('Maximum tenant portion'), { target: { value: bad } });
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(PORTION_ERROR);
+    expect(updateContact).not.toHaveBeenCalled();
   });
 });

@@ -7,7 +7,7 @@
 // PATCHed (the server SET-merges, so an untouched field is never blanked) -
 // switching type leaves the other type's old fields on the record (harmless; they
 // just stop showing). On success the parent applies the returned contact in place.
-import { useRef, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import {
   ApiError,
   setTenantStatus,
@@ -60,6 +60,12 @@ import { KindPicker, type KindPickerValue } from './KindPicker.js';
 import { TypeChangeRefusalList } from './TypeChangeRefusalList.js';
 import { isCaseworkerContact } from './caseworkerRole.js';
 import { useContactVocabulary } from './useContactVocabulary.js';
+import {
+  TENANT_MATCHING_INPUTS,
+  TENANT_MATCHING_TEXT_MAX,
+  buildTenantMatchingPatch,
+  tenantMatchingFormValues,
+} from './tenantMatchingInputs.js';
 import { NewOrgDialog } from '../orgs/NewOrgDialog.js';
 import { OrgPicker, type OrgPickerHandle } from '../orgs/OrgPicker.js';
 import {
@@ -280,6 +286,10 @@ export function ContactEditForm({
   const [evictions, setEvictions] = useState(str(contact['evictions']));
   const [tenure, setTenure] = useState(str(contact['tenure']));
   const [lifEligible, setLifEligible] = useState(contact['lifEligible'] === true);
+  // WP1 B1 (spec D2): the tenant matching inputs, one value per entry of the
+  // mirror list (tenantMatchingInputs.ts) - this form names none of the four.
+  const [matching, setMatching] = useState<Record<string, string>>(() => tenantMatchingFormValues(contact));
+  const matchingId = useId();
   const [relRows, setRelRows] = useState<Relationship[]>(contact.relationships ?? []);
   const [cfRows, setCfRows] = useState<CustomField[]>(contact.customFields ?? []);
   // Track whether the editors have been expanded (start collapsed to keep the
@@ -467,6 +477,12 @@ export function ContactEditForm({
       if (evictions !== str(base['evictions'])) patch.evictions = evictions;
       if (tenure !== str(base['tenure'])) patch.tenure = tenure;
       if (lifEligible !== (base['lifEligible'] === true)) patch.lifEligible = lifEligible;
+      // WP1 B1 (spec D2): only the changed matching inputs, trimmed; a
+      // cleared one sends null (the server REMOVEs it). A bad value stops the
+      // save with the server's own copy (the mirror drift test pins it).
+      const matchingPatch = buildTenantMatchingPatch(matching, base);
+      if (!matchingPatch.ok) return { error: matchingPatch.error };
+      Object.assign(patch, matchingPatch.patch);
       // Address: if ANY part changed, send the whole object (the server keeps only
       // the non-empty parts).
       if (
@@ -893,6 +909,58 @@ export function ContactEditForm({
               />
               <span className={styles.label}>LIF eligible</span>
             </label>
+            {/* WP1 B1 (spec D2): the tenant matching inputs, in list order,
+                each by its `control`. The label sits outside the control
+                (htmlFor) so the portion's "$" stays out of its name. The
+                portion takes step="any" and no min / max ON PURPOSE: native
+                validation would refuse a bad value in the browser's words
+                first, and spec D2 wants the server's (C3). */}
+            {TENANT_MATCHING_INPUTS.map((input) => {
+              const id = `${matchingId}-${input.key}`;
+              const value = matching[input.key] ?? '';
+              const onChange = (next: string): void =>
+                setMatching((prev) => ({ ...prev, [input.key]: next }));
+              return (
+                <div key={input.key} className={styles.field}>
+                  <label className={styles.label} htmlFor={id}>
+                    {input.label}
+                  </label>
+                  {input.control === 'textarea' ? (
+                    <textarea
+                      id={id}
+                      className={styles.textarea}
+                      value={value}
+                      onChange={(e) => onChange(e.target.value)}
+                      rows={3}
+                      maxLength={TENANT_MATCHING_TEXT_MAX}
+                    />
+                  ) : input.control === 'dollars' ? (
+                    <span className={styles.dollarsRow}>
+                      <span aria-hidden="true">$</span>
+                      <input
+                        id={id}
+                        className={styles.input}
+                        type="number"
+                        inputMode="numeric"
+                        step="any"
+                        value={value}
+                        onChange={(e) => onChange(e.target.value)}
+                        placeholder="e.g. 400"
+                      />
+                    </span>
+                  ) : (
+                    <input
+                      id={id}
+                      className={styles.input}
+                      value={value}
+                      onChange={(e) => onChange(e.target.value)}
+                      maxLength={TENANT_MATCHING_TEXT_MAX}
+                      autoComplete="off"
+                    />
+                  )}
+                </div>
+              );
+            })}
           </div>
         ) : null}
 

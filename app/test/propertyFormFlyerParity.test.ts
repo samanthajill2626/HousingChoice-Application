@@ -46,6 +46,9 @@ const SAMPLE: Readonly<Record<string, unknown>> = {
   listing_link: 'https://example.com/parity',
   video_url: 'https://v.example/parity',
   same_day_rta: false,
+  // WP1 B1 spec D6: Staff only - two units differing only in priority give
+  // identical toUnitFlyer output.
+  priority: true,
   no_evictions_on_program: true,
   evictions_notes: 'Parity evictions details',
   credit_requirements: 'Parity credit',
@@ -102,6 +105,7 @@ const BASES: readonly Base[] = [
       listing_link: 'https://example.com/base',
       video_url: 'https://v.example/base',
       same_day_rta: true,
+      priority: false,
       no_evictions_on_program: true,
       evictions_notes: 'None in 5 years',
       credit_requirements: '600+',
@@ -171,8 +175,8 @@ function flyerTagMismatches(fields: readonly FormFieldVisibility[], bases: reado
 }
 
 describe('PROPERTY_FORM_FIELDS - the D10a tag table', () => {
-  it('lists every property-form field in form order with its tag (D10, D10a, plan AR1) - 35 rows', () => {
-    expect(PROPERTY_FORM_FIELDS).toHaveLength(35);
+  it('lists every property-form field in form order with its tag (D10, D10a, plan AR1) - 36 rows', () => {
+    expect(PROPERTY_FORM_FIELDS).toHaveLength(36);
     expect(PROPERTY_FORM_FIELDS.map((f) => [f.label, [...f.keys], f.flyer])).toEqual([
       // New form only (plan AR1): the landlord picker; landlordId never reaches the flyer.
       ['Owning landlord', ['landlordId'], 'staff_only'],
@@ -194,6 +198,8 @@ describe('PROPERTY_FORM_FIELDS - the D10a tag table', () => {
       ['Public listing link', ['listing_link'], 'on_flyer'],
       ['Video URL', ['video_url'], 'on_flyer'],
       ['Same-day RTA', ['same_day_rta'], 'on_flyer'],
+      // WP1 B1 spec D6: the Priority switch, its own row after Same-day RTA.
+      ['Priority', ['priority'], 'staff_only'],
       ['No evictions while on the program', ['no_evictions_on_program'], 'staff_only'],
       ['Evictions (details)', ['evictions_notes'], 'staff_only'],
       ['Credit score', ['credit_requirements'], 'staff_only'],

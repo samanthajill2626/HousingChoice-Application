@@ -116,6 +116,9 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
   const [listingLink, setListingLink] = useState(str(unit.listing_link));
   const [videoUrl, setVideoUrl] = useState(str(unit.video_url));
   const [sameDayRta, setSameDayRta] = useState(unit.same_day_rta === true);
+  // WP1 B1 (spec D6): `=== true` is the only on test - a legacy stored
+  // string reads as off and is never re-sent untouched.
+  const [priority, setPriority] = useState(unit.priority === true);
   // The Requirements section (D1): the baseline is the INTERPRETED value, so a
   // legacy boolean `pets` shows as No pets / "Allowed" and is never re-sent
   // untouched; buildRequirementPatch diffs against it.
@@ -186,6 +189,8 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
     if (videoUrl !== str(unit.video_url)) patch['video_url'] = videoUrl;
     // same_day_rta - a boolean toggle; send when it differs from the stored value.
     if (sameDayRta !== (unit.same_day_rta === true)) patch['same_day_rta'] = sameDayRta;
+    // priority - the same toggle (spec D6): off is stored as false.
+    if (priority !== (unit.priority === true)) patch['priority'] = priority;
     if (applicationProcess !== str(unit.application_process)) {
       patch['application_process'] = applicationProcess;
     }
@@ -604,6 +609,16 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
           audience="property"
           checked={sameDayRta}
           onChange={setSameDayRta}
+        />
+
+        {/* WP1 B1 (spec D6): the staff Priority switch - its own row at the
+            end of Property details, tagged Staff only. */}
+        <TaggedCheckbox
+          label="Priority"
+          visibility={formFieldVisibility('Priority')}
+          audience="property"
+          checked={priority}
+          onChange={setPriority}
         />
 
         <h3 className={styles.sectionHeading}>Requirements</h3>

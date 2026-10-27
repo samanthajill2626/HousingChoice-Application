@@ -2721,6 +2721,10 @@ export interface UnitItem {
   application_fee?: number;
   /** Public flyer details (public-pages §3): same-day RTA available. */
   same_day_rta?: boolean;
+  /** WP1 B1 (spec D6): the staff Priority switch. `priority === true` is the
+   *  only on test - false, absent and a legacy stored string read as off.
+   *  Staff only: never on the flyer. */
+  priority?: boolean;
   // --- Requirements (spec 2026-10-20 D1, D2): the property's OWN copy of each
   // item, flat keys named as in the registry (routes/listing/requirements.ts).
   // Checkboxes are true or absent; text and money are absent when blank.

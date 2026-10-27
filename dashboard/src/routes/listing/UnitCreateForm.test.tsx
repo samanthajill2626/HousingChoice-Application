@@ -1091,3 +1091,32 @@ describe('UnitCreateForm - flyer tags and the D10 order (spec 2026-10-20)', () =
     }
   });
 });
+
+describe('UnitCreateForm - Priority (WP1 B1 spec D6)', () => {
+  it('starts off and sends no priority key; checked, the create body carries priority true', async () => {
+    const user = userEvent.setup();
+    createUnit.mockResolvedValue(newUnit());
+    setup({ landlordId: 'contact-landlord-0001' });
+    await dialogReady();
+    const priority = screen.getByRole('checkbox', { name: 'Priority' });
+    expect(priority).not.toBeChecked();
+    await user.click(priority);
+    await user.click(screen.getByRole('button', { name: /^Create$/ }));
+    await waitFor(() => expect(createUnit).toHaveBeenCalledTimes(1));
+    expect(createUnit.mock.calls[0]?.[0]).toEqual({
+      landlordId: 'contact-landlord-0001',
+      priority: true,
+      requirements_snapshot: blankSnapshot('contact-landlord-0001'),
+    });
+  });
+
+  it('(PIN) unchecked, the create body has no priority key', async () => {
+    const user = userEvent.setup();
+    createUnit.mockResolvedValue(newUnit());
+    setup({ landlordId: 'contact-landlord-0001' });
+    await dialogReady();
+    await user.click(screen.getByRole('button', { name: /^Create$/ }));
+    await waitFor(() => expect(createUnit).toHaveBeenCalledTimes(1));
+    expect('priority' in (createUnit.mock.calls[0]?.[0] as Record<string, unknown>)).toBe(false);
+  });
+});

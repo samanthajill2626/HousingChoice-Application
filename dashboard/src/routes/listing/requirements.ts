@@ -273,6 +273,8 @@ const FORM_FIELD_LIST: FormFieldVisibility[] = [
   { label: 'Public listing link', keys: ['listing_link'], flyer: 'on_flyer' },
   { label: 'Video URL', keys: ['video_url'], flyer: 'on_flyer' },
   { label: 'Same-day RTA', keys: ['same_day_rta'], flyer: 'on_flyer' },
+  // WP1 B1 (spec D6): the staff Priority switch. Never on the flyer.
+  { label: 'Priority', keys: ['priority'], flyer: 'staff_only' },
   { label: 'No evictions while on the program', keys: ['no_evictions_on_program'], flyer: 'staff_only' },
   { label: 'Evictions (details)', keys: ['evictions_notes'], flyer: 'staff_only' },
   { label: 'Credit score', keys: ['credit_requirements'], flyer: 'staff_only' },

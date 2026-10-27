@@ -63,6 +63,14 @@ export interface AiRunRecord {
   rawResult?: unknown;
   decisions: Partial<Record<DecisionTarget, RunDecision>>;
   notedLines: number;
+  /** B1 spec D4: model note lines dropped below EXTRACTION_FACT_MIN_CONFIDENCE.
+   *  Absent on runs that never reached apply and on runs recorded before B1.
+   *  putRun spreads its input, so no write change. Dashboard twin:
+   *  AiRunRecordView. */
+  notesBelowFloor?: number;
+  /** B1 spec D4: note lines a demoted (unknown-speaker) run withheld. Absent
+   *  as notesBelowFloor is. */
+  notesDemoted?: number;
   expires_at: number;
 }
 

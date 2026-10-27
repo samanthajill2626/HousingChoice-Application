@@ -335,6 +335,10 @@ export interface RunDraft {
   rawResult?: ExtractionResult;
   decisions?: Partial<Record<DecisionTarget, RunDecision>>;
   notedLines?: number;
+  /** B1 spec D4: model note lines dropped below the floor. Set only once apply ran. */
+  notesBelowFloor?: number;
+  /** B1 spec D4: note lines a demoted run withheld. Set only once apply ran. */
+  notesDemoted?: number;
   /** Counts for the completion event, sourced from applyOutcome where they
    *  exist - NOT re-derived from `decisions`, which is best-effort. */
   wrote?: number;
@@ -641,6 +645,8 @@ async function processRow(
   }));
   if (appliedDecisions !== undefined) draft.decisions = appliedDecisions;
   draft.notedLines = applyOutcome.notedLines;
+  draft.notesBelowFloor = applyOutcome.notesBelowFloor;
+  draft.notesDemoted = applyOutcome.notesDemoted;
   // `wrote` and `suggested` are string[] of target names on applyOutcome; the
   // event carries COUNTS only.
   draft.wrote = applyOutcome.wrote.length;
@@ -684,6 +690,8 @@ async function recordRun(deps: ExtractionJobDeps, outcome: RunOutcome, draft: Ru
       ...(draft.rawResult !== undefined && { rawResult: draft.rawResult }),
       decisions: draft.decisions ?? {},
       notedLines: draft.notedLines ?? 0,
+      ...(draft.notesBelowFloor !== undefined && { notesBelowFloor: draft.notesBelowFloor }),
+      ...(draft.notesDemoted !== undefined && { notesDemoted: draft.notesDemoted }),
     };
     await deps.aiRuns.putRun(record);
   } catch (err) {

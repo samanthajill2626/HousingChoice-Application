@@ -1974,3 +1974,40 @@ describe('toProfile - the tenant matching inputs (B1 spec D3)', () => {
     expect(h.runs[0]!.profileFieldsPopulated!.join(',')).not.toContain('Decatur');
   });
 });
+
+// B1 spec D4: the run record carries the floor and demotion counts beside
+// notedLines (record fields, not decision targets).
+describe('runDueExtractions - Notes line counts in the run record (B1 spec D4)', () => {
+  const TWO_LINES = 'EXTRACT:{"noteLines":[{"text":"works nights downtown","confidence":0.9},{"text":"might move in spring","confidence":0.3}]}';
+
+  it('records notedLines, notesBelowFloor and notesDemoted for a run that reached apply', async () => {
+    const h = makeHarness({ dueRows: [dueRow()], messages: [msg(10, 'inbound', TWO_LINES)], contact: tenantContact(), conversation: convWith('c1') });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]).toMatchObject({ outcome: 'applied', notedLines: 1, notesBelowFloor: 1, notesDemoted: 0 });
+  });
+
+  it('records the withheld lines of a demoted (unknown-speaker) run, and writes none', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [
+        callMsg(5, 'inbound', 'Speaker 1: I work nights downtown\nSpeaker 2: thanks for calling', 'completed'),
+        msg(10, 'inbound', TWO_LINES),
+      ],
+      contact: tenantContact(), conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]).toMatchObject({ notedLines: 0, notesBelowFloor: 1, notesDemoted: 1 });
+    const notesWrites = (h.contactsUpdate.mock.calls as unknown[][]).filter(
+      (call) => typeof (call[1] as Record<string, unknown> | undefined)?.['notes'] === 'string',
+    );
+    expect(notesWrites).toEqual([]);
+  });
+
+  it('(PIN) a run that never reached apply carries neither count', async () => {
+    const h = makeHarness({ dueRows: [dueRow()], messages: [msg(10, 'inbound', TWO_LINES)], contact: landlordContact(), conversation: convWith('c1') });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]!.outcome).toBe('skipped');
+    expect('notesBelowFloor' in h.runs[0]!).toBe(false);
+    expect('notesDemoted' in h.runs[0]!).toBe(false);
+  });
+});

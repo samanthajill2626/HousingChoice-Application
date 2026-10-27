@@ -11,18 +11,17 @@ cut from main @d0e2c2d8.
 
 ## STATE
 
-Phase: PLAN WRITING (spec rev 8 APPROVED 2026-10-26; compaction gate A
-taken, manual /compact 230k -> 112k). Plan:
-docs/superpowers/plans/2026-10-26-wp1-b1-ranking-inputs.md - sections
-0-4 (binding, planner) committed, incl. the hours table (5.5-8.5 h total,
-~3-3.5 h of it design already spent). Plan v1 ASSEMBLED and committed
-(952b2b2e): S1-S6 opus drafts + planner S7 + rulings PR1-PR28. In
-flight: plan review round 1, two opus reviewers writing
-plan-review/round1-reviewer-{a,b}.md. Next: adjudicate into
-plan-review/plan-adjudications.md, fold accepted findings into the plan
-(rulings section), round 2 with the reviewer that landed more, stop on a
-round that changes no decision (cap 4); then mission block and launch
-gate (AskUserQuestion: Go AUTO / Go MANUAL / Revise), gate B, dispatch.
+Phase: LAUNCH GATE. Plan v4 FINAL (9d254258): plan review closed after 3
+rounds (24 findings, all accepted; round 3 terminal), rulings PR1-PR49.
+Hours table in plan section 4: 5.5-8.5 h total, ~3-3.5 h design spent.
+Mission block: mission-block.md (this folder). Launch gate asked as TEXT
+(Cameron's client drops text paired with AskUserQuestion): options Go
+AUTO / Go MANUAL / Revise, plus three confirmations at the gate - the
+rulings that depart from spec text (PR38 list), the banned-term lists
+(plan S6.1, BANNED_TERMS + STRICT_TERMS), the unverified price table.
+Nothing in flight. Next on a Go: compaction gate B (intent refreshed,
+replay proven, --show, watcher, offer), then AUTO dispatch of
+abt:build-orchestrator with mission-block.md verbatim (or MANUAL prompt).
 Registered with compact-resume (--persist) until mission end.
 
 ## What Cameron asked for (verbatim where wording matters)

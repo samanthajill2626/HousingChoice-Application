@@ -34,3 +34,18 @@ between slices drafted in parallel, or in commit hygiene.
 Decision changes this round: 1 (M2 - the gate's block path). Round 2
 runs (continue reviewer A: more unique accepted findings, incl. the only
 commit-hygiene HIGH; it gets reviewer B's report path).
+
+## Round 2 (plan v2 @25812156; reviewer A continued with the re-review charge)
+
+Report: plan-review/round2-reviewer-a.md (4 findings). The reviewer
+re-verified PR29-PR37 and PR39 against the tree and the S4/S5 text:
+anchors match and the seam signatures line up. Accepted 4, rejected 0.
+
+| # | Sev | Finding | Ruling | Decision changed? |
+|---|---|---|---|---|
+| R2-1 | MEDIUM | S7 commits between specs run against one long-lived `e2e:session`; the preflight rejects a server stamped at an older commit (e2e/support/preflight.ts:96-135), so S7.2/S7.3 die in globalSetup | ACCEPT - PR43: start ONE session at S6's final commit; write and run S7.1-S7.3 against it with NO commit in between; stop it; then commit S7.1-S7.3 one task at a time | no (sequencing) |
+| R2-2 | MEDIUM | PR41's phrase-only union swaps false FAILs for false PASSES: a case's own fact paraphrased ("the only Black resident", "expecting her first child", "moved to the US two years ago") scores clean; `expecting in` hits "Expecting inspection Friday" | ACCEPT - PR44: per-case STRICT terms (spec D7 "Each case carries banned terms"), bare words included, checked only against that case's own lines; PLUS the phrase-form union checked against every line; drop `expecting in` | YES - gate detection rule |
+| R2-3 | LOW | PR38's deviation list is incomplete (PR9, PR23, PR25 missing); S5 C7's one-space flattening has no ruling | ACCEPT - PR45: S5 C7 accepted (one-space flattening in the leaf, since toSingleLine cannot be imported there); PR38's list extended with PR9, PR23, PR25, PR44, PR45 | no |
+| R2-4 | LOW | With PR42 a run that failed at the model call renders "0 appended" as if apply ran; PR42's test is prose only | ACCEPT - PR46: inside the region the `notedLines` row renders only when an S4/S5 count is present or `notedLines > 0`; a fingerprint-only run shows the fingerprint item alone; the test is written as code | no |
+
+Decision changes this round: 1 (R2-2). Round 3 runs after the write-through.

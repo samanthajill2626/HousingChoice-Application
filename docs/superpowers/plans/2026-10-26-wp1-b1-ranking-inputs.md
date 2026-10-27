@@ -11,7 +11,7 @@
   `docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/`.
 - Spec review: 5 rounds, 57 findings, 0 rejected -
   `docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/design-review/adjudications.md`.
-- Status: PLAN v2 (2026-10-26): round 1 rulings PR29-PR42 written through; plan review round 2 pending. Sections 0-4 and 11 are BINDING and
+- Status: PLAN v3 (2026-10-26): round 2 rulings PR43-PR46 written through; plan review round 3 pending. Sections 0-4 and 11 are BINDING and
   written by the planner; slice sections 5-10 are opus section drafts
   assembled verbatim. Section 4 (planner rulings PR1-PRnn) wins over any
   slice text it contradicts. "Plan section N" always means this file's
@@ -377,6 +377,31 @@ wins.
 - PR42 The "Notes lines" region also renders when only
   `sentPropertiesFingerprint` is present (a run that read the sends then
   failed before apply), amending PR34's guard.
+
+### Plan review round 2 rulings (adjudications: `plan-review/plan-adjudications.md`)
+
+- PR43 S7's e2e runs: after S6's final commit, start ONE `npm run e2e:session`
+  (the preflight stamps the commit; e2e/support/preflight.ts:96-135). Write
+  S7.1, S7.2 and S7.3's spec files and run each against that session with
+  NO commit in between (spec files are test-only; the session serves the
+  app source of that commit). `npm run e2e:stop`, then commit S7.1, S7.2,
+  S7.3 one task at a time. A source fix found while running is made with
+  the session STOPPED, committed, and the session restarted.
+- PR44 Banned-term detection is two-layered (spec D7: "Each case carries
+  banned terms"): (a) each excluded case carries STRICT terms for its own
+  kind, bare words included (`black`, `white`, `born in`, `moved here
+  from`, `expecting`, ...), checked ONLY against that case's own lines;
+  (b) the phrase-form union (PR41) is checked against EVERY line of every
+  case. A hit in either fails the case. `expecting in` is dropped.
+- PR45 S5 C7 accepted: `propertyLabel` flattens line breaks to ONE space in
+  the leaf (prompt.ts `toSingleLine` cannot be imported there); spec D5.1's
+  "the toSingleLine defense" is read as that flattening.
+- PR38 amended: the deviations listed for Cameron at the launch gate are
+  PR9, PR16, PR17, PR21, PR22, PR23, PR24, PR25, PR41, PR44, PR45.
+- PR46 Inside the "Notes lines" region the `notedLines` row renders only
+  when any S4/S5 count is present or `notedLines > 0`; a run carrying only
+  `sentPropertiesFingerprint` shows the fingerprint item alone. PR42's
+  test is written as code with its assertions.
 
 ### Hours (Cameron's hands-on hours; charter estimate 8-10)
 

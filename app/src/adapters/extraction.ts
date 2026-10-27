@@ -9,6 +9,14 @@
 //              `npm run dev` stays fully offline.
 // - fake:      deterministic EXTRACT: marker protocol for tests/e2e (in
 //              extractionFake.ts; config refuses driver 'fake' in production).
+//
+// Also one structured-output CLIENT (createStructuredOutputClient, end of
+// file): a one-shot JSON answer against a CALLER's system prompt, user content
+// and schema, for code that is not extraction but must call the same model
+// family - today only the never-written test's grader
+// (app/scripts/extraction-prompt-probe.ts, WP1 B1 spec D7). It lives here so
+// this file stays the only Anthropic SDK importer, and it reuses the driver's
+// client construction, output cap and thinking-off form.
 import Anthropic from '@anthropic-ai/sdk';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import {
@@ -247,6 +255,11 @@ function thinkingOff(model: string) {
   return BETWEEN_TOOLS_MODELS.has(model) ? ({ type: 'between_tools' } as const) : ({ type: 'disabled' } as const);
 }
 
+/** The ONE Anthropic client construction: the extraction driver and the structured-output client. */
+function newAnthropicClient(apiKey: string, apiBaseUrl?: string): Anthropic {
+  return new Anthropic({ apiKey, ...(apiBaseUrl ? { baseURL: apiBaseUrl } : {}) });
+}
+
 class ConsoleExtractionDriver implements ExtractionDriver {
   readonly kind = 'console' as const;
   private readonly log: Logger;
@@ -275,7 +288,7 @@ class AnthropicExtractionDriver implements ExtractionDriver {
 
   constructor(opts: { apiKey: string; apiBaseUrl?: string; model: string; logger?: Logger }) {
     // Constructed once per driver instance (mirrors the Twilio adapter).
-    this.client = new Anthropic({ apiKey: opts.apiKey, ...(opts.apiBaseUrl ? { baseURL: opts.apiBaseUrl } : {}) });
+    this.client = newAnthropicClient(opts.apiKey, opts.apiBaseUrl);
     this.model = opts.model;
     this.log = opts.logger ?? defaultLogger;
   }
@@ -426,4 +439,104 @@ export function createExtractionDriver(cfg: {
       throw new Error(`createExtractionDriver: unknown driver ${String(exhaustive)}`);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Structured-output client - a one-shot JSON answer against a caller's schema.
+// ---------------------------------------------------------------------------
+
+/** What a structured-output caller sends: its own system prompt, user content and JSON schema. */
+export interface StructuredOutputRequest {
+  system: string;
+  user: string;
+  /** A structured-outputs json_schema: every object level `additionalProperties: false`, all keys required. */
+  schema: Record<string, unknown>;
+}
+
+/**
+ * A DISCRIMINATED result, never a throw (as ExtractionCall). `text` is the
+ * model's response text VERBATIM; parsing it is the caller's job (the caller
+ * decides what an unparseable answer means).
+ */
+export type StructuredOutputCall =
+  | { ok: true; text: string; usage: { inputTokens: number; outputTokens: number } }
+  | {
+      ok: false;
+      failure: 'refusal' | 'truncated' | 'driver';
+      message: string;
+      /** Present when the provider billed the call. */
+      usage?: { inputTokens: number; outputTokens: number };
+    };
+
+export interface StructuredOutputClient {
+  readonly model: string;
+  call(request: StructuredOutputRequest): Promise<StructuredOutputCall>;
+}
+
+class AnthropicStructuredOutputClient implements StructuredOutputClient {
+  private readonly client: Anthropic;
+  readonly model: string;
+
+  constructor(opts: { apiKey: string; apiBaseUrl?: string; model: string }) {
+    this.client = newAnthropicClient(opts.apiKey, opts.apiBaseUrl);
+    this.model = opts.model;
+  }
+
+  async call(request: StructuredOutputRequest): Promise<StructuredOutputCall> {
+    let message: Awaited<ReturnType<typeof this.client.messages.create>>;
+    try {
+      message = await this.client.messages.create({
+        model: this.model,
+        max_tokens: MAX_OUTPUT_TOKENS,
+        thinking: thinkingOff(this.model),
+        output_config: { format: { type: 'json_schema', schema: request.schema } },
+        system: request.system,
+        messages: [{ role: 'user', content: request.user }],
+      });
+    } catch (err) {
+      return { ok: false, failure: 'driver', message: err instanceof Error ? err.message : String(err) };
+    }
+    // The same defensive reading as AnthropicExtractionDriver.extract: a
+    // response missing what its type promises is a 'driver' failure, never a
+    // TypeError, and stop_reason is read before the usage guard.
+    const raw: typeof message.usage | undefined = message?.usage;
+    const usage =
+      typeof raw?.input_tokens === 'number' && typeof raw.output_tokens === 'number'
+        ? { inputTokens: raw.input_tokens, outputTokens: raw.output_tokens }
+        : undefined;
+    const billed = usage === undefined ? {} : { usage };
+    if (message?.stop_reason === 'refusal') {
+      return { ok: false, failure: 'refusal', message: 'Anthropic declined to answer (stop_reason: refusal)', ...billed };
+    }
+    if (message?.stop_reason === 'max_tokens') {
+      return {
+        ok: false, failure: 'truncated', ...billed,
+        message: `Anthropic hit the ${MAX_OUTPUT_TOKENS}-token output cap and returned an incomplete response (stop_reason: max_tokens)`,
+      };
+    }
+    if (usage === undefined) return { ok: false, failure: 'driver', message: 'Anthropic response carried no usage counts' };
+    const content: typeof message.content | undefined = message.content;
+    if (!Array.isArray(content)) {
+      return { ok: false, failure: 'driver', message: 'Anthropic response contained no content blocks', usage };
+    }
+    const textBlock = content.find(
+      (block): block is Extract<typeof block, { type: 'text' }> => block.type === 'text',
+    );
+    if (!textBlock) return { ok: false, failure: 'driver', message: 'Anthropic response contained no text block', usage };
+    return { ok: true, text: textBlock.text, usage };
+  }
+}
+
+/**
+ * A structured-output client on `model` (anthropic only - there is no console
+ * or fake form; callers inject a stub in tests). Like the extraction driver it
+ * cannot run claude-opus-5-5 or the Fable/Mythos models (thinkingOff).
+ */
+export function createStructuredOutputClient(cfg: { model: string; apiKey: string; apiBaseUrl?: string }): StructuredOutputClient {
+  if (!cfg.apiKey) throw new Error('createStructuredOutputClient: an apiKey is required');
+  return new AnthropicStructuredOutputClient({
+    apiKey: cfg.apiKey,
+    model: cfg.model,
+    ...(cfg.apiBaseUrl ? { apiBaseUrl: cfg.apiBaseUrl } : {}),
+  });
 }

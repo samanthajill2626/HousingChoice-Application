@@ -740,3 +740,45 @@ describe('the tenant matching fields in the system prompt (B1 spec D3)', () => {
     expect(bad).toEqual([]);
   });
 });
+
+// B1 spec D4: noteLines widen from "secondary facts" to facts that might matter
+// to matching this person with a home; each carries a confidence; and the
+// never-written list (charter 6.4) is stated. C3: every asserted phrase lives
+// INSIDE one prompt line.
+describe('noteLines in the system prompt (B1 spec D4)', () => {
+  const sys = buildExtractionSystemPrompt();
+
+  it('widens noteLines to matching facts, including a fact that adds to a filled text field', () => {
+    expect(sys).toContain('- noteLines are facts that might matter to matching this client with a home,');
+    expect(sys).toContain('or to staff understanding their situation, that no field or other output');
+    expect(sys).toContain('already-filled tenant matching text field is also a noteLine');
+    expect(sys).not.toContain('noteLines are secondary facts');
+  });
+
+  // PR32: the no-address bullet is NOT pinned here - S5.5 deletes it
+  // (PR50) and owns its pin.
+  it('keeps the reconcile, append-only and short-line rules verbatim', () => {
+    expect(sys).toContain('RECONCILE every noteLine against the profile notes');
+    expect(sys).toContain('You CANNOT revise or replace a notes line');
+    expect(sys).toContain('Keep every noteLine SHORT');
+    expect(sys).toContain('Profile notes lines beginning "[Auto - <date>]" are your own notes from');
+  });
+
+  it('explains the { text, confidence } item and that low-confidence lines are not written', () => {
+    expect(sys).toContain('- Each noteLine is an object: "text" is the line, "confidence" is a number');
+    expect(sys).toContain('low confidence are not written, so never inflate it.');
+  });
+
+  it('states the never-written list, keeping household size, the rent portion and an assistance animal', () => {
+    expect(sys).toContain('- NEVER write a noteLine stating any of these, even when the client says it:');
+    // [PR58] sex covers sexual orientation and gender identity.
+    expect(sys).toContain('race, color, religion, sex (including sexual orientation and gender');
+    expect(sys).toContain('identity), national origin; familial facts beyond');
+    expect(sys).toContain('household size (no pregnancy, marital status, children\'s ages or custody);');
+    expect(sys).toContain('disability or medical facts, other than the accessibility need (its field,');
+    expect(sys).toContain('or a noteLine when it adds to the filled field) and an assistance animal.');
+    expect(sys).toContain('Write a need as a feature of the home ("needs a ground floor"), never as a');
+    expect(sys).toContain('diagnosis. Household size, the client\'s own rent portion and an assistance');
+    expect(sys).toContain('animal are allowed. This is the never-written list.');
+  });
+});

@@ -632,8 +632,8 @@ describe('prompt builders', () => {
   it('keeps the worked noteLines example free of any address', () => {
     // The example is drawn from a real production failure, but a street address
     // baked into the system prompt would both persist production data in the
-    // prompt forever and model the one thing the address rules forbid - putting an
-    // address in a noteLine.
+    // prompt forever and teach the model a real client's address. (WP1 B1
+    // PR50: a feedback noteLine may now name a sent property; not this one.)
     const sys = buildExtractionSystemPrompt();
     const example = sys.slice(sys.indexOf('Given a note'), sys.indexOf('Keep every noteLine SHORT'));
     expect(example).toContain('Toured a 5-bedroom duplex');
@@ -642,12 +642,14 @@ describe('prompt builders', () => {
     expect(example).not.toMatch(/\b\d+\s+\w+\s+(St|St\.|Street|Dr|Drive|Ave|Avenue|Rd|Road|Ln|Lane)\b/i);
   });
 
-  it('carries the address hard rules (current-residence only; never in noteLines)', () => {
+  it('carries the address hard rule (current-residence only); the no-address bullet is gone (PR50)', () => {
     const sys = buildExtractionSystemPrompt();
     // C3: assert substrings that live INSIDE one line (the prompt is lines joined
     // with '\n'), never a phrase that spans a line break.
     expect(sys).toContain('OWN CURRENT residential address ONLY');
-    expect(sys).toContain('Addresses NEVER go in noteLines');
+    // WP1 B1 spec D5.2 rev 9 (charter 20 item 9): the no-address bullet is
+    // removed; a feedback line names a sent property by its label.
+    expect(sys).not.toContain('Addresses NEVER go in noteLines');
   });
 });
 
@@ -833,5 +835,44 @@ describe('the PROPERTIES SENT block in the user content (WP1 B1 spec D5.1)', () 
       'TRANSCRIPT',
       renderUtteranceLine(u),
     ].join('\n'));
+  });
+});
+
+describe('the system prompt and the PROPERTIES SENT block (WP1 B1 spec D5.1, D5.2)', () => {
+  // C3: every asserted phrase lives INSIDE one prompt line.
+  const sys = buildExtractionSystemPrompt();
+
+  it('names the block in its description of the user message', () => {
+    expect(sys).toContain('agencies we already know), a PROPERTIES SENT block (the properties staff sent');
+    expect(sys).toContain('as "- <label> - sent <date>" or "- <label> - signed up <date>", or');
+    expect(sys).toContain('"PROPERTIES SENT: none"), and a TRANSCRIPT of the conversation in chronological');
+    // The transcript-line contract is unchanged.
+    expect(sys).toContain('order. Each transcript line is "<timestamp> [<speaker>/<channel>] <text>"');
+  });
+
+  it('asks for a feedback noteLine that names the property by copying its label', () => {
+    expect(sys).toContain('- FEEDBACK ON A SENT PROPERTY: when the client says anything about a');
+    expect(sys).toContain('copying its label exactly as PROPERTIES SENT writes it');
+    expect(sys).toContain('when one is given. Example: "123 Main St, Decatur: on the fence - likes');
+    expect(sys).toContain('no fixed shape, no fixed set of reaction words');
+  });
+
+  it('keeps a maybe a maybe, ties place feedback to a home only when the client did, and reconciles', () => {
+    expect(sys).toContain('Never turn a maybe into a no.');
+    expect(sys).toContain('Name a sent property only when the');
+    expect(sys).toContain('a CHANGE of mind is');
+    expect(sys).toContain('- Every other noteLine rule applies to feedback, the never-written list');
+  });
+
+  it('drops the no-address bullet; the address output still never takes a sent home', () => {
+    expect(sys).not.toContain('Addresses NEVER go in noteLines');
+    expect(sys).not.toContain('for address information.');
+    // PIN: the address-output bullet is unchanged.
+    expect(sys).toContain('property they are asking about, touring, applying to, or that staff sent');
+    expect(sys).toContain('or mentioned to them; NEVER a previous address; NEVER a prospective or');
+  });
+
+  it('puts the feedback guidance after the worked reconcile example, which stays address-free', () => {
+    expect(sys.indexOf('FEEDBACK ON A SENT PROPERTY')).toBeGreaterThan(sys.indexOf('Keep every noteLine SHORT'));
   });
 });

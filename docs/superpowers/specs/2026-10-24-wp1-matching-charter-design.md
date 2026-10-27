@@ -294,6 +294,12 @@ change how we rank properties with respect to them"). B2 bounds its size
 (newest first) and fingerprints it so that a bare new send with no
 outcome does not change the tenant card (section 10.3).
 
+AMENDED 2026-10-26 (section 20, item 8): pairing feedback with a property
+by its address label in Notes text is a STOPGAP. WP3 redesigns property
+feedback from the ground up, captured against the send when the reply is
+read (docs/issues/wp3-property-feedback-redesign.md). B2 keeps its attach
+step minimal and easy to delete, and does not polish it.
+
 Property card: everything on the unit except the exclusions, which today
 means address, beds, baths, rent range, payment standard, accepted voucher
 sizes, accepted authorities, pets, accessibility, utilities the tenant
@@ -1093,7 +1099,9 @@ standard table: WP1 reads the per-property Payment standard field as
 entered; a table is a later improvement if Sam's numbers come from one.
 Cross-property "which priority property has the best tenants" view.
 Several properties per message. Priority levels beyond on/off. Credit or
-income used to rank or exclude.
+income used to rank or exclude. Property feedback as first-class records
+paired with the send at capture, replacing the address-matched feedback
+lines (WP3; docs/issues/wp3-property-feedback-redesign.md).
 
 ## 19. Open items and assumptions
 
@@ -1164,3 +1172,10 @@ date; this list is the index.
      per home (Cameron: "It's incohesive to have the notes box include the
      property and the maybe tag, and the properties seen much later")
      (sections 3, 4, 6.2, 6.3, 6.4, 10.3, 13.5, 15.1, 15.4, 17).
+  8. Address-matched feedback lines are a stopgap until WP3. Cameron:
+     "When we get to work package 3 we need a much better way of pairing
+     the property with feedback about the property. This all seems so
+     fragile and really not the best design. ... I think we need to
+     re-design from the ground up on shared property feedback." Filed as
+     docs/issues/wp3-property-feedback-redesign.md; B2 keeps its attach
+     step minimal and easy to delete (sections 6.2, 18).

@@ -1,6 +1,7 @@
 # WP1 B1 Ranking inputs - design
 
-Status: DRAFT revision 8 (2026-10-26), at the spec gate. Revs 2-4 folded
+Status: APPROVED revision 8 (2026-10-26). Cameron passed the spec gate
+on rev 8 without a further review round. Revs 2-4 folded
 in design review rounds 1-3 (40 findings, all accepted); rev 6 folded in
 round 4, the last allowed (8 findings, all precision edits; the review is
 closed). Rev 5 followed Cameron's first spec-gate redesign (charter
@@ -406,6 +407,12 @@ five-line cap, the demotion rule (a demoted run appends no line), the
   B2's tenant card (charter 6.2 amended), using `propertyLabel` and
   `labelMatches`. B1's list is extraction input only.
 - No Maybe button (charter 4 amended).
+- FLAG FOR B2 (Cameron 2026-10-26, charter section 20 item 8): this
+  address-matched pairing is a STOPGAP. WP3 redesigns property feedback
+  from the ground up, captured against the send
+  (docs/issues/wp3-property-feedback-redesign.md). B2 keeps its attach
+  step minimal and easy to delete; the notes below are for doing that
+  safely, not for polishing it.
 - Notes for B2 (charter 6.2 consequences B1's contract hands it; each
   is B2's to decide, the first with Cameron):
   - Attaching works on WHOLE lines and cannot tell an `[Auto - ...]` line

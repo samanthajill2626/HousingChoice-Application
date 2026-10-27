@@ -11,7 +11,9 @@ cut from main @d0e2c2d8.
 
 ## STATE
 
-Phase: SPEC GATE (fourth pass). Spec rev 8 (round 5 folded in, 9 findings accepted; Cameron asked for the round). Rev 7 was: the fixed-shape reaction line
+Phase: SPEC GATE PASSED on rev 8 (Cameron 2026-10-26, no round 6).
+Next: compaction gate A, then write the plan. Before the gate pass:
+SPEC GATE (fourth pass). Spec rev 8 (round 5 folded in, 9 findings accepted; Cameron asked for the round). Rev 7 was: the fixed-shape reaction line
 is withdrawn for free-form FEEDBACK LINES naming the property, and B2's
 properties seen carries each property's feedback lines under it (charter
 section 20, item 7). Round 5 ran past the cap at Cameron's request
@@ -115,6 +117,17 @@ amendment, and then file the issue and write the spec."
 - Asked whether "card" maps to a UI element: it does not; it is the
   charter's word for all of one record's information as given to the
   ranker (charter section 3, now stated there).
+
+- On the address-matched pairing (after rev 8): "When we get to work
+  package 3 we need a much better way of pairing the property with
+  feedback about the property. This all seems so fragile and really not
+  hte best design. It's for sure like we're shoehorning this whole thing
+  into the existing system. Instead I think we need to re-design from the
+  ground up on shared property feedback. Do you think we need another
+  review round?" Planner: no round 6. Then Cameron: "yes file an issue
+  for wp3, pass rev 8, and flag it for b2" -> SPEC GATE PASSED on rev 8;
+  docs/issues/wp3-property-feedback-redesign.md filed; charter section 20
+  item 8; flag in spec D5.4.
 
 ## Why
 

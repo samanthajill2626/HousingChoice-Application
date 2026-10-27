@@ -12,7 +12,9 @@ the planner defaults confirmed. Hours: no cut; B1 measures them
 B1's merge gate, the fixed tenant fields built to move into notes later.
 AMENDED again 2026-10-26 at the B1 spec gate (section 20, items 4-6):
 stored reactions withdrawn for reaction lines in the Notes box, properties
-seen on the tenant card, the maybe case.
+seen on the tenant card, the maybe case. AMENDED a third time 2026-10-26
+(section 20, item 7): reaction lines become free-form FEEDBACK LINES that
+name the home, and properties seen carries each home's feedback under it.
 Mission: Amendment No. 1 Work Package 1 (signed; Cameron 2026-10-20, Sam
 2026-10-21). 52 contracted hours.
 Records: docs/superpowers/reviews/2026-10-24-wp1-matching-charter/
@@ -102,7 +104,11 @@ section 17 for Sam to hear.
   record lacks it. Reasons and missing are never mixed.
 - **Matches store** - the DynamoDB table `matches`. Never "the matches
   table" in prose near UI text: the Matching page also shows a table.
-- **Card** - the projection of a record the model reads (section 6).
+- **Card** - the projection of a record the model reads (section 6): all
+  of one record's information as given to the ranker. Not a screen
+  element; the dashboard's "cards" are unrelated.
+- **Feedback line** - a Notes line recording what a tenant said about a
+  home sent to them, in free form, naming that home (section 6.4).
 - **Fingerprint** - a hash of a card or of a pair's history, stored with
   the match, compared on read to detect change (section 10).
 - Human copy: tenant-facing "home", landlord and staff "property", code
@@ -127,15 +133,15 @@ interested" send outcome, an accessibility need the property cannot meet,
 or a rent above the tenant's stated portion are inputs the model weighs,
 not rules the rubric dictates. A pair marked Not interested stays in the
 pool and is never forced into Weak; the recorded outcome and the tenant's
-reaction line (a hard no, or "maybe, but show me others first") are both
+feedback line (a hard no, or "maybe, but show me others first") are both
 in front of the model (Cameron 2026-10-25). A "maybe" read
 from context weighs only as a slight reason against, and the age rule in
-section 10.3 lets it rise again as time passes. AMENDED 2026-10-26: the
-reaction is a Notes line in a fixed shape naming the property (section
-6.4), not a stored reaction. Staff still mark a "maybe" tenant Not
+section 10.3 lets it rise again as time passes. AMENDED 2026-10-26 (twice): the
+reaction is a free-form feedback line in the Notes box naming the home
+(section 6.4), not a stored reaction. Staff still mark a "maybe" tenant Not
 interested so the tenant moves on (no tour is created); the rubric reads
-a staff Not interested together with a `maybe` reaction line for the same
-property as a MAYBE, never as a hard no (Cameron 2026-10-26: "we want to
+a staff Not interested together with feedback on the same property saying
+the tenant is unsure as a MAYBE, never as a hard no (Cameron 2026-10-26: "we want to
 make sure that that's very clearly shown as a maybe, and then after a
 certain amount of time, that property would bubble back up").
 
@@ -272,9 +278,17 @@ AMENDED 2026-10-26: the tenant card also carries PROPERTIES SEEN: every
 property sent to the tenant (and every flyer sign-up), each with that
 property's card details, the dates sent, and its stored outcome facts
 (the declined record with who and when, tour requests and outcomes; the
-same stored facts as section 6.3, never the derived outcome). With the
-reaction lines in the Notes box, this is how feedback on ANY property
-changes the ranking of EVERY property for that tenant (Cameron
+same stored facts as section 6.3, never the derived outcome), AND what the
+tenant said about it. AMENDED again 2026-10-26 (section 20, item 7): every
+Notes line that names a seen property (its label, section 6.4, matched
+with case and spacing folded) is shown UNDER that property and not
+repeated in the card's Notes section; a line that names no seen property
+stays in the Notes section and bears on every property. Each entry reads
+as one unit: what the home is, what happened, what the tenant thought
+(Cameron 2026-10-26: a list of homes seen without what the tenant thought
+is useless to the ranker). The Notes box Sam sees is unchanged; only the
+card arranges it. This is how feedback on ANY property changes the
+ranking of EVERY property for that tenant (Cameron
 2026-10-26: "Every time they give us feedback on a property, that should
 change how we rank properties with respect to them"). B2 bounds its size
 (newest first) and fingerprints it so that a bare new send with no
@@ -320,7 +334,7 @@ extracted reactions as a list on the listing_sends row (with its own
 writer under `shares_op`, kinds, and a staff remove control) is
 withdrawn: it was a new hidden store that needed its own display and
 correction path. Instead, what a tenant says about a property is a
-reaction line in the Notes box (section 6.4), which Sam already sees and
+feedback line in the Notes box (section 6.4), which Sam already sees and
 edits, and the outcome is the stored facts above, which staff already
 set. The ranker reads both on the tenant card (section 6.2), so feedback
 on one property informs every ranking for that tenant.
@@ -370,13 +384,13 @@ as follows:
 - Never written as a Notes line: race, color, religion, sex, national
   origin, familial facts beyond household size, and disability or
   medical facts other than the stated accessibility need and an
-  assistance animal. The same list governs reaction lines (the last
+  assistance animal. The same list governs feedback lines (the last
   bullet). Screening facts the box carries today (utility
   debt and the like) stay, because Sam uses them; the
   ranker disregards their credit and income content (section 7.2). B1
   tests the list: synthetic conversations stating each excluded kind of
   fact, run on the testing key, must append no line of an excluded kind,
-  reaction lines included (household size and tenant portion remain
+  feedback lines included (household size and tenant portion remain
   allowed).
   The test is B1's MERGE GATE: B1 is not handed back merge-ready until it
   passes on the widened prompt, or Cameron decides. AMENDED 2026-10-26:
@@ -384,22 +398,28 @@ as follows:
   `AI_MATCHING_NOTES_ENABLED` this bullet named is dropped); extraction
   writes only to the record and sends nothing, so Cameron judged a switch
   an extra code path that protects nothing the merge gate does not. The
-  list governs Notes lines only, reaction lines included; the fixed
+  list governs Notes lines only, feedback lines included; the fixed
   free-text fields above are not covered by it or by the test (Cameron
   2026-10-26).
-- AMENDED 2026-10-26 (replaces "one reading per send ... written to the
-  pair history"): a tenant's reaction to a property sent to them is a
-  REACTION LINE, a Notes line in a fixed shape that names the property and
-  starts with one of four reaction words:
-  `[Auto - <date>] <address line 1>, <city> - <interested | maybe | not interested | question>: <reason>`,
-  for example `[Auto - Oct 12] 123 Main St, Decatur - maybe: on the fence,
-  wants to see other homes first`. Extraction is told which properties
-  were sent to the tenant so it can name the right one; the rule keeping
-  addresses out of Notes lines covers the tenant's OWN address only. A
-  reaction to a home never sent is an ordinary Notes line without an
-  address. Reaction lines carry the same confidence floor, demotion rule
-  and never-written list as every Notes line, and Sam corrects one by
-  editing the Notes box.
+- AMENDED 2026-10-26, twice (replaces "one reading per send ... written to
+  the pair history", then the fixed-shape reaction line): what a tenant
+  says about a property sent to them is a FEEDBACK LINE, an ordinary
+  free-form Notes line that NAMES the property by its label, for example
+  `[Auto - Oct 12] 123 Main St, Decatur: on the fence - likes the yard,
+  worried about the commute, wants to see other homes first`. There is no
+  fixed shape and no fixed set of reaction words; the model says what the
+  tenant thought in its own words, and says plainly when the tenant is
+  unsure rather than collapsing a maybe into a no (Cameron 2026-10-26:
+  "Saying we need to exactly include notes a specific way, that's a bad
+  idea"). The one requirement is that the line names the home, so the
+  card can put it under that home (section 6.2). Extraction is told which
+  properties were sent to the tenant, each with its label (address line
+  1, address line 2 when present, city), so it can name the right one;
+  one shared function builds the label for extraction (B1) and for the
+  card (B2). The rule keeping addresses out of Notes lines covers the
+  tenant's OWN address only. Feedback lines carry the same confidence
+  floor, demotion rule and never-written list as every Notes line, and
+  Sam corrects one by editing the Notes box.
 
 The landlord-side counterpart is filed,
 not built: docs/issues/landlord-conversation-extraction-to-property.md.
@@ -738,10 +758,11 @@ section 6 (recency only as its bucket); on the pair history (section 6.3),
 the declined record or a tour. A new send ALONE
 does not make a match out of date, and neither does a text that adds
 nothing to the record: the derived outcome is never fingerprinted. A text
-that extraction turns into a field or a Notes line (a reaction line
+that extraction turns into a field or a Notes line (a feedback line
 included) does, correctly, and so does a staff edit to either notes box.
 AMENDED 2026-10-26: because the tenant card carries properties seen and
-the reaction lines (section 6.2), a decline, tour or reaction line about
+the feedback lines under them (section 6.2), a decline, tour or feedback
+line about
 ANY property makes every match of that tenant out of date, which is
 intended: feedback re-ranks the whole list. A bare new send does not
 (B2 leaves sends with no outcome out of the tenant card's fingerprint). The Already sent and outcome
@@ -919,7 +940,7 @@ complete records; nothing refuses to rank.
 Sending from the composer records the send on the pair (listing sends,
 tracker #27 shape). The row shows Already sent at once; the send alone does
 not make the match out of date (section 10.3). A later decline, tour or
-reaction line does. The outcome controls (No
+feedback line does. The outcome controls (No
 reply yet / Interested / Not interested) remain where they are today.
 
 ## 14. D11 - Models, drivers and configuration
@@ -954,8 +975,8 @@ reply yet / Interested / Not interested) remain where they are today.
 
 | Slice | Owns | Hours |
 |---|---|---|
-| B1 Ranking inputs | Tenant fields area preference, maximum tenant portion, accessibility need, preferences and constraints on the record and edit form; `priority` boolean on the unit, its edit-form control and record display; extraction schema widened (fixed fields; the noteLines instruction widened to matching facts, each line with a confidence and the floor, no lines from unknown-speaker runs, the never-written list; reaction lines naming the property with one of four reaction words, and the list of properties sent to the tenant given to extraction so it can name them; amended 2026-10-26); the never-written test covering Notes lines, reaction lines included, run as B1's merge gate (no production switch, amended 2026-10-26); the one list of tenant matching inputs and their sources (section 6.4). Ships to production first. | 8-10 |
-| B2 Ranking engine | Pool in both directions with the window and the sendability fences; cards by classification with the runtime allowlist and the landlord switch; card fingerprint helpers; completeness pass; rubric, examples, structured output; anthropic/fake/console drivers; the ranking poll loop and properties seen on the tenant card with its fingerprint rule (amended 2026-10-26); the ranking-job record (claim generation, lease, one takeover, failed batches, carried trace); persisted batches, event hint, GET and base-table re-read; matches with the out-of-date, age and version rules and the one-button whole-pool re-score; the lean seed row replaced; review records with direction and input snapshots, the in-app review list, example promotion and `examplesVersion`, the synthetic examples and evaluation set, the de-identified export, the evaluation script; the Staff notes comment corrected; the cap with its key list, accommodation flags and the property-level unlawful-flag record; the counterfactual fair-housing check on synthetic pairs; the Rank rate-limit knob and roles; `AI_RANKING_ENABLED`; run log under its own keys with cost by environment; band and priority policy on read; endpoints: rank, read ranking by anchor, review a pair; the Rankings page with "Rank this anchor". | 33-42 |
+| B1 Ranking inputs | Tenant fields area preference, maximum tenant portion, accessibility need, preferences and constraints on the record and edit form; `priority` boolean on the unit, its edit-form control and record display; extraction schema widened (fixed fields; the noteLines instruction widened to matching facts, each line with a confidence and the floor, no lines from unknown-speaker runs, the never-written list; feedback lines, free-form Notes lines naming the home the tenant is talking about, the shared property label function, and the list of properties sent to the tenant given to extraction so it can name them; amended 2026-10-26); the never-written test covering Notes lines, feedback lines included, run as B1's merge gate (no production switch, amended 2026-10-26); the one list of tenant matching inputs and their sources (section 6.4). Ships to production first. | 8-10 |
+| B2 Ranking engine | Pool in both directions with the window and the sendability fences; cards by classification with the runtime allowlist and the landlord switch; card fingerprint helpers; completeness pass; rubric, examples, structured output; anthropic/fake/console drivers; the ranking poll loop and properties seen on the tenant card, each home's feedback lines under it, with its fingerprint rule (amended 2026-10-26); the ranking-job record (claim generation, lease, one takeover, failed batches, carried trace); persisted batches, event hint, GET and base-table re-read; matches with the out-of-date, age and version rules and the one-button whole-pool re-score; the lean seed row replaced; review records with direction and input snapshots, the in-app review list, example promotion and `examplesVersion`, the synthetic examples and evaluation set, the de-identified export, the evaluation script; the Staff notes comment corrected; the cap with its key list, accommodation flags and the property-level unlawful-flag record; the counterfactual fair-housing check on synthetic pairs; the Rank rate-limit knob and roles; `AI_RANKING_ENABLED`; run log under its own keys with cost by environment; band and priority policy on read; endpoints: rank, read ranking by anchor, review a pair; the Rankings page with "Rank this anchor". | 33-42 |
 | B3 Send property from a tenant | The ranked row; the composer's tenant anchor; priority-only view; completeness banner; Rank/Update; one-step send with the outcome on the pair; agree/disagree with the disagree direction; the tenant record's Send re-pointed. | 10-12 |
 | B4 Send property from a property | The composer's property anchor; ranked tenants replacing the filter-only audience, the window toggle, rows unchecked by default and Select all, with hand-picks, the tour-hold chip and confirm, old filter drafts and the partner flow kept (section 13.1); already-sent No reply filter chip; pick one, a few or many; the switch-off composer; the unlawful-flag display on the property record with the admin Dismiss; the Matching nav entry asking which record to start from; the property page's Send re-pointed; the Similar panel relabeled "similarity". | 13-16 |
 
@@ -994,7 +1015,7 @@ every review kept as its own record with its input snapshot; the dataset
 from synthetic to real; no identified client record committed), 13.1 (one composer, two anchors; Send property on both records),
 14 (model per stage; fake driver), 15.2 (order), and the compliance
 decisions: 6.3 (no stored reactions; declines left to WP3), 6.4 (matching
-facts and reaction lines as Notes lines, the never-written list, its test as B1's merge gate), 7.2 (fair housing,
+facts and feedback lines as Notes lines, the never-written list, its test as B1's merge gate), 7.2 (fair housing,
 credit and income, the counterfactual gate), 7.4 (the cap and its key
 list), 10.2 (no SQS queue for ranking; one automatic takeover), 13.1
 (selection defaults). A slice that needs one changed brings it to
@@ -1050,7 +1071,7 @@ Each is a deliberate call, listed so Sam hears all of them (section 16.2).
 - Each ranking recorded: built as matches overwritten on each press plus
   the run log kept 180 days, and every review kept (sections 10, 11, 12).
 - Scope reaching into WP3: the signed WP3 text reads tenant reactions
-  ("too far") during sharing; B1 builds the reaction lines and the
+  ("too far") during sharing; B1 builds the feedback lines and the
   widened Notes instruction now and bills them to WP1, because the
   ranking reads them (section 6.4).
 - "Computed on open" / no background re-rank: built as computed on
@@ -1131,3 +1152,14 @@ date; this list is the index.
      the rubric reads that with a `maybe` reaction line as a maybe, and
      the age rule lets the property bubble back up. No Maybe button
      (section 4).
+  7. Reaction lines lose their fixed shape (supersedes the shape in item
+     4). Cameron: "Why do we care if the 'maybe' is lowercase and in the
+     fixed shape? I thought the whole point was to use llm capabilities to
+     save info about the response to a property, and use that info in
+     future rankings." A FEEDBACK LINE is a free-form Notes line that
+     names the home; the model words the reaction, saying plainly when the
+     tenant is unsure. On the card, each seen property carries the
+     feedback lines that name it, so the ranker reads one cohesive entry
+     per home (Cameron: "It's incohesive to have the notes box include the
+     property and the maybe tag, and the properties seen much later")
+     (sections 3, 4, 6.2, 6.3, 6.4, 10.3, 13.5, 15.1, 15.4, 17).

@@ -11,13 +11,14 @@ cut from main @d0e2c2d8.
 
 ## STATE
 
-Phase: SPEC GATE (second pass). Spec rev 6 after the reaction redesign
-and design-review round 4 (the last allowed; terminal, 8 precision
-findings). Waiting on Cameron to pass the gate on rev 6. One refinement
-to name to him: the reaction line's label includes address line 2 when
-present (charter 6.4 shape plus detail). Next after his go: offer
-compaction gate A, write the plan with the honest hours estimate, plan
-review, mission block, launch gate. Nothing in flight.
+Phase: SPEC GATE (third pass). Spec rev 7: the fixed-shape reaction line
+is withdrawn for free-form FEEDBACK LINES naming the property, and B2's
+properties seen carries each property's feedback lines under it (charter
+section 20, item 7). No further design-review round (cap reached; rev 7
+is Cameron's simplification). Waiting on Cameron to pass the gate on
+rev 7. Next after his go: offer compaction gate A, write the plan with
+the honest hours estimate, plan review, mission block, launch gate.
+Nothing in flight.
 
 ## What Cameron asked for (verbatim where wording matters)
 
@@ -94,6 +95,26 @@ amendment, and then file the issue and write the spec."
   staff Not interested + a maybe line reads as a maybe; no Maybe button.
   Charter section 20 items 4-6.
 
+- On the fixed reaction-line shape (after rev 6): "Why do we care if the
+  "maybe" is lowercase and in the fixed shape? I thought the whole point
+  was to use llm capabilities to save info about the response to a
+  property, and use that info in future rankings. Saying we need to
+  exactly include notes a specific way, that's a bad idea imho."
+- On what reaches the ranker: "we don't really care what properties a
+  tenant has seen if it doesn't include any info about what they thought
+  about the property. So just a list of properties they've seen is
+  useless to us. There's an issue with the way we're looking at all this
+  information making it into the agent."
+- "It's incohesive to have the notes box include the property and the
+  maybe tag, and the properties seen much later. We need a way to have a
+  more cohesive information list for the ranker." Then, of the planner's
+  proposal (feedback lines are free-form Notes lines naming the home; the
+  card puts each under that home in properties seen): "I agree with your
+  thoughts here." -> charter section 20 item 7, spec rev 7.
+- Asked whether "card" maps to a UI element: it does not; it is the
+  charter's word for all of one record's information as given to the
+  ranker (charter section 3, now stated there).
+
 ## Why
 
 Preference data should start accumulating before anything ranks (charter
@@ -110,6 +131,13 @@ estimate (8-10) before the WP1 scope question is revisited.
   gate is the protection.
 
 ## Rejected options
+
+- A fixed-shape reaction line with four reaction words, a lowercase rule
+  and label-matching drops (spec rev 6): Cameron, a bad idea; the model
+  words the feedback, and only naming the home is required.
+- Properties seen as a bare list of homes and outcomes, with the
+  feedback elsewhere in the Notes box: incohesive and useless to the
+  ranker (Cameron).
 
 - Stored per-pair reactions on listing_sends with a writer, handles and a
   staff remove control (spec revs 1-4): Cameron did not want a new hidden

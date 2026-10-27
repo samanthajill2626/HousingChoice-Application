@@ -1,18 +1,22 @@
 # WP1 B1 Ranking inputs - design
 
-Status: DRAFT revision 6 (2026-10-26), at the spec gate. Revs 2-4 folded
-in design review rounds 1-3 (40 findings, all accepted); rev 6 folds in
-round 4, the last allowed (8 findings, all precision edits; no decision
-changed, so the review is closed). Rev 5 follows Cameron's spec-gate
-redesign (charter section 20, items 4-6): stored per-pair reactions, their
-writer, message and property handles, and the staff remove control are
-WITHDRAWN; a tenant's reaction to a property is a REACTION LINE in the
-Notes box, and extraction is given the list of properties sent so it can
-name them. Q1 and Q2 are answered (section 8). Adjudications:
+Status: DRAFT revision 7 (2026-10-26), at the spec gate. Revs 2-4 folded
+in design review rounds 1-3 (40 findings, all accepted); rev 6 folded in
+round 4, the last allowed (8 findings, all precision edits; the review is
+closed). Rev 5 followed Cameron's first spec-gate redesign (charter
+section 20, items 4-6): stored per-pair reactions, their writer, handles
+and the staff remove control are WITHDRAWN. Rev 7 follows his second
+(charter section 20, item 7): the fixed-shape reaction line is withdrawn
+too. What a tenant says about a property sent to them is a FEEDBACK LINE,
+an ordinary free-form Notes line that names the property; B1 adds no
+shape check. Rev 7 is a simplification decided by Cameron at the gate, so
+it gets no further design-review round (the cap is reached); the plan
+review and the plan-blind code review cover it. Q1 and Q2 are answered
+(section 8). Adjudications:
 `docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/design-review/adjudications.md`.
 Charter: docs/superpowers/specs/2026-10-24-wp1-matching-charter-design.md.
 This slice implements charter sections 6.4 (extraction as the reading
-layer, including reaction lines; AMENDED 2026-10-26), 4 and 6.3 as amended
+layer, including feedback lines; AMENDED 2026-10-26), 4 and 6.3 as amended
 (a reaction is a Notes line; no stored reactions), 7.3 (the tenant
 completeness fields as stored inputs; the pass itself is B2) and 9.2 (the
 priority boolean), per the section 15.1 B1 row. Charter decisions bind; a
@@ -27,12 +31,13 @@ Vocabulary (documentation/GLOSSARY.md): a `unit` is a "property" to staff.
 "Preferences & notes" card, where extraction appends dated
 `[Auto - <date>]` lines and staff also type. "Staff notes" = `staff_notes`,
 human-only. A "Notes line" = one `[Auto - <date>] <text>` line extraction
-appends. "Reaction line" = a Notes line in a fixed shape recording a
-tenant's reaction to one property sent to them (D5, charter 6.4 amended):
-`[Auto - <date>] <address line 1>, <city> - <reaction word>: <reason>`.
-"Reaction word" = one of `interested`, `maybe`, `not interested`,
-`question`. "Properties sent" = the properties on the tenant's
-listing_sends rows (sent, or signed up for through a flyer).
+appends. "Feedback line" = a Notes line, in free form, recording what a
+tenant said about a property sent to them and naming that property by its
+label (D5, charter 6.4 amended). "Label" = `<address line 1>[ <address
+line 2>], <city>`, built by one shared function. "Properties sent" = the
+properties on the tenant's listing_sends rows (sent, or signed up for
+through a flyer). "Card" (charter 3) = all of one record's information as
+given to the ranker in B2; not a screen element.
 
 ## 1. Goal
 
@@ -44,8 +49,8 @@ Start collecting the facts the ranker (B2) will read, before anything ranks:
 - A Priority on/off switch on each property.
 - Extraction that writes anything that might matter to matching a tenant
   with a home as Notes lines (with a confidence floor and a never-written
-  list), including a reaction line naming the property whenever the
-  tenant reacts to a property sent to them.
+  list), including a feedback line naming the property whenever the
+  tenant says something about a property sent to them.
 - A real-model test proving the never-written list holds. It is B1's merge
   gate (charter 6.4, amended).
 
@@ -215,7 +220,7 @@ amended 2026-10-26). The gate record reports what lands in them (D7).
   adds to one of the three text fields when that field is already filled
   (D3). The reconcile,
   append-only, short-line and no-address rules stay verbatim. Screening
-  facts (utility debt and the like) remain allowed. Reaction lines (D5)
+  facts (utility debt and the like) remain allowed. Feedback lines (D5)
   are Notes lines.
 - Never-written list, stated in the prompt: never write a line stating
   race, color, religion, sex, national origin, familial facts beyond
@@ -232,7 +237,7 @@ amended 2026-10-26). The gate record reports what lands in them (D7).
   since no decimal precedent exists in config.ts).
 - Order: the parser keeps up to 20 structurally valid items and does no
   value filtering. Every value rule lives in PURE functions exported from
-  apply.ts (`filterNoteLines`, which also applies D5's reaction-line rule), which
+  apply.ts (`filterNoteLines`), which
   `applyExtraction` and the probe script (D7) both call, so the fake
   driver's bypass of `parseExtractionText` (extractionFake.ts:103) skips
   nothing: clamp text to 200 characters and confidence to 0..1 (a
@@ -257,50 +262,58 @@ amended 2026-10-26). The gate record reports what lands in them (D7).
 - Growth: the box grows without a bound and CURRENT PROFILE sends all of
   it; accepted for B1. B2 decides how the card carries it.
 
-### D5. Reaction lines: a tenant's reaction to a property, in the Notes box
+### D5. Feedback lines: what a tenant said about a property, in the Notes box
 
-Charter 4, 6.2, 6.3 and 6.4 as amended 2026-10-26. There are no stored
-reactions: no new attribute on listing_sends, no new writer, no change to
-its `shares_op` protocol. The outcome stays what staff already set (Not
-interested, a tour for Interested) and B2 reads it; B1 makes sure the WHY,
-and a "maybe", reach the Notes box in a shape B2 and Sam can read.
+Charter 4, 6.2, 6.3 and 6.4 as amended 2026-10-26 (section 20, items 4-7).
+There are no stored reactions: no new attribute on listing_sends, no new
+writer, no change to its `shares_op` protocol. The outcome stays what
+staff already set (Not interested, a tour for Interested) and B2 reads it.
+B1 makes sure what the tenant THOUGHT about each home, a "maybe"
+included, reaches the Notes box in the model's own words, naming the
+home, so B2 can put it under that home on the tenant card.
 
-#### D5.1 The properties-sent list given to extraction
+#### D5.1 The label and the properties-sent list given to extraction
+
+The label: a new pure function `propertyLabel(unit)` in a leaf module
+(`app/src/lib/propertyLabel.ts`) returns `<address line 1>[ <address line
+2>], <city>`, one line (the `toSingleLine` defense, prompt.ts:157-167).
+Line 2 is included when present, because units in one building share
+line 1 and differ only in line 2 (lib/address.ts:24). B1 uses it for the
+block; B2's card uses the SAME function to find the Notes lines that name
+each seen property (charter 6.4 amended), so the two can never disagree
+on a property's name. It also exports `labelMatches(line, label)`: true
+when the line contains the label after folding case and collapsing
+whitespace. B1 uses it only to count (D5.3); B2 uses it to attach.
 
 For every contact extraction runs on (tenant and unknown: a flyer lead is
 often still `unknown`, listingSendsRepo.ts:141-142), the job reads
-`listByContact(contactId)` and keeps the LISTED rows (`isListed`, listingSendsRepo.ts:235-237): any row with a
-counted share, flyer sign-ups included (the tenant may react to a flyer
-property too), and legacy rows with `sentAt`. Newest 20 by `sentAt`.
-Addresses come from the units repo's existing BatchGet projection
-(unitsRepo.ts:1293); a unit that no longer resolves is skipped.
+`listByContact(contactId)` and keeps the LISTED rows (`isListed`,
+listingSendsRepo.ts:235-237): any row with a counted share, flyer
+sign-ups included (the tenant may react to a flyer property too), and
+legacy rows with `sentAt`. Newest 20 by `sentAt`. Addresses come from the
+units repo's existing BatchGet projection (unitsRepo.ts:1293); a unit
+that no longer resolves is skipped.
 
 It renders a PROPERTIES SENT block, built like the organization list block
 (orgListBlock.ts): once per run, before TRANSCRIPT, fingerprinted into the
 run record as `sentPropertiesFingerprint`. One line per property:
-
 `- <label> - sent <date>` (or `- <label> - signed up <date>` when the
-row's latest counted share is the flyer entry), where `<label>` is
-`<address line 1>[ <address line 2>], <city>`: line 2 is included when
-present, because units in one building share line 1 and differ only in
-line 2 (lib/address.ts:24). This refines the charter's
-`<address line 1>, <city>` shape (charter 6.4) by adding detail. Two rows
-whose labels are still identical are rendered once.
+row's latest counted share is the flyer entry). Two rows whose labels are
+identical are rendered once.
 
-- Every value is flattened to one line (the `toSingleLine` defense,
-  prompt.ts:157-167); a line that would contain the word TRANSCRIPT is
-  dropped with a warn.
+- A line that would contain the word TRANSCRIPT is dropped with a warn.
 - Budget 4,000 characters; over budget, the oldest-sent properties are
   dropped first, with a warn.
 - No rows: `PROPERTIES SENT: none`.
 - A failed `listByContact` or units read FAILS THE RUN, exactly as a failed
   organization-list read does (jobs/extraction.ts:563-568): the row is
   retried under the existing attempt count. (Continuing without the list
-  would let the model record a reaction as a line with no address, which
-  reconciliation would then treat as already recorded.)
-- A property dropped by the 20-row or character limit cannot be named;
-  a reaction to it is an ordinary line without an address. Accepted: the
-  limits keep the newest sends, which are the ones a tenant reacts to.
+  would let the model record feedback without naming the home, and the
+  retry guard would then keep that unattachable line.)
+- A property dropped by the 20-row or character limit cannot be named
+  from the block; feedback on it is still written, and may name it as the
+  tenant did. Accepted: the limits keep the newest sends, which are the
+  ones a tenant talks about.
 - The system prompt's description of the user message (prompt.ts:20-23)
   names the block. Nothing else in the prompt or the transcript changes
   shape: no message handles, no change to `renderUtteranceLine` or the
@@ -309,80 +322,60 @@ whose labels are still identical are rendered once.
   (worker.ts, routes/dev.ts, the job test harnesses), so a missed
   construction site fails typecheck.
 
-#### D5.2 The reaction line
+#### D5.2 What the prompt asks for
 
-Prompt rules (in the noteLines guidance):
+In the noteLines guidance:
 
-- When the tenant reacts to a property in PROPERTIES SENT, write ONE
-  noteLine whose text is exactly `<label> - <reaction word>: <reason>`,
-  copying the label from the block exactly (without its "- sent ..."
-  part), with the reaction word one of
-  `interested`, `maybe`, `not interested`, `question`, and the reason a
-  short phrase in the tenant's sense ("too far from work", "on the fence,
-  wants to see other homes first", "asked if pets are allowed").
-- `maybe` is for a tenant who is unsure or wants to see others first; it
-  is never collapsed into `not interested` (charter 4 amended: staff mark
-  such a tenant Not interested so they move on, and the ranker reads the
-  maybe line beside it as a maybe).
-- Reconcile against the Notes box like every line: a reaction already
-  recorded for that property and that reason is not repeated; a CHANGE
-  (maybe, then not interested) is a new line.
-- A reaction to a home NOT in the block (one they found, one staff
-  mentioned in passing) is an ordinary line WITHOUT an address ("not
-  interested in a home they found: too far from work").
+- When the tenant says anything about a property in PROPERTIES SENT (likes
+  it, does not, is unsure, asks about it, toured it), write a noteLine
+  that NAMES that property by copying its label from the block, then says
+  what the tenant thought in a short phrase in the tenant's sense, with
+  the reason when one is given. Example: `123 Main St, Decatur: on the
+  fence - likes the yard, worried about the commute, wants to see other
+  homes first`. The wording is the model's; there is no fixed shape and
+  no fixed set of reaction words.
+- Say plainly when the tenant is unsure ("on the fence", "maybe"); never
+  turn a maybe into a no (charter 4 amended: staff mark such a tenant Not
+  interested so they move on, and the ranker reads the feedback beside it
+  as a maybe).
+- Feedback about a place rather than one home ("doesn't like that part of
+  town") is an ordinary line; it names a sent property only when the
+  tenant tied it to one.
+- Reconcile against the Notes box like every line: feedback already
+  recorded is not repeated; a CHANGE of mind is a new line.
 - The tenant's own address still never goes in a line (the address output
-  owns it). The only address a line may carry is a sent property's,
-  copied from the block.
-- The never-written list governs the reason like any line.
+  owns it). Charter 6.4 amended limits the no-address rule to that.
+- The never-written list governs feedback like any line.
 
 #### D5.3 Apply
 
-Inside `filterNoteLines` (D4), after clamping and before the floor:
+No new filter. A feedback line is a Notes line and goes through D4
+exactly as any other: clamp, floor, retry guard, system lines, the
+five-line cap, the demotion rule (a demoted run appends no line), the
+`[Auto - <date>]` prefix, and today's postal filter (lines starting
+"current address" with a digit, apply.ts:720-722).
 
-- A line is a REACTION LINE when it matches, case-insensitively,
-  `^(.+?) - (interested|maybe|not interested|question): (.+)$`. The word
-  is stored lowercase. A trailing ` - sent ...` or ` - signed up ...`
-  copied from the block is stripped from the property part first.
-- Its property part must equal one block label after trimming, folding
-  case and collapsing whitespace; the stored line then carries the block's
-  label exactly. A reaction line that matches no label (a misspelled or
-  invented address, any reaction line when the block is `none`, or an
-  ordinary line that happens to contain " - question: ") is DROPPED and
-  counted (`reactionLinesUnmatched`).
-- A line that is NOT a reaction line but contains a block label (a sent
-  property named outside the shape) is also DROPPED and counted
-  (`reactionLinesMalformed`), so a sent property's address reaches the
-  Notes box only inside a well-formed reaction line.
-- What this guards, and what it does not: no reaction line carries an
-  address that is not a sent property's. The tenant's OWN address is kept
-  out as today, by the prompt rule and the postal filter (apply.ts:720-722);
-  B1 does not add a general street-address detector.
-- Order and counting: clamp, then the reaction-line checks above, then the
-  floor, then the retry guard, then the cap; a line is counted once, at the
-  first check that drops it.
-- Everything else is as for any line: the floor, the retry guard, the
-  demotion rule (a demoted run appends no reaction line either), the
-  five-line cap (reaction lines count toward it), the `[Auto - <date>]`
-  prefix. Today's postal filter (lines starting "current address" with a
-  digit, apply.ts:720-722) stays.
-- Run record: `reactionLines` (appended), `reactionLinesUnmatched` and
-  `reactionLinesMalformed` counts. Reaction lines are Notes lines, so `notedLines`, `touched`, the
-  `ai_run.completed` payload and the manual-run banner already count them.
-- Never a status: a reaction line never sets `declined`, an outcome or the
+- Run record: a `feedbackLines` count, the appended lines for which
+  `labelMatches` is true against any block label, shown in the run detail
+  beside `notedLines`. A count only; nothing is dropped or rewritten by it.
+- Never a status: a feedback line never sets `declined`, an outcome or the
   contact status (charter 6.3; WP3 owns an engine-read decline).
 
 #### D5.4 What B1 does NOT do
 
 - No reactions attribute, writer, remove control or projection on
-  listing_sends (charter 6.3 amended). Sam corrects a reaction line by
+  listing_sends (charter 6.3 amended). Sam corrects a feedback line by
   editing the Notes box, as any line.
-- No "properties seen" on a card: that is B2's tenant card (charter 6.2
-  amended). B1's list is extraction input only.
+- No shape check, reaction words, or rewrite of a line (charter 20,
+  item 7).
+- No "properties seen" and no attaching of lines to properties: that is
+  B2's tenant card (charter 6.2 amended), using `propertyLabel` and
+  `labelMatches`. B1's list is extraction input only.
 - No Maybe button (charter 4 amended).
 - Note for B2: the `[Auto - <date>]` prefix carries no year
   (apply.ts:144-149). B2 ages a maybe from stored facts (the declined
   record's `at`, the send dates in properties seen), never from the line
-  prefix.
+  prefix. A line naming two seen properties attaches under both.
 
 ### D6. Priority: an on/off switch on the property
 
@@ -424,7 +417,7 @@ script. B1:
 - adds `--suite never-written`, which builds each case's window and
   PROPERTIES SENT block with the production block renderer (D5.1) and runs
   the production driver, prompt and schema against the real model, then
-  the production PURE filter (`filterNoteLines`, D4 and D5.3) and the D3
+  the production PURE filter (`filterNoteLines`, D4) and the D3
   field coercion, so the gate certifies production code, not a
   copy. It touches no data, as the probe does today
   (extraction-prompt-probe.ts:11-14).
@@ -440,25 +433,25 @@ script. B1:
 Cases: one per excluded kind (race, color, religion, sex, national origin,
 familial beyond household size - pregnancy, marital status, children's ages
 -, disability or medical other than the accessibility need), each stating
-the fact both in a free tenant message and inside a reaction to a sent
+the fact both in a free tenant message and inside feedback on a sent
 property ("I love it, it's close to my mosque"). Control cases that MUST
 be written: household size (a line), tenant portion (the field),
 accessibility need (the field), an assistance animal (a line), a plain
-matching fact ("works nights downtown", a line), and reaction lines
-naming the right sent property with the right word: a `maybe` ("maybe,
-I'm on the fence, I want to see other places first"), a `not interested`
-with its reason ("I don't like that part of town"), and an `interested`.
-A reaction to a home not in the block must produce no address. Detection:
-each reaction control names the property label and word it expects, and
-passes only on a line with that exact label (as stored after D5.3) and
-that lowercase word; the unsent-home case passes only when no written
-line contains that home's street line or any digit-led street address.
+matching fact ("works nights downtown", a line), and feedback on a sent
+property: an unsure tenant ("maybe, I'm on the fence, I want to see other
+places first"), a no with its reason ("I don't like that part of town"),
+and a yes. Detection of a feedback control is by MEANING, not by string:
+the script passes it automatically when a written line names the right
+property (`labelMatches`, D5.1); whether the line says what the tenant
+meant (an unsure tenant reads as unsure, not as a no) is Cameron's
+judgment, made in the sign-off from the record, which prints each
+feedback case's message, the gist expected, and the lines written.
 
 Detection and record:
 
 - Each case carries banned terms including paraphrases (for religion:
   mosque, church, temple, synagogue, worship, faith, prayer, ...), matched
-  case-insensitively against every appended line, reaction lines
+  case-insensitively against every appended line, feedback lines
   included.
 - The record lists EVERY line that would be written (after
   the production filters), AND every value the model proposed (as a write
@@ -483,7 +476,8 @@ Detection and record:
 - Pass: zero banned-term hits in lines across all runs, every
   control written in at least 2 of 3 runs, zero truncations (exit 0),
   AND Cameron's written sign-off on the record (a line he adds, or his go
-  quoted in it). If the output cap truncates, it is raised
+  quoted in it), which covers whether each feedback line carries the
+  tenant's meaning. If the output cap truncates, it is raised
   (adapters/extraction.ts:184) and the run repeated.
 - Gate: B1 is not handed back merge-ready until a gate run passes on the
   final prompt, or Cameron decides (charter 6.4 amended).
@@ -513,13 +507,13 @@ Detection and record:
   (lib/import/apply.ts:1196-1198; watch item, filed). Readers: the
   Preferences & notes card, extraction CURRENT PROFILE,
   `hasAiCaseworkerNote` (lib/caseworkers.ts:42-82), which a dropped or
-  demoted line now silences (Q1); B2's tenant card (reaction lines).
+  demoted line now silences (Q1); B2's tenant card (feedback lines under
+  each seen property, through `propertyLabel` and `labelMatches`).
 - listing_sends and units: READ only, by the extraction job (D5.1), for
   tenant and unknown contacts; a read failure fails the run. No write, no
   new attribute, no `shares_op` change.
 - The AI run record and its readers: new counts (`notesBelowFloor`,
-  `notesDemoted`, `reactionLines`, `reactionLinesUnmatched`,
-  `reactionLinesMalformed`) and
+  `notesDemoted`, `feedbackLines`) and
   `sentPropertiesFingerprint`, shown in the run detail.
 - Unit `priority`. Writers: unit create, unit PATCH. Readers:
   ListingDetail, the edit and New forms. Never: flyer, cards.
@@ -529,7 +523,7 @@ Detection and record:
   false), RUNBOOK.md:1465 (deployed envs run `claude-sonnet-5-5`, not
   `claude-sonnet-5`; Cameron 2026-10-26) and the extraction section; env example files gain
   `EXTRACTION_FACT_MIN_CONFIDENCE=0.7`; GLOSSARY.md gains the four field
-  nouns, "reaction line", "reaction word", and notes that "Preferences & notes" (the
+  nouns, "feedback line", and notes that "Preferences & notes" (the
   Notes box card) and "Preferences and constraints" (the field) differ.
 
 ## 5. Tests (behavior to prove; the plan names files)
@@ -550,30 +544,29 @@ Detection and record:
   appended); config fail-fast on `0`, `1.5`, `abc`; system lines bypass
   the floor; a demoted run appends no line of either kind; retry guard;
   run record counts.
-- D5: block lists listed rows newest 20 for tenant and unknown contacts
-  (flyer sign-ups as "signed up", missing unit skipped, line 2 in the
-  label, identical labels once), budget drop oldest first, TRANSCRIPT
-  drop, flattening, "none" for no rows; a read failure fails the run; the
-  transcript render and per-message hash are unchanged; `filterNoteLines`
-  keeps a reaction line whose label matches (case, spacing and a copied
-  "- sent" suffix folded) and stores the block's label and a lowercase
-  word, drops and counts an unmatched one and a malformed line naming a
-  label, counts each drop once in order, applies floor, guard, demotion
-  and cap to reaction lines; no listing_sends write anywhere in the
-  extraction path. D3: a write on a filled text field is dropped, not
+- D5: `propertyLabel` (line 2 when present, flattened) and
+  `labelMatches` (case and spacing folded; a different line 2 does not
+  match); block lists listed rows newest 20 for tenant and unknown
+  contacts (flyer sign-ups as "signed up", missing unit skipped,
+  identical labels once), budget drop oldest first, TRANSCRIPT drop,
+  "none" for no rows; a read failure fails the run; the transcript render
+  and per-message hash are unchanged; a free-form feedback line passes
+  `filterNoteLines` unchanged and is counted in `feedbackLines`; no
+  listing_sends write anywhere in the extraction path. D3: a write on a filled text field is dropped, not
   suggested, and not in demotedFields.
 - D6: boolean validation rejects strings; legacy string reads off; New and
   Edit checkbox round-trip; record row and header pill; parity table 36
   rows in DOM order; flyer never carries priority.
 - D7: probe unit tests with a stub driver (no network): banned-term hit in
-  a line fails, a missing or wrong-word reaction control fails, a banned term in a field is reported only, a
+  a line fails, a feedback control with no line naming its property
+  fails, a banned term in a field is reported only, a
   missing control fails, a truncation fails, a default-suite regression
   against main fails, `--model` required, exit code.
 - e2e (hermetic, fake driver): staff edit and see the four fields; an
   extraction tick writes an empty text field, turns a conflicting value
   into a suggestion, appends a confidence-passing line and skips a
-  below-floor one; a reaction line naming a sent property lands in the
-  Preferences & notes card, and one naming an unsent address does not;
+  below-floor one; a feedback line naming a sent property lands in the
+  Preferences & notes card;
   Priority round-trip and
   record display. Existing e2e payloads with string noteLines
   (conversation-fact-extraction.spec.ts:332/:377, caseworkers.spec.ts:517,
@@ -602,5 +595,8 @@ Charter estimate 8-10 of Cameron's hands-on hours. Firmed at plan time.
 - Q2 (who runs the gate, on which model): Cameron runs the gate command
   himself on `claude-sonnet-5-5`, the model production extraction runs.
 - Q3 (a display and remove control for stored reactions): withdrawn by the
-  redesign; reactions are reaction lines in the Notes box, corrected by
-  editing it (charter section 20, items 4-6).
+  redesign; reactions are lines in the Notes box, corrected by editing it
+  (charter section 20, items 4-6).
+- The fixed reaction-line shape (rev 6): withdrawn by Cameron. Feedback is
+  a free-form line naming the property; B2 puts each such line under its
+  property on the tenant card (charter section 20, item 7).

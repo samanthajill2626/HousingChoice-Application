@@ -4,8 +4,10 @@
 // <label>`; 'status' MUST stay exactly "status" - e2e depends on it) and a reader
 // for a contact field's `<field>_source` AI provenance stamp.
 import type { Contact, FieldSource, SuggestionItem } from '../../api/index.js';
+import { TENANT_MATCHING_INPUTS } from './tenantMatchingInputs.js';
 
-/** Display label per suggestion target. */
+/** Display label per suggestion target. The tenant matching inputs' labels
+ *  come from their one list (WP1 B1 spec D1) - this map names none of them. */
 export const SUGGESTION_TARGET_LABEL: Record<string, string> = {
   firstName: 'first name',
   lastName: 'last name',
@@ -19,6 +21,7 @@ export const SUGGESTION_TARGET_LABEL: Record<string, string> = {
   phone: 'phone',
   type: 'type',
   address: 'current address',
+  ...Object.fromEntries(TENANT_MATCHING_INPUTS.map((input) => [input.key, input.chipLabel])),
 };
 
 /** The AI provenance stamp for a field, when its value came from an extraction. */

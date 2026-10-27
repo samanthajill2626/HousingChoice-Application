@@ -6,6 +6,11 @@
 // Type-only, and `.js`-suffixed: the APP's typecheck also compiles this file
 // (app/test/contactTimeline.test.ts imports it under NodeNext resolution).
 import type { RETRY_OUTCOME_UNCONFIRMED } from '../routes/contact/retryPromise.js';
+import type {
+  TenantMatchingInputKey,
+  TenantMatchingInputPatch,
+  TenantMatchingInputValues,
+} from '../routes/contact/tenantMatchingInputs.js';
 
 /** Team role. admin = the founder role; va = virtual assistant. */
 export type UserRole = 'admin' | 'va';
@@ -2233,6 +2238,14 @@ export interface FieldSource {
   accepted_by?: string;
 }
 
+/** WP1 B1 (spec 2026-10-26 D2): each tenant matching input's AI provenance
+ *  stamp, `<key>_source` - present when extraction wrote or a human accepted
+ *  the value; drives the AutoBadge on its Eligibility intake row. Read-only:
+ *  no write body carries one (the server never copies a client `_source`). */
+export type TenantMatchingInputSources = {
+  [K in TenantMatchingInputKey as `${K}_source`]?: FieldSource;
+};
+
 export interface SuggestionItem {
   itemId: string;
   ownerContactId: string;
@@ -2286,7 +2299,9 @@ export interface ContactVocabulary {
  *  `consent_*` fields let staff record text consent at create time (CONTRACT 4);
  *  `consent_method` is a HUMAN value only (the server stamps consent_captured_by).
  *  Left blank → nothing sent (the just-in-time gate catches it later). */
-export interface ContactCreate {
+// WP1 B1 (spec D2): the create API accepts the four tenant matching inputs
+// (the create form sends none - the API stays symmetric with the PATCH).
+export interface ContactCreate extends TenantMatchingInputValues {
   type: ContactType;
   firstName?: string;
   lastName?: string;
@@ -2312,7 +2327,7 @@ export interface ContactCreate {
 
 /** A contact (GET /api/contacts/:id → { contact }). Flexible document. C1 adds
  *  an optional `phones[]`; when absent, synthesize [{phone, primary:true}]. */
-export interface Contact {
+export interface Contact extends TenantMatchingInputValues, TenantMatchingInputSources {
   contactId: string;
   type: ContactType;
   status?: string;
@@ -2456,7 +2471,9 @@ export interface Contact {
 /** Editable contact fields (PATCH /api/contacts/:id). Every field is optional —
  *  only the changed ones are sent; the server SET-merges (absent leaves a value
  *  untouched; an empty string clears it). `type` doubles as the triage action. */
-export interface ContactPatch {
+// WP1 B1 (spec D2): the four tenant matching inputs - each optional; null
+// clears it (built by buildTenantMatchingPatch, routes/contact/tenantMatchingInputs.ts).
+export interface ContactPatch extends TenantMatchingInputPatch {
   type?: ContactType;
   firstName?: string;
   lastName?: string;

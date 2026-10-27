@@ -262,11 +262,14 @@ function clampConfidence(raw: unknown): number {
  *     non-number reads as 0). An item that is not an object with string text
  *     is dropped uncounted (only the fake driver can deliver one).
  *  2. Floor FIRST: a model item below `floor` is dropped and counted.
- *  3. Blank lines and POSTAL lines are dropped. Addresses are a structured
- *     target - a model that still narrates one is overridden (spec SS5); the
- *     digit requirement keeps the filter to postal lines, so a digit-free
- *     housing-status fact ("Current address is unstable, couch-surfing")
- *     survives.
+ *  3. Blank lines and POSTAL lines are dropped. The postal filter drops ONLY
+ *     a line that starts with "Current address" and carries a digit - the
+ *     client's address narrated in the shape of the structured address
+ *     target; the digit requirement keeps a digit-free housing-status fact
+ *     ("Current address is unstable, couch-surfing"). It is not an address
+ *     ban: B1 removed the prompt's no-address bullet (spec rev 9 D5.2, PR50)
+ *     because a feedback line names a sent property by its address label
+ *     (PROPERTIES SENT), so a written line may now carry an address.
  *  4. The retry guard (adversarial F1), BEFORE the cap (B1 WI5):
  *     applyExtraction runs BEFORE repo.complete(), so a complete() failure
  *     re-arms the SAME due row and the retry re-extracts the identical

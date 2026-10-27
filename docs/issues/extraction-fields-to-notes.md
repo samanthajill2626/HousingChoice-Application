@@ -44,6 +44,13 @@ moved: change its source in the one list, stop extraction writing the field,
 let the widened notes instruction pick it up, decide whether existing field
 values are folded into notes as lines, and remove the edit-form input.
 
+Changing `source` alone does nothing today: as B1 ships, NO reader consults
+the list's `source` - extraction (schema, prompt, apply), the edit form, the
+Eligibility intake rows and the suggestion labels all treat every entry as a
+field (and the dashboard mirror does not carry `source` at all). So the move
+must also make those readers filter on `source === 'field'` - or remove the
+entry from the list (code review R1 CONF-4).
+
 **Known cost.** B2's completeness pass (charter 7.3) checks missing inputs in
 code against fixed fields. A fact that lives only in notes cannot be checked
 that way; its gap would come from the ranker's own unknowns instead, and the

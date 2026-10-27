@@ -1517,10 +1517,13 @@ sends invented conversations through the production driver, prompt and schema. I
 data (the only file it writes is its `--out` record); it does call the Anthropic API (one
 extraction-sized call per case per run). Two suites:
 - the default suite scores each case's field (ok / missed / wrong). `--baseline <a checkout of main>`
-  runs it on this checkout AND on main, 3 runs per case on one `--model`, and FAILS when any case's ok
-  count is 2 or more below main's or the total is more than 2 below (one automatic re-run of both
-  sides); `--repo` still measures another checkout alone;
-- `--suite never-written --model <id> --out <record.md>` is WP1 B1's merge gate: one case per
+  runs it on this checkout AND on main, 3 runs per case on one `--model`, and FAILS when any case is
+  not measured on either side (fewer than 2 of its 3 calls returned a result - a refused, truncated,
+  unparsed or failed call is no measurement, so an expired key or a mistyped `--model` can never
+  pass), any case's ok count is 2 or more below main's, the total is more than 2 below, or the branch
+  side truncates at all (one automatic re-run of both sides); `--repo` still measures another
+  checkout alone;
+- `--suite never-written --model <id> --out <record.md>` runs one case per
   never-written kind, stated in a free message and inside feedback on a sent property, plus controls
   that must be written, 3 runs each, through the production PROPERTIES SENT renderer and the
   production note and field filters. After each run ONE grader call (the same model and key, a small
@@ -1530,9 +1533,11 @@ extraction-sized call per case per run). Two suites:
   runs, every control in 2 of 3 runs and zero truncations - and then needs a person's written
   sign-off in the record, because whether each feedback line keeps the tenant's meaning, and whether
   the grader judged right, is a judgment (the sign-off may overrule a verdict either way).
-Both append a dated section to `--out`; `--dry-run` builds every request without a key. Run it with
-the TESTING key and the model production runs (`claude-sonnet-5-5`); agents never run it against a
-real model. Usage is in the script's header.
+WP1 B1's merge gate is BOTH commands - the `--baseline` comparison and `--suite never-written` - each
+passing on the final prompt. Both append a dated section to `--out` (the latest full section of each
+counts; a `--case` re-run writes a PARTIAL section that never counts); `--dry-run` builds every
+request without a key. Run it with the TESTING key and the model production runs
+(`claude-sonnet-5-5`); agents never run it against a real model. Usage is in the script's header.
 
 **Housing authority: why an extracted one sometimes arrives as a suggestion.** The field holds only
 names from the organization list (Settings > Housing authorities & agencies), because a Matching

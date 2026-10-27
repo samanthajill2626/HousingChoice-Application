@@ -11,7 +11,7 @@
   `docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/`.
 - Spec review: 5 rounds, 57 findings, 0 rejected -
   `docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/design-review/adjudications.md`.
-- Status: PLAN v3 (2026-10-26): round 2 rulings PR43-PR46 written through; plan review round 3 pending. Sections 0-4 and 11 are BINDING and
+- Status: PLAN v4 FINAL (2026-10-26): plan review CLOSED after 3 rounds (round 3 terminal, rulings PR47-PR49). Sections 0-4 and 11 are BINDING and
   written by the planner; slice sections 5-10 are opus section drafts
   assembled verbatim. Section 4 (planner rulings PR1-PRnn) wins over any
   slice text it contradicts. "Plan section N" always means this file's
@@ -403,6 +403,18 @@ wins.
   when any S4/S5 count is present or `notedLines > 0`; a run carrying only
   `sentPropertiesFingerprint` shows the fingerprint item alone. PR42's
   test is written as code with its assertions.
+
+### Plan review round 3 rulings (terminal round; adjudications: `plan-review/plan-adjudications.md`)
+
+- PR47 S7.2 test 4 and S7.5 open the AI run detail (admin-only,
+  aiRuns.ts:137) after a dev-login as `founder@example.com`, as
+  ai-run-log.spec.ts does; the rest of the file keeps its VA login.
+- PR48 Each children's-ages case carries its literal ages as strict terms;
+  national origin's strict terms add `u.s`, `united states`, `the states`,
+  `america`; the term-shape check allows `.`.
+- PR49 Strict `expecting` becomes `expecting a`, `expecting her`,
+  `expecting his`, `expecting their`; `tone`, `light`, `condition` are
+  dropped (`skin`, `medical`, `treatment` cover those leaks).
 
 ### Hours (Cameron's hands-on hours; charter estimate 8-10)
 

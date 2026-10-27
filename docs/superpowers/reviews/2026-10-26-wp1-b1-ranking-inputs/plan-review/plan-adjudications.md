@@ -49,3 +49,18 @@ anchors match and the seam signatures line up. Accepted 4, rejected 0.
 | R2-4 | LOW | With PR42 a run that failed at the model call renders "0 appended" as if apply ran; PR42's test is prose only | ACCEPT - PR46: inside the region the `notedLines` row renders only when an S4/S5 count is present or `notedLines > 0`; a fingerprint-only run shows the fingerprint item alone; the test is written as code | no |
 
 Decision changes this round: 1 (R2-2). Round 3 runs after the write-through.
+
+## Round 3 (plan v3 @058f3e7c; reviewer A continued) - TERMINAL
+
+Report: plan-review/round3-reviewer-a.md (3 findings). The reviewer
+confirmed PR43's one-session sequence against the e2e preflight (HEAD
+compare only) and PR46's region JSX and tests against S4.5's anchors.
+Accepted 3, rejected 0. No decision changed (a test login and term-list
+tuning), so per the stop rule this is the terminal round: folded in, no
+round 4.
+
+| # | Sev | Finding | Ruling | Decision changed? |
+|---|---|---|---|---|
+| R3-1 | MEDIUM | S7.2 test 4 and S7.5 open the AI run detail, which is admin-only (aiRuns.ts:137); the file's devLogin is the VA user (dev.ts:326, :333-336) | ACCEPT - PR47: that step dev-logs in as `founder@example.com`, as ai-run-log.spec.ts does | no |
+| R3-2 | MEDIUM | Strict lists miss bare-number ages ("Two kids (4 and 11)") and "U.S." / "United States" / "America" | ACCEPT - PR48: each children's-ages case carries its literal ages as strict terms; national origin adds `u.s`, `united states`, `the states`, `america`; the term-shape check allows `.` | no |
+| R3-3 | LOW | `expecting`, `tone`, `light`, `condition` are likely in a correct line of their own case | ACCEPT - PR49: `expecting` narrowed to `expecting a` / `expecting her` / `expecting his` / `expecting their`; `tone`, `light`, `condition` dropped | no |

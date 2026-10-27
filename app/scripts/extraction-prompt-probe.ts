@@ -90,7 +90,7 @@
  */
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -1449,8 +1449,28 @@ export interface ProbeCliDeps {
   createGrader: (m: BranchModules, opts: { model: string; apiKey: string }) => StructuredOutputClient;
   /** The checkout's HEAD and whether TRACKED files are modified (the record file itself is untracked). */
   gitInfo: (root: string) => { commit: string; dirty: boolean };
+  /** FW-4: the platform the same-checkout guard compares paths for (win32 paths are case-insensitive). */
+  platform: NodeJS.Platform;
   appendRecord: (file: string, text: string) => void;
   now: () => string;
+}
+
+/**
+ * FW-4 (code review R1 ADV-9): a checkout root as the same-checkout guard
+ * compares it - resolved, then its real path when it exists (a junction, a
+ * symlink or a mapped drive resolves to its target; on Windows the native
+ * call also returns the stored letter case), then case-folded on win32,
+ * whose paths are case-insensitive.
+ */
+export function canonicalRoot(root: string, platform: NodeJS.Platform): string {
+  const resolved = path.resolve(root);
+  let real = resolved;
+  try {
+    real = realpathSync.native(resolved);
+  } catch {
+    // A root that does not exist keeps its resolved form; loading it fails later, loudly.
+  }
+  return platform === 'win32' ? real.toLowerCase() : real;
 }
 
 function gitInfoOf(root: string): { commit: string; dirty: boolean } {
@@ -1495,6 +1515,7 @@ function defaultDeps(): ProbeCliDeps {
       }),
     createGrader: (m, opts) => m.extraction.createStructuredOutputClient({ model: opts.model, apiKey: opts.apiKey }),
     gitInfo: gitInfoOf,
+    platform: process.platform,
     appendRecord: appendRecordFile,
     now: () => new Date().toISOString(),
   };
@@ -1634,7 +1655,9 @@ async function runComparison(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string): 
   if (cases === undefined) return usage(deps, `No case "${a.caseId}". Cases: ${DEFAULT_CASES.map((c) => c.id).join(', ')}`);
   const model = a.model!; // parseProbeArgs refuses --baseline without one
   const roots = [path.resolve(a.repo ?? deps.ownRoot), path.resolve(a.baseline!)] as const;
-  if (roots[0] === roots[1]) return usage(deps, '--baseline names the same checkout as the measured side');
+  if (canonicalRoot(roots[0], deps.platform) === canonicalRoot(roots[1], deps.platform)) {
+    return usage(deps, '--baseline names the same checkout as the measured side');
+  }
   const startedAt = deps.now();
   const sides = (await Promise.all(
     roots.map(async (root): Promise<ComparisonSide> => {

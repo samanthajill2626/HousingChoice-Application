@@ -20,6 +20,7 @@ import * as prompt from '../src/services/extraction/prompt.js';
 import * as sentBlock from '../src/services/extraction/sentPropertiesBlock.js';
 import {
   DEFAULT_CASES,
+  canonicalRoot,
   compareDefaultSuites,
   keyTail,
   main,
@@ -1229,6 +1230,23 @@ describe('main --baseline', () => {
     const h = harness((id) => defaultCorrect(id));
     expect(await main(['--model', 'claude-sonnet-5-5', '--baseline', BRANCH_ROOT, '--out', 'rec.md'], h.deps)).toBe(2);
     expect(h.driversCreated).toEqual([]);
+  });
+
+  // FW-4 (code review R1 ADV-9): Windows paths are case-insensitive, so
+  // `w:/x` against `W:\X` is the same checkout - compared with itself it
+  // measures only noise and nearly always passes.
+  it('on win32, a baseline naming the measured checkout in another letter case is a usage error', async () => {
+    const h = harness((id) => defaultCorrect(id));
+    h.deps.platform = 'win32';
+    expect(await main(['--model', 'claude-sonnet-5-5', '--baseline', BRANCH_ROOT.toUpperCase(), '--out', 'rec.md'], h.deps)).toBe(2);
+    expect(h.errors.join('\n')).toMatch(/--baseline names the same checkout as the measured side/);
+    expect(h.driversCreated).toEqual([]);
+    expect(h.records).toEqual([]);
+  });
+
+  it('canonicalRoot folds case on win32 only', () => {
+    expect(canonicalRoot('W:/probe-test/Branch', 'win32')).toBe(canonicalRoot('w:/PROBE-TEST/branch', 'win32'));
+    expect(canonicalRoot('/probe-test/Branch', 'linux')).not.toBe(canonicalRoot('/probe-test/branch', 'linux'));
   });
 
   it('a dry run calls nothing and writes nothing', async () => {

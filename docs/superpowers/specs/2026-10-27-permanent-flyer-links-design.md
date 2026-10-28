@@ -1,10 +1,15 @@
 # Permanent flyer links - design
 
-Status: APPROVED revision 3 (2026-10-27). Cameron: "I think the spec probably
-looks good." No new off switch ("We don't need to turn this off"), and the
-properties-sent row keeps its buttons on non-Available homes ("Might cause
-confusion if the property wasn't properly moved into the right status").
+Status: APPROVED revision 4 (2026-10-28). Rev 3 passed the spec gate
+(2026-10-27) - Cameron: "I think the spec probably looks good." No new off
+switch ("We don't need to turn this off"), and the properties-sent row keeps
+its buttons on non-Available homes ("Might cause confusion if the property
+wasn't properly moved into the right status").
 Next: the plan (docs/superpowers/plans/2026-10-27-permanent-flyer-links-plan.md).
+- Rev 4 (2026-10-28) corrects D2's premise only: the import namespace is in
+  the public repository, so an imported property's unitId is computable from
+  its address (code review R2-1). Cameron accepted the true premise (Q1,
+  option c); no behavior change.
 - Rev 3 folds in round 2 (the continued reviewer): 4 findings, all accepted as
   precision edits (the Setup take-down claim withdrawn, the fallback's unitId
   rule trimmed, missed test and comment sites). Round 2 changed no decision,
@@ -130,10 +135,18 @@ setup units keep the one opaque 404, body unchanged.
 - The payload gains NO status field.
 - D3a: for a non-Available unit the route sets `listing_link` to `null` in the
   payload. (Its absence is a weak hint that a home is not Available; accepted.)
-- "No existence oracle" now means: nothing beyond holding the id. A 200 answers
-  for any public unit. Imported unitIds are derived from the address
-  (`app/src/lib/import/ids.ts:24`, `:84-86`); the namespace is in the private
-  repository only. Accepted.
+- What the API tells the public: the 404 is one opaque body for every cause,
+  and a 200 tells the holder of an id that its property is public. Imported
+  unitIds are derived from the address with a fixed namespace
+  (`app/src/lib/import/ids.ts:24`, `:84-86`) that is in the PUBLIC GitHub
+  repository (code review R2-1, 2026-10-28; rev 3's "private repository only"
+  was false). So anyone who knows an imported property's address can compute
+  its id and get its flyer in every status but Setup - including Airtable
+  "Placed" homes imported as Occupied, which go live with the deploy.
+  Cameron (2026-10-28, Q1 option c): "Imported properties can have their
+  links stay available. We don't need to update those, I understand they'll
+  go live with a deploy. i'm not sure which option that is, i believe it
+  would be C." Accepted.
 
 ### D3. Flyer page - a served flyer
 

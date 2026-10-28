@@ -415,7 +415,7 @@ export interface UnitFlyer {
    *  before #12 (spec 2026-10-20 D11), which reads this one size. */
   voucher_size: number | null;
   /** Every voucher size the unit takes, ascending (spec 2026-10-20 D11): its
-   *  recorded sizes, else its beds (see acceptedVoucherSizes). Shareable. */
+   *  recorded sizes, else its beds (see acceptedVoucherSizes). On the public flyer. */
   voucher_sizes: number[];
   /** The authorities whose vouchers this unit accepts (synthesized - see authoritiesOf). */
   accepted_authorities: string[];

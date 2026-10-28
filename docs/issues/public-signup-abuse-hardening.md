@@ -39,6 +39,16 @@ reach is wider: every unitId whose property is public - every status but
 Setup, not only Available - is a live 24-hour pin source and properties-sent
 rewrite target, the ids in every old Matching and broadcast text included.
 
+**Severity, re-weighed 2026-10-28: stays `med`** (permanent-flyer-links code
+review R2-1; Cameron accepted its true premise, Q1 option c). Anyone can
+compute an imported property's unitId from its address (point 2 (d)), and
+since that branch an imported property is public in every status but Setup -
+the Airtable "Placed" homes (imported as Occupied) included, from the deploy.
+But unitIds were never the scarce input: every Matching and broadcast text
+carries one. The public namespace widens the pool of usable ids, not what one
+request can do (point 2 (a) to (c)), and the per-IP `/public` limiter
+(`app/src/app.ts:185-191`) still bounds bursts (point 1).
+
 **1. The 24-hour cap is read-then-write, not atomic.** The repeat check
 (the sign-up handler's step (3a), `app/src/routes/public.ts:710-725`) is
 `activityEventsRepo.hasEventSince`, a strongly consistent Query (AR12,

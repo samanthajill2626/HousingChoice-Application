@@ -466,11 +466,11 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
 
   const router = Router();
 
-  // The opaque 404 - IDENTICAL for missing, soft-deleted, setup, or a stored
-  // status outside the listing statuses
-  // (no existence oracle beyond holding the id - permanent-flyer-links D2). It
-  // carries contact_number (config, not unit data) so the public page's neutral
-  // fallback can still offer the text-us CTA.
+  // The opaque 404 - one IDENTICAL body for every cause: missing, soft-deleted,
+  // setup, or a stored status outside the listing statuses. What a 200 does
+  // tell the public is under the flyer route below (permanent-flyer-links D2).
+  // It carries contact_number (config, not unit data) so the public page's
+  // neutral fallback can still offer the text-us CTA.
   function sendNotFound(res: Response): void {
     res.status(404).json({ error: 'not_found', contact_number: contactNumber });
   }
@@ -864,16 +864,20 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
   // Served for every public status (FLYER_PUBLIC: every listing status but
   // setup - permanent-flyer-links D2). 404 when the unit is missing,
   // soft-deleted, or not public (setup, or a stored value outside the listing
-  // statuses): one opaque body, so the public learns nothing beyond holding the
-  // id. Returns the FULL public payload upfront (lib/unitFields.toUnitFlyer) +
-  // contact_number - no internal leak and no status field. The teaser/reveal
-  // split (and the /details route) are gone.
+  // statuses): one opaque body for every cause. What the public can learn: a
+  // 200 tells the holder of an id that its property is public; an IMPORTED
+  // property's id is computable from its address (public import namespace -
+  // accepted, permanent-flyer-links D2 rev 4); and a served flyer's null
+  // listing_link tells a reader the home is not Available (D3a, accepted -
+  // planner review PA-3). Returns the FULL public payload upfront
+  // (lib/unitFields.toUnitFlyer) + contact_number - no internal leak and no
+  // status field. The teaser/reveal split (and the /details route) are gone.
   router.get('/units/:unitId/flyer', async (req, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     const unit = await units.getById(unitId);
     if (!unit || isDeleted(unit) || !FLYER_PUBLIC_STATUSES.has(unit.status)) {
-      // Same 404 for missing, deleted, setup, or a stored status outside the
-      // listing statuses - no existence oracle beyond holding the id.
+      // One opaque 404 body for every cause - missing, deleted, setup, or a
+      // stored status outside the listing statuses (sendNotFound).
       sendNotFound(res);
       return;
     }

@@ -478,11 +478,11 @@ export interface UnitItem {
    *  flyer link). Shown on the public flyer only while the property is
    *  Available (permanent-flyer-links D3a). */
   listing_link?: string;
-  /** Public flyer details (public-pages §3): a tour video link. Shareable. */
+  /** Public flyer details (public-pages sec 3): a tour video link. On the public flyer. */
   video_url?: string;
-  /** Public flyer details (public-pages §3): the application fee in dollars (>= 0). Shareable. */
+  /** Public flyer details (public-pages sec 3): the application fee in dollars (>= 0). On the public flyer. */
   application_fee?: number;
-  /** Public flyer details (public-pages §3): same-day RTA available. Shareable. */
+  /** Public flyer details (public-pages sec 3): same-day RTA available. On the public flyer. */
   same_day_rta?: boolean;
   /**
    * Landlord-onboarding: the voucher (bedroom) sizes this unit ACCEPTS - a

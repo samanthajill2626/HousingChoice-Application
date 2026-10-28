@@ -932,8 +932,25 @@ export const LISTING_STATUS_LABELS: Readonly<Record<ListingStatus, string>> = {
   off_market: 'Off market',
 };
 
-/** The ONLY publicly-shareable property status (`available` gates the public flyer). */
+/**
+ * The only status a property can be SENT in (broadcasts); the public flyer uses
+ * FLYER_PUBLIC (permanent-flyer-links D1).
+ */
 export const SHAREABLE: ReadonlySet<ListingStatus> = new Set<ListingStatus>(['available']);
+
+// MIRRORS app/src/lib/statusModel.ts FLYER_PUBLIC (permanent-flyer-links D1,
+// D7; pinned by api/flyerPublicMirror.test.ts). The statuses whose property the
+// PUBLIC FLYER serves: every listing status except `setup`, written out so a
+// future status is not public until someone adds it. It exists for the property
+// page's flyer line (D7); broadcasts do NOT use it - see SHAREABLE.
+export const FLYER_PUBLIC: ReadonlySet<ListingStatus> = new Set<ListingStatus>([
+  'available',
+  'under_application',
+  'finalizing',
+  'occupied',
+  'on_hold',
+  'off_market',
+]);
 
 // --- Transition sources -----------------------------------------------------
 export const TRANSITION_SOURCES = ['derived', 'import', 'automation', 'ai', 'manual'] as const;
@@ -3046,7 +3063,7 @@ export type TimelineMilestoneType =
   | 'listing_decline_cleared'
   | 'listing_interested'
   // flyer-leads D6: mirrors the server union (activityEventsRepo.ts) - a flyer
-  // or /join sign-up pin; a shareable flyer's pin carries refType 'unit'.
+  // or /join sign-up pin; a public flyer's pin carries refType 'unit'.
   | 'signed_up';
 
 interface TimelineBase {

@@ -5,7 +5,8 @@
 // the known-tenant (text) variant renders a tap-to-text sms: link with an
 // encoded prefill and NO form, strips the cta param from the URL on load, and
 // survives a same-tab remount via sessionStorage; the null-contact degrade; the
-// unsafe-URL guard; and the variant-aware unavailable state. Public API mocked.
+// unsafe-URL guard; and the variant-aware fallback (permanent-flyer-links D4).
+// Public API mocked.
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -318,46 +319,6 @@ describe('FlyerPage', () => {
     expect(screen.queryByRole('link', { name: /see the full listing/i })).toBeNull();
   });
 
-  it('unavailable (public variant) keeps the /join link', async () => {
-    getFlyer.mockRejectedValue(
-      new ApiError(404, 'not_found', 'not_found', {
-        error: 'not_found',
-        contact_number: '+15550009999',
-      }),
-    );
-    renderPage();
-
-    expect(await screen.findByRole('heading', { name: /no longer available/i })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: /see other homes/i })).toHaveAttribute('href', '/join');
-    expect(screen.queryByRole('link', { name: /text us/i })).toBeNull();
-  });
-
-  it('unavailable (known variant) offers the text-us CTA from the 404 body', async () => {
-    getFlyer.mockRejectedValue(
-      new ApiError(404, 'not_found', 'not_found', {
-        error: 'not_found',
-        contact_number: '+15550009999',
-      }),
-    );
-    const first = renderPage('/p/unit-1?cta=text');
-    expect(await screen.findByRole('link', { name: /text us/i })).toHaveAttribute(
-      'href',
-      'sms:+15550009999?&body=' +
-        encodeURIComponent(
-          "The home I was looking at is no longer available - I'm interested in similar homes.",
-        ),
-    );
-    first.unmount();
-
-    // A null contact_number in the 404 body -> the reply-prompt copy, no dead button.
-    getFlyer.mockRejectedValue(
-      new ApiError(404, 'not_found', 'not_found', { error: 'not_found', contact_number: null }),
-    );
-    renderPage('/p/unit-1?cta=text');
-    expect(await screen.findByText(/reply to the text we sent you/i)).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: /text us/i })).toBeNull();
-  });
-
   it('the flyer form has no housing authority select, never sends one, and keeps its error copy (join-housing-authority D8)', async () => {
     const user = userEvent.setup();
     getFlyer.mockResolvedValue(FLYER);
@@ -656,13 +617,16 @@ describe('FlyerPage - the highlight and the authority line (flyer-leads D3)', ()
     }
   });
 
-  it('(PIN) the unavailable state keeps its copy, with no highlight', async () => {
-    getFlyer.mockRejectedValue(
-      new ApiError(404, 'not_found', 'not_found', { error: 'not_found', contact_number: null }),
-    );
-    renderPage();
-    expect(await screen.findByRole('heading', { name: /no longer available/i })).toBeInTheDocument();
-    expect(screen.queryByText('Same-day tours available')).toBeNull();
+  // permanent-flyer-links D3a: the route nulls listing_link on every
+  // non-Available flyer, and a null link hides the Listing row (safeHttpUrl)
+  // with no page change. (The fallback's no-highlight assertion moved to the
+  // fallback describe below.)
+  it('(PIN) a null listing_link shows no Listing row (permanent-flyer-links D3a)', async () => {
+    getFlyer.mockResolvedValue(BARE);
+    renderPage('/p/unit-bare');
+    expect(await screen.findByRole('heading', { level: 1, name: 'Home for rent' })).toBeInTheDocument();
+    expect(screen.queryByText('Listing', { selector: 'dt' })).toBeNull();
+    expect(screen.queryByRole('link', { name: /see the full listing/i })).toBeNull();
   });
 
   it('(PIN) the authority line keeps its wording and the class the CSS pin reads', async () => {
@@ -693,5 +657,177 @@ describe('FlyerPage - the sign-up box (flyer-leads D3)', () => {
     expect(await screen.findByRole('heading', { level: 2, name: 'Interested in this home?' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: "I'm interested - text us" })).toBeInTheDocument();
     expect(screen.queryByText('Sign up for home alerts')).toBeNull();
+  });
+});
+
+// permanent-flyer-links D4: when the flyer cannot be served - a missing,
+// deleted or setup unit (the one opaque 404) or ANY other failure (5xx,
+// network, 429) - the page is a neutral sign-up, the same for every cause. It
+// never says a home is gone, and no status word appears on it (WI8). Every
+// case awaits the fallback h1 BEFORE an absence check: the page shows its
+// loading line first, so an earlier absence check would pass vacuously.
+describe('FlyerPage - the fallback (permanent-flyer-links D4)', () => {
+  const HEADING = 'Find a home that fits your voucher';
+  const SIGN_UP_LINE =
+    "Sign up and we'll text you about homes that fit your voucher. Signing up does not book a tour.";
+  const THANKS = "Thanks - you're all set!";
+  const THANKS_LINE = "We'll text you about homes that fit your voucher.";
+  const REPLY_LINE = "Looking for a home? Reply to the text we sent you and we'll help you find one.";
+  const NUMBER = '+15550009999';
+  /** What the inline IntakeForm passes for the person signUp() types. */
+  const SIGN_UP = { firstName: 'Ada', lastName: 'Lovelace', phone: '+14045551234', smsConsent: true };
+
+  /** The flyer API's one opaque 404 (a missing, deleted or setup unit). */
+  const notFound = (contactNumber: string | null): ApiError =>
+    new ApiError(404, 'not_found', 'not_found', { error: 'not_found', contact_number: contactNumber });
+
+  /** Awaits the fallback h1 (the positive read on this load), then: none of
+   *  the retired copy anywhere on the page, no status word, no highlight line
+   *  (the old unavailable PIN's assertion) and no "See other homes" link. */
+  async function expectNeutralFallback(): Promise<void> {
+    expect(await screen.findByRole('heading', { level: 1, name: HEADING })).toBeInTheDocument();
+    const text = document.body.textContent ?? '';
+    expect(text).not.toMatch(/no longer available|taken|removed/i);
+    expect(text).not.toMatch(/under application|finalizing|occupied|on hold|off market/i);
+    expect(screen.queryByText('Same-day tours available')).toBeNull();
+    expect(screen.queryByRole('link', { name: /see other homes/i })).toBeNull();
+  }
+
+  /** Fill the inline IntakeForm and press Sign up. */
+  async function signUp(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+    await user.type(screen.getByLabelText(/first name/i), 'Ada');
+    await user.type(screen.getByLabelText(/last name/i), 'Lovelace');
+    await user.type(screen.getByLabelText(/phone number/i), '4045551234');
+    await user.click(screen.getByRole('checkbox', { name: /I agree to receive/i }));
+    await user.click(screen.getByRole('button', { name: 'Sign up' }));
+  }
+
+  /** Waits for the thank-you, then returns the ONE submitHousingFair argument. */
+  async function submittedArg(): Promise<unknown> {
+    expect(await screen.findByRole('heading', { level: 2, name: THANKS })).toBeInTheDocument();
+    expect(submitHousingFair).toHaveBeenCalledTimes(1);
+    return submitHousingFair.mock.calls[0]?.[0];
+  }
+
+  it.each<[string, string | null]>([
+    ['with a texting number', NUMBER],
+    ['without one', null],
+  ])('form variant, a 404 %s: the heading, the sign-up line and the inline form - no /join link', async (_case, number) => {
+    getFlyer.mockRejectedValue(notFound(number));
+    renderPage();
+    await expectNeutralFallback();
+    expect(screen.getByText(SIGN_UP_LINE)).toBeInTheDocument();
+    expect(screen.getByLabelText(/first name/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Sign up' })).toBeInTheDocument();
+    expect(document.querySelector('a[href="/join"]')).toBeNull();
+    expect(screen.queryByRole('link', { name: /text us/i })).toBeNull();
+  });
+
+  it.each<[string, unknown]>([
+    ['a 500', new ApiError(500, 'internal_error', 'Internal Server Error', { error: 'internal_error' })],
+    ['a 429', new ApiError(429, 'rate_limited', 'rate_limited', { error: 'rate_limited' })],
+    ['a network failure', new ApiError(0, 'network_error', 'Network request failed')],
+    ['a TypeError', new TypeError('Failed to fetch')],
+  ])('%s renders the same fallback as a 404', async (_case, err) => {
+    getFlyer.mockRejectedValue(err);
+    renderPage();
+    await expectNeutralFallback();
+    expect(screen.getByText(SIGN_UP_LINE)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Sign up' })).toBeInTheDocument();
+  });
+
+  it('the sign-up sends the route unitId, then a focused thank-you; the h1 stays', async () => {
+    const user = userEvent.setup();
+    getFlyer.mockRejectedValue(notFound(NUMBER));
+    submitHousingFair.mockResolvedValue(undefined);
+    renderPage();
+    await expectNeutralFallback();
+
+    await signUp(user);
+
+    expect(await submittedArg()).toEqual({ ...SIGN_UP, unitId: 'unit-1' });
+    // a11y: focus moves to the swapped-in heading, as on the served flyer.
+    expect(screen.getByRole('heading', { level: 2, name: THANKS })).toHaveFocus();
+    expect(screen.getByText(THANKS_LINE)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: HEADING })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/first name/i)).toBeNull();
+    expect(screen.queryByText(SIGN_UP_LINE)).toBeNull();
+    expect(document.body.textContent).not.toMatch(/no longer available|taken|removed/i);
+  });
+
+  it.each<[string, string, string]>([
+    ['with surrounding spaces is sent trimmed', '%20unit-1%20', 'unit-1'],
+    ['of exactly 200 characters is still sent', 'x'.repeat(200), 'x'.repeat(200)],
+    ['of 200 characters once trimmed (202 with its spaces) is sent', `%20${'x'.repeat(200)}%20`, 'x'.repeat(200)],
+  ])('a route unitId %s', async (_case, routeId, sent) => {
+    const user = userEvent.setup();
+    getFlyer.mockRejectedValue(notFound(NUMBER));
+    submitHousingFair.mockResolvedValue(undefined);
+    renderPage(`/p/${routeId}`);
+    await expectNeutralFallback();
+    // The page asked for the RAW route id (the premise: trimming is the sign-up's).
+    expect(getFlyer).toHaveBeenCalledWith(decodeURIComponent(routeId), expect.anything());
+
+    await signUp(user);
+
+    expect(await submittedArg()).toEqual({ ...SIGN_UP, unitId: sent });
+  });
+
+  it.each<[string, string]>([
+    ['201 characters (over the server cap)', 'x'.repeat(201)],
+    ['blank once trimmed', '%20%20%20'],
+  ])('a route unitId of %s signs up with NO unitId key', async (_case, routeId) => {
+    const user = userEvent.setup();
+    getFlyer.mockRejectedValue(notFound(NUMBER));
+    submitHousingFair.mockResolvedValue(undefined);
+    renderPage(`/p/${routeId}`);
+    await expectNeutralFallback();
+    expect(getFlyer).toHaveBeenCalledWith(decodeURIComponent(routeId), expect.anything());
+
+    await signUp(user);
+
+    const arg = await submittedArg();
+    expect(arg).not.toHaveProperty('unitId');
+    expect(arg).toEqual(SIGN_UP);
+  });
+
+  it('a failed sign-up keeps the form and shows its error - no thank-you', async () => {
+    const user = userEvent.setup();
+    getFlyer.mockRejectedValue(notFound(NUMBER));
+    submitHousingFair.mockRejectedValue(
+      new ApiError(429, 'rate_limited', 'rate_limited', { error: 'rate_limited' }),
+    );
+    renderPage();
+    await expectNeutralFallback();
+
+    await signUp(user);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent("Sorry, we couldn't send that. Please try again.");
+    expect(screen.queryByRole('heading', { name: THANKS })).toBeNull();
+    expect(screen.getByLabelText(/first name/i)).toBeInTheDocument();
+  });
+
+  it('text variant with the 404 body number: the tap-to-text link, prefilled; no form', async () => {
+    getFlyer.mockRejectedValue(notFound(NUMBER));
+    renderPage('/p/unit-1?cta=text');
+    await expectNeutralFallback();
+    expect(screen.getByRole('link', { name: "I'm looking for a home - text us" })).toHaveAttribute(
+      'href',
+      `sms:${NUMBER}?&body=` + encodeURIComponent("I'm looking for a home that fits my voucher."),
+    );
+    expect(screen.queryByLabelText(/first name/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Sign up' })).toBeNull();
+    expect(screen.queryByText(SIGN_UP_LINE)).toBeNull();
+    expect(screen.queryByText(REPLY_LINE)).toBeNull();
+  });
+
+  it('text variant without a number: the reply line; no link, no form', async () => {
+    getFlyer.mockRejectedValue(notFound(null));
+    renderPage('/p/unit-1?cta=text');
+    await expectNeutralFallback();
+    expect(screen.getByText(REPLY_LINE)).toBeInTheDocument();
+    expect(screen.queryByRole('link')).toBeNull();
+    expect(screen.queryByLabelText(/first name/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Sign up' })).toBeNull();
   });
 });

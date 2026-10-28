@@ -1,7 +1,9 @@
 // FlyerPage (/p/:unitId) - the public, unauthenticated FULL-INFO flyer for one
-// shareable unit (flyer-full-info 2026-07-16: the teaser->intake->reveal funnel
-// is gone; everything public is shown upfront). This route is what flyerUrl()
-// emits, so every broadcast [FlyerLink] share lands here.
+// public unit - every status but Setup, with no status word on the page
+// (permanent-flyer-links D1, D3). flyer-full-info 2026-07-16: the
+// teaser->intake->reveal funnel is gone; everything public is shown upfront.
+// This route is what flyerUrl() emits, so every broadcast [FlyerLink] share
+// lands here.
 //
 // Two CTA variants, selected by ?cta=text (stripped from the URL on load so a
 // copied/shared address never carries it; sessionStorage keeps the variant
@@ -11,8 +13,10 @@
 //   text (?cta=text)  - "I'm interested - text us": a tap-to-text sms: link to
 //                       our main business number (contact_number). No form -
 //                       these visitors are ALREADY onboarded.
-// The unavailable state is variant-aware too (the opaque 404 body carries
-// contact_number so the text CTA still works there).
+// The fallback (missing, deleted, setup or any failure) is a neutral sign-up
+// page and is variant-aware too (the opaque 404 body carries contact_number so
+// the text CTA still works there). It never says a home is gone
+// (permanent-flyer-links D4).
 //
 // Tenant-facing copy: the dwelling is a "home" (never unit/property/listing).
 //
@@ -37,13 +41,20 @@ import styles from './FlyerPage.module.css';
 
 type Stage =
   | { kind: 'loading' }
-  | { kind: 'unavailable'; contactNumber: string | null }
+  | { kind: 'fallback'; contactNumber: string | null }
   | { kind: 'ready'; flyer: PublicFlyer };
 
 type Variant = 'form' | 'text';
 
-const UNAVAILABLE_PREFILL =
-  "The home I was looking at is no longer available - I'm interested in similar homes.";
+/** permanent-flyer-links D4: the fallback's tap-to-text prefill. */
+const FALLBACK_PREFILL = "I'm looking for a home that fits my voucher.";
+
+/** The server's unitId cap: app/src/routes/public.ts MAX_UNIT_ID_LEN, checked
+ *  in parseHousingFairBody after the app-wide body trim (app.ts trimJsonBody).
+ *  The fallback sends the route id only when it passes, so its one button can
+ *  always succeed (permanent-flyer-links D4). A copy, not an import: public.ts
+ *  is not a leaf module; FlyerPage.test.tsx pins the 200/201 boundary. */
+const MAX_UNIT_ID_LEN = 200;
 
 /** Build the cross-platform tap-to-text href. The `?&body=` form is DELIBERATE
  *  (iOS takes &body / modern iOS ?body, Android takes ?body) - do not "fix" it. */
@@ -227,7 +238,7 @@ export function FlyerPage(): React.JSX.Element {
 
   useEffect(() => {
     if (unitId === undefined) {
-      setStage({ kind: 'unavailable', contactNumber: null });
+      setStage({ kind: 'fallback', contactNumber: null });
       return;
     }
     const controller = new AbortController();
@@ -238,9 +249,10 @@ export function FlyerPage(): React.JSX.Element {
         setStage({ kind: 'ready', flyer });
       } catch (err) {
         if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
-        // Opaque 404 (missing/not-shareable) or any other failure -> the
-        // friendly unavailable state; its body may carry our texting number.
-        setStage({ kind: 'unavailable', contactNumber: contactFromError(err) });
+        // Opaque 404 (missing, deleted or setup) or any other failure (5xx,
+        // network, 429) -> the same neutral fallback (permanent-flyer-links
+        // D4); a 404 body may carry our texting number.
+        setStage({ kind: 'fallback', contactNumber: contactFromError(err) });
       }
     })();
     return () => controller.abort();
@@ -253,6 +265,19 @@ export function FlyerPage(): React.JSX.Element {
     setSubmitted(true);
   }
 
+  // permanent-flyer-links D4: the fallback's sign-up. It sends the route id,
+  // trimmed, only when the server will take it (1..MAX_UNIT_ID_LEN after the
+  // trim) - the server then decides the credit (D5). Otherwise it sends NO
+  // unitId key (input itself, never `unitId: undefined`), so the one button
+  // can always succeed. A throw propagates to the IntakeForm, as above.
+  async function handleFallbackSubmit(
+    input: Omit<HousingFairInput, 'unitId' | 'housingAuthority'>,
+  ): Promise<void> {
+    const id = unitId?.trim() ?? '';
+    await submitHousingFair(id.length >= 1 && id.length <= MAX_UNIT_ID_LEN ? { ...input, unitId: id } : input);
+    setSubmitted(true);
+  }
+
   if (stage.kind === 'loading') {
     return (
       <p className={styles.status} role="status">
@@ -261,32 +286,38 @@ export function FlyerPage(): React.JSX.Element {
     );
   }
 
-  if (stage.kind === 'unavailable') {
+  if (stage.kind === 'fallback') {
+    // permanent-flyer-links D4: one neutral page for every cause - it never
+    // says the home is gone and shows no status word. The form variant signs
+    // up inline; the text variant offers our number.
     return (
       <section className={styles.card}>
-        <h1 className={styles.title}>This home is no longer available</h1>
-        <p className={styles.muted}>
-          The home you&apos;re looking for has been taken or removed.
-        </p>
+        <h1 className={styles.title}>Find a home that fits your voucher</h1>
         {variant === 'text' ? (
           stage.contactNumber !== null ? (
-            <a className={styles.linkButton} href={smsHref(stage.contactNumber, UNAVAILABLE_PREFILL)}>
-              I&apos;m interested in similar homes - text us
+            <a className={styles.linkButton} href={smsHref(stage.contactNumber, FALLBACK_PREFILL)}>
+              I&apos;m looking for a home - text us
             </a>
           ) : (
             <p className={styles.muted}>
-              Interested in similar homes? Reply to the text we sent you and
-              we&apos;ll help you take the next step.
+              Looking for a home? Reply to the text we sent you and we&apos;ll
+              help you find one.
             </p>
           )
+        ) : submitted ? (
+          <>
+            <h2 className={styles.title} ref={headingRef} tabIndex={-1}>
+              Thanks - you&apos;re all set!
+            </h2>
+            <p className={styles.muted}>We&apos;ll text you about homes that fit your voucher.</p>
+          </>
         ) : (
           <>
             <p className={styles.muted}>
-              Sign up to hear about other homes that fit your voucher.
+              Sign up and we&apos;ll text you about homes that fit your voucher.
+              Signing up does not book a tour.
             </p>
-            <a className={styles.linkButton} href="/join">
-              See other homes
-            </a>
+            <IntakeForm onSubmit={handleFallbackSubmit} submitLabel="Sign up" />
           </>
         )}
       </section>

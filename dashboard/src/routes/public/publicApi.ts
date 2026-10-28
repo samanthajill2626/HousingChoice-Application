@@ -2,9 +2,10 @@
 // reachable with NO session - the public surface mounts OUTSIDE the auth gate.
 // We reuse the SAME request() transport every other api/*.ts function uses
 // (same-origin; the browser sends Origin so the app's origin/CSRF check passes).
-// getFlyer returns an opaque 404 (ApiError.status === 404) when a unit is missing
-// OR not shareable - the flyer page maps that to a friendly "no longer available"
-// state, never an existence oracle.
+// getFlyer returns an opaque 404 (ApiError.status === 404) when a unit is
+// missing, deleted or in Setup - one body for all three, never an existence
+// oracle. The flyer page maps that, and any other failure, to a neutral
+// sign-up page (permanent-flyer-links D4).
 //
 // PublicFlyer MIRRORS app/src/lib/unitFields.ts UnitFlyer exactly (same field
 // names + nullability), PLUS contact_number (added by the route) - so the public
@@ -63,7 +64,8 @@ export interface HousingFairInput {
   lastName: string;
   phone: string;
   voucherSize?: number;
-  /** When present (and a shareable unit), the signup is attributed to the home. */
+  /** When present (and a public unit - every status but Setup), the signup is
+   *  attributed to the home. */
   unitId?: string;
   /** join-housing-authority D8: the chosen housing authority's exact listed
    *  name; omitted for "Not sure". /join only - the flyer never sends it (the
@@ -74,7 +76,8 @@ export interface HousingFairInput {
   smsConsent: boolean;
 }
 
-/** GET the full public flyer. Throws ApiError (status 404) when unavailable. */
+/** GET the full public flyer. Throws ApiError (status 404) for a missing,
+ *  deleted or Setup unit. */
 export async function getFlyer(unitId: string, signal?: AbortSignal): Promise<PublicFlyer> {
   const { flyer } = await request<{ flyer: PublicFlyer }>(
     `/public/units/${encodeURIComponent(unitId)}/flyer`,

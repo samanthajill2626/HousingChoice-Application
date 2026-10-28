@@ -1,6 +1,6 @@
 # Live self-QA - permanent flyer links
 
-Orchestrator, 2026-10-28 03:10-03:25Z, hermetic `npm run e2e:session` lane 11
+Orchestrator, 2026-10-28 03:10-03:13Z, hermetic `npm run e2e:session` lane 11
 (dashboard http://127.0.0.1:10111, lean seed) at branch commit 9accca8a (code
 = 49d9fd24, main 71fb9b45 merged). Driven with the project Playwright MCP
 (`browser_run_code_unsafe`), measured with DOM reads, not eyeballed. Public

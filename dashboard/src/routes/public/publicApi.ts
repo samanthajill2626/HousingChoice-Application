@@ -3,9 +3,10 @@
 // We reuse the SAME request() transport every other api/*.ts function uses
 // (same-origin; the browser sends Origin so the app's origin/CSRF check passes).
 // getFlyer returns an opaque 404 (ApiError.status === 404) when a unit is
-// missing, deleted or in Setup - one body for all three, never an existence
-// oracle. The flyer page maps that, and any other failure, to a neutral
-// sign-up page (permanent-flyer-links D4).
+// missing, deleted, in Setup, or holds a stored status outside the listing
+// statuses - one body for all four, never an existence oracle. The flyer page
+// maps that, and any other failure, to a neutral sign-up page
+// (permanent-flyer-links D4).
 //
 // PublicFlyer MIRRORS app/src/lib/unitFields.ts UnitFlyer exactly (same field
 // names + nullability), PLUS contact_number (added by the route) - so the public

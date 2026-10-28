@@ -53,8 +53,9 @@
 //        -> 200 { flyer }   (the FULL public payload upfront + contact_number,
 //           for every status but setup - FLYER_PUBLIC, permanent-flyer-links
 //           D2; listing_link only while the unit is Available, D3a)
-//        -> 404 { error, contact_number }   (missing/deleted/setup;
-//           flyer-full-info: the teaser/reveal split + the /details route are gone)
+//        -> 404 { error, contact_number }   (missing/deleted/setup, or a stored
+//           status outside the listing statuses; flyer-full-info: the
+//           teaser/reveal split + the /details route are gone)
 //   GET  /public/housing-authorities   (join-housing-authority D1/D2; built by
 //        createPublicHousingAuthoritiesRouter below and mounted in app.ts AHEAD
 //        of this router, with its own 60-per-minute per-IP limit)

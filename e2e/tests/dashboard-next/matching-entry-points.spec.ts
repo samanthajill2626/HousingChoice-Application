@@ -19,7 +19,8 @@ import { expectTodayReady } from '../../support/today.js';
 // as broadcasts.spec.ts does. Fresh, uniquely-phoned tenants AND a fresh Available
 // per-run property are created via the API so every outbox thread has a clean,
 // order-independent single message and the availability guard (spec 2026-07-10) is
-// satisfied (the seeded unit-0001 stays under_application for public-pages.spec.ts).
+// satisfied (the seeded unit-0001 is never moved: every spec shares the lean seed,
+// and public-pages.spec.ts reads its served flyer).
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
 async function devLogin(page: Page): Promise<void> {
@@ -55,10 +56,11 @@ async function createTenant(
 
 /** Create a fresh per-run property via the API and publish it Available (the
  *  status the send guard, spec 2026-07-10, requires). Hermetic on purpose: the
- *  seeded units keep their statuses (unit-0001 MUST stay under_application for
- *  public-pages.spec.ts, and the availability guard rejects it), so every send
- *  test creates + publishes its own. Returns the new unitId plus the unique
- *  street line we can search the Property picker by. Mirrors broadcasts.spec.ts. */
+ *  seeded units keep their statuses (unit-0001 is never moved - every spec
+ *  shares the lean seed, and public-pages.spec.ts reads its served flyer - and
+ *  the availability guard rejects it), so every send test creates + publishes
+ *  its own. Returns the new unitId plus the unique street line we can search
+ *  the Property picker by. Mirrors broadcasts.spec.ts. */
 async function createUnitViaApi(
   request: APIRequestContext,
   stamp: string,

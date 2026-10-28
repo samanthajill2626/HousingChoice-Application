@@ -82,8 +82,9 @@ async function createTenant(
 /** Create a fresh per-run property via the API. New units start in 'setup'
  *  (not shareable); pass available: true to flip it Available through the
  *  transition route - the status the send guard (spec 2026-07-10) requires.
- *  Hermetic on purpose: shared seeded units keep their statuses (unit-0001
- *  MUST stay under_application for public-pages.spec.ts). */
+ *  Hermetic on purpose: shared seeded units keep their statuses (never move
+ *  unit-0001: every spec shares the lean seed, and public-pages.spec.ts reads
+ *  its served flyer). */
 async function createUnitViaApi(
   request: APIRequestContext,
   stamp: string,
@@ -132,8 +133,10 @@ test.describe('Broadcasts — compose from a property → curate → send → re
     const authority = `Bcast Compose Authority ${stamp}`;
     await addOrg(page.request, { kind: 'housing_authority', name: authority });
     // Per-run Available property (spec 2026-07-10): with the send guard live,
-    // sending against seeded unit-0001 would 400 (it is under_application, kept
-    // that way for public-pages.spec.ts). Create + publish our own.
+    // sending against seeded unit-0001 would 400 (the lean seed makes it
+    // under_application), and a seeded unit is never moved (every spec shares
+    // the lean seed; public-pages.spec.ts reads its served flyer). Create +
+    // publish our own.
     const unitId = await createUnitViaApi(page.request, stamp, { available: true, authorities: [authority] });
     const keep = await createTenant(page.request, `Keepme${stamp}`, 2, { housingAuthority: authority });
     const drop = await createTenant(page.request, `Dropme${stamp}`, 2, { housingAuthority: authority });
@@ -349,8 +352,9 @@ test.describe('Broadcasts - live send progress + disjoint buckets + recipient id
     const N = tenants.length;
     const body = `Live progress ${stamp} - a 2BR home is available.`;
     // Per-run Available property (spec 2026-07-10): the send guard rejects a
-    // non-available unit, and seeded unit-0001 must stay under_application for
-    // public-pages.spec.ts. Create + publish our own.
+    // non-available unit, and seeded unit-0001 is never moved (every spec shares
+    // the lean seed; public-pages.spec.ts reads its served flyer). Create +
+    // publish our own.
     const unitId = await createUnitViaApi(page.request, stamp, { available: true });
 
     // A curated send (explicit recipientContactIds = the curation) driven straight

@@ -139,9 +139,10 @@ test('Priority: checked on the New form shows the row and the pill, never reache
   await expect(priorityPill(page, line1)).toBeVisible();
   expect((await getUnit(api, unitId))['priority']).toBe(true);
 
-  // --- 3. WI12, while Priority is ON: publish (the flyer answers only for an
-  // Available property), then neither the flyer JSON nor the flyer page carries
-  // it. The h1 is the positive control on that load, before the absence. ---
+  // --- 3. WI12, while Priority is ON: publish (the flyer serves every status
+  // but Setup, where a new property starts; Available is the plain case), then
+  // neither the flyer JSON nor the flyer page carries it. The h1 is the
+  // positive control on that load, before the absence. ---
   await publish(api, unitId);
   const flyerRes = await api.get(`${NEXT}/public/units/${unitId}/flyer`);
   expect(flyerRes.status(), await flyerRes.text()).toBe(200);

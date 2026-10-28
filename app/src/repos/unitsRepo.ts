@@ -474,7 +474,9 @@ export interface UnitItem {
   priority?: boolean;
   /** Photo/media references — S3 keys or URLs. */
   media?: string[];
-  /** Public flyer link. */
+  /** The EXTERNAL listing URL (the home's public listing elsewhere - not the
+   *  flyer link). Shown on the public flyer only while the property is
+   *  Available (permanent-flyer-links D3a). */
   listing_link?: string;
   /** Public flyer details (public-pages §3): a tour video link. Shareable. */
   video_url?: string;

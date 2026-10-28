@@ -184,6 +184,38 @@ function cardTitled(title: RegExp): HTMLElement {
   return screen.getByRole('heading', { name: title }).closest('section') as HTMLElement;
 }
 
+/** permanent-flyer-links D7: when the property page does not offer the public
+ *  flyer, its flyer line shows ONE note, first match wins - deleted (any
+ *  status), then Setup, then any other (an unknown stored status). */
+const FLYER_NOTES = {
+  deleted: 'The public flyer is off while this property is deleted.',
+  setup: 'The public flyer goes live once this property leaves Setup.',
+  other: 'The public flyer is off for this property.',
+} as const;
+
+/** The flyer is offered: View flyer (the same-origin /p/ funnel) and Copy
+ *  public link, with no note. */
+function expectFlyerOffered(): void {
+  expect(screen.getByRole('link', { name: /View flyer/ })).toHaveAttribute('href', '/p/u1');
+  expect(screen.getByRole('button', { name: /Copy public link/ })).toBeInTheDocument();
+  for (const note of Object.values(FLYER_NOTES)) {
+    expect(screen.queryByText(note)).not.toBeInTheDocument();
+  }
+}
+
+/** The flyer is NOT offered: exactly the one expected note, no View flyer link
+ *  or Copy public link button, and never the retired "goes live when this
+ *  property is Available" copy. */
+function expectFlyerNote(which: keyof typeof FLYER_NOTES): void {
+  expect(screen.getByText(FLYER_NOTES[which])).toBeInTheDocument();
+  for (const [key, note] of Object.entries(FLYER_NOTES)) {
+    if (key !== which) expect(screen.queryByText(note)).not.toBeInTheDocument();
+  }
+  expect(screen.queryByRole('link', { name: /View flyer/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Copy public link/ })).not.toBeInTheDocument();
+  expect(screen.queryByText(/goes live when this property is Available/i)).not.toBeInTheDocument();
+}
+
 describe('ListingDetail', () => {
   it('shows a spinner while loading', () => {
     useListing.mockReturnValue({ ...READY, status: 'loading', unit: null });
@@ -249,13 +281,52 @@ describe('ListingDetail', () => {
     expect(screen.queryByText(/arrives with the new public routes/)).not.toBeInTheDocument();
   });
 
-  it('shows an honest note for a non-available property (flyer not public yet)', () => {
-    useListing.mockReturnValue({ ...READY, unit: { ...READY.unit, status: 'setup' } });
+  // permanent-flyer-links D7: the flyer line offers the flyer for every status
+  // but Setup (the dashboard FLYER_PUBLIC mirror of the server's flyer gate).
+  // The six statuses are written out, so the test does not read the mirror.
+  it.each([
+    'available',
+    'under_application',
+    'finalizing',
+    'occupied',
+    'on_hold',
+    'off_market',
+  ] as const)('offers the public flyer for status %s (every status but Setup)', (status) => {
+    useListing.mockReturnValue({ ...READY, unit: { ...READY.unit!, status } });
     renderAt();
-    expect(
-      screen.getByText(/public flyer goes live when this property is Available/i),
-    ).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: /View flyer/ })).not.toBeInTheDocument();
+    expectFlyerOffered();
+  });
+
+  it('a Setup property shows the goes-live note instead of the flyer', () => {
+    useListing.mockReturnValue({ ...READY, unit: { ...READY.unit!, status: 'setup' } });
+    renderAt();
+    expectFlyerNote('setup');
+  });
+
+  it('a deleted property shows the flyer-off note, even while its status is public', () => {
+    // READY's status is available: deleted wins over a public status.
+    useListing.mockReturnValue({
+      ...READY,
+      unit: { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' },
+    });
+    renderAt();
+    expectFlyerNote('deleted');
+  });
+
+  it('a deleted Setup property shows the deleted note (first match wins)', () => {
+    useListing.mockReturnValue({
+      ...READY,
+      unit: { ...READY.unit!, status: 'setup', deleted_at: '2026-06-19T00:00:00.000Z' },
+    });
+    renderAt();
+    expectFlyerNote('deleted');
+  });
+
+  it('an unknown stored status shows the flyer-off note (not public until listed)', () => {
+    // 'placed' is outside LISTING_STATUSES; the server does not serve its flyer.
+    useListing.mockReturnValue({ ...READY, unit: { ...READY.unit!, status: 'placed' } });
+    renderAt();
+    expectFlyerNote('other');
   });
 
   it('renders property details and the Housing authorities row', () => {

@@ -35,6 +35,7 @@ import {
 } from '../../api/index.js';
 import { Button, Spinner, StatusBadge, StatusMenu, type StatusTone } from '../../ui/index.js';
 import {
+  FLYER_PUBLIC,
   LISTING_STATUSES,
   LISTING_STATUS_LABELS,
   STAGE_LABELS,
@@ -80,7 +81,7 @@ import { contactTypeErrorMessage } from '../../lib/contactTypeErrors.js';
 import styles from './ListingDetail.module.css';
 
 // Property-status -> the interactive status pill's tone. `available` is the one
-// publicly-shareable status (green); under_application/finalizing/occupied read as
+// sendable status (green); under_application/finalizing/occupied read as
 // a settled/in-progress (placed) tone; the rest fall back to the neutral tone.
 const STATUS_TONE: Record<ListingStatus, StatusTone> = {
   setup: 'inactive',
@@ -413,9 +414,24 @@ export function ListingDetail(): React.JSX.Element {
   const atPhotoCap = mediaDisplay.length >= UNIT_MEDIA_MAX;
   // Only an http(s) video link becomes clickable (never javascript:/data:/… — XSS).
   const videoUrl = safeHttpUrl(unit.video_url);
-  // Public flyer: live only for a shareable (available) unit, at the same-origin
-  // /p/:unitId funnel (what flyerUrl() emits). Copy the absolute public URL.
-  const flyerShareable = unit.status === 'available';
+
+  // Soft-delete (reversible). Deleting is confirmed first, then the property drops
+  // out of the normal views - so on success we navigate back to the Properties list
+  // (it can be restored from the Deleted tab). Restore stays on the page and
+  // applies the returned unit in place so the Deleted banner clears.
+  const deleted = typeof unit.deleted_at === 'string' && unit.deleted_at.length > 0;
+  // Public flyer (permanent-flyer-links D7): offered for every status but Setup
+  // (FLYER_PUBLIC, the dashboard mirror of the server's flyer gate) and never on
+  // a deleted property, so `deleted` is computed first. The link is the
+  // same-origin /p/:unitId funnel (what flyerUrl() emits); Copy puts the absolute
+  // public URL on the clipboard. Otherwise ONE note, first match wins: deleted
+  // (any status), then Setup, then any other (an unknown stored status).
+  const flyerPublic = !deleted && FLYER_PUBLIC.has(unit.status);
+  const flyerNote = deleted
+    ? 'The public flyer is off while this property is deleted.'
+    : unit.status === 'setup'
+      ? 'The public flyer goes live once this property leaves Setup.'
+      : 'The public flyer is off for this property.';
   const onCopyFlyerLink = (): void => {
     void navigator.clipboard
       ?.writeText(`${window.location.origin}/p/${encodeURIComponent(unit.unitId)}`)
@@ -428,11 +444,6 @@ export function ListingDetail(): React.JSX.Element {
       });
   };
 
-  // Soft-delete (reversible). Deleting is confirmed first, then the property drops
-  // out of the normal views - so on success we navigate back to the Properties list
-  // (it can be restored from the Deleted tab). Restore stays on the page and
-  // applies the returned unit in place so the Deleted banner clears.
-  const deleted = typeof unit.deleted_at === 'string' && unit.deleted_at.length > 0;
   // Shared by both entry points to the send composer (the kebab item and the
   // "Sent to" card's "+ Send" action) - one URL, one place it's built.
   const goToSend = (): void => void navigate(`/broadcasts/new?unitId=${encodeURIComponent(unit.unitId)}`);
@@ -934,10 +945,11 @@ export function ListingDetail(): React.JSX.Element {
             <div className={styles.hero} aria-hidden="true" />
           )}
 
-          {/* Public flyer affordance: live only for a shareable (available) unit,
-              at the same-origin /p/:unitId funnel (what flyerUrl() emits). */}
+          {/* Public flyer affordance (permanent-flyer-links D7): offered for every
+              status but Setup and never on a deleted property, at the same-origin
+              /p/:unitId funnel (what flyerUrl() emits); otherwise the one note. */}
           <div className={styles.flyerLine}>
-            {flyerShareable ? (
+            {flyerPublic ? (
               <>
                 <a
                   className={styles.flyerLink}
@@ -952,9 +964,7 @@ export function ListingDetail(): React.JSX.Element {
                 </button>
               </>
             ) : (
-              <span className={styles.flyerNote}>
-                The public flyer goes live when this property is Available.
-              </span>
+              <span className={styles.flyerNote}>{flyerNote}</span>
             )}
           </div>
 

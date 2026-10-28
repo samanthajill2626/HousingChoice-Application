@@ -749,6 +749,12 @@ describe('availability pre-flight on Send (spec 2026-07-10)', () => {
 
     const dialog = await screen.findByRole('dialog', { name: "Property isn't Available" });
     expect(within(dialog).getByText(/On hold/)).toBeInTheDocument();
+    // permanent-flyer-links D8: the body gives the send rule, not a flyer-link
+    // reason (the sentence spans the <strong> label, so assert on the paragraph).
+    expect(within(dialog).getByText(/Only Available properties can be sent/)).toHaveTextContent(
+      'Only Available properties can be sent. Its status is currently On hold.',
+    );
+    expect(dialog).not.toHaveTextContent(/flyer link/);
     expect(getUnit).toHaveBeenCalledWith('u1');
     expect(sendBroadcast).not.toHaveBeenCalled();
   });
@@ -820,9 +826,13 @@ describe('availability pre-flight on Send (spec 2026-07-10)', () => {
 
     await user.click(screen.getByRole('button', { name: /Send to 1 recipient/ }));
 
+    // permanent-flyer-links D8: the full sentence, with no flyer-link reason.
     await waitFor(() =>
-      expect(screen.getByRole('alert')).toHaveTextContent(/isn't Available/),
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        "This property isn't Available. Only Available properties can be sent - make it Available, then send.",
+      ),
     );
+    expect(screen.getByRole('alert')).not.toHaveTextContent(/flyer link/);
   });
 });
 

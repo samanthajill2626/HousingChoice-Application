@@ -2159,7 +2159,7 @@ describe('share-broadcast API (M1.8a)', () => {
       return create.body.broadcastId as string;
     }
 
-    it('refuses to send when the unit is not available (flyer link would be dead)', async () => {
+    it('refuses to send when the unit is not available (only Available properties can be sent)', async () => {
       seedTenant(world, { contactId: 'c-1' });
       const unit = seedUnit(world);
       unit.status = 'on_hold'; // any non-shareable status

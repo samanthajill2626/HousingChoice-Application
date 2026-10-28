@@ -537,15 +537,16 @@ export function BroadcastComposer(): React.JSX.Element {
     setUnitPick({ label: '' });
   }
 
-  // Spec 2026-07-10: a non-Available property's flyer link is dead (public.ts
-  // serves only 'available'). Warn EARLY — before the operator curates a whole
-  // audience — that the Send step will ask to make it Available.
+  // Spec 2026-07-10, permanent-flyer-links D8: only Available properties can be
+  // sent - a send says the home is open to apply for now (the public flyer itself
+  // serves more, FLYER_PUBLIC). Warn EARLY - before the operator curates a whole
+  // audience - that the Send step will ask to make it Available.
   const unavailableNote =
     unit !== null && unit.status !== 'available' ? (
       <p className={styles.unavailableNote} role="status">
         This property is{' '}
-        <strong>{LISTING_STATUS_LABELS[unit.status as ListingStatus] ?? unit.status}</strong>, so
-        its flyer link won't work. You'll be asked to make it Available when you send.
+        <strong>{LISTING_STATUS_LABELS[unit.status as ListingStatus] ?? unit.status}</strong>. Only
+        Available properties can be sent - you'll be asked to make it Available when you send.
       </p>
     ) : null;
 

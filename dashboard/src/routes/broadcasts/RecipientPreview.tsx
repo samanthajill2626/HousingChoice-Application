@@ -85,8 +85,9 @@ export interface RecipientPreviewProps {
   /** Whether the tenant-candidate list is still loading (disables add until ready). */
   candidatesLoading: boolean;
   /** The attached property, when composing from one. Send re-checks its status
-   *  (spec 2026-07-10): a non-Available unit's flyer link is dead, so the send
-   *  is blocked behind a "Make Available & send" dialog. */
+   *  (spec 2026-07-10; permanent-flyer-links D8): only an Available property can
+   *  be sent - a send says the home is open to apply for now - so the send is
+   *  blocked behind a "Make Available & send" dialog. */
   unitId?: string;
   /** Resolved 1:1 mode (matching sends): the message was composed for exactly
    *  ONE tenant (the one-to-one default is the address and the flyer link,
@@ -372,8 +373,8 @@ export function RecipientPreview({
 
   async function onSend(): Promise<void> {
     if (sending || checkingUnit || checkedCount === 0 || resolvedMismatch) return;
-    // Pre-flight (spec 2026-07-10): the flyer link only resolves while the
-    // property is Available. Check FRESH status (never the compose-time object;
+    // Pre-flight (spec 2026-07-10; permanent-flyer-links D8): only an Available
+    // property can be sent. Check FRESH status (never the compose-time object;
     // a resumed draft can be days old).
     if (unitId !== undefined) {
       setError(null);
@@ -416,7 +417,7 @@ export function RecipientPreview({
         } else if (err.status === 400 && err.code === 'unit_not_available') {
           // Race: the property left Available between our pre-flight and the
           // server's own guard (or another session flipped it back).
-          setError("This property isn't Available, so its flyer link won't work. Make it Available, then send.");
+          setError("This property isn't Available. Only Available properties can be sent - make it Available, then send.");
         } else if (err.status === 400 && /cap/i.test(err.message)) {
           setError(err.message);
         } else if (err.status === 400) {
@@ -754,8 +755,7 @@ export function RecipientPreview({
           }
         >
           <p className={styles.availGateBody}>
-            The flyer link in this send only works while the property is Available. Its
-            status is currently{' '}
+            Only Available properties can be sent. Its status is currently{' '}
             <strong>{LISTING_STATUS_LABELS[availGate as ListingStatus] ?? availGate}</strong>.
           </p>
         </Modal>

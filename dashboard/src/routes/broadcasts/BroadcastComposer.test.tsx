@@ -573,10 +573,13 @@ describe('BroadcastComposer — non-Available property banner (spec 2026-07-10)'
     renderComposer('?unitId=unit-0001');
     // The compose step already renders a role="status" reach element (AudienceFilters),
     // so scope on the banner text and assert on its paragraph (plan Task 3 fallback).
-    const note = await screen.findByText(/flyer link won't work/);
-    expect(note).toHaveTextContent(/This property is On hold/);
-    expect(note).toHaveTextContent(/its flyer link won't work/);
-    expect(note).toHaveTextContent(/make it Available when you send/);
+    const note = await screen.findByText(/Only Available properties can be sent/);
+    // permanent-flyer-links D8: the note gives the send rule, not a flyer-link
+    // reason (the sentence spans the <strong> label, so assert on the paragraph).
+    expect(note).toHaveTextContent(
+      "This property is On hold. Only Available properties can be sent - you'll be asked to make it Available when you send.",
+    );
+    expect(note).not.toHaveTextContent(/flyer link/);
   });
 
   it('no banner for an Available property', async () => {
@@ -584,15 +587,15 @@ describe('BroadcastComposer — non-Available property banner (spec 2026-07-10)'
     renderComposer('?unitId=unit-0001');
     // Wait for the unit load to land (the pre-fill tag proves it).
     await screen.findByText(/matches property/i);
-    expect(screen.queryByText(/flyer link won't work/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Only Available properties can be sent/)).not.toBeInTheDocument();
   });
 
   it('no banner when composing without a property', async () => {
     renderComposer();
-    expect(screen.queryByText(/flyer link won't work/)).not.toBeInTheDocument();
     // Let the picker-candidates fetch settle (act hygiene — the pre-filled
     // default also kicks the auto-draft on a bare compose now).
     await screen.findByRole('combobox', { name: 'Property' });
+    expect(screen.queryByText(/Only Available properties can be sent/)).not.toBeInTheDocument();
   });
 });
 
@@ -1761,7 +1764,9 @@ describe('BroadcastComposer - Available properties only (matching-blast-rules D9
   it('(PIN) a ?unitId= preselection keeps a non-Available property, with the banner', async () => {
     getUnit.mockResolvedValue(oak);
     renderComposer('?unitId=u-2');
-    expect(await screen.findByText(/flyer link won't work/)).toHaveTextContent(/This property is On hold/);
+    expect(await screen.findByText(/Only Available properties can be sent/)).toHaveTextContent(
+      /This property is On hold/,
+    );
     expect(screen.getByRole('textbox', { name: 'Message' })).toBeInTheDocument();
     expect(getAllUnits).not.toHaveBeenCalled();
   });

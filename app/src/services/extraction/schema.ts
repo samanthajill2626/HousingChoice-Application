@@ -60,15 +60,25 @@ function isSuggestedContactKind(value: unknown): value is SuggestedContactKind {
     && (SUGGESTED_CONTACT_KINDS as readonly string[]).includes(value);
 }
 
-const fieldOpSchema = {
+/**
+ * One field's op on the wire: `{ field, op, value, reason }`, the field named
+ * by an enum. `fields` is a LIST of these, never an object with one key per
+ * field: twelve named field objects exceed the structured-output compiler's
+ * grammar size limit (400 "The compiled grammar is too large", WP1 B1's first
+ * never-written gate run; eight compiled). Measured with
+ * app/scripts/extraction-schema-compile-check.ts - re-run it after any schema
+ * change, because no offline test can see this limit.
+ */
+const fieldEntrySchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
+    field: { type: 'string', enum: [...EXTRACTABLE_FIELDS] },
     op: { type: 'string', enum: ['none', 'write', 'suggest'] },
     value: { type: 'string' },
     reason: { type: 'string' },
   },
-  required: ['op', 'value', 'reason'],
+  required: ['field', 'op', 'value', 'reason'],
 } as const;
 
 /** Draft-07 subset compatible with structured outputs (json_schema format). */
@@ -76,14 +86,14 @@ export const EXTRACTION_SCHEMA: Record<string, unknown> = {
   type: 'object',
   additionalProperties: false,
   properties: {
+    // One entry per extractable field (the prompt asks for all of them, in
+    // EXTRACTABLE_FIELDS order); every entry key is REQUIRED, so the schema
+    // stays at zero optional parameters - the 24-optional grammar cap
+    // tripwire. The field enum is built from EXTRACTABLE_FIELDS so the two
+    // cannot drift.
     fields: {
-      type: 'object',
-      additionalProperties: false,
-      // One fieldOpSchema per extractable field, every one REQUIRED (B1 spec D3:
-      // the schema stays at zero optional parameters - the 24-optional grammar
-      // cap tripwire). Built from EXTRACTABLE_FIELDS so the two cannot drift.
-      properties: Object.fromEntries(EXTRACTABLE_FIELDS.map((field) => [field, fieldOpSchema])),
-      required: [...EXTRACTABLE_FIELDS],
+      type: 'array',
+      items: fieldEntrySchema,
     },
     statusAdvance: {
       type: 'object',
@@ -181,6 +191,26 @@ function clamp(text: string, max: number): string {
 }
 
 /**
+ * The model's `fields` output keyed by field name. The wire shape is a LIST of
+ * `{ field, op, value, reason }` (EXTRACTION_SCHEMA); a field listed twice
+ * keeps its FIRST entry, and an entry naming no extractable field is ignored.
+ * The older object shape (`{ <field>: { op, value, reason } }`) is still read:
+ * the AI run log stores each run's raw response text, and parseExtractionOps
+ * re-reads runs recorded before the list shape.
+ */
+function rawFieldOps(raw: unknown): Record<string, unknown> {
+  if (isRecord(raw)) return raw;
+  const byField: Record<string, unknown> = {};
+  if (!Array.isArray(raw)) return byField;
+  for (const entry of raw) {
+    if (!isRecord(entry) || typeof entry.field !== 'string') continue;
+    if (!(EXTRACTABLE_FIELDS as readonly string[]).includes(entry.field)) continue;
+    if (!(entry.field in byField)) byField[entry.field] = entry;
+  }
+  return byField;
+}
+
+/**
  * JSON.parse + structural validation + clamp. Throws SyntaxError on
  * unparseable text (the job layer treats that as a failure); NEVER throws on
  * structurally-valid JSON - unknown/ill-typed pieces are simply dropped.
@@ -191,7 +221,7 @@ export function parseExtractionText(text: string): ExtractionResult {
 
   const result: ExtractionResult = { fields: {} };
 
-  const rawFields = isRecord(root.fields) ? root.fields : {};
+  const rawFields = rawFieldOps(root.fields);
   const fields: Partial<Record<ExtractableField, ExtractionFieldOp>> = {};
   for (const field of EXTRACTABLE_FIELDS) {
     const rawOp = rawFields[field];
@@ -371,8 +401,8 @@ export function parseExtractionOps(rawText: string | undefined): ExtractionOpsVi
   }
   if (!isRecord(parsed)) return view;
 
-  // The twelve scalars: fields.<name>.op, verbatim.
-  const rawFields = isRecord(parsed.fields) ? parsed.fields : {};
+  // The twelve scalars: each field's op, verbatim (list or older object shape).
+  const rawFields = rawFieldOps(parsed.fields);
   for (const field of EXTRACTABLE_FIELDS) {
     const rawOp = rawFields[field];
     if (!isRecord(rawOp)) continue;

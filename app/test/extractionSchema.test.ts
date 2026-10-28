@@ -98,13 +98,37 @@ describe('the tenant matching inputs in the schema (B1 spec D3)', () => {
     expect(PROVENANCE_FIELDS).toEqual([...ORIGINAL, ...MATCHING, 'address']);
   });
 
-  it('carries ONE all-required fieldOp entry per extractable field', () => {
-    const fields = (EXTRACTION_SCHEMA['properties'] as Record<string, { properties: Record<string, unknown>; required: string[] }>)['fields']!;
-    expect(Object.keys(fields.properties)).toEqual([...EXTRACTABLE_FIELDS]);
-    expect(fields.required).toEqual([...EXTRACTABLE_FIELDS]);
-    for (const key of MATCHING) {
-      expect(fields.properties[key]).toEqual(fields.properties['pets']);
-    }
+  // The first never-written gate run: twelve NAMED field objects exceed the
+  // structured-output grammar limit (400 "The compiled grammar is too large");
+  // the one-list shape compiles (app/scripts/extraction-schema-compile-check.ts).
+  it('(PIN) carries fields as ONE list of all-required { field, op, value, reason } entries, the field an enum of every extractable field', () => {
+    const fields = (EXTRACTION_SCHEMA['properties'] as Record<string, Record<string, unknown>>)['fields']!;
+    expect(fields['type']).toBe('array');
+    const items = fields['items'] as { properties: Record<string, { enum?: string[] }>; required: string[]; additionalProperties: boolean };
+    expect(items.additionalProperties).toBe(false);
+    expect(items.required).toEqual(['field', 'op', 'value', 'reason']);
+    expect(items.properties['field']!.enum).toEqual([...EXTRACTABLE_FIELDS]);
+    expect(items.properties['op']!.enum).toEqual(['none', 'write', 'suggest']);
+  });
+
+  it('reads the list shape: first entry per field wins, an unknown field is ignored', () => {
+    const parsed = parseExtractionText(JSON.stringify({
+      fields: [
+        { field: 'area_preference', op: 'write', value: 'Decatur', reason: 'said so' },
+        { field: 'area_preference', op: 'write', value: 'Atlanta', reason: 'second' },
+        { field: 'bogusField', op: 'write', value: 'x', reason: '' },
+        { field: 'pets', op: 'none', value: '', reason: '' },
+      ],
+    }));
+    expect(parsed.fields.area_preference).toEqual({ op: 'write', value: 'Decatur', reason: 'said so' });
+    expect(parsed.fields.pets).toEqual({ op: 'none' });
+    expect((parsed.fields as Record<string, unknown>)['bogusField']).toBeUndefined();
+    expect(parsed.fields.firstName).toBeUndefined();
+  });
+
+  it('still reads the older object shape (run records written before the list shape)', () => {
+    const parsed = parseExtractionText(JSON.stringify({ fields: { pets: { op: 'write', value: 'one dog', reason: 'said so' } } }));
+    expect(parsed.fields.pets).toEqual({ op: 'write', value: 'one dog', reason: 'said so' });
   });
 
   it('(PIN) stays at ZERO optional parameters', () => {
@@ -706,6 +730,9 @@ describe('the tenant matching fields in the system prompt (B1 spec D3)', () => {
 
   it('counts the field entries from EXTRACTABLE_FIELDS - no stale "eight"', () => {
     expect(sys).toContain(`of the ${EXTRACTABLE_FIELDS.length} field entries`);
+    // The wire shape is one list of { field, op, value, reason } (the grammar limit).
+    expect(sys).toContain(`${EXTRACTABLE_FIELDS.join(', ')}. Each entry is`);
+    expect(sys).toContain('{ "field": "<name>", "op": ..., "value": ..., "reason": ... } (use op "none",');
     expect(sys).not.toMatch(/\beight\b/i);
   });
 

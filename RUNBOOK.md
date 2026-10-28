@@ -1539,6 +1539,14 @@ counts; a `--case` re-run writes a PARTIAL section that never counts); `--dry-ru
 request without a key. Run it with the TESTING key and the model production runs
 (`claude-sonnet-5-5`); agents never run it against a real model. Usage is in the script's header.
 
+**Changing a structured-output schema.** The API compiles `EXTRACTION_SCHEMA` (and the probe's
+`GRADER_SCHEMA`) into a grammar with a size limit no offline test can see: past it, EVERY call fails
+400 "The compiled grammar is too large". WP1 B1 hit it (twelve named field objects failed, eight
+compiled), which is why `fields` is one list of `{ field, op, value, reason }` entries. After any
+schema change, run `npx tsx app/scripts/extraction-schema-compile-check.ts --model claude-sonnet-5-5`
+with the TESTING key - three tiny calls (a control, the extraction schema, the grader schema); it
+exits 1 when one fails to compile.
+
 **Housing authority: why an extracted one sometimes arrives as a suggestion.** The field holds only
 names from the organization list (Settings > Housing authorities & agencies), because a Matching
 blast's housing authority filter matches a tenant's stored value against list names exactly (any

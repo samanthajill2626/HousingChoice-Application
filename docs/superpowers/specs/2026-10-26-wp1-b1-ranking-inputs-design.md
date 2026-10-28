@@ -1,6 +1,7 @@
 # WP1 B1 Ranking inputs - design
 
-Status: APPROVED revision 11 (2026-10-27). Rev 11: the Notes retry guard
+Status: APPROVED revision 12 (2026-10-28). Rev 12: `fields` on the wire is
+one list of entries, after the grammar-size failure (D3 Mechanics). Rev 11: the Notes retry guard
 stays any-date, over whole lines (Cameron at the handback; D4). Rev 10: "sex" on the
 never-written list covers sexual orientation and gender identity (charter
 section 20, item 11; D4, D7). Rev 9 carries two decisions
@@ -184,7 +185,16 @@ Reconciliation:
 Mechanics:
 
 - Schema: four more `fieldOpSchema` entries in `fields`, all required (the
-  schema stays at zero optional parameters, schema.ts:8-13).
+  schema stays at zero optional parameters, schema.ts:8-13). Rev 12
+  (2026-10-28, planner fix PF-2): twelve named field objects exceed the
+  structured-output grammar limit (every call of the first never-written gate
+  run failed 400 "The compiled grammar is too large"; eight compiled), so
+  `fields` is ONE list of `{ field, op, value, reason }` entries, `field` an
+  enum of the extractable fields, every key required; the prompt asks for one
+  entry per field in order. The parsers still read the older object shape
+  (the run log re-reads stored response text). Measured with
+  app/scripts/extraction-schema-compile-check.ts, which any schema change
+  re-runs.
 - Coercion, by `kind`, in BOTH `coerceField` (apply.ts) and `coerceAccept`
   (suggestionResolution.ts):
   - text: trimmed; at most 500 characters (the staff cap); a longer model

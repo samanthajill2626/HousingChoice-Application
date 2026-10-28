@@ -44,3 +44,22 @@ B1 code that is cheap and in scope would go to a fix wave (none found).
 
 Decision changes: none made by the planner. Two items go to Cameron: PC-1
 (keep or revert the retry guard) and PA-1 (re-confirm with the example).
+
+## Cameron's rulings (2026-10-27, after the verdict)
+
+- PC-1: REVERSED the planner's recommendation. Cameron: "For the notes retry
+  guard, we are feeding old messages into the agent so what happens if the
+  extraction agent pulls out the old information since the retry guard is
+  gone?" The planner confirmed the window re-sends up to 30 days of
+  already-extracted messages (jobs/extraction.ts:80-90), so the same-day guard
+  let a re-extracted old fact through on every later run. Cameron: "Yes -
+  restore the any-date retry guard over whole lines, keep the prefix stripping
+  and whole-line matching, re-run the gates." Applied by the planner directly
+  (planner fix PF-1): filterNoteLines drops a model or system line equal to a
+  run of whole lines under any date, prefixes removed on both sides; the
+  `prefix` input and the probe's PROBE_NOTE_PREFIX are gone; the prompt again
+  says an identical line is never written and asks for a change back worded
+  differently ("likes it again"); tests re-pinned; spec rev 11 (D4); issue
+  notes-guard-stale-reread-vs-flip-back updated. The prompt fingerprint
+  changes, so the never-written gate run must be on this commit or later.
+- PA-1: Cameron: "Fields can stay outside the never written list." No change.

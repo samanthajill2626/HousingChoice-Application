@@ -11,17 +11,14 @@ cut from main @d0e2c2d8.
 
 ## STATE
 
-Phase: HANDBACK REVIEWED (2026-10-27 23:40 UTC). Build DONE (handback.md,
-c70a56c4; 0 recoveries). Planner gates all exit 0 at c70a56c4; two
-independent reviews adjudicated (planner-review/adjudications.md), no fix
-wave. Verdict: planner-review/planner-verdict.md - MERGE-READY PENDING
-Cameron's never-written gate run and two rulings: PC-1 (keep or revert the
-same-day Notes retry guard; planner recommends keep -> spec rev 11 + charter
-20 item 12, docs only) and PA-1 (re-confirm fields outside the list, with
-the "near my mosque" example; planner recommends keep for B1).
-Nothing in flight (orchestrator done, watchdog and mirror stopped).
-NEXT: on Cameron's rulings, apply any docs amendment; he runs
-gate-run-commands.md and signs off; he merges; unregister compact-resume.
+Phase: PLANNER FIX PF-1 (2026-10-27). Cameron ruled at the verdict: restore
+the any-date Notes retry guard over whole lines (keep prefix stripping and
+whole-line matching); fields stay outside the never-written list. The
+planner applied PF-1 itself (code, prompt sentence, tests, spec rev 11,
+issue update) and re-runs the five gates on the quiet tree.
+NEXT: report gate results; Cameron runs gate-run-commands.md on the PF-1
+commit or later (the prompt fingerprint changed), signs off, merges;
+unregister compact-resume.
 Registered with compact-resume (--persist) until mission end.
 
 ## What Cameron asked for (verbatim where wording matters)
@@ -156,6 +153,13 @@ amendment, and then file the issue and write the spec."
 
 - 2026-10-27, after round 5 (no defects): "Yes, let's go auto with
   55-minute watchdog timers." -> launch mode AUTO, watchdog 55 min.
+
+- 2026-10-27, at the handback verdict: "For the notes retry guard, we are
+  feeding old messages into the agent so what happens if the extraction agent
+  pulls out the old information since the retry guard is gone? Fields can
+  stay outside the never written list." Then: "Yes - restore the any-date
+  retry guard over whole lines, keep the prefix stripping and whole-line
+  matching, re-run the gates." -> planner fix PF-1, spec rev 11.
 
 ## Why
 

@@ -2,7 +2,10 @@
 
 ## STATE (replaced at each gate)
 
-- Phase: BUILD (SUPERVISE) - dispatched 2026-10-28 after compaction gate B.
+- Phase: VERDICT DELIVERED 2026-10-28 - MERGE-READY at 7d1229d9
+  (planner-verdict.md); waiting on Cameron's merge. Nothing in flight.
+  After merge: unregister compact-resume (`--off`); cleanup only on his go.
+- (history) BUILD (SUPERVISE) - dispatched 2026-10-28 after compaction gate B.
 - Launch mode: AUTO. Cameron 2026-10-28, verbatim: "Go auto with 55 minute
   watchdog timers". Watchdog checkpoints every 55 minutes (3300 s).
 - In flight: abt:build-orchestrator (background, mission-block.md verbatim);

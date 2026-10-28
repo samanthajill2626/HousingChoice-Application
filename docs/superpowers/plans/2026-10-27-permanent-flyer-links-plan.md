@@ -8,7 +8,11 @@
   `docs/superpowers/reviews/2026-10-27-permanent-flyer-links/`.
 - Spec review: 2 rounds, closed -
   `docs/superpowers/reviews/2026-10-27-permanent-flyer-links/design-review/adjudications.md`.
-- Status: PLAN v1 (2026-10-27), before plan review.
+- Status: PLAN v2 (2026-10-28). Plan review round 1 (two reviewers, 21
+  findings merged to 13 items, all precision) folded in; no decision
+  changed, so the review is closed -
+  `docs/superpowers/reviews/2026-10-27-permanent-flyer-links/plan-review/adjudications.md`.
+  Changed steps are marked `[P<n>]` with the adjudication item number.
 
 Line numbers below were read at d0e2c2d8 and are hints; the SYMBOLS and the
 quoted text identify each site.
@@ -34,9 +38,10 @@ quoted text identify each site.
 - Every new or touched line is ASCII. Many touched files already hold
   non-ASCII (em dashes, "Loading..." with an ellipsis glyph in
   FlyerPage.tsx); leave those lines alone and keep ADDED lines ASCII. Check
-  a file's added lines with
-  `git diff -U0 -- <file> | grep '^+' | grep -nP '[^\x00-\x7F]'` (no output
-  = clean).
+  a task's added lines BEFORE committing with
+  `git diff -U0 HEAD -- <files> | grep '^+' | grep -nP '[^\x00-\x7F]'` (no
+  output = clean). `HEAD` matters: a bare `git diff` reads only unstaged
+  changes and checks nothing once the files are staged. [P12]
 - Vocabulary (AGENTS.md): "home" on the public page, "property" in the
   dashboard, `unit` in code.
 - Never touch the live :5174/:8080 stack. e2e runs only through
@@ -160,9 +165,9 @@ Files: `app/src/routes/public.ts`, `app/test/publicIntake.test.ts`.
        the three bodies are deep-equal.
    Red because on_hold/occupied etc. 404 today.
 2. GREEN in `public.ts`:
-   - Import `FLYER_PUBLIC_STATUSES` beside `SHAREABLE_STATUSES` (~71). If
-     `SHAREABLE_STATUSES` has no other use left in the file after T3, drop it
-     from the import (lint would flag it).
+   - Import `FLYER_PUBLIC_STATUSES` beside `SHAREABLE_STATUSES` (~71). Keep
+     `SHAREABLE_STATUSES` for now: the sign-up gate still uses it until T3,
+     which removes it (T3 step 2). [P3]
    - Flyer route (~845): `!FLYER_PUBLIC_STATUSES.has(unit.status)`.
    - Build the payload so a non-Available unit carries `listing_link: null`:
      ```ts
@@ -172,7 +177,9 @@ Files: `app/src/routes/public.ts`, `app/test/publicIntake.test.ts`.
      const listing_link = unit.status === 'available' ? flyer.listing_link : null;
      res.json({ flyer: { ...flyer, listing_link, media, contact_number: contactNumber } });
      ```
-     Do NOT change `toUnitFlyer` (`lib/unitFields.ts`); it has other callers.
+     Do NOT change `toUnitFlyer` (`lib/unitFields.ts`): it stays a pure
+     field projection, and the status rule lives in the route with the
+     gate. (Its only app caller is this route.) [P7]
    - Reword the route comment (~838-839, ~846) and `sendNotFound`'s comment
      (~450-453): 404 for missing, soft-deleted or setup; "no existence oracle"
      now means nothing beyond holding the id (spec D2); the fallback page (not
@@ -201,6 +208,13 @@ Files: `app/src/routes/public.ts`, `app/test/publicIntake.test.ts`,
      and `PIN_FORMS`' `'a flyer whose property is not shareable'` ->
      `'a flyer whose property is in Setup'`. The `skipped: 'not_shareable'`
      case keeps that value (spec D5: the stored name stays).
+   - Rename hazard [P5]: a request body left pointing at `unit-placed`
+     after its seed was renamed takes the made-up-id path, which behaves
+     the same and stays green while testing "missing" instead of "setup".
+     After the rename, `grep -n "unit-placed\|'placed'" app/test/publicIntake.test.ts app/test/publicSignupLeads.test.ts`
+     must print only lines where `placed` is a CONTACT status (never a unit
+     seed or a unitId), and every renamed case seeds `unit-setup` in the
+     same test that sends it.
    - Add to `publicSignupLeads.test.ts` (next to the existing flyer pin
      label cases; reuse its `seedUnit`, `seedContact`, `signupBody` helpers
      and its label constants' address form):
@@ -209,15 +223,28 @@ Files: `app/src/routes/public.ts`, `app/test/publicIntake.test.ts`,
        pin's ref is the unit, and the properties-sent `flyer` entry is
        written (`sentRecorded: true` in the audit event, as the existing
        Available case asserts it).
+     - on_hold flyer WITH an address -> `... <address> (On hold) as ...`,
+       pin ref the unit, and `sentRecorded: true` (spec section 5 names
+       both statuses). [P10]
      - on_hold flyer with NO address on the unit -> `Signed up from the flyer for <unitId> (On hold) as ...`.
      - occupied flyer for an opted-out contact -> the suffix comes before the
        opt-out note: `... (Occupied) as <name> (marked Do-Not-Contact - ...)`.
      - (PIN) Available label unchanged (the existing case covers it; keep it).
-     - Two sign-ups within 24 hours from the same occupied flyer -> one pin
-       (the repeat check now keys on that unit, R4).
+     - The repeat check keys on the unit (R4) [P4]. "Two sign-ups from the
+       same occupied flyer -> one pin" is green TODAY (both fall in the shared
+       no-property source, `public.ts` ~692), so it proves nothing on its
+       own. Instead, for an existing contact within 24 hours: an occupied
+       flyer sign-up, then a `/join` sign-up -> TWO pins (red today: both
+       are the no-property source, so the second is a repeat); and two
+       sign-ups from the same occupied flyer -> one pin whose ref is the
+       unit (keep it, with the ref assertion, as the positive half).
    Red because occupied/on_hold are not `viaFlyer` today.
 2. GREEN in `public.ts`:
    - `viaFlyer` (~515): `FLYER_PUBLIC_STATUSES.has(flyerUnit.status)`.
+     `SHAREABLE_STATUSES` now has no use left in `public.ts`: remove it from
+     the import (~71), or gate 5 fails on `no-unused-vars`
+     (`eslint.config.mjs` ~32; typecheck does not catch it). Run
+     `npx eslint app/src/routes/public.ts` before committing. [P3]
    - `signupPinLabel` (~198-211): after the address, when
      `args.flyerUnit.status !== 'available'`, append
      ` (${statusLabel})` where `statusLabel` is
@@ -240,13 +267,20 @@ Files: `app/src/routes/public.ts`, `app/test/publicIntake.test.ts`,
 
 ### T4. Dashboard `FLYER_PUBLIC` mirror (D7 prerequisite)
 
-Files: `dashboard/src/api/types.ts`, `dashboard/src/api/statusModel.test.ts`.
+Files: `dashboard/src/api/types.ts`, new
+`dashboard/src/api/flyerPublicMirror.test.ts`.
 
-1. RED: in `dashboard/src/api/statusModel.test.ts` add a case: `FLYER_PUBLIC`
-   equals exactly the six statuses (sorted compare), has no `setup`, and
-   `SHAREABLE` is still exactly `['available']`. Import from `./index.js`
-   like the file's other imports (check `index.ts` re-exports `types.ts`;
-   add the export there if it does not).
+1. RED [P11]: a cross-workspace mirror test, on the pattern of
+   `dashboard/src/routes/contact/contactStatusMirror.test.ts:1-30` (read its
+   header: the app `statusModel.ts` is a LEAF module with no imports, so the
+   dashboard may import it in a test; import nothing else from `app/`).
+   Import `FLYER_PUBLIC as APP_FLYER_PUBLIC` and `SHAREABLE as APP_SHAREABLE`
+   from `../../../app/src/lib/statusModel.js` and the dashboard copies from
+   `./index.js` (check `index.ts` re-exports them from `types.ts`; add the
+   export if not). Assert the dashboard `FLYER_PUBLIC` equals the app's
+   (sorted arrays), has no `setup`, and `SHAREABLE` equals the app's. Red
+   because the dashboard `FLYER_PUBLIC` does not exist. (The app-side T1
+   test pins the six statuses literally; this one pins the mirror.)
 2. GREEN: in `types.ts` beside `SHAREABLE` (~935-936) add the mirror
    (`// MIRRORS app/src/lib/statusModel.ts FLYER_PUBLIC`), same six statuses.
    Reword the `SHAREABLE` comment to the broadcast meaning. Reword the
@@ -261,7 +295,12 @@ Files: `dashboard/src/routes/public/FlyerPage.tsx`,
 `dashboard/src/routes/public/publicApi.ts` (comment only).
 
 1. RED in `FlyerPage.test.tsx` (read its render helpers and the `getFlyer` /
-   `submitHousingFair` mocks first):
+   `submitHousingFair` mocks first). `renderPage()` opens `/p/unit-1` by
+   default (~55), so the route id is `unit-1`; pass an entry to
+   `renderPage` for the other ids. Every fallback case first AWAITS the
+   fallback h1 (`findByRole('heading', ...)`) before any absence or
+   body-text assertion - otherwise it runs against "Loading..." and passes
+   vacuously. [P6]
    - Replace `unavailable (public variant) keeps the /join link` (~321) and
      `unavailable (known variant) offers the text-us CTA from the 404 body`
      (~335) and `(PIN) the unavailable state keeps its copy, with no highlight`
@@ -273,7 +312,7 @@ Files: `dashboard/src/routes/public/FlyerPage.tsx`,
        `/no longer available|taken|removed/i` - assert on
        `document.body.textContent` in every fallback case (both variants,
        with and without a contact number).
-     - submitting sends `{ ...input, unitId: 'u1' }` (the route id), then
+     - submitting sends `{ ...input, unitId: 'unit-1' }` (the route id), then
        shows h2 `Thanks - you're all set!` + `We'll text you about homes that fit your voucher.`,
        focused (`toHaveFocus()`); the h1 stays.
      - a route unitId with surrounding spaces is sent trimmed.
@@ -424,17 +463,28 @@ files, `app/src/routes/broadcasts.ts` (comment), `app/test/broadcastApi.test.ts`
    - Code comments: `app/src/routes/units.ts` ~982-983;
      `app/src/repos/activityEventsRepo.ts` ~74;
      `dashboard/src/ui/StatusBadge.tsx` ~46;
-     `app/src/lib/import/apply.ts` ~1622; `e2e/support/steps.ts` ~1033;
+     `app/src/lib/import/apply.ts` ~1622; `e2e/scenarios/steps.ts` ~1033
+     (the spec's `e2e/support/steps.ts` does not exist) [P7];
      `app/src/lib/seed/lean.ts` ~211 ("only 'available' is shareable, sec 6")
      -> "every status but setup serves the public flyer; only 'available'
      can be sent".
-2. Sweep: `git grep -n -i -E "shareable|no longer available|flyer link"` over
-   `app/src dashboard/src e2e documentation docs/issues` (exclude
-   `docs/superpowers/` - dated history). Fix every hit that states the old
-   rule. Leave: the `SHAREABLE` / `SHAREABLE_STATUSES` identifiers, the
-   `'not_shareable'` value, dated history docs, and anything about
-   broadcasts that is still true. Record what you left and why in the commit
-   body.
+   - `e2e/support/selectors.md`: add a row for the flyer FALLBACK page (h1
+     `Find a home that fits your voucher`; form variant: the inline
+     IntakeForm, button `Sign up`; text variant: link `I'm looking for a
+     home - text us` with an `sms:` href, or the reply line without a
+     number), next to the existing public-page rows. [P8]
+2. Sweep [P8]: `git grep -n -i -E "shareable|no longer available|flyer link"`
+   over `app/src app/test app/scripts scripts dashboard/src e2e/support
+   e2e/scenarios documentation docs/issues` (exclude `docs/superpowers/` -
+   dated history). `e2e/tests/` is T9's: leave it to T9, which sweeps it
+   the same way. Known hits beyond step 1 (d0e2c2d8):
+   `app/test/publicIntake.test.ts` ~3, ~336, ~686 (header and comments;
+   titles there are T2/T3's), `app/scripts/backfill-join-housing-authority.ts`
+   ~150, `scripts/e2e-session.mjs` ~169. Fix every hit that states the old
+   rule as current. Leave: the `SHAREABLE` / `SHAREABLE_STATUSES`
+   identifiers, the `'not_shareable'` value, dated history docs, and
+   anything about broadcasts that is still true. Record what you left and
+   why in the commit body.
 3. Commit `docs: the public flyer serves every status but Setup`.
 
 ### T9. e2e (spec section 5)
@@ -451,11 +501,20 @@ and the helpers named below before writing.
      (a) bogus id bare -> h1 `Find a home that fits your voucher`, the
      `Sign up` button visible; (b) bogus id `?cta=text` in a fresh context
      -> the same h1 and a `text us` link with an `sms:` href (never click
-     it); (c) a fresh Setup property
-     (`createUnitViaApi(staff.request, stamp, { available: false })` from
-     `e2e/support/followUpFixtures.ts:48`) -> the same fallback;
-     (d) `UNDER_APPLICATION_UNIT` -> the `Sign up for home alerts` heading
-     and its address heading; (e) in every case
+     it); (c) a fresh Setup property -> the same fallback [P1]. Mint it in
+     this spec: give the file's own `createShareableUnit` (~103) an optional
+     `{ setup: true }` that skips its listing-status flip to Available (a
+     new unit starts in `setup`), and open a staff page with the file's
+     `devLogin` (~64) for the authenticated create, as the
+     flyer-attributed test (~268) does. Do NOT use
+     `e2e/support/followUpFixtures.ts` `createUnitViaApi`: it always flips
+     to Available and its third parameter is a tour type. Assert the
+     created unit's status is `setup` through the API before opening
+     `/p/<id>`; (d) `UNDER_APPLICATION_UNIT` -> the `Sign up for home
+     alerts` heading, and the flyer API answers 200. Do NOT assert an
+     address heading: the seed stores its address as a plain string
+     (`app/src/lib/seed/lean.ts` ~224), which the projection drops, so the
+     page's h1 is the no-address fallback [P2]; (e) in every case
      `page.getByText(/no longer available/i)` has count 0. No sign-in
      redirect (keep the existing `Sign in with Google` count-0 check).
 2. `e2e/tests/dashboard-next/listing-photos.spec.ts` (~326-338): after the
@@ -479,10 +538,17 @@ and the helpers named below before writing.
    `Signed up from the flyer for <line1>, <CITY_LINE> (Occupied) as <First Last>`
    (exact); `sentOutcome` is `signed_up`; the contact's
    `capture_source` is `flyer` and `unit_of_interest` is the unit.
-6. Do not run e2e per task; T10 runs the suite. While iterating you may use
+   D3a [P9]: `createAvailableUnit` stores a listing link (~168). Before the
+   flip, `/p/<id>` shows the `See the full listing` link (positive
+   control); after the flip to Occupied it has count 0, and the flyer
+   API's `listing_link` is `null`.
+6. Sweep `e2e/tests/` with the T8 grep and fix every remaining old-rule
+   comment or title (for example the headers of `listing-photos.spec.ts`
+   and `public-pages.spec.ts`). [P8]
+7. Do not run e2e per task; T10 runs the suite. While iterating you may use
    an `e2e:session` lane from this worktree only (AGENTS.md); never run a
    lane and the full suite together.
-7. Commit `test(e2e): permanent flyer links - fallback, non-Available flyers and the status pin`.
+8. Commit `test(e2e): permanent flyer links - fallback, non-Available flyers and the status pin`.
 
 ### T10. Gates and handback prep
 
@@ -504,10 +570,16 @@ from the Occupied flyer (the pin on the contact page), and the property
 page's flyer line for Available / Occupied / Setup / deleted. Screenshots go
 under `.playwright-mcp/`.
 
+Records [P13]: the self-QA write-up, gate results (exit codes quoted) and
+the handback are mission records - write them to
+`docs/superpowers/reviews/2026-10-27-permanent-flyer-links/` (`self-qa.md`,
+`handback.md`) and commit each when produced. Gate logs and screenshots
+stay in gitignored `.superpowers/` / `.playwright-mcp/`.
+
 ## 3. Watch items
 
-- WI1 The flyer route must not change `toUnitFlyer`; `listing_link` is
-  nulled in the route only (T2).
+- WI1 Do not change `toUnitFlyer`; `listing_link` is nulled in the route
+  only, beside the gate (T2).
 - WI2 `handleIntakeSubmit` on a SERVED flyer is unchanged; only the fallback
   trims and length-checks the id (T5).
 - WI3 The `'not_shareable'` audit value keeps its name - it is in stored

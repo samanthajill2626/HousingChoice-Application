@@ -2,14 +2,13 @@
 
 ## STATE (replaced at each gate)
 
-- Phase: DESIGN - spec rev 3 APPROVED by Cameron 2026-10-27; at compaction
-  gate A.
-- Launch mode: not chosen yet.
-- In flight: nothing (no orchestrator, watchdog or mirror). Round-2 reviewer
-  (reviewer B) is idle and can be continued for the plan review.
-- Next step: on Cameron's spec approval, compaction gate A, then write the
-  plan `docs/superpowers/plans/2026-10-27-permanent-flyer-links-plan.md` and
-  run its adversarial review.
+- Phase: LAUNCH GATE - spec rev 3 APPROVED; plan v2 final (plan review
+  closed at round 1: 13 precision items, no decision changed).
+- Launch mode: not chosen yet (asked at the launch gate 2026-10-28).
+- In flight: nothing (no orchestrator, watchdog or mirror).
+- Next step: on Cameron's launch-gate pick, compaction gate B (confirm the
+  registration with --show, watcher, offer), then AUTO dispatch of
+  abt:build-orchestrator with the mission block (or MANUAL handover).
 
 ## What Cameron asked for
 

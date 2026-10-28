@@ -6,6 +6,7 @@
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
 import type { OrgEntry, OrgKind } from '../src/lib/orgNames.js';
+import { LISTING_STATUS_LABELS } from '../src/lib/statusModel.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { WELCOME_TEXT_TEMPLATE } from '../src/routes/public.js';
@@ -536,7 +537,30 @@ describe('GET /public/units/:unitId/flyer - public fields only', () => {
   // is Available. One harness per status: a bare harness allows 5 /public
   // requests a minute.
   describe('every public status (permanent-flyer-links D2)', () => {
-    it.each(['available', 'under_application', 'finalizing', 'occupied', 'on_hold', 'off_market'])(
+    // The served payload's whole key set, sorted - the same keys as the
+    // allowlist test above, and IDENTICAL for every public status: D2's "no
+    // status field" also means nothing status-derived under any other key
+    // (code review R1 C-2).
+    const PUBLIC_FLYER_KEYS = [
+      'accepted_authorities',
+      'address',
+      'application_fee',
+      'area',
+      'baths',
+      'beds',
+      'contact_number',
+      'listing_link',
+      'media',
+      'same_day_rta',
+      'unitId',
+      'utilities',
+      'video_url',
+      'voucher_size',
+      'voucher_sizes',
+      'washer_dryer',
+    ].sort();
+
+    it.each(['available', 'under_application', 'finalizing', 'occupied', 'on_hold', 'off_market'] as const)(
       'status %s: 200, no status key, the listing link only while Available',
       async (status) => {
         const { app, world } = makeWebhookHarness();
@@ -544,9 +568,18 @@ describe('GET /public/units/:unitId/flyer - public fields only', () => {
 
         const res = await request(app).get('/public/units/unit-1/flyer').set('x-origin-verify', SECRET);
         expect(res.status).toBe(200);
+        expect(Object.keys(res.body)).toEqual(['flyer']);
+        expect(Object.keys(res.body.flyer).sort()).toEqual(PUBLIC_FLYER_KEYS);
         expect(res.body.flyer).not.toHaveProperty('status');
         // Not under any other key either: the stored value appears nowhere.
         expect(JSON.stringify(res.body)).not.toContain(status);
+        // Off Available, neither the stored value nor its staff label shows in
+        // any case: a label folded into another key's value names the status too.
+        if (status !== 'available') {
+          const lowered = JSON.stringify(res.body).toLowerCase();
+          expect(lowered).not.toContain(status);
+          expect(lowered).not.toContain(LISTING_STATUS_LABELS[status].toLowerCase());
+        }
         // D3a: the stored link for Available, null (not absent) for the rest.
         expect(res.body.flyer.listing_link).toBe(status === 'available' ? 'https://example.com/listing/1' : null);
         expect(res.body.flyer.media).toEqual(['/unit-media/unit-1/photo1', '/unit-media/unit-1/photo2']);
@@ -604,7 +637,7 @@ describe('POST /public/housing-fair — flyer attribution (optional unitId)', ()
   // permanent-flyer-links D5: a sign-up from the flyer of a home that is no
   // longer Available is credited to it exactly like one from an Available flyer.
   it.each(['occupied', 'on_hold'])(
-    'stamps capture_source:flyer + unit_of_interest for a %s unit (permanent-flyer-links D5)',
+    'stamps capture_source:flyer + unit_of_interest for a unit in status %s (permanent-flyer-links D5)',
     async (status) => {
       const { app, world } = makeWebhookHarness();
       world.units.set('unit-flyer', { unitId: 'unit-flyer', landlordId: 'll-1', status, beds: 2 });
@@ -687,6 +720,46 @@ describe('POST /public/housing-fair — flyer attribution (optional unitId)', ()
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ error: 'invalid request' });
     expect(world.contacts).toHaveLength(0);
+  });
+
+  // permanent-flyer-links D4 (code review R1 A-6): the server half of the
+  // fallback's unitId contract. The flyer page's fallback sends the route id
+  // only when, trimmed, it is 1 to 200 characters (its own copy of the cap,
+  // FlyerPage.tsx MAX_UNIT_ID_LEN), so that its one button can always succeed.
+  // The server's cap (public.ts MAX_UNIT_ID_LEN) is checked in
+  // parseHousingFairBody AFTER the app-wide body trim (app.ts trimJsonBody).
+  // A change to either cap must change both. One request per harness (a bare
+  // harness allows 5 /public requests a minute).
+  const UNIT_ID_200 = 'u'.repeat(200);
+
+  it.each([
+    ['exactly 200 characters', UNIT_ID_200],
+    ['200 characters inside surrounding spaces (the body trim)', `  ${UNIT_ID_200}  `],
+  ])('accepts a unitId of %s and credits the unit it names (permanent-flyer-links D4)', async (_what, sent) => {
+    const { app, world } = makeWebhookHarness();
+    world.units.set(UNIT_ID_200, { unitId: UNIT_ID_200, landlordId: 'll-1', status: 'available', beds: 2 });
+
+    const res = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ unitId: sent }));
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+
+    const contact = world.contacts.find((c) => c.phone === '+15550102000');
+    expect(contact).toMatchObject({ capture_source: 'flyer', unit_of_interest: UNIT_ID_200 });
+  });
+
+  it('refuses a unitId of 201 characters with the generic 400, writing nothing (permanent-flyer-links D4)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const res = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ unitId: 'u'.repeat(201) }));
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'invalid request' });
+    expect(world.contacts).toHaveLength(0);
+    expect(world.sent).toHaveLength(0);
   });
 
   it('keeps housing_fair when no unitId is supplied (today’s behavior)', async () => {

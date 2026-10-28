@@ -303,7 +303,7 @@ describe('the signed_up pin and the unread mark (D6)', () => {
   it.each([
     ['occupied', OCCUPIED_FLYER_LABEL],
     ['on_hold', 'Signed up from the flyer for 12 Oak St, Atlanta, GA 30303 (On hold) as Keisha Jones'],
-  ])('a flyer for a %s property: the status after the address, the unit ref and the flyer entry', async (status, label) => {
+  ])('a flyer for a property in status %s: the status after the address, the unit ref and the flyer entry', async (status, label) => {
     const { app, world } = harness();
     seedUnit(world, 'unit-1', { status });
     seedContact(world);

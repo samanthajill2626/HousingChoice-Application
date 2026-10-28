@@ -17,6 +17,13 @@
   source. Options put to him: (a) imported units stay Available-only,
   (b) serve them off Available only once they were Available in the app,
   (c) accept as is. Build continues (FW2) meanwhile.
+- 2026-10-28: orchestrator HANDED BACK (STATUS: QUESTION Q1; gated green
+  at 3635160e; handback.md). Planner review done on 3635160e:
+  planner-review/conformance.md + adversarial.md + adjudications.md
+  (dedc2931). Nothing in flight. NEXT: on Cameron's Q1 answer, SendMessage
+  the orchestrator one fix wave = Q1 outcome + PC-2 comments + PA-3 comment
+  + PA-7 (if cheap); then planner gates bare on a quiet tree, live QA,
+  verdict with merge command.
 - Next step: on each watchdog wake, read the ledger tail, post one
   "**Checkpoint:**" line, re-arm. On STATUS: DONE, run the handback review
   (re-ground in the full replay, gates bare on a quiet tree, spec-conformance

@@ -1,6 +1,10 @@
 # Permanent flyer links - design
 
-Status: DRAFT revision 3 (2026-10-27), design review closed - to Cameron's spec gate.
+Status: APPROVED revision 3 (2026-10-27). Cameron: "I think the spec probably
+looks good." No new off switch ("We don't need to turn this off"), and the
+properties-sent row keeps its buttons on non-Available homes ("Might cause
+confusion if the property wasn't properly moved into the right status").
+Next: the plan (docs/superpowers/plans/2026-10-27-permanent-flyer-links-plan.md).
 - Rev 3 folds in round 2 (the continued reviewer): 4 findings, all accepted as
   precision edits (the Setup take-down claim withdrawn, the fallback's unitId
   rule trimmed, missed test and comment sites). Round 2 changed no decision,

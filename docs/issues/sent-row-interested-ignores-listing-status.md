@@ -23,6 +23,11 @@ adds a second way: a flyer sign-up from a non-Available home now writes a
 `flyer` share entry, so `Signed up` rows appear on non-Available homes too.
 Staff see the status in the sign-up pin (D6) but not on the row.
 
-**Suggested fix.** Show the property's status on the row when it is not
-Available, and decide with Sam whether Interested on a non-Available home
-should warn, be hidden, or stay as is (a lead for similar homes).
+**Decision (Cameron, 2026-10-27).** Keep the buttons on rows for
+non-Available homes: "We don't need to hide the buttons on rows for homes that
+aren't available. Might cause confusion if the property wasn't properly moved
+into the right status." Nothing creates a tour automatically; only a staff
+click on Interested does, and that stays.
+
+**Suggested fix (if it comes up again).** Show the property's status on the
+row when it is not Available, so staff see it before clicking.

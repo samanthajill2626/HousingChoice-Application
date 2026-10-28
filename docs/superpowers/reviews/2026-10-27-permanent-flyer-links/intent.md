@@ -2,8 +2,8 @@
 
 ## STATE (replaced at each gate)
 
-- Phase: DESIGN - spec rev 3, design review CLOSED after round 2 (terminal).
-  Waiting on Cameron's spec gate.
+- Phase: DESIGN - spec rev 3 APPROVED by Cameron 2026-10-27; at compaction
+  gate A.
 - Launch mode: not chosen yet.
 - In flight: nothing (no orchestrator, watchdog or mirror). Round-2 reviewer
   (reviewer B) is idle and can be continued for the plan review.
@@ -58,6 +58,17 @@ application falls through. Shared links should keep pulling in leads.
    only (Recommended)" - leave out the external "See the full listing" link
    when the home is not Available; keep "Same-day tours available".
 
+5. Spec gate (2026-10-27), verbatim: "No new switch should be fine too. We
+   don't need to turn this off. And your response about the interested part
+   is good. We don't need to hide the buttons on rows for homes that aren't
+   available. Might cause confusion if the property wasn't properly moved into
+   the right status. With that, I think the spec probably looks good."
+   -> spec rev 3 APPROVED.
+6. Cameron (2026-10-27), on the Signed up row: OK that a sign-up shows on the
+   contact page for a non-Available home - "I just don't want it to create a
+   tour or say a tour needs to be created." (Verified: the sign-up writes no
+   tour and no follow-up; only a staff Interested click books one.)
+
 ## Preferences / taste
 
 - No status wording anywhere on the public page (Sam).
@@ -72,6 +83,10 @@ application falls through. Shared links should keep pulling in leads.
   properties-sent entry.
 
 ## Explicit NOs
+
+- No new flyer off switch (delete is the only take-down).
+- Do not hide the properties-sent row buttons on non-Available homes.
+- A flyer sign-up must never create a tour or say one is needed.
 
 - Do not change the broadcast send guard or composer.
 - Do not show "no longer available" (or taken/removed) on any public page.

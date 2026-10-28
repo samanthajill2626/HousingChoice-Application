@@ -2,14 +2,53 @@
 
 Branch `feat/permanent-flyer-links`, worktree `W:\tmp\permanent-flyer-links`.
 Base main d0e2c2d8; ONE main sync at 49d9fd24 (main 71fb9b45 - WP1 B1 landed;
-clean merge). Spec rev 3 (APPROVED), plan v2. Records:
-`docs/superpowers/reviews/2026-10-27-permanent-flyer-links/`.
+clean merge). Spec rev 4 (APPROVED; rev 4 = the D2 premise correction),
+plan v2. Records: `docs/superpowers/reviews/2026-10-27-permanent-flyer-links/`.
 
-## VERDICT
+## VERDICT (refreshed 2026-10-28 after fix wave 3)
 
-BLOCKED ON ONE CAMERON DECISION (Q1) - otherwise complete: every work-map
-item shipped, three gate batteries green (final on 3635160e), two review
-rounds closed, live self-QA clean.
+Q1 ANSWERED - option (c). Cameron, 2026-10-28, verbatim: "Imported
+properties can have their links stay available. We don't need to update
+those, I understand they'll go live with a deploy. i'm not sure which option
+that is, i believe it would be C." (intent.md decision 8). Every work-map
+item shipped, two review rounds plus the planner's review closed, live
+self-QA clean. MERGE-READY pending the coordinator's five-gate run on the
+quiet tree (FW3 landed code after the last full battery - see below).
+
+Fix wave 3 (the coordinator's scope, from planner-review/adjudications.md):
+wording plus one equivalent-constant swap, no behavior change.
+- f6ee0a76 PA-7: the pin suffix (public.ts ~227) and the D3a listing_link
+  (~895) use `SHAREABLE_STATUSES.has(...)` instead of a second `'available'`
+  literal (SHAREABLE is {'available'}: identical behavior).
+- 595ca503: spec rev 4 - D2 states the true premise (public import
+  namespace; imported properties, Airtable "Placed" homes included, are
+  public from the deploy) with Cameron's quote; the public.ts comments stop
+  claiming the public learns "nothing beyond holding the id" and name what a
+  200 and a null listing_link tell a reader (PA-3); the four "Shareable."
+  field comments read "On the public flyer." (PC-2); the abuse issue's
+  severity is re-weighed on the true premise and STAYS `med` (ids were never
+  the scarce input; the namespace widens the pool, not what one request can
+  do; the per-IP limiter still bounds bursts).
+- 3e2aaf43: report `code-review/FW3.md`.
+Verified by the orchestrator (micro wave, by hand): diffs read;
+`app/test/publicIntake.test.ts` + `publicSignupLeads.test.ts` 155/155 (74 +
+81, unchanged), EXIT 0. The child also ran root typecheck (exit 0), eslint on
+public.ts / unitsRepo.ts / unitFields.ts (exit 0) and `npm run issues`
+(exit 0). The full battery was NOT re-run after FW3, by the coordinator's
+instruction (the coordinator runs all five gates on the quiet tree). The last
+full battery (battery 3, below) is on 3635160e; the code after it is
+f6ee0a76 (two expressions + comments in public.ts) and 595ca503 (comments
+only in public.ts, unitsRepo.ts, unitFields.ts).
+
+FW3 leftovers (outside its scope, not changed): the abuse issue's `refs:`
+line numbers into public.ts drift by up to 3 lines (FW2/FW3 comment growth;
+its body also cites symbols); `app/test/publicIntake.test.ts:654` still says
+"No existence oracle beyond holding the id" (it is about the 404 body
+carrying config only - still true there); the dashboard keeps its own
+`'available'` literals (BroadcastComposer.tsx:376, :545;
+RecipientPreview.tsx:391 - PA-7 named only the two server sites).
+
+The question as it was asked (kept for the record):
 
 **Q1 (from code review R2-1, verified by the orchestrator):** spec D2 accepted
 that an IMPORTED property's unitId is derived from its address because "the
@@ -43,9 +82,8 @@ Making the repository private now cannot recall what has been public since
 **SEPARATE, LOUD (not this branch's to fix):** the whole repository is public
 on GitHub (README.md:33 records the plan as a private repo).
 
-When Q1 is answered: (c) = wording only (spec D2 + two comments + the abuse
-issue's severity re-weigh) and a re-gate; (a) / (b) = a code follow-up on
-this branch with tests, a fresh review and a battery.
+Answered (c) on 2026-10-28; the wording landed in fix wave 3 (above). The
+coordinator's gate run on the quiet tree is the re-gate.
 
 ## Work map
 
@@ -69,7 +107,7 @@ self-QA saw the integrated code; extra tests beyond spec section 5 (an
 off-list `placed` status at the route, the 200/201 unitId boundary on the
 server, whole-payload equality across statuses, a fallback sign-up e2e).
 
-## Gates on the FINAL code commit 3635160e (battery 3, bare, real exit codes)
+## Gates - the last FULL battery, on 3635160e (battery 3, bare, real exit codes; before FW3)
 
 Run 2026-10-28 04:24-04:45Z (`.superpowers/sdd/battery-3/summary.txt`):
 
@@ -82,8 +120,11 @@ Run 2026-10-28 04:24-04:45Z (`.superpowers/sdd/battery-3/summary.txt`):
 | 5 `npx eslint $(git diff --name-only --diff-filter=d main...HEAD -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs')` | 1 | 37 files; 4 errors, all pre-existing (below) - no new error |
 
 Earlier batteries: battery 1 on 49d9fd24 (all green, e2e 385 passed in
-16.4m); battery 2 on d9ce3c56 (all green). Commits after 3635160e are
-records-only (`docs/superpowers/`).
+16.4m); battery 2 on d9ce3c56 (all green). After 3635160e: FW3's
+f6ee0a76 (public.ts: two `'available'` literals -> `SHAREABLE_STATUSES.has`,
+plus comments) and 595ca503 (comments in public.ts, unitsRepo.ts,
+unitFields.ts; spec and issue text) - targeted vitest 155/155, typecheck 0,
+eslint 0 on those files; the coordinator re-runs all five gates.
 
 Gate 5 attribution (baseline = the same files at main via `git show main:<f>
 | eslint --stdin`, normalized relpath|rule|message): the 4 errors are
@@ -97,8 +138,8 @@ No new lint error; the new test file lints clean.
 
 1506ff7c T1 / 579bc642 T2 / dfb0bf50 T3 / 3f944265 T4 / ed5d8848 T5 /
 7632e720 T6 / 0459a08c T7 / 9a5ef80b T8 / 98051455 T9 / 49d9fd24 main sync /
-81a7bfd2 + 8eebb336 FW1 / 22ae56b2 + 78a553ef FW2.
-Net vs main (excluding docs/superpowers/): 45 files, +1544 / -378.
+81a7bfd2 + 8eebb336 FW1 / 22ae56b2 + 78a553ef FW2 / f6ee0a76 + 595ca503 FW3.
+Net vs main (excluding docs/superpowers/): 46 files, +1568 / -382.
 
 ## Review
 
@@ -118,6 +159,10 @@ Net vs main (excluding docs/superpowers/): 45 files, +1544 / -378.
 - FW2 is a tests + comments micro wave, verified by hand (diff read,
   publicIntake 74/74; its RED evidence against mutants vals2 / vals / facts5
   / lists1 is in code-review/FW2.md), then battery 3.
+- Planner review on 3635160e (planner-review/: conformance PC-1..PC-3,
+  plan-blind adversarial PA-1..PA-8, adjudications): PC-2, PA-3 and PA-7
+  fixed in FW3; PC-1/PA-1 = Q1, answered (c); the rest ruled by the planner
+  (no code change).
 
 ## Your eye (not blocking unless you say so)
 
@@ -142,7 +187,7 @@ Net vs main (excluding docs/superpowers/): 45 files, +1544 / -378.
 4. (R1-14) The property forms tag "Public listing link" as On flyer; since
    D3a it shows on the flyer only while Available.
 5. (R4-2) At deploy every imported "Placed" (Occupied) property starts
-   serving its flyer and crediting sign-ups - the privacy side is Q1.
+   serving its flyer and crediting sign-ups - accepted by Cameron (Q1 (c)).
 6. (C-5) WP1 B1's extraction PROPERTIES SENT block now also lists homes
    signed up from while Occupied / On hold ("signed up <date>") - D5's reach.
 7. (A-3, A-7) Spec-accepted and recorded: the only durable take-down is
@@ -168,19 +213,22 @@ fallback. Screenshots: `W:\tmp\permanent-flyer-links\.playwright-mcp\qa-*.png`.
 - Filed: `docs/issues/broadcast-send-refusal-deleted-unit-copy.md` (bug,
   low, open; pre-existing on main).
 - Updated: `docs/issues/public-signup-abuse-hardening.md` (D5 widening; the
-  public namespace; refs refreshed; severity left for Q1),
+  public namespace; refs refreshed in FW1; severity re-weighed in FW3 on the
+  true premise - stays `med`),
   `docs/issues/unit-media-dangling-reference-race.md` (reach).
 - Filed during design (planner): `sent-row-interested-ignores-listing-status.md`.
 
 ## Flakes, recoveries
 
-No flake in any run. 14 children (4 readers, 5 slices, 3 reviewers, 2 fix
+No flake in any run. 15 children (4 readers, 5 slices, 3 reviewers, 3 fix
 waves): 0 misfires, 0 recoveries.
 
 ## Merge state
 
-NOT MERGE-READY until Q1 is answered. Branch tip at handback is a
-records-only commit on top of the gated 3635160e; 0 behind main (71fb9b45).
-UNMERGED (human gate). NO infra, no backfill, no new dependency, no env var
-for the branch as built - option (b) of Q1 would add a backfill. Deploy is
-Cameron's call.
+MERGE-READY pending the coordinator's five-gate run on the quiet tree: the
+code-final commit is 595ca503 (FW3), the tip a records-only commit on top of
+it; 0 behind main (71fb9b45). The last full battery (green) is on 3635160e;
+FW3's code since then is an equivalent-constant swap plus comments,
+targeted-tested 155/155. UNMERGED (human gate). NO infra, no backfill, no new
+dependency, no env var. Deploy is Cameron's call; at deploy every imported
+non-Setup property's flyer goes live (accepted, Q1 (c)).

@@ -283,10 +283,26 @@ export const LISTING_STATUS_LABELS: Readonly<Record<ListingStatus, string>> = {
 };
 
 /**
- * The ONLY publicly-shareable property status (§6: `available` gates the public
- * flyer). Kept here so the central model owns it; unitsRepo re-exports it.
+ * The only status a property can be SENT in (broadcasts); the public flyer uses
+ * FLYER_PUBLIC (permanent-flyer-links D1). Kept here so the central model owns
+ * it; unitsRepo re-exports it.
  */
 export const SHAREABLE: ReadonlySet<ListingStatus> = new Set<ListingStatus>(['available']);
+
+/**
+ * The statuses whose property the PUBLIC FLYER serves (permanent-flyer-links
+ * D1, 2026-10-27): every listing status except `setup`, written out so a
+ * future status is not public until someone adds it here. A flyer sign-up's
+ * attribution follows the same set. Broadcasts do NOT use this - see SHAREABLE.
+ */
+export const FLYER_PUBLIC: ReadonlySet<ListingStatus> = new Set<ListingStatus>([
+  'available',
+  'under_application',
+  'finalizing',
+  'occupied',
+  'on_hold',
+  'off_market',
+]);
 
 // --- Transition sources + precedence (§8) -----------------------------------
 // `*_source` is recorded for PROVENANCE/audit on every status write (who/what

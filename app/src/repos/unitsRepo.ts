@@ -34,6 +34,7 @@ import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import { itemOfUnitKey, REQUIREMENT_ITEMS } from '../lib/requirements.js';
 import {
+  FLYER_PUBLIC,
   LISTING_STATUSES,
   SHAREABLE,
   type ListingStatus,
@@ -51,17 +52,24 @@ import type { RepoDeps } from './conversationsRepo.js';
 
 /**
  * Property (unit) lifecycle status (byStatus GSI hash; also gates the public
- * flyer). The full enum lives in lib/statusModel.ts (LISTING_STATUSES, §6); the
- * route allowlists these so the GSI partition key never takes an arbitrary
- * value. `available` is the only publicly shareable status (SHAREABLE_STATUSES).
+ * flyer). The full enum lives in lib/statusModel.ts (LISTING_STATUSES, section
+ * 6); the route allowlists these so the GSI partition key never takes an
+ * arbitrary value. The public flyer serves every status but `setup`
+ * (FLYER_PUBLIC_STATUSES); only `available` can be sent (SHAREABLE_STATUSES).
  * Most non-`setup`/`available` values are DERIVED from the committed placement.
  */
 export type UnitStatus = ListingStatus;
 
 export const UNIT_STATUSES: readonly UnitStatus[] = LISTING_STATUSES;
 
-/** Statuses whose unit may be exposed by the public flyer endpoint (§6: only `available`). */
+/**
+ * The only status a property can be SENT in (broadcasts: `available` only); the
+ * public flyer uses FLYER_PUBLIC_STATUSES (permanent-flyer-links D1).
+ */
 export const SHAREABLE_STATUSES: ReadonlySet<string> = SHAREABLE;
+
+/** Statuses whose unit the public flyer endpoint serves (every status but setup). */
+export const FLYER_PUBLIC_STATUSES: ReadonlySet<string> = FLYER_PUBLIC;
 
 /**
  * One contact on a unit's roster (BE3/C3 — contract verbatim; the frontend

@@ -3,8 +3,10 @@
 // the terminal set, the guards, and the source-precedence ordering are
 // internally consistent — the invariants every transition relies on.
 import { describe, expect, it } from 'vitest';
+import { FLYER_PUBLIC_STATUSES } from '../src/repos/unitsRepo.js';
 import {
   deriveStatuses,
+  FLYER_PUBLIC,
   isListingOverrideStatus,
   isLandlordStatus,
   isListingStatus,
@@ -28,6 +30,7 @@ import {
   PLACEMENT_DERIVATION,
   PLACEMENT_PHASES,
   PLACEMENT_STAGES,
+  SHAREABLE,
   SOURCE_PRECEDENCE,
   STAGE_LABELS,
   STAGE_PHASE,
@@ -312,5 +315,32 @@ describe('statusModel - per-type contact status lists (D1)', () => {
     expect(statusLabelFor('tenant', 'parked')).toBe('parked');
     // An inherited object key is not a label.
     expect(statusLabelFor('partner', 'constructor')).toBe('constructor');
+  });
+});
+
+// permanent-flyer-links D1 (spec 2026-10-27): the public flyer serves every
+// listing status but setup (FLYER_PUBLIC), written out so a future status is
+// not public until someone adds it; only `available` can be SENT (SHAREABLE,
+// broadcasts).
+describe('statusModel - public flyer statuses (permanent-flyer-links D1)', () => {
+  it('FLYER_PUBLIC is exactly the six listing statuses other than setup', () => {
+    expect([...FLYER_PUBLIC].sort()).toEqual(
+      ['available', 'under_application', 'finalizing', 'occupied', 'on_hold', 'off_market'].sort(),
+    );
+  });
+
+  it('FLYER_PUBLIC does not contain setup', () => {
+    expect(FLYER_PUBLIC.has('setup')).toBe(false);
+  });
+
+  it('(PIN) SHAREABLE is still exactly available - the only status a property can be sent in', () => {
+    expect([...SHAREABLE]).toEqual(['available']);
+  });
+
+  it('unitsRepo re-exports the same set as FLYER_PUBLIC_STATUSES; a stored status outside LISTING_STATUSES is not public', () => {
+    expect(FLYER_PUBLIC_STATUSES).toBe(FLYER_PUBLIC);
+    // Asserted through the string-typed re-export: FLYER_PUBLIC.has('placed')
+    // does not compile (a ReadonlySet<ListingStatus>).
+    expect(FLYER_PUBLIC_STATUSES.has('placed')).toBe(false);
   });
 });

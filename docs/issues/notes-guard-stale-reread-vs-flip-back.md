@@ -6,7 +6,7 @@ severity: low
 status: open
 area: app/extraction
 created: 2026-10-27
-refs: app/src/services/extraction/apply.ts:299, app/src/jobs/extraction.ts:80
+refs: app/src/services/extraction/apply.ts:292, app/src/jobs/extraction.ts:80
 ---
 
 **Problem.** WP1 B1 extraction appends feedback lines that name a sent
@@ -23,11 +23,17 @@ equal an earlier line for the same home, text alone cannot tell:
   keeps a stale view as the newest line).
 
 B1's code review went both ways on this (R2-1, R3-3, R4 section 3; records in
-docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/code-review/). B1
-ships a same-day retry guard for model lines: it trusts the model's reconcile
-judgment and never drops a flip back, at the cost of writing a stale re-read
-(and other later-day verbatim repeats). Neither failure's frequency is known:
-no run record counts a guard drop.
+docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/code-review/). The
+build first shipped a same-day guard for model lines. Cameron ruled at the
+handback (2026-10-27) for the ANY-DATE guard over whole lines, because every
+run re-reads old messages and a model that misses the reconcile rule would
+otherwise re-append old facts: "we are feeding old messages into the agent so
+what happens if the extraction agent pulls out the old information since the
+retry guard is gone?" So B1 ships the any-date guard: it never writes a stale
+re-read worded as before, at the cost of dropping a flip back worded exactly
+as an earlier line (the prompt asks for a change back worded differently,
+e.g. "likes it again"). Neither failure's frequency is known: no run record
+counts a guard drop.
 
 **Suggested fix.** For B2, before the card reads "the latest line for a
 home": (1) count guard drops on the AI run record (a `notesDuplicate` count

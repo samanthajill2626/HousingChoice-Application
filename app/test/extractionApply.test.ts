@@ -1790,24 +1790,24 @@ describe('applyExtraction - Notes lines through filterNoteLines (B1 spec D4)', (
     expect(records.updates[0]!.patch['notes']).toBe(`${earlier}\n[Auto - Jul 16] 12 Oak St, Decatur: likes it`);
   });
 
-  it('writes a flip back to an EARLIER date\'s exact words under this run\'s prefix (FW3-1, R2-1)', async () => {
+  it('drops a fact re-extracted from an old message on a later day, writes the new one (any-date guard, handback ruling)', async () => {
     const { deps, records } = makeDeps();
-    const earlier = '[Auto - Jul 10] 412 Oak Ave, Decatur: on the fence\n[Auto - Jul 12] 412 Oak Ave, Decatur: likes it';
+    const earlier = '[Auto - Jul 10] 412 Oak Ave, Decatur: on the fence\n[Auto - Jul 12] works nights downtown';
     const outcome = await run(deps, makeContact({ type: 'tenant', notes: earlier }), {
-      fields: {}, noteLines: [note('412 Oak Ave, Decatur: on the fence')],
+      fields: {}, noteLines: [note('works nights downtown'), note('412 Oak Ave, Decatur: now likes it')],
     });
-    expect(outcome.appendedLines).toEqual(['412 Oak Ave, Decatur: on the fence']);
-    expect(records.updates[0]!.patch['notes']).toBe(`${earlier}\n[Auto - Jul 16] 412 Oak Ave, Decatur: on the fence`);
+    expect(outcome.appendedLines).toEqual(['412 Oak Ave, Decatur: now likes it']);
+    expect(records.updates[0]!.patch['notes']).toBe(`${earlier}\n[Auto - Jul 16] 412 Oak Ave, Decatur: now likes it`);
   });
 
-  it('writes a line the model copied with an old prefix under ONE prefix, and drops a same-day echo (FW3-1, R3-4)', async () => {
+  it('writes a new line the model copied with an old prefix under ONE prefix, and drops a copied old line (R3-4)', async () => {
     const { deps, records } = makeDeps();
-    const earlier = '[Auto - Jul 10] works nights downtown\n[Auto - Jul 16] has a car';
+    const earlier = '[Auto - Jul 10] works nights downtown';
     const outcome = await run(deps, makeContact({ type: 'tenant', notes: earlier }), {
-      fields: {}, noteLines: [note('[Auto - Jul 10] works nights downtown'), note('[Auto - Jul 16] has a car')],
+      fields: {}, noteLines: [note('[Auto - Jul 10] works nights downtown'), note('[Auto - Jul 10] has a car')],
     });
-    expect(outcome.appendedLines).toEqual(['works nights downtown']);
-    expect(records.updates[0]!.patch['notes']).toBe(`${earlier}\n[Auto - Jul 16] works nights downtown`);
+    expect(outcome.appendedLines).toEqual(['has a car']);
+    expect(records.updates[0]!.patch['notes']).toBe(`${earlier}\n[Auto - Jul 16] has a car`);
   });
 
   it('a demoted run appends NO line of either kind and emits nothing for notes', async () => {
@@ -1865,7 +1865,6 @@ describe('applyExtraction - appendedLines (WP1 B1 spec D5.3)', () => {
   });
 
   it('leaves out a line the retry guard finds already in the notes', async () => {
-    // Was a Jul 15 line; FW3-1 (R3-adjudications): the guard drops a model line written the SAME day (this run's Jul 16).
     const { deps } = makeDeps();
     const outcome = await run(deps, makeContact({ type: 'tenant', notes: `[Auto - Jul 16] ${FEEDBACK}` }), {
       fields: {},

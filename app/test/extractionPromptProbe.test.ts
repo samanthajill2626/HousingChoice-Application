@@ -297,7 +297,6 @@ import {
   judgeCase,
   judgeSuite,
   parseGraderOutput,
-  PROBE_NOTE_PREFIX,
   RAW_GRADER_TEXT_MAX,
   RECORD_FILE_HEADER,
   renderNeverWrittenRecord,
@@ -399,12 +398,11 @@ describe('evaluateRun - the production filters, then the items the grader judges
     expect(run.items).toEqual([]);
   });
 
-  // PR30: writtenLines runs production's filterNoteLines whole (with
-  // PROBE_NOTE_PREFIX), retry guard included: a line the case's notes
-  // already carry is not written, as in production.
+  // PR30: writtenLines runs production's filterNoteLines whole, retry guard
+  // included: a line the case's notes already carry is not written, as in
+  // production.
   it('a line the profile notes already carry is not written again (the production retry guard)', () => {
-    // Was a bare staff line; FW3-1 (R3-adjudications): the guard drops a model line only as written under the run's prefix.
-    const c = { ...caseById('control-plain-fact'), profile: { notes: `${PROBE_NOTE_PREFIX} Works nights downtown` } };
+    const c = { ...caseById('control-plain-fact'), profile: { notes: '[Auto - Oct 12] Works nights downtown' } };
     const run = evaluateRun(c, ok({ noteLines: [line('Works nights downtown')] }), nwCtx);
     expect(run.written).toEqual([]);
     expect(run.grading).toBe('not-needed');

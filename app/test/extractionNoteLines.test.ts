@@ -11,7 +11,7 @@ const PREFIX = '[Auto - Oct 26]';
 const SYSTEM = 'Mentioned number +15550109999 which belongs to another contact';
 
 function input(over: Partial<NoteLineFilterInput> = {}): NoteLineFilterInput {
-  return { modelLines: [], systemLines: [], floor: 0.7, existingNotes: '', prefix: PREFIX, demoted: false, ...over };
+  return { modelLines: [], systemLines: [], floor: 0.7, existingNotes: '', demoted: false, ...over };
 }
 const note = (text: string, confidence: unknown = 0.9): { text: string; confidence: unknown } => ({ text, confidence });
 
@@ -75,14 +75,13 @@ describe('filterNoteLines - the retry guard, system lines and the cap', () => {
     expect(out.modelCount).toBe(5);
   });
 
-  it('the guard also covers system lines (spec D4 C1); a bare staff line no longer drops a model line', () => {
-    // Was ['has a car']; FW3-1 (R3-adjudications): a model line is dropped only as this run writes it, `<prefix> <line>`.
+  it('the guard also drops a bare line already in the notes - model or system (spec D4 C1)', () => {
     const out = filterNoteLines(input({
       existingNotes: `works nights downtown\n${PREFIX} ${SYSTEM}`,
       modelLines: [note('works nights downtown'), note('has a car')],
       systemLines: [SYSTEM],
     }));
-    expect(out.append).toEqual(['works nights downtown', 'has a car']);
+    expect(out.append).toEqual(['has a car']);
   });
 
   it('system lines carry no confidence and bypass the floor, AFTER the model lines', () => {
@@ -101,8 +100,8 @@ describe('filterNoteLines - the retry guard, system lines and the cap', () => {
 
 // FW2-1 (code review R2-1): the retry guard compares WHOLE lines, so a line
 // merely CONTAINED in a longer one is new feedback (spec D5.2: a change of
-// mind is a new line). WHICH lines it compares against is FW3-1's (the
-// describe below): a model line as this run writes it, the same date only.
+// mind is a new line). It compares against every line under ANY date (the
+// describe below; Cameron's handback ruling, 2026-10-27).
 describe('filterNoteLines - the retry guard compares WHOLE lines (FW2-1)', () => {
   it('appends feedback on 12 Oak St although an earlier line names 112 Oak St (R2-1 reproduction b)', () => {
     const out = filterNoteLines(input({
@@ -131,8 +130,8 @@ describe('filterNoteLines - the retry guard compares WHOLE lines (FW2-1)', () =>
     expect(out.append).toEqual(['works nights downtown']);
   });
 
-  it('appends a flip back to EXACTLY an earlier date\'s words (R2-1 reproduction a, verbatim), beside a worded change', () => {
-    // Was a PIN that dropped it; FW3-1 (R3-adjudications): a model line equal to one from an EARLIER date is written again.
+  it('(PIN) drops a flip back to EXACTLY an earlier date\'s words, keeps a change worded as a change (R2-1 reproduction a, verbatim)', () => {
+    // The accepted cost of the any-date guard: the prompt asks for a change back worded differently.
     const out = filterNoteLines(input({
       existingNotes: [
         '[Auto - Oct 20] 412 Oak Ave, Decatur: on the fence',
@@ -143,7 +142,7 @@ describe('filterNoteLines - the retry guard compares WHOLE lines (FW2-1)', () =>
         note('412 Oak Ave, Decatur: back on the fence', 0.95),
       ],
     }));
-    expect(out.append).toEqual(['412 Oak Ave, Decatur: on the fence', '412 Oak Ave, Decatur: back on the fence']);
+    expect(out.append).toEqual(['412 Oak Ave, Decatur: back on the fence']);
   });
 
   it('(PIN) still drops a same-run retry (F1), a candidate holding a line break and a system line included', () => {
@@ -157,55 +156,41 @@ describe('filterNoteLines - the retry guard compares WHOLE lines (FW2-1)', () =>
   });
 });
 
-// FW3-1 (R3-adjudications, "The retry guard, decided"; code review R2-1, R3-3,
-// R3-4): the guard exists for ONE thing - a complete() failure re-arms the
-// SAME due row and the retry re-extracts the same transcript minutes later
-// (adversarial F1). So a MODEL line is dropped only when, AS THIS RUN WRITES
-// IT (`<prefix> <line>`, the prefix carrying the run's date), it equals a run
-// of whole lines already in the notes; a SYSTEM line is dropped when it equals
-// a line of any date, the prefix removed on both sides. A leading
-// `[Auto - <date>]` the model copied into its text is removed before the
-// comparison and before the write: never a double prefix.
-describe('filterNoteLines - the retry guard drops a model line only as this run writes it (FW3-1)', () => {
+// Cameron's handback ruling (2026-10-27) over FW3-1's same-day form: every
+// run re-sends up to 30 days of ALREADY-EXTRACTED messages, so a model that
+// misses the reconcile rule re-emits an old fact on a later day - often by
+// copying its earlier line, prefix and all. The guard drops a line (model or
+// system) equal to a run of whole lines under ANY date, the `[Auto - <date>]`
+// prefix removed on both sides. A copied prefix is also removed before the
+// write: never a double prefix (R3-4).
+describe('filterNoteLines - the retry guard drops a line already written under any date', () => {
   const HOME = '412 Oak Ave, Decatur';
-  const NOV_2 = '[Auto - Nov 2]';
 
-  it('appends a second oscillation back to "now likes it" (R3-3 case a)', () => {
+  it('(PIN) drops a fact re-extracted from an old message on a later day - bare, or copied with its old prefix', () => {
     const out = filterNoteLines(input({
-      prefix: NOV_2,
+      existingNotes: ['[Auto - Oct 19] works nights downtown', '[Auto - Oct 19] toured on Monday', 'liked the yard'].join('\n'),
+      modelLines: [
+        note('works nights downtown'),
+        note('[Auto - Oct 19] works nights downtown'),
+        note('toured on Monday\nliked the yard'),
+      ],
+    }));
+    expect(out).toEqual({ append: [], modelCount: 0, belowFloor: 0, demoted: 0 });
+  });
+
+  it('(PIN) drops a second oscillation back to the exact words of an earlier line (the accepted cost), keeps one worded differently', () => {
+    const out = filterNoteLines(input({
       existingNotes: [
         `[Auto - Oct 20] ${HOME}: on the fence`,
         `[Auto - Oct 22] ${HOME}: now likes it`,
         `[Auto - Oct 27] ${HOME}: back on the fence`,
       ].join('\n'),
-      modelLines: [note(`${HOME}: now likes it`, 0.95)],
+      modelLines: [note(`${HOME}: now likes it`, 0.95), note(`${HOME}: likes it again`, 0.95)],
     }));
-    expect(out.append).toEqual([`${HOME}: now likes it`]);
+    expect(out.append).toEqual([`${HOME}: likes it again`]);
   });
 
-  it('appends a second oscillation back to "back on the fence" (R3-3 case b, the mirror)', () => {
-    const out = filterNoteLines(input({
-      prefix: NOV_2,
-      existingNotes: [
-        `[Auto - Oct 20] ${HOME}: likes it`,
-        `[Auto - Oct 22] ${HOME}: back on the fence`,
-        `[Auto - Oct 27] ${HOME}: now likes it`,
-      ].join('\n'),
-      modelLines: [note(`${HOME}: back on the fence`, 0.95)],
-    }));
-    expect(out.append).toEqual([`${HOME}: back on the fence`]);
-  });
-
-  it('appends a model line repeated verbatim from an EARLIER date, one holding a line break too (the documented cost)', () => {
-    const out = filterNoteLines(input({
-      existingNotes: ['[Auto - Oct 19] works nights downtown', '[Auto - Oct 19] toured on Monday', 'liked the yard'].join('\n'),
-      modelLines: [note('works nights downtown'), note('toured on Monday\nliked the yard')],
-    }));
-    expect(out.append).toEqual(['works nights downtown', 'toured on Monday\nliked the yard']);
-  });
-
-  it('(PIN) drops a same-day re-emission of the same words, both sides trimmed (the documented cost: a same-day flip back)', () => {
-    // A second run the SAME day - a new transcript, not a retry - flipping back to words this day already wrote.
+  it('(PIN) drops a same-day re-emission of the same words, both sides trimmed', () => {
     const out = filterNoteLines(input({
       existingNotes: [`  ${PREFIX} ${HOME}: on the fence  `, `${PREFIX} ${HOME}: likes it`].join('\n'),
       modelLines: [note(`  ${HOME}: on the fence `, 0.95)],
@@ -213,7 +198,7 @@ describe('filterNoteLines - the retry guard drops a model line only as this run 
     expect(out).toEqual({ append: [], modelCount: 0, belowFloor: 0, demoted: 0 });
   });
 
-  it('(PIN) a candidate holding a line break matches a RUN of whole lines as this run writes it, not lines scattered apart', () => {
+  it('(PIN) a candidate holding a line break matches a RUN of whole lines, not lines scattered apart', () => {
     const scattered = [`${PREFIX} toured on Monday`, `${PREFIX} has a car`, 'liked the yard'].join('\n');
     expect(filterNoteLines(input({ existingNotes: scattered, modelLines: [note('toured on Monday\nliked the yard')] })).append)
       .toEqual(['toured on Monday\nliked the yard']);
@@ -222,30 +207,21 @@ describe('filterNoteLines - the retry guard drops a model line only as this run 
       .toEqual([]);
   });
 
-  it('(PIN) drops a system line repeated on a later date - it carries no meaning change', () => {
+  it('(PIN) drops a system line repeated on a later date', () => {
     const out = filterNoteLines(input({ existingNotes: `[Auto - Oct 19] ${SYSTEM}`, systemLines: [SYSTEM] }));
     expect(out.append).toEqual([]);
   });
 
-  it('writes a model line that copied an old prefix under ONE prefix - every copied prefix removed (R3-4)', () => {
+  it('writes a new model line that copied an old prefix with every copied prefix removed (R3-4)', () => {
     const out = filterNoteLines(input({
       existingNotes: '[Auto - Oct 19] works nights downtown',
       modelLines: [
-        note('[Auto - Oct 19] works nights downtown'),
         note('[Auto - Oct 19] [Auto - Oct 18] has a car'),
         // The postal filter, too, reads the text without the copied prefix.
         note('[Auto - Oct 19] Current address: 535 Seal Pl NE, Atlanta'),
       ],
     }));
-    expect(out.append).toEqual(['works nights downtown', 'has a car']);
-  });
-
-  it('drops a same-day echo of a line the model copied with its prefix (R3-4)', () => {
-    const out = filterNoteLines(input({
-      existingNotes: `seed note\n${PREFIX} works nights downtown`,
-      modelLines: [note(`${PREFIX} works nights downtown`)],
-    }));
-    expect(out.append).toEqual([]);
+    expect(out.append).toEqual(['has a car']);
   });
 });
 

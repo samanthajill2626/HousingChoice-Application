@@ -1,6 +1,7 @@
 # WP1 B1 Ranking inputs - design
 
-Status: APPROVED revision 10 (2026-10-27). Rev 10: "sex" on the
+Status: APPROVED revision 11 (2026-10-27). Rev 11: the Notes retry guard
+stays any-date, over whole lines (Cameron at the handback; D4). Rev 10: "sex" on the
 never-written list covers sexual orientation and gender identity (charter
 section 20, item 11; D4, D7). Rev 9 carries two decisions
 Cameron made at the launch gate (charter section 20, items 9-10): the
@@ -264,7 +265,13 @@ amended 2026-10-26). The gate record reports what lands in them (D7).
   is appended, model lines and system lines alike (charter 6.4: "appends no
   lines"). A change from today (apply.ts:713-751 ignores demotion). See Q1.
 - Kept as is: the `[Auto - <date>]` prefix, the verbatim retry guard
-  (apply.ts:731-740), and the read-modify-write of `notes`.
+  (apply.ts:731-740), and the read-modify-write of `notes`. Rev 11
+  (Cameron, handback 2026-10-27): the guard stays ANY-DATE because every
+  run re-reads already-extracted messages; it now compares WHOLE lines
+  with any `[Auto - <date>]` prefix removed on both sides (so "12 Oak St"
+  is no longer "present" inside "112 Oak St"), and a prefix the model
+  copied is removed before the write. A change back worded exactly as an
+  earlier line is dropped; the prompt asks for it worded differently.
 - Run record: today's `notedLines` count plus `notesBelowFloor` and
   `notesDemoted` counts (record fields, not decision targets).
 - Growth: the box grows without a bound and CURRENT PROFILE sends all of

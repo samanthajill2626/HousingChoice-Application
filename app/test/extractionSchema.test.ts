@@ -866,15 +866,16 @@ describe('the system prompt and the PROPERTIES SENT block (WP1 B1 spec D5.1, D5.
 
   // FW3-2 (code review R3-1): a change of mind still NAMES its home by copying
   // its label - the one repetition the reconcile rule allows - and SAYS the
-  // view changed. Was FW2-1's "never written again" pin; that sentence is gone
-  // (R3-adjudications: the guard now writes a change back to earlier words).
-  it('asks for a change of mind that names the property by its label and says the view changed', () => {
+  // view changed. Cameron's handback ruling (2026-10-27) restored the any-date
+  // retry guard, so the prompt again says an identical line is never written
+  // and asks for a change back worded differently.
+  it('asks for a change of mind that names the property by its label, says the view changed, and differs from an earlier line', () => {
     expect(sys).toContain('a new noteLine that still NAMES the property by copying its label, then');
     expect(sys).toContain('SAYS the view changed, e.g. "123 Main St, Decatur: now likes it" or');
     expect(sys).toContain('"123 Main St, Decatur: back on the fence". The label is the one wording');
-    expect(sys).toContain('already in the notes that a noteLine may repeat.');
-    expect(sys).not.toContain('never written again');
-    expect(sys).not.toContain('a change back worded as before is lost');
+    expect(sys).toContain('already in the notes that a noteLine may repeat. A line identical to an');
+    expect(sys).toContain('earlier notes line is never written again, so word a change back so it');
+    expect(sys).toContain('differs from the earlier line, e.g. "123 Main St, Decatur: likes it');
   });
 
   it('drops the no-address bullet; the address output still never takes a sent home', () => {

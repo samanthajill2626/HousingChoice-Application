@@ -218,8 +218,8 @@ function autoPrefix(nowIso: string): string {
 /**
  * A line's leading autoPrefix, whatever its date - the shape lib/caseworkers.ts
  * AUTO_PREFIX also reads. filterNoteLines removes it from a model line before
- * the retry guard and the write, and from both sides of a system line's
- * comparison (FW3-1).
+ * the retry guard and the write, and from both sides of the guard's
+ * comparison (FW3-1; any date since the planner's handback ruling).
  */
 const LEADING_AUTO_PREFIX = /^\[Auto - [^\]]+\]/;
 
@@ -249,13 +249,6 @@ export interface NoteLineFilterInput {
   floor: number;
   /** The contact's current notes, trimmed ('' when none) - the lines the retry guard compares against. */
   existingNotes: string;
-  /**
-   * The `[Auto - <MMM D>]` prefix this run appends with (autoPrefix). The
-   * retry guard compares a model line AS THIS RUN WRITES IT, `<prefix> <line>`
-   * (FW3-1), so the prefix's date is what limits that guard to the same day.
-   * The probe's seam passes a fixed one (plan PR30).
-   */
-  prefix: string;
   /** hasInferredRoleContent: a demoted run appends no line (charter 6.4). */
   demoted: boolean;
 }
@@ -296,36 +289,26 @@ function clampConfidence(raw: unknown): number {
  *     ban: B1 removed the prompt's no-address bullet (spec rev 9 D5.2, PR50)
  *     because a feedback line names a sent property by its address label
  *     (PROPERTIES SENT), so a written line may now carry an address.
- *  4. The retry guard (adversarial F1), BEFORE the cap (B1 WI5):
- *     applyExtraction runs BEFORE repo.complete(), so a complete() failure
- *     re-arms the SAME due row and the retry re-extracts the identical
- *     transcript minutes later, against a contact that already carries run
- *     1's lines. That retry is the guard's one purpose (FW3-1, code review R3:
- *     the retry guard decided). It compares WHOLE lines, each trimmed (FW2-1);
- *     a candidate that spans lines must match a run of whole lines.
- *     - A MODEL line is dropped only when, AS THIS RUN WRITES IT
- *       (`<prefix> <line>`), it equals lines already in the notes. The prefix
- *       carries the run's date, so this drops the same-day retry (and a
- *       same-day re-emission of the same words). A line equal to one from an
- *       EARLIER date, or to a bare staff line, is written: a change of mind
- *       back to earlier words is a new line (spec D5.2), and a lost change of
- *       mind costs more than a repeated line.
- *     - A SYSTEM line (apply's own text, which changes no meaning) is dropped
- *       when it equals a line of ANY date, the prefix removed on both sides,
- *       so it is not repeated on every run.
- *     A line merely CONTAINED in a longer one is KEPT: "12 Oak St, ..." inside
- *     "112 Oak St, ...", or a change of mind whose words an earlier line
- *     contains, is new feedback. Accepted costs (R3- and R4-adjudications): a
- *     retry that crosses UTC midnight appends its lines once more; a model
- *     line repeated verbatim on a later date is written again; a second run
- *     the same day that flips back to that day's words is dropped; a retry of
- *     a run that hit the cap appends the lines the cap kept out of run 1, at
- *     most another MAX_NOTE_LINES (spec D4 puts this guard BEFORE the cap, so
- *     the lines run 1 wrote are dropped here and no longer take cap slots);
- *     and "same day" means the same month and day of ANY year (the prefix,
- *     `[Auto - <MMM D>]`, carries no year), so a flip back to identical words
- *     on an exact anniversary is dropped. A dropped line never takes a cap
- *     slot.
+ *  4. The retry guard (adversarial F1), BEFORE the cap (B1 WI5). A line -
+ *     model or system - is dropped when it equals lines already in the notes
+ *     under ANY date, the `[Auto - <date>]` prefix removed on both sides (a
+ *     bare staff line counts too). Two jobs: a complete() failure re-arms the
+ *     SAME due row and the retry re-extracts the identical transcript
+ *     (applyExtraction runs BEFORE repo.complete()); and every run re-sends up
+ *     to 30 days of ALREADY-EXTRACTED messages, so a model that misses the
+ *     reconcile rule re-emits an old fact - often by copying its earlier line
+ *     - on a later day. Cameron's handback ruling (2026-10-27) restored the
+ *     any-date guard for the second job over FW3-1's same-day form. It
+ *     compares WHOLE lines, each trimmed (FW2-1); a candidate that spans
+ *     lines must match a run of whole lines. A line merely CONTAINED in a
+ *     longer one is KEPT: "12 Oak St, ..." inside "112 Oak St, ...", or a
+ *     change of mind whose words an earlier line contains, is new feedback.
+ *     Accepted cost: a change of mind back to the EXACT words of an earlier
+ *     line is dropped (the prompt asks for it worded differently;
+ *     docs/issues/notes-guard-stale-reread-vs-flip-back.md). A retry of a run
+ *     that hit the cap appends the lines the cap kept out of run 1, at most
+ *     another MAX_NOTE_LINES (the guard runs BEFORE the cap). A dropped line
+ *     never takes a cap slot.
  *  5. System lines are appended after the model lines; they carry no
  *     confidence and are never floored.
  *  6. The cap: at most MAX_NOTE_LINES, model lines first.
@@ -338,13 +321,9 @@ export function filterNoteLines(input: NoteLineFilterInput): NoteLineFilterResul
   // sides, so one includes() matches only a run of WHOLE lines, never part of one.
   const physical = (text: string): string[] => text.split('\n').map((part) => part.trim());
   const fenced = (lines: readonly string[]): string => `\n${lines.join('\n')}\n`;
-  const existing = physical(input.existingNotes);
-  // A model line, as this run writes it, against the lines as stored: the same date only.
-  const storedLines = fenced(existing);
-  const modelPresent = (line: string): boolean => storedLines.includes(fenced(physical(`${input.prefix} ${line}`)));
-  // A system line against every line with its prefix removed: any date.
-  const unprefixedLines = fenced(existing.map(withoutAutoPrefix));
-  const systemPresent = (line: string): boolean => unprefixedLines.includes(fenced(physical(line).map(withoutAutoPrefix)));
+  // Every stored line with its prefix removed: a match under any date.
+  const unprefixedLines = fenced(physical(input.existingNotes).map(withoutAutoPrefix));
+  const present = (line: string): boolean => unprefixedLines.includes(fenced(physical(line).map(withoutAutoPrefix)));
 
   let belowFloor = 0;
   const model: string[] = [];
@@ -357,12 +336,12 @@ export function filterNoteLines(input: NoteLineFilterInput): NoteLineFilterResul
       belowFloor += 1;
       continue;
     }
-    if (line.length === 0 || isPostal(line) || modelPresent(line)) continue;
+    if (line.length === 0 || isPostal(line) || present(line)) continue;
     model.push(line);
   }
   const system = input.systemLines
     .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !isPostal(line) && !systemPresent(line));
+    .filter((line) => line.length > 0 && !isPostal(line) && !present(line));
 
   const append = [...model, ...system].slice(0, MAX_NOTE_LINES);
   if (input.demoted) return { append: [], modelCount: 0, belowFloor, demoted: append.length };
@@ -967,7 +946,6 @@ export async function applyExtraction(
     systemLines: noteStrings,
     floor: deps.factMinConfidence,
     existingNotes: existing,
-    prefix,
     demoted: ctx.hasInferredRoleContent === true,
   });
   if (filtered.demoted > 0) {

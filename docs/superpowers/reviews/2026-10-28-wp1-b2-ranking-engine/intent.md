@@ -15,8 +15,14 @@ cut from main @404e039d.
 Phase: SPEC (2026-10-28). Charter amendment 12 committed on this branch.
 Restatement answered: SPLIT. This branch is B2a (the engine); B2b (the
 review dataset) gets its own spec and branch after B2a merges.
-NEXT: write the B2a spec at docs/superpowers/specs/, then the adversarial
-spec review (round 1: two opus reviewers), then Cameron's spec gate.
+Spec rev 1 committed (dc8025cc):
+docs/superpowers/specs/2026-10-28-wp1-b2a-ranking-engine-design.md.
+Charter amendment 13 (the split) committed (1f128d99).
+IN FLIGHT: design review round 1, two opus reviewers writing
+design-review/R1-reviewer-A.md and R1-reviewer-B.md.
+NEXT: adjudicate into design-review/adjudications.md, revise the spec,
+continue the stronger reviewer for round 2 (cap 4), then Cameron's spec
+gate with Q1-Q5 (spec section 9) and the compile-check command.
 
 ## What Cameron asked for (verbatim where wording matters)
 

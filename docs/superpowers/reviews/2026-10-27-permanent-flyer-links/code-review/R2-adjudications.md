@@ -1,0 +1,25 @@
+# Code review round 2 - adjudications (orchestrator)
+
+Branch feat/permanent-flyer-links @ d9ce3c56 (after fix wave 1). One FRESH
+reviewer (`R2-review.md`): what round 1 missed, the fix diff cold, the round-1
+rulings challenged, the fixes checked. Battery 2 at d9ce3c56: typecheck 0,
+smoke 0, npm test 0, e2e 0, lint 1 = the four pre-existing react-hooks rows
+only.
+
+| # | Finding | Ruling | Why |
+|---|---|---|---|
+| R2-1 (BLOCKER, decision-gated) | The spec D2 premise "the namespace is in the private repository only" is FALSE: the `github` remote (samanthajill2626/HousingChoice-Application) is PUBLIC, and app/src/lib/import/ids.ts:24 (the uuidv5 namespace) has been on its main since c4d9e069 (2026-08-05). Anyone who knows an address can compute an imported property's unitId and now gets its flyer in every status but Setup - including Airtable "Placed" homes imported as Occupied, i.e. homes where a voucher household was placed, which were never Available in the app (no link to them was ever sent) | ACCEPT - QUESTION FOR CAMERON before merge. Orchestrator verified independently 2026-10-28: anonymous `GET api.github.com/repos/samanthajill2626/HousingChoice-Application` -> HTTP 200, `"private": false`, `"visibility": "public"`; `git show github/main:app/src/lib/import/ids.ts` line 24 holds the namespace. Options in the handback: (a) keep Available-only for imported units (`imported_from` set); (b) serve a non-Available imported unit only once it has been Available in the app (stamp on the move to available + backfill from the listing-status audits); (c) accept with the true premise and re-record D2. Making the repository private now cannot recall what has been public since 2026-08-05, and changing the namespace would re-mint every imported id (the importer's idempotency, and every link already sent) | The R1 A-2 REJECT rested on the false premise and is WITHDRAWN as reasoned; the gate itself is unchanged pending Cameron |
+| R2-2 (LOW, fix-wave regression) | FW1's sentence in public-signup-abuse-hardening.md says "anyone holding the namespace"; the namespace is public. The quoted pin label lacks the D6 status suffix | FIX (FW2) - state the fact (the namespace is in the public GitHub repository, so anyone can compute an imported property's id from its address) and add the optional ` (<Status>)` to the quoted label; leave severity for Cameron's R2-1 decision | factual either way |
+| R2-3 (LOW, fix-wave regression) | The six-status flyer test claims "nothing status-derived under any other key" but checks only key names and strings; its fixture records no video_url / same_day_rta / application_fee / washer_dryer / utilities; a mutant that empties accepted_authorities and the voucher sizes off Available passes every app test, and no e2e checks those lines on a non-Available flyer | FIX (FW2) - seed every public field and assert the WHOLE payload equals the Available payload except `listing_link` (null off Available); prove it red against that mutant without in-place edits; make the comment say what it pins | spec D3: "renders exactly as an Available one does today, whatever the status" |
+| R2-4 (INFO, pre-existing) | broadcast-send-refusal-deleted-unit-copy.md leaves one path "not checked"; traced: setListingStatus ignores deleted_at, so "Make Available & send" on a property deleted while not Available flips its status (audit row) and the send still fails with the same copy | FIX (FW2) - replace the paragraph with the trace | the filed issue should be complete |
+| R2-5 (INFO, records) | The A-1 ruling overstated what Cameron was asked: design review #3/#4 covered the tours line, the Same-day RTA row and the listing link - not the thank-you line "We'll text you about this home and others that fit your voucher." on an Occupied home, nor the ?cta=text inbound "I'm interested in <address>" reaching staff with no status cue | ACCEPT - the A-1 ruling stands on D3 ("the variant's CTA", "renders exactly as an Available one"), but the handback's "your eye" line names these two items explicitly | correct the record |
+| (FW1 left open) | Four sibling comments list only three 404 causes (public.ts ~466 and ~871, publicApi.ts ~80-81, FlyerPage.tsx ~16 and ~252); the FlyerPage cap comment names only its own test | FIX (FW2) - add "or a stored status outside the listing statuses" to each cause list (do NOT touch the "no existence oracle beyond holding the id" wording - it changes with Cameron's R2-1 answer) and cite the app boundary test in the cap comment | consistency, comment-only |
+
+Rulings R2 upheld: A-3, A-4, A-7 (reasons verified true), A-5, A-6, A-8d, C-5.
+
+Fix wave FW2 = R2-2, R2-3, R2-4 and the comment items above: tests and
+docs/comments only (no runtime change), verified by the orchestrator by hand
+(a tests-and-comments micro wave), then battery 3. R2-1 goes to Cameron as
+the mission's open QUESTION; whichever option he picks is a follow-up on this
+branch (options (a)/(b) are code + tests + one more review; (c) is a spec /
+comment / issue wording change).

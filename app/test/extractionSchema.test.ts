@@ -2,9 +2,12 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
+  EXTRACTABLE_FIELDS,
   EXTRACTION_SCHEMA,
+  PROVENANCE_FIELDS,
   parseExtractionText,
 } from '../src/services/extraction/schema.js';
+import { TENANT_MATCHING_INPUTS } from '../src/lib/tenantMatchingInputs.js';
 import {
   buildExtractionSystemPrompt,
   buildExtractionUserContent,
@@ -14,6 +17,7 @@ import {
 import type { ExtractionInput } from '../src/adapters/extraction.js';
 import { buildStartingEntries, STARTING_ORG_LIST } from '../src/lib/orgStartingList.js';
 import { renderOrgListBlock } from '../src/services/extraction/orgListBlock.js';
+import { renderSentPropertiesBlock } from '../src/services/extraction/sentPropertiesBlock.js';
 
 // The structured-outputs contract: every object level carries
 // additionalProperties:false and NONE of the unsupported constraint keywords
@@ -79,6 +83,79 @@ describe('EXTRACTION_SCHEMA', () => {
   });
 });
 
+// B1 spec D3: the four tenant matching inputs join the extractable fields
+// through their one list - eight -> twelve - and the schema stays all-required.
+describe('the tenant matching inputs in the schema (B1 spec D3)', () => {
+  const ORIGINAL = ['firstName', 'lastName', 'voucherSize', 'housingAuthority', 'pets', 'evictions', 'tenure', 'porting'];
+  const MATCHING = TENANT_MATCHING_INPUTS.map((input) => input.key);
+
+  it('EXTRACTABLE_FIELDS is the eight, then the four in list order - twelve', () => {
+    expect(EXTRACTABLE_FIELDS).toEqual([...ORIGINAL, ...MATCHING]);
+    expect(EXTRACTABLE_FIELDS).toHaveLength(12);
+  });
+
+  it('PROVENANCE_FIELDS is every extractable field plus address, so a staff edit clears each _source', () => {
+    expect(PROVENANCE_FIELDS).toEqual([...ORIGINAL, ...MATCHING, 'address']);
+  });
+
+  // The first never-written gate run: twelve NAMED field objects exceed the
+  // structured-output grammar limit (400 "The compiled grammar is too large");
+  // the one-list shape compiles (app/scripts/extraction-schema-compile-check.ts).
+  it('(PIN) carries fields as ONE list of all-required { field, op, value, reason } entries, the field an enum of every extractable field', () => {
+    const fields = (EXTRACTION_SCHEMA['properties'] as Record<string, Record<string, unknown>>)['fields']!;
+    expect(fields['type']).toBe('array');
+    const items = fields['items'] as { properties: Record<string, { enum?: string[] }>; required: string[]; additionalProperties: boolean };
+    expect(items.additionalProperties).toBe(false);
+    expect(items.required).toEqual(['field', 'op', 'value', 'reason']);
+    expect(items.properties['field']!.enum).toEqual([...EXTRACTABLE_FIELDS]);
+    expect(items.properties['op']!.enum).toEqual(['none', 'write', 'suggest']);
+  });
+
+  it('reads the list shape: first entry per field wins, an unknown field is ignored', () => {
+    const parsed = parseExtractionText(JSON.stringify({
+      fields: [
+        { field: 'area_preference', op: 'write', value: 'Decatur', reason: 'said so' },
+        { field: 'area_preference', op: 'write', value: 'Atlanta', reason: 'second' },
+        { field: 'bogusField', op: 'write', value: 'x', reason: '' },
+        { field: 'pets', op: 'none', value: '', reason: '' },
+      ],
+    }));
+    expect(parsed.fields.area_preference).toEqual({ op: 'write', value: 'Decatur', reason: 'said so' });
+    expect(parsed.fields.pets).toEqual({ op: 'none' });
+    expect((parsed.fields as Record<string, unknown>)['bogusField']).toBeUndefined();
+    expect(parsed.fields.firstName).toBeUndefined();
+  });
+
+  it('a "none" placeholder never hides a real op listed later for the same field (PA-S-2)', () => {
+    const parsed = parseExtractionText(JSON.stringify({
+      fields: [
+        { field: 'pets', op: 'none', value: '', reason: '' },
+        { field: 'pets', op: 'write', value: 'one small dog', reason: 'said so' },
+        { field: 'pets', op: 'suggest', value: 'two cats', reason: 'later' },
+      ],
+    }));
+    expect(parsed.fields.pets).toEqual({ op: 'write', value: 'one small dog', reason: 'said so' });
+  });
+
+  it('still reads the older object shape (run records written before the list shape)', () => {
+    const parsed = parseExtractionText(JSON.stringify({ fields: { pets: { op: 'write', value: 'one dog', reason: 'said so' } } }));
+    expect(parsed.fields.pets).toEqual({ op: 'write', value: 'one dog', reason: 'said so' });
+  });
+
+  it('(PIN) stays at ZERO optional parameters', () => {
+    expect(countOptionalParams(EXTRACTION_SCHEMA)).toBe(0);
+  });
+
+  it('parses a field op for each tenant matching input', () => {
+    const parsed = parseExtractionText(JSON.stringify({
+      fields: Object.fromEntries(MATCHING.map((key) => [key, { op: 'write', value: `v-${key}`, reason: 'said so' }])),
+    }));
+    for (const key of MATCHING) {
+      expect(parsed.fields[key as keyof typeof parsed.fields]).toEqual({ op: 'write', value: `v-${key}`, reason: 'said so' });
+    }
+  });
+});
+
 describe('parseExtractionText', () => {
   it('round-trips a full structurally-valid payload', () => {
     const payload = {
@@ -90,7 +167,7 @@ describe('parseExtractionText', () => {
       statusAdvance: { suggest: true, reason: 'voucher in hand' },
       typeSuggestion: { value: 'tenant', reason: 'seeking a home' },
       phoneAddition: { phone: '+14045551234', label: 'cell', reason: 'her other number' },
-      noteLines: ['Has a stairs concern'],
+      noteLines: [{ text: 'Has a stairs concern', confidence: 0.9 }],
     };
     expect(parseExtractionText(JSON.stringify(payload))).toEqual(payload);
   });
@@ -122,18 +199,49 @@ describe('parseExtractionText', () => {
     expect(unsupported.typeSuggestion).toBeUndefined();
   });
 
-  it('clamps 7 noteLines to 5 and truncates long strings to 200 chars', () => {
+  // B1 spec D4: the parser keeps up to 20 STRUCTURALLY valid noteLines and does
+  // no value filtering - the 200-char clamp, the confidence clamp, the floor and
+  // the five-line cap all live in apply.ts filterNoteLines.
+  it('keeps up to 20 { text, confidence } noteLines, unclamped; reasons still clamp to 200', () => {
     const long = 'x'.repeat(250);
-    const seven = Array.from({ length: 7 }, (_unused, i) => `note ${i} ${long}`);
+    const many = Array.from({ length: 25 }, (_unused, i) => ({ text: `note ${i} ${long}`, confidence: 5 }));
     const parsed = parseExtractionText(
       JSON.stringify({
         fields: { pets: { op: 'write', value: 'yes', reason: long } },
-        noteLines: seven,
+        noteLines: many,
       }),
     );
-    expect(parsed.noteLines).toHaveLength(5);
-    for (const line of parsed.noteLines ?? []) expect(line.length).toBeLessThanOrEqual(200);
+    expect(parsed.noteLines).toHaveLength(20);
+    expect(parsed.noteLines?.[0]).toEqual({ text: `note 0 ${long}`, confidence: 5 });
     expect(parsed.fields.pets?.reason?.length).toBeLessThanOrEqual(200);
+  });
+
+  it('drops a noteLine that is not { text: string, confidence: number } - and nothing else', () => {
+    const parsed = parseExtractionText(JSON.stringify({
+      noteLines: [
+        { text: 'kept', confidence: 0.8 },
+        'a legacy string',
+        { text: 'no confidence' },
+        { text: 3, confidence: 1 },
+        { text: 'string confidence', confidence: '0.9' },
+        null,
+        { text: '   ', confidence: 0.9 },
+      ],
+    }));
+    expect(parsed.noteLines).toEqual([{ text: 'kept', confidence: 0.8 }, { text: '   ', confidence: 0.9 }]);
+  });
+
+  it('the schema states the { text, confidence } item, both required', () => {
+    const props = EXTRACTION_SCHEMA['properties'] as Record<string, unknown>;
+    expect(props['noteLines']).toEqual({
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { text: { type: 'string' }, confidence: { type: 'number' } },
+        required: ['text', 'confidence'],
+      },
+    });
   });
 
   it('drops unknown field keys and defaults missing fields to {}', () => {
@@ -145,7 +253,7 @@ describe('parseExtractionText', () => {
     expect(parsed.fields.pets).toEqual({ op: 'write', value: 'yes' });
     expect((parsed.fields as Record<string, unknown>).bogusField).toBeUndefined();
 
-    expect(parseExtractionText(JSON.stringify({ noteLines: ['hi'] })).fields).toEqual({});
+    expect(parseExtractionText(JSON.stringify({ noteLines: [{ text: 'hi', confidence: 0.9 }] })).fields).toEqual({});
   });
 
   it('ignores field ops with an invalid op enum', () => {
@@ -410,6 +518,7 @@ describe('prompt builders', () => {
       profile: { contactType: 'tenant', phones: [] },
       transcript: [u],
       orgListBlock: '',
+      sentPropertiesBlock: '',
     });
     expect(user.endsWith(`\n${line}`)).toBe(true);
   });
@@ -476,6 +585,7 @@ describe('prompt builders', () => {
   it('user content carries the profile JSON then a chronological transcript', () => {
     const input: ExtractionInput = {
       orgListBlock: '',
+      sentPropertiesBlock: '',
       profile: { contactType: 'tenant', firstName: 'Ann', voucherSize: 2, phones: ['+14045550000'] },
       transcript: [
         { tsMsgId: '2026-07-16T10:01:00.000Z#s2', speaker: 'client', text: 'Hi there', at: '2026-07-16T10:01:00.000Z', channel: 'sms' },
@@ -498,6 +608,7 @@ describe('prompt builders', () => {
     // TRANSCRIPT line can start with a bracketed speaker tag (adversarial F2).
     const input: ExtractionInput = {
       orgListBlock: '',
+      sentPropertiesBlock: '',
       profile: { contactType: 'tenant', phones: ['+14045550000'] },
       transcript: [
         {
@@ -533,7 +644,7 @@ describe('prompt builders', () => {
     // C3: assert substrings that live INSIDE one line (the prompt is lines joined
     // with '\n'), never a phrase that spans a line break.
     const sys = buildExtractionSystemPrompt();
-    // The reconciliation contract the eight scalar fields already have.
+    // The reconciliation contract the scalar fields already have.
     expect(sys).toContain('RECONCILE every noteLine against the profile notes');
     expect(sys).toMatch(/omit the line\. A fact learned again/);
     // The asymmetry the model was never told about: it cannot revise, only append,
@@ -556,8 +667,8 @@ describe('prompt builders', () => {
   it('keeps the worked noteLines example free of any address', () => {
     // The example is drawn from a real production failure, but a street address
     // baked into the system prompt would both persist production data in the
-    // prompt forever and model the one thing the address rules forbid - putting an
-    // address in a noteLine.
+    // prompt forever and teach the model a real client's address. (WP1 B1
+    // PR50: a feedback noteLine may now name a sent property; not this one.)
     const sys = buildExtractionSystemPrompt();
     const example = sys.slice(sys.indexOf('Given a note'), sys.indexOf('Keep every noteLine SHORT'));
     expect(example).toContain('Toured a 5-bedroom duplex');
@@ -566,12 +677,14 @@ describe('prompt builders', () => {
     expect(example).not.toMatch(/\b\d+\s+\w+\s+(St|St\.|Street|Dr|Drive|Ave|Avenue|Rd|Road|Ln|Lane)\b/i);
   });
 
-  it('carries the address hard rules (current-residence only; never in noteLines)', () => {
+  it('carries the address hard rule (current-residence only); the no-address bullet is gone (PR50)', () => {
     const sys = buildExtractionSystemPrompt();
     // C3: assert substrings that live INSIDE one line (the prompt is lines joined
     // with '\n'), never a phrase that spans a line break.
     expect(sys).toContain('OWN CURRENT residential address ONLY');
-    expect(sys).toContain('Addresses NEVER go in noteLines');
+    // WP1 B1 spec D5.2 rev 9 (charter 20 item 9): the no-address bullet is
+    // removed; a feedback line names a sent property by its label.
+    expect(sys).not.toContain('Addresses NEVER go in noteLines');
   });
 });
 
@@ -591,6 +704,7 @@ describe('the ORGANIZATION LIST block in the user content (spec 2026-10-06 D8)',
       profile: { contactType: 'tenant', phones: [] },
       transcript: [u],
       orgListBlock: block,
+      sentPropertiesBlock: '',
     });
     const header = user.indexOf('\nTRANSCRIPT\n');
     expect(user.indexOf(block)).toBeGreaterThan(-1);
@@ -606,6 +720,7 @@ describe('the ORGANIZATION LIST block in the user content (spec 2026-10-06 D8)',
       profile: { contactType: 'tenant', phones: [] },
       transcript: [u],
       orgListBlock: '',
+      sentPropertiesBlock: '',
     });
     expect(user).toBe([
       'CURRENT PROFILE',
@@ -614,5 +729,202 @@ describe('the ORGANIZATION LIST block in the user content (spec 2026-10-06 D8)',
       'TRANSCRIPT',
       renderUtteranceLine(u),
     ].join('\n'));
+  });
+});
+
+// B1 spec D3: the prompt's field guidance comes from the list's promptGuidance,
+// the text fields accumulate (an added fact goes to a noteLine), and no count
+// is hard-coded. C3: every asserted phrase lives INSIDE one prompt line.
+describe('the tenant matching fields in the system prompt (B1 spec D3)', () => {
+  const sys = buildExtractionSystemPrompt();
+  const lines = sys.split('\n');
+
+  it('counts the field entries from EXTRACTABLE_FIELDS - no stale "eight"', () => {
+    expect(sys).toContain(`of the ${EXTRACTABLE_FIELDS.length} field entries`);
+    // The wire shape is one list of { field, op, value, reason } (the grammar limit).
+    expect(sys).toContain(`${EXTRACTABLE_FIELDS.join(', ')}. Each entry is`);
+    expect(sys).toContain('{ "field": "<name>", "op": ..., "value": ..., "reason": ... } (use op "none",');
+    expect(sys).not.toMatch(/\beight\b/i);
+  });
+
+  it('gives every tenant matching input its guidance from the list, one line each', () => {
+    for (const input of TENANT_MATCHING_INPUTS) {
+      expect(input.promptGuidance, input.key).not.toMatch(/[\r\n]/);
+      expect(lines, input.key).toContain(`  - ${input.key}: ${input.promptGuidance}`);
+    }
+  });
+
+  it('routes an added fact on a filled TEXT field to a noteLine; write only fills an empty one', () => {
+    const textKeys = TENANT_MATCHING_INPUTS.filter((input) => input.kind === 'text').map((input) => input.key);
+    const head = lines.find((line) => line.includes('collect several facts over time'));
+    expect(head).toBeDefined();
+    for (const key of textKeys) expect(head).toContain(key);
+    expect(sys).toContain('When the field is empty, op "write" fills it.');
+    expect(sys).toContain('field op: write it as a noteLine instead.');
+    expect(sys).toContain('Use op "suggest" only when the new fact CONTRADICTS the stored value');
+    expect(sys).toContain('Never use op "write" on one of these fields when it already holds a value.');
+  });
+
+  it('spells the dollars value as a whole-dollar digit string', () => {
+    const dollarKeys = TENANT_MATCHING_INPUTS.filter((input) => input.kind === 'dollars').map((input) => input.key);
+    const line = lines.find((candidate) => candidate.includes('whole dollars per month as a digit string'));
+    expect(line).toBeDefined();
+    for (const key of dollarKeys) expect(line).toContain(key);
+    expect(line).toContain('"1200"');
+  });
+
+  it('drops the noteLines examples the new fields now own', () => {
+    expect(sys).not.toContain('stairs are OK or a problem');
+    expect(sys).not.toContain('their rent portion');
+  });
+
+  it('stays ASCII', () => {
+    const bad = [...sys].filter((ch) => {
+      const code = ch.charCodeAt(0);
+      return !(code === 9 || code === 10 || code === 13 || (code >= 32 && code <= 126));
+    });
+    expect(bad).toEqual([]);
+  });
+});
+
+// B1 spec D4: noteLines widen from "secondary facts" to facts that might matter
+// to matching this person with a home; each carries a confidence; and the
+// never-written list (charter 6.4) is stated. C3: every asserted phrase lives
+// INSIDE one prompt line.
+describe('noteLines in the system prompt (B1 spec D4)', () => {
+  const sys = buildExtractionSystemPrompt();
+
+  it('widens noteLines to matching facts, including a fact that adds to a filled text field', () => {
+    expect(sys).toContain('- noteLines are facts that might matter to matching this client with a home,');
+    expect(sys).toContain('or to staff understanding their situation, that no field or other output');
+    expect(sys).toContain('already-filled tenant matching text field is also a noteLine');
+    expect(sys).not.toContain('noteLines are secondary facts');
+  });
+
+  // PR32: the no-address bullet is NOT pinned here - S5.5 deletes it
+  // (PR50) and owns its pin.
+  it('keeps the reconcile, append-only and short-line rules verbatim', () => {
+    expect(sys).toContain('RECONCILE every noteLine against the profile notes');
+    expect(sys).toContain('You CANNOT revise or replace a notes line');
+    expect(sys).toContain('Keep every noteLine SHORT');
+    expect(sys).toContain('Profile notes lines beginning "[Auto - <date>]" are your own notes from');
+  });
+
+  it('explains the { text, confidence } item and that low-confidence lines are not written', () => {
+    expect(sys).toContain('- Each noteLine is an object: "text" is the line, "confidence" is a number');
+    expect(sys).toContain('low confidence are not written, so never inflate it.');
+  });
+
+  it('states the never-written list, keeping household size, the rent portion and an assistance animal', () => {
+    expect(sys).toContain('- NEVER write a noteLine stating any of these, even when the client says it:');
+    // [PR58] sex covers sexual orientation and gender identity.
+    expect(sys).toContain('race, color, religion, sex (including sexual orientation and gender');
+    expect(sys).toContain('identity), national origin; familial facts beyond');
+    expect(sys).toContain('household size (no pregnancy, marital status, children\'s ages or custody);');
+    expect(sys).toContain('disability or medical facts, other than the accessibility need (its field,');
+    expect(sys).toContain('or a noteLine when it adds to the filled field) and an assistance animal.');
+    expect(sys).toContain('Write a need as a feature of the home ("needs a ground floor"), never as a');
+    expect(sys).toContain('diagnosis. Household size, the client\'s own rent portion and an assistance');
+    expect(sys).toContain('animal are allowed. This is the never-written list.');
+  });
+});
+
+describe('the PROPERTIES SENT block in the user content (WP1 B1 spec D5.1)', () => {
+  const u = {
+    tsMsgId: '2026-07-16T10:00:00.000Z#s1',
+    speaker: 'client' as const,
+    text: 'I liked the Main St one',
+    at: '2026-07-16T10:00:00.000Z',
+    channel: 'sms' as const,
+  };
+  const org = 'ORGANIZATION LIST\nHousing authorities (test):\n- Alpha Housing Authority';
+  const sent = renderSentPropertiesBlock([
+    { unit: { address: { line1: '123 Main St', city: 'Decatur' } }, sentAt: '2026-07-15T10:00:00.000Z', signedUp: false },
+  ]).text;
+
+  it('sits after the ORGANIZATION LIST block and BEFORE the TRANSCRIPT header, which stays the first TRANSCRIPT in the content', () => {
+    const user = buildExtractionUserContent({
+      profile: { contactType: 'tenant', phones: [] },
+      transcript: [u],
+      orgListBlock: org,
+      sentPropertiesBlock: sent,
+    });
+    const header = user.indexOf('\nTRANSCRIPT\n');
+    expect(user.indexOf(sent)).toBeGreaterThan(-1);
+    expect(user.indexOf(org) + org.length).toBeLessThan(user.indexOf(sent));
+    expect(user.indexOf(sent) + sent.length).toBeLessThan(header);
+    expect(user.indexOf('TRANSCRIPT')).toBe(header + 1);
+    expect(user.endsWith(`\n${renderUtteranceLine(u)}`)).toBe(true);
+  });
+
+  it('carries "PROPERTIES SENT: none" when the contact has no sends', () => {
+    const user = buildExtractionUserContent({
+      profile: { contactType: 'tenant', phones: [] },
+      transcript: [u],
+      orgListBlock: '',
+      sentPropertiesBlock: renderSentPropertiesBlock([]).text,
+    });
+    expect(user).toBe([
+      'CURRENT PROFILE',
+      JSON.stringify({ contactType: 'tenant', phones: [] }, null, 2),
+      '',
+      'PROPERTIES SENT: none',
+      '',
+      'TRANSCRIPT',
+      renderUtteranceLine(u),
+    ].join('\n'));
+  });
+});
+
+describe('the system prompt and the PROPERTIES SENT block (WP1 B1 spec D5.1, D5.2)', () => {
+  // C3: every asserted phrase lives INSIDE one prompt line.
+  const sys = buildExtractionSystemPrompt();
+
+  it('names the block in its description of the user message', () => {
+    expect(sys).toContain('agencies we already know), a PROPERTIES SENT block (the properties staff sent');
+    expect(sys).toContain('as "- <label> - sent <date>" or "- <label> - signed up <date>", or');
+    expect(sys).toContain('"PROPERTIES SENT: none"), and a TRANSCRIPT of the conversation in chronological');
+    // The transcript-line contract is unchanged.
+    expect(sys).toContain('order. Each transcript line is "<timestamp> [<speaker>/<channel>] <text>"');
+  });
+
+  it('asks for a feedback noteLine that names the property by copying its label', () => {
+    expect(sys).toContain('- FEEDBACK ON A SENT PROPERTY: when the client says anything about a');
+    expect(sys).toContain('copying its label exactly as PROPERTIES SENT writes it');
+    expect(sys).toContain('when one is given. Example: "123 Main St, Decatur: on the fence - likes');
+    expect(sys).toContain('no fixed shape, no fixed set of reaction words');
+  });
+
+  it('keeps a maybe a maybe, ties place feedback to a home only when the client did, and reconciles', () => {
+    expect(sys).toContain('Never turn a maybe into a no.');
+    expect(sys).toContain('Name a sent property only when the');
+    expect(sys).toContain('a CHANGE of mind is');
+    expect(sys).toContain('- Every other noteLine rule applies to feedback, the never-written list');
+  });
+
+  // FW3-2 (code review R3-1): a change of mind still NAMES its home by copying
+  // its label - the one repetition the reconcile rule allows - and SAYS the
+  // view changed. Cameron's handback ruling (2026-10-27) restored the any-date
+  // retry guard, so the prompt again says an identical line is never written
+  // and asks for a change back worded differently.
+  it('asks for a change of mind that names the property by its label, says the view changed, and differs from an earlier line', () => {
+    expect(sys).toContain('a new noteLine that still NAMES the property by copying its label, then');
+    expect(sys).toContain('SAYS the view changed, e.g. "123 Main St, Decatur: now likes it" or');
+    expect(sys).toContain('"123 Main St, Decatur: back on the fence". The label is the one wording');
+    expect(sys).toContain('already in the notes that a noteLine may repeat. A line identical to an');
+    expect(sys).toContain('earlier notes line is never written again, so word a change back so it');
+    expect(sys).toContain('differs from the earlier line, e.g. "123 Main St, Decatur: likes it');
+  });
+
+  it('drops the no-address bullet; the address output still never takes a sent home', () => {
+    expect(sys).not.toContain('Addresses NEVER go in noteLines');
+    expect(sys).not.toContain('for address information.');
+    // PIN: the address-output bullet is unchanged.
+    expect(sys).toContain('property they are asking about, touring, applying to, or that staff sent');
+    expect(sys).toContain('or mentioned to them; NEVER a previous address; NEVER a prospective or');
+  });
+
+  it('puts the feedback guidance after the worked reconcile example, which stays address-free', () => {
+    expect(sys.indexOf('FEEDBACK ON A SENT PROPERTY')).toBeGreaterThan(sys.indexOf('Keep every noteLine SHORT'));
   });
 });

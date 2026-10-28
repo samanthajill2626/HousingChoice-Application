@@ -8,6 +8,8 @@
 //                                    → { contact }                                          (M1.4)
 //                                    + the 15 landlord requirement keys req_* (landlords only;
 //                                      lib/requirements.ts, property-requirements spec D2)
+//                                    + the four tenant matching inputs (also on POST;
+//                                      lib/tenantMatchingInputs.ts, WP1 B1 spec D2)
 //   POST  /api/contacts/:contactId/requirements/apply  { units, items, expected }
 //                                    -> { updated, skipped }   (routes/contactRequirementsApply.ts)
 //
@@ -32,6 +34,7 @@ import { groupThreadLabel, relayMemberLabels } from '../lib/groupTitle.js';
 import { resolveRosterNames, withLiveNames } from '../lib/participantNames.js';
 import { parseRole, parseRelationships, parseCustomFields } from '../lib/contactProfile.js';
 import { isCaseworker } from '../lib/caseworkers.js';
+import { parseTenantMatchingInputs } from '../lib/tenantMatchingInputs.js';
 import {
   LANDLORD_STATUSES,
   PARTNER_STATUSES,
@@ -780,6 +783,17 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     changedFields.push('lifEligible');
   }
 
+  // WP1 B1 (spec 2026-10-26 D2): the tenant matching inputs, by the ONE list -
+  // lib/tenantMatchingInputs.ts holds the rule; this parser names none of the
+  // four. Not type-gated, like the intake fields above; unlike pets / tenure,
+  // '' (after the trim) or null CLEARS (null -> REMOVE).
+  const matching = parseTenantMatchingInputs(b);
+  if (!matching.ok) return { error: matching.error };
+  for (const [key, value] of Object.entries(matching.fields)) {
+    patch[key] = value; // a string or whole dollars, or null -> REMOVE
+    changedFields.push(key);
+  }
+
   // Structured landlord deal terms + approval criteria (onboarding call). Like the
   // tenant intake fields above, these are first-class optional fields validated only
   // when supplied — NOT type-gated (mirrors voucherSize/pets).
@@ -978,6 +992,14 @@ function parseCreateBody(body: unknown): CreateContactResult | { error: string }
     item.lifEligible = v;
   }
 
+  // WP1 B1 (spec D2): accepted on create so the API stays symmetric (the
+  // create form sends none). A clear is a no-op on create: nothing to remove.
+  const matching = parseTenantMatchingInputs(b);
+  if (!matching.ok) return { error: matching.error };
+  for (const [key, value] of Object.entries(matching.fields)) {
+    if (value !== null) item[key] = value;
+  }
+
   // Structured landlord deal terms + approval criteria (see parseTriageBody).
   if ('contract_status' in b) {
     const v = b['contract_status'];
@@ -1095,8 +1117,9 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   const router = Router();
 
   // conversation-fact-extraction: the field names whose `<field>_source` provenance
-  // a human edit clears - the eight AI-extractable scalars plus the compound
-  // `address` (address-extraction slice 3).
+  // a human edit clears - every AI-extractable scalar (twelve since B1, the
+  // tenant matching inputs included) plus the compound `address`
+  // (address-extraction slice 3).
   const PROVENANCE = new Set<string>(PROVENANCE_FIELDS);
   // property-requirements D2: the landlord requirement keys a PATCH may carry,
   // and the Deposit item's keys (D1 deposit_conflict is checked only when the
@@ -2040,7 +2063,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       // The value comparison is CONFINED to `type` (frozen design 7.3): a human
       // triaging a contact to `landlord` after the model suggested `tenant` has
       // REJECTED that suggestion, so `type` must be judged on VALUE. For the
-      // other eleven targets a PATCH is a human edit that supersedes the
+      // other fifteen targets a PATCH is a human edit that supersedes the
       // suggestion regardless of value - generalizing the equality rule would
       // record edits that merely coincide with the model as acceptances and
       // corrupt the accuracy record this feature exists to produce.

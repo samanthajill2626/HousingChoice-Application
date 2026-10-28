@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import { reseed } from '../../fixtures/reseed.js';
 import { extractionTick, sendExtractSms } from '../../fixtures/extraction.js';
 import {
@@ -8,6 +8,7 @@ import {
   expectTodayReady,
   openAiSuggestions,
 } from '../../support/today.js';
+import { createUnitViaApi, daysAgo, plantListedSend } from '../../support/followUpFixtures.js';
 
 // Conversation-fact-extraction, end-to-end against the hermetic stack with the
 // DETERMINISTIC FAKE driver (EXTRACTION_DRIVER=fake, set in e2e-session childEnv).
@@ -31,6 +32,16 @@ const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
+  await expectTodayReady(page);
+}
+
+/** Sign in as a named dev user (ai-run-log.spec.ts:18-25). The AI run log is
+ *  ADMIN-only (app/src/routes/aiRuns.ts) and devLogin's dev user is a VA, so a
+ *  test that opens a run detail signs in as `founder@example.com` first [PR47]. */
+async function devLoginAs(page: Page, email: string): Promise<void> {
+  const res = await page.request.post(`${NEXT}/auth/dev-login`, { data: { email } });
+  expect(res.ok()).toBeTruthy();
+  await page.goto(`${NEXT}/`);
   await expectTodayReady(page);
 }
 
@@ -329,7 +340,7 @@ test('type recommendation: an unknown caseworker triages to Partner and clears T
 
   await sendExtractSms(request, phone, {
     typeSuggestion: { value: 'partner', reason: 'caseworker at Hope Atlanta' },
-    noteLines: ['Identified as a caseworker at Hope Atlanta'],
+    noteLines: [{ text: 'Identified as a caseworker at Hope Atlanta', confidence: 0.9 }],
   });
   const tick = await extractionTick(request);
   expect(tick.processed).toBeGreaterThanOrEqual(1);
@@ -374,7 +385,7 @@ test('type recommendation: an unknown property manager triages to the landlord p
 
   await sendExtractSms(request, phone, {
     typeSuggestion: { value: 'property_manager', reason: 'manages properties for the owner' },
-    noteLines: ['Identified as property manager for Example Homes'],
+    noteLines: [{ text: 'Identified as property manager for Example Homes', confidence: 0.9 }],
   });
   const tick = await extractionTick(request);
   expect(tick.processed).toBeGreaterThanOrEqual(1);
@@ -496,4 +507,186 @@ test('dismissal tombstone: a dismissed value never re-suggests; the run still ap
   await page.reload();
   await expect(page.getByRole('group', { name: 'AI suggestion for voucher size' })).toBeVisible();
   await expect(page.getByRole('group', { name: 'AI suggestion for first name' })).toBeHidden();
+});
+
+// WP1 B1 Ranking inputs (spec 2026-10-26 D3-D5; plan S7.2). The tenant
+// matching inputs are extractable: a text field fills when EMPTY, a write on a
+// FILLED one is dropped (`text_field_filled` - never a suggestion), a suggest
+// becomes a chip. Notes lines carry a confidence and only those at or above
+// the floor (EXTRACTION_FACT_MIN_CONFIDENCE, default 0.7) are appended. A
+// line naming a property sent to the tenant is an ordinary Notes line, counted
+// on the run as a feedback line.
+
+/** The tenant file's "Preferences & notes" card (the AI-appended Notes box);
+ *  its heading's name also carries the `Add a note` action. */
+function notesCard(page: Page): Locator {
+  return page
+    .locator('section')
+    .filter({ has: page.getByRole('heading', { name: /^Preferences & notes/ }) });
+}
+
+/** An Eligibility intake row, read through its label span's parent (the KV
+ *  `<div>`), so the value and any Auto badge are checked against ITS label. */
+function intakeRow(page: Page, label: string): Locator {
+  return page
+    .locator('section')
+    .filter({ has: page.getByRole('heading', { name: 'Eligibility intake' }) })
+    .getByText(label, { exact: true })
+    .locator('..');
+}
+
+test('text field: an extracted area preference fills an empty field with an Auto badge', async ({
+  page,
+  request,
+}) => {
+  await devLogin(page);
+  const { contactId, phone } = await createTenant(page.request, { firstName: 'AreaWrite' });
+
+  await sendExtractSms(request, phone, {
+    fields: { area_preference: { op: 'write', value: 'Decatur', reason: 'said Decatur' } },
+  });
+  const tick = await extractionTick(request);
+  expect(tick.processed).toBeGreaterThanOrEqual(1);
+
+  await page.goto(`${NEXT}/contacts/${contactId}`);
+  const areaRow = intakeRow(page, 'Area preference');
+  await expect(areaRow.getByText('Decatur', { exact: true })).toBeVisible();
+  await expect(areaRow.getByRole('img', { name: 'Auto' })).toBeVisible();
+
+  const contact = await readContact(page.request, contactId);
+  expect(contact['area_preference']).toBe('Decatur');
+  expect(contact['area_preference_source']).toMatchObject({ source: 'ai' });
+});
+
+test('text field: a write on a filled field is dropped, a suggest becomes a chip', async ({
+  page,
+  request,
+}) => {
+  await devLogin(page);
+  const { contactId, phone } = await createTenant(page.request, { firstName: 'AreaFilled' });
+  const filled = await page.request.patch(`${NEXT}/api/contacts/${contactId}`, {
+    data: { area_preference: 'Marietta' },
+  });
+  expect(filled.ok(), 'staff fill area preference').toBeTruthy();
+
+  // Run 1: a WRITE on the filled field - dropped as text_field_filled, never
+  // turned into a suggestion - plus a SENTINEL suggest on voucherSize that
+  // proves the run applied (a positive signal beats a fixed wait).
+  await sendExtractSms(request, phone, {
+    fields: {
+      area_preference: { op: 'write', value: 'Decatur', reason: 'said Decatur' },
+      voucherSize: { op: 'suggest', value: '3', reason: 'sentinel fact' },
+    },
+  });
+  let tick = await extractionTick(request);
+  expect(tick.processed).toBeGreaterThanOrEqual(1);
+
+  // Server truth first: the sentinel is pending, the dropped write is not, and
+  // the staff value stands.
+  const listed = await page.request.get(`${NEXT}/api/contacts/${contactId}/suggestions`);
+  expect(listed.ok(), await listed.text()).toBeTruthy();
+  const targets = ((await listed.json()) as { suggestions: Array<{ target: string }> }).suggestions.map(
+    (s) => s.target,
+  );
+  expect(targets).toContain('voucherSize');
+  expect(targets).not.toContain('area_preference');
+  expect((await readContact(page.request, contactId))['area_preference']).toBe('Marietta');
+
+  // The page reads its suggestions in a SEPARATE fetch that starts empty, so
+  // await the sentinel chip BEFORE the absence: only then is "no area chip"
+  // a statement about the run rather than about a request still in flight.
+  await page.goto(`${NEXT}/contacts/${contactId}`);
+  await expect(page.getByRole('group', { name: 'AI suggestion for voucher size' })).toBeVisible();
+  const areaRow = intakeRow(page, 'Area preference');
+  await expect(areaRow).toHaveText('Area preferenceMarietta');
+  const areaChip = page.getByRole('group', { name: 'AI suggestion for area preference', exact: true });
+  await expect(areaChip).toHaveCount(0);
+
+  // Run 2: a SUGGEST of the same value becomes a chip; the row is unchanged
+  // until staff accept.
+  await sendExtractSms(request, phone, {
+    fields: { area_preference: { op: 'suggest', value: 'Decatur', reason: 'said Decatur again' } },
+  });
+  tick = await extractionTick(request);
+  expect(tick.processed).toBeGreaterThanOrEqual(1);
+
+  await page.reload();
+  await expect(areaChip).toBeVisible();
+  await expect(areaChip.getByText('AI heard "Decatur"')).toBeVisible();
+  await expect(areaRow).toHaveText('Area preferenceMarietta');
+});
+
+test('notes: a line at or above the floor is appended, a below-floor line is not', async ({
+  page,
+  request,
+}) => {
+  await devLogin(page);
+  const { contactId, phone } = await createTenant(page.request, { firstName: 'NotesFloor' });
+
+  await sendExtractSms(request, phone, {
+    noteLines: [
+      { text: 'Works nights downtown', confidence: 0.9 },
+      { text: 'Maybe likes cats', confidence: 0.3 },
+    ],
+  });
+  const tick = await extractionTick(request);
+  expect(tick.processed).toBeGreaterThanOrEqual(1);
+
+  // Both lines came from ONE run, so the appended line on this load is the
+  // positive control for the absence after it.
+  await page.goto(`${NEXT}/contacts/${contactId}`);
+  const card = notesCard(page);
+  await expect(card.getByText(/\[Auto - [A-Z][a-z]{2} \d{1,2}\] Works nights downtown/)).toBeVisible();
+  await expect(card).not.toContainText('Maybe likes cats');
+
+  const notes = String((await readContact(page.request, contactId))['notes']);
+  expect(notes).toMatch(/\[Auto - [A-Z][a-z]{2} \d{1,2}\] Works nights downtown/);
+  expect(notes).not.toContain('Maybe likes cats');
+});
+
+test('feedback: a line naming a sent property lands in the Notes box and is counted', async ({
+  page,
+  request,
+}) => {
+  test.slow(); // two sign-ins, a property and a listed send, a tick and the run log
+  await devLogin(page);
+  const api = page.request;
+  const stamp = `${Date.now()}`.slice(-6);
+  const { contactId, phone } = await createTenant(api, { firstName: 'Feedback' });
+  const { unitId, line1 } = await createUnitViaApi(api, stamp);
+  await plantListedSend(api, unitId, contactId, daysAgo(2));
+
+  // The property's label is `<line1>, Atlanta` (propertyLabel), so this line
+  // names a property in the run's PROPERTIES SENT block.
+  const feedback = `${line1}, Atlanta: on the fence - likes the yard, wants to see other homes first`;
+  await sendExtractSms(request, phone, { noteLines: [{ text: feedback, confidence: 0.9 }] });
+  const tick = await extractionTick(request);
+  // Processed: the PROPERTIES SENT read did not fail the run.
+  expect(tick.processed).toBeGreaterThanOrEqual(1);
+
+  // Still the VA: the line is an ordinary Notes line on the tenant's card.
+  await page.goto(`${NEXT}/contacts/${contactId}`);
+  await expect(notesCard(page).getByText(feedback)).toBeVisible();
+  expect(String((await readContact(api, contactId))['notes'])).toContain(feedback);
+
+  // [PR47] The run detail is admin-only: sign in as the founder, then open the
+  // one run scoped to this contact (ai-run-log.spec.ts openRunFor).
+  await devLoginAs(page, 'founder@example.com');
+  await page.goto(`${NEXT}/settings/ai-runs?scope=${encodeURIComponent(`contacts#${contactId}`)}`);
+  await expect(page.getByRole('heading', { name: 'AI run log' })).toBeVisible();
+  const runRow = page.getByRole('list', { name: 'AI runs' }).getByRole('button');
+  await expect(runRow).toHaveCount(1);
+  await runRow.click();
+  const detail = page.getByRole('region', { name: 'AI run detail' });
+  await expect(detail).toBeVisible();
+  const notesLines = detail.getByRole('region', { name: 'Notes lines' });
+  await expect(notesLines.getByText('1 appended', { exact: true })).toBeVisible();
+  await expect(notesLines.getByText('Feedback lines: 1', { exact: true })).toBeVisible();
+  await expect(notesLines.getByText('Unlabeled address lines: 0', { exact: true })).toBeVisible();
+  // Self-QA SQA-1 (WP1 B1): the 64-character fingerprint is one unbroken
+  // token; in the narrow detail column it must wrap inside the region, never
+  // spill past it (unit tests run css:false, so only a browser can measure).
+  await expect(notesLines.getByText(/^Properties sent fingerprint: [0-9a-f]{64}$/)).toBeVisible();
+  const spill = await notesLines.evaluate((el) => el.scrollWidth - el.clientWidth);
+  expect(spill, 'the Notes lines region scrolls sideways').toBeLessThanOrEqual(1);
 });

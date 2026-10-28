@@ -101,3 +101,24 @@ describe('SuggestionChip', () => {
     expect(within(group).getByRole('button', { name: 'Dismiss' })).toBeDisabled();
   });
 });
+
+describe('SuggestionChip - a shown value (WP1 B1 spec D2)', () => {
+  it('shows `value` in place of the raw suggested value when given', () => {
+    renderChip(
+      <SuggestionChip
+        label="maximum tenant portion"
+        suggestion={{ ...SUGGESTION, target: 'max_tenant_portion', suggestedValue: '1200' }}
+        value="$1,200 / month"
+        onAccept={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('AI heard "$1,200 / month"')).toBeInTheDocument();
+    expect(screen.queryByText('AI heard "1200"')).toBeNull();
+  });
+
+  it('(PIN) without `value` it shows the suggested value as before', () => {
+    renderChip(<SuggestionChip label="voucher size" suggestion={SUGGESTION} onAccept={vi.fn()} onDismiss={vi.fn()} />);
+    expect(screen.getByText('AI heard "3"')).toBeInTheDocument();
+  });
+});

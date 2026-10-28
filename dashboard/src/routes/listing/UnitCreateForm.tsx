@@ -172,6 +172,7 @@ export function UnitCreateForm({
   const [listingLink, setListingLink] = useState('');
   const [videoUrl, setVideoUrl] = useState('');
   const [sameDayRta, setSameDayRta] = useState(false);
+  const [priority, setPriority] = useState(false);
   const [applicationProcess, setApplicationProcess] = useState('');
   const [notes, setNotes] = useState('');
 
@@ -309,6 +310,8 @@ export function UnitCreateForm({
     // Only send a recorded washer / dryer; "Not recorded" -> omit (D3).
     if (washerDryer) body['washer_dryer'] = washerDryer;
     if (sameDayRta) body['same_day_rta'] = true;
+    // WP1 B1 (spec D6): only an ON switch is sent; off is the default.
+    if (priority) body['priority'] = true;
 
     if (!addNumber(body, 'beds', beds, 'Beds')) return null;
     if (!addNumber(body, 'baths', baths, 'Baths')) return null;
@@ -739,6 +742,16 @@ export function UnitCreateForm({
           audience="property"
           checked={sameDayRta}
           onChange={setSameDayRta}
+        />
+
+        {/* WP1 B1 (spec D6): the staff Priority switch - its own row at the
+            end of Property details, tagged Staff only. */}
+        <TaggedCheckbox
+          label="Priority"
+          visibility={formFieldVisibility('Priority')}
+          audience="property"
+          checked={priority}
+          onChange={setPriority}
         />
 
         <div className={styles.sectionHead}>

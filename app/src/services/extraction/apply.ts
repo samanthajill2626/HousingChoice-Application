@@ -5,7 +5,8 @@
 //     per-field `<field>_source` provenance and auditing from/to;
 //   - queue a pending SUGGESTION when the model flagged a genuine conflict, or
 //     for status-advance / type-classification / a novel phone number;
-//   - append secondary facts to the contact's notes.
+//   - append Notes lines to the contact's notes - every value rule (clamp,
+//     confidence floor, retry guard, cap, demotion) is filterNoteLines.
 //
 // Every side-effect is BEST-EFFORT (try/catch + log): a suggestion failure must
 // never abort a field write, and a notes failure must never lose a suggestion.
@@ -30,6 +31,12 @@ import {
 } from './address.js';
 import type { Logger } from '../../lib/logger.js';
 import type { DropReason } from './runTypes.js';
+import {
+  TENANT_MATCHING_DOLLARS_MAX,
+  TENANT_MATCHING_INPUTS,
+  TENANT_MATCHING_TEXT_MAX,
+  type TenantMatchingInputKind,
+} from '../../lib/tenantMatchingInputs.js';
 
 export interface ApplyDeps {
   contacts: Pick<ReturnType<typeof createContactsRepo>, 'getById' | 'update' | 'addPhone' | 'findByPhone'>;
@@ -41,6 +48,13 @@ export interface ApplyDeps {
   events: { emit(name: string, payload: unknown): void };
   logger: Logger;
   now(): string; // ISO
+  /**
+   * EXTRACTION_FACT_MIN_CONFIDENCE (lib/config.ts, B1 spec D4): the floor
+   * filterNoteLines applies to model note lines. REQUIRED, so a missed
+   * construction site (worker.ts, routes/dev.ts, the test harnesses) is a
+   * typecheck failure, never a silently unfloored run.
+   */
+  factMinConfidence: number;
 }
 
 export interface ApplyOutcome {
@@ -50,6 +64,18 @@ export interface ApplyOutcome {
   suggested: string[];
   /** Count of note lines appended. */
   notedLines: number;
+  /**
+   * WP1 B1 spec D5.3: the bare text (no `[Auto - <date>]` prefix) of each line
+   * appended this run, model lines then system lines, exactly as joined into
+   * `notes`; [] when nothing was appended or the write failed, so
+   * `notedLines === appendedLines.length`. The job counts feedback lines over
+   * it. Contact PII by design: never logged.
+   */
+  appendedLines: string[];
+  /** Model note lines dropped below the confidence floor (B1 spec D4). */
+  notesBelowFloor: number;
+  /** Note lines a demoted run withheld (B1 spec D4); 0 when not demoted. */
+  notesDemoted: number;
   /** Earlier run suggestions this apply pass replaced. */
   displaced: Array<{ target: string; runId: string; createdAt: string }>;
   /** One entry per target written, suggested, or discarded. Note lines are not targets. */
@@ -72,7 +98,10 @@ export interface ApplyDecision {
 const NAME_FIELDS: readonly ExtractableField[] = ['firstName', 'lastName'];
 
 const MAX_TEXT_CHARS = 120;
+/** At most this many Notes lines are appended per run (model lines first). */
 const MAX_NOTE_LINES = 5;
+/** A Notes line's text is clamped to this many characters (B1 spec D4). */
+const MAX_NOTE_CHARS = 200;
 const MONTHS = [
   'Jan',
   'Feb',
@@ -88,18 +117,51 @@ const MONTHS = [
   'Dec',
 ] as const;
 
-type Coerced = { ok: true; value: unknown } | { ok: false; reason: string };
+export type Coerced = { ok: true; value: unknown } | { ok: false; reason: string };
+
+/** B1 spec D1/D3: each tenant matching input's kind, keyed by field, from the list. */
+const MATCHING_KIND: ReadonlyMap<string, TenantMatchingInputKind> = new Map(
+  TENANT_MATCHING_INPUTS.map((input) => [input.key, input.kind] as const),
+);
 
 /**
  * Coerce/validate a raw string op value per its field. Invalid -> ok:false
- * (caller skips + logs). voucherSize -> int 0..12; porting -> boolean;
+ * (caller skips + logs). PURE and exported: the accept path
+ * (suggestionResolution.ts coerceAccept) and the never-written probe (B1 spec
+ * D7) use this exact rule.
+ *
+ * A tenant matching input coerces by its KIND (B1 spec D3), never by name:
+ *   - text: trimmed; empty -> dropped; over TENANT_MATCHING_TEXT_MAX (the
+ *     staff cap) -> DROPPED, never truncated (an extraction value only fills
+ *     or replaces a field, so it has no reason to grow);
+ *   - dollars: `$`, commas and spaces stripped, then a whole number
+ *     0..TENANT_MATCHING_DOLLARS_MAX; anything else (1200.50 included) is
+ *     dropped, never rounded.
+ * The eight original fields: voucherSize -> int 0..12; porting -> boolean;
  * housingAuthority -> trimmed, whitespace-collapsed text <= 120 chars (the
  * field loop resolves it against the organization list); names/pets/
  * evictions/tenure -> non-empty trimmed string <= 120 chars.
  */
-function coerceField(field: ExtractableField, raw: string | undefined): Coerced {
+export function coerceField(field: ExtractableField, raw: string | undefined): Coerced {
   if (raw === undefined) return { ok: false, reason: 'no value supplied' };
   const trimmed = raw.trim();
+  const kind = MATCHING_KIND.get(field);
+  if (kind === 'text') {
+    if (trimmed.length === 0) return { ok: false, reason: 'empty after trim' };
+    if (trimmed.length > TENANT_MATCHING_TEXT_MAX) {
+      return { ok: false, reason: `exceeds ${TENANT_MATCHING_TEXT_MAX} chars` };
+    }
+    return { ok: true, value: trimmed };
+  }
+  if (kind === 'dollars') {
+    const digits = trimmed.replace(/[$,\s]/g, '');
+    if (!/^\d+$/.test(digits)) return { ok: false, reason: 'not a whole dollar amount' };
+    const dollars = Number(digits);
+    if (dollars > TENANT_MATCHING_DOLLARS_MAX) {
+      return { ok: false, reason: `exceeds ${TENANT_MATCHING_DOLLARS_MAX}` };
+    }
+    return { ok: true, value: dollars };
+  }
   switch (field) {
     case 'voucherSize': {
       if (!/^\d+$/.test(trimmed)) return { ok: false, reason: 'voucherSize is not a digit string' };
@@ -136,9 +198,14 @@ function coerceField(field: ExtractableField, raw: string | undefined): Coerced 
 /** Which fields a contact of this type may have written/suggested. */
 function fieldApplies(field: ExtractableField, type: ContactType): boolean {
   if (NAME_FIELDS.includes(field)) return type === 'tenant' || type === 'unknown';
-  // Remaining (voucherSize/housingAuthority/pets/evictions/tenure/porting) are
-  // tenant facts.
+  // Remaining (voucherSize/housingAuthority/pets/evictions/tenure/porting and
+  // the tenant matching inputs, B1 spec D3) are tenant facts.
   return type === 'tenant';
+}
+
+/** A stored text value that holds something (whitespace-only reads as empty). */
+function isFilledText(value: unknown): boolean {
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
 /** `[Auto - Jul 16]` - month/day (UTC, deterministic) from deps.now(). */
@@ -146,6 +213,139 @@ function autoPrefix(nowIso: string): string {
   const d = new Date(nowIso);
   const month = MONTHS[d.getUTCMonth()] ?? 'Jan';
   return `[Auto - ${month} ${d.getUTCDate()}]`;
+}
+
+/**
+ * A line's leading autoPrefix, whatever its date - the shape lib/caseworkers.ts
+ * AUTO_PREFIX also reads. filterNoteLines removes it from a model line before
+ * the retry guard and the write, and from both sides of the guard's
+ * comparison (FW3-1; any date since the planner's handback ruling).
+ */
+const LEADING_AUTO_PREFIX = /^\[Auto - [^\]]+\]/;
+
+/**
+ * The line trimmed, with EVERY leading autoPrefix removed (FW3-1, code review
+ * R3-4): a model that copies a notes line copies its prefix too - even a
+ * doubled one - and this run writes its own, so the box never gets two.
+ */
+function withoutAutoPrefix(line: string): string {
+  let out = line.trim();
+  while (LEADING_AUTO_PREFIX.test(out)) out = out.replace(LEADING_AUTO_PREFIX, '').trim();
+  return out;
+}
+
+/** What filterNoteLines needs. Every field is plain data - the function is pure. */
+export interface NoteLineFilterInput {
+  /**
+   * result.noteLines AS RECEIVED. Typed unknown[] on purpose: the fake driver
+   * hands its marker payload over without parseExtractionText
+   * (adapters/extractionFake.ts, the marker merge; B1 WI1), so an item may be
+   * any shape.
+   */
+  modelLines: readonly unknown[] | undefined;
+  /** System lines (today only the phone-owned-by-other note): no confidence, never floored. */
+  systemLines: readonly string[];
+  /** EXTRACTION_FACT_MIN_CONFIDENCE (lib/config.ts), 0 < floor <= 1. */
+  floor: number;
+  /** The contact's current notes, trimmed ('' when none) - the lines the retry guard compares against. */
+  existingNotes: string;
+  /** hasInferredRoleContent: a demoted run appends no line (charter 6.4). */
+  demoted: boolean;
+}
+
+export interface NoteLineFilterResult {
+  /** Bare lines to append (no prefix): model lines first, then system lines, at most MAX_NOTE_LINES. */
+  append: string[];
+  /** How many leading entries of `append` are model lines - append.slice(0, modelCount). */
+  modelCount: number;
+  /** Model items dropped below the floor. */
+  belowFloor: number;
+  /** Lines a demoted run withheld; 0 when not demoted. */
+  demoted: number;
+}
+
+/** A model confidence clamped to 0..1; a non-number (or NaN/Infinity) reads as 0. */
+function clampConfidence(raw: unknown): number {
+  return typeof raw === 'number' && Number.isFinite(raw) ? Math.min(1, Math.max(0, raw)) : 0;
+}
+
+/**
+ * Every Notes line value rule (B1 spec D4) - the ONE place they live (PR4).
+ * PURE: no I/O, no clock, no logger. applyExtraction and the never-written
+ * probe (spec D7) both call it, so the fake driver's parser bypass skips
+ * nothing. In order:
+ *
+ *  1. Clamp: text trimmed, every leading `[Auto - <date>]` the model copied
+ *     from the notes removed (FW3-1: this run writes its own; never a double
+ *     prefix), and cut to MAX_NOTE_CHARS; confidence to 0..1 (a non-number
+ *     reads as 0). An item that is not an object with string text is dropped
+ *     uncounted (only the fake driver can deliver one).
+ *  2. Floor FIRST: a model item below `floor` is dropped and counted.
+ *  3. Blank lines and POSTAL lines are dropped. The postal filter drops ONLY
+ *     a line that starts with "Current address" and carries a digit - the
+ *     client's address narrated in the shape of the structured address
+ *     target; the digit requirement keeps a digit-free housing-status fact
+ *     ("Current address is unstable, couch-surfing"). It is not an address
+ *     ban: B1 removed the prompt's no-address bullet (spec rev 9 D5.2, PR50)
+ *     because a feedback line names a sent property by its address label
+ *     (PROPERTIES SENT), so a written line may now carry an address.
+ *  4. The retry guard (adversarial F1), BEFORE the cap (B1 WI5). A line -
+ *     model or system - is dropped when it equals lines already in the notes
+ *     under ANY date, the `[Auto - <date>]` prefix removed on both sides (a
+ *     bare staff line counts too). Two jobs: a complete() failure re-arms the
+ *     SAME due row and the retry re-extracts the identical transcript
+ *     (applyExtraction runs BEFORE repo.complete()); and every run re-sends up
+ *     to 30 days of ALREADY-EXTRACTED messages, so a model that misses the
+ *     reconcile rule re-emits an old fact - often by copying its earlier line
+ *     - on a later day. Cameron's handback ruling (2026-10-27) restored the
+ *     any-date guard for the second job over FW3-1's same-day form. It
+ *     compares WHOLE lines, each trimmed (FW2-1); a candidate that spans
+ *     lines must match a run of whole lines. A line merely CONTAINED in a
+ *     longer one is KEPT: "12 Oak St, ..." inside "112 Oak St, ...", or a
+ *     change of mind whose words an earlier line contains, is new feedback.
+ *     Accepted cost: a change of mind back to the EXACT words of an earlier
+ *     line is dropped (the prompt asks for it worded differently;
+ *     docs/issues/notes-guard-stale-reread-vs-flip-back.md). A retry of a run
+ *     that hit the cap appends the lines the cap kept out of run 1, at most
+ *     another MAX_NOTE_LINES (the guard runs BEFORE the cap). A dropped line
+ *     never takes a cap slot.
+ *  5. System lines are appended after the model lines; they carry no
+ *     confidence and are never floored.
+ *  6. The cap: at most MAX_NOTE_LINES, model lines first.
+ *  7. Demotion LAST: a demoted run (unknown-speaker content) appends no line
+ *     of either kind and reports how many it withheld (charter 6.4; spec Q1).
+ */
+export function filterNoteLines(input: NoteLineFilterInput): NoteLineFilterResult {
+  const isPostal = (line: string): boolean => /^current address\b/i.test(line) && /\d/.test(line);
+  // Rule 4 over whole lines: every line trimmed and fenced by '\n' on both
+  // sides, so one includes() matches only a run of WHOLE lines, never part of one.
+  const physical = (text: string): string[] => text.split('\n').map((part) => part.trim());
+  const fenced = (lines: readonly string[]): string => `\n${lines.join('\n')}\n`;
+  // Every stored line with its prefix removed: a match under any date.
+  const unprefixedLines = fenced(physical(input.existingNotes).map(withoutAutoPrefix));
+  const present = (line: string): boolean => unprefixedLines.includes(fenced(physical(line).map(withoutAutoPrefix)));
+
+  let belowFloor = 0;
+  const model: string[] = [];
+  for (const item of input.modelLines ?? []) {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) continue;
+    const { text, confidence } = item as { text?: unknown; confidence?: unknown };
+    if (typeof text !== 'string') continue;
+    const line = withoutAutoPrefix(text).slice(0, MAX_NOTE_CHARS).trim();
+    if (clampConfidence(confidence) < input.floor) {
+      belowFloor += 1;
+      continue;
+    }
+    if (line.length === 0 || isPostal(line) || present(line)) continue;
+    model.push(line);
+  }
+  const system = input.systemLines
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !isPostal(line) && !present(line));
+
+  const append = [...model, ...system].slice(0, MAX_NOTE_LINES);
+  if (input.demoted) return { append: [], modelCount: 0, belowFloor, demoted: append.length };
+  return { append, modelCount: Math.min(model.length, MAX_NOTE_LINES), belowFloor, demoted: 0 };
 }
 
 export async function applyExtraction(
@@ -213,6 +413,24 @@ export async function applyExtraction(
         target: field,
         outcome: 'dropped',
         dropReason: 'wrong_contact_type',
+        ...(fieldOp.value !== undefined && { proposedValue: fieldOp.value }),
+        ...(fieldOp.reason !== undefined && { reason: fieldOp.reason }),
+      });
+      continue;
+    }
+
+    // B1 spec D3: for a TEXT tenant matching input, op "write" means "fill an
+    // EMPTY field" and nothing else. A write on a filled one is dropped - not
+    // demoted to a suggestion, and so never in `demotedFields` (the Layer-3
+    // audit): an added fact belongs in a Notes line, and a contradiction comes
+    // as a `suggest`. Checked BEFORE coercion, so its reason always wins. The
+    // dollars kind keeps the pets rule (a same-fact write lands).
+    if (fieldOp.op === 'write' && MATCHING_KIND.get(field) === 'text' && isFilledText(contact[field])) {
+      logger.debug({ contactId, field }, 'extraction write on a filled text field dropped');
+      decide({
+        target: field,
+        outcome: 'dropped',
+        dropReason: 'text_field_filled',
         ...(fieldOp.value !== undefined && { proposedValue: fieldOp.value }),
         ...(fieldOp.reason !== undefined && { reason: fieldOp.reason }),
       });
@@ -711,42 +929,39 @@ export async function applyExtraction(
   }
 
   // --- 8. noteLines --------------------------------------------------------
+  // Every value rule lives in filterNoteLines (B1 spec D4, PR4): clamp, the
+  // confidence floor, the postal filter, the F1 retry guard (before the cap),
+  // the system lines, the five-line cap and the demotion rule. This block only
+  // reads the snapshot and writes what it returns.
   let notedLines = 0;
-  // Addresses are a structured target now - a model that still narrates one into
-  // noteLines is overridden deterministically (spec SS5); the prompt forbids it,
-  // this filter makes the ban belt-and-braces. The digit requirement keeps the
-  // filter to POSTAL lines (a street/zip always carries one) so digit-free
-  // housing-STATUS facts ("Current address is unstable, couch-surfing") survive.
-  const rawNotes = [...(result.noteLines ?? []), ...noteStrings].filter(
-    (line) => !(/^current address\b/i.test(line.trim()) && /\d/.test(line)),
-  );
-  const cleaned = rawNotes.map((line) => line.trim()).filter((line) => line.length > 0).slice(0, MAX_NOTE_LINES);
-  if (cleaned.length > 0) {
-    const prefix = autoPrefix(at);
-    // Read-modify-write on the ctx.contact snapshot. This can lose a concurrent
-    // human notes edit made between the snapshot read and this write; the race
-    // is ACCEPTED (single scalar attribute, low write frequency) rather than
-    // paying for an optimistic-concurrency retry loop on a low-stakes field.
-    const existing = typeof contact.notes === 'string' ? contact.notes.trim() : '';
-    // Belt-and-braces idempotency guard (adversarial F1): applyExtraction runs
-    // BEFORE repo.complete(), so a complete() failure re-arms the SAME due row and
-    // the retry re-extracts the identical transcript against a contact that already
-    // carries run 1's appended line. Drop any candidate whose formatted
-    // `[Auto - <date>] <line>` OR bare `<line>` is already present verbatim in the
-    // current notes, so the retry appends nothing (the deterministic FAKE driver
-    // double-appends every time otherwise; the anthropic driver only usually does).
-    const toAppend = cleaned.filter(
-      (line) => !existing.includes(`${prefix} ${line}`) && !existing.includes(line),
-    );
-    if (toAppend.length > 0) {
-      const joined = toAppend.map((line) => `${prefix} ${line}`).join('\n');
-      const nextNotes = existing.length > 0 ? `${existing}\n${joined}` : joined;
-      try {
-        await deps.contacts.update(contactId, { notes: nextNotes });
-        notedLines = toAppend.length;
-      } catch (err) {
-        logger.warn({ contactId, err }, 'extraction notes append failed');
-      }
+  let appendedLines: string[] = [];
+  // Read-modify-write on the ctx.contact snapshot. This can lose a concurrent
+  // human notes edit made between the snapshot read and this write; the race
+  // is ACCEPTED (single scalar attribute, low write frequency) rather than
+  // paying for an optimistic-concurrency retry loop on a low-stakes field.
+  const existing = typeof contact.notes === 'string' ? contact.notes.trim() : '';
+  const prefix = autoPrefix(at);
+  const filtered = filterNoteLines({
+    modelLines: result.noteLines,
+    systemLines: noteStrings,
+    floor: deps.factMinConfidence,
+    existingNotes: existing,
+    demoted: ctx.hasInferredRoleContent === true,
+  });
+  if (filtered.demoted > 0) {
+    logger.debug({ contactId, withheld: filtered.demoted }, 'extraction note lines withheld (unknown-speaker window)');
+  }
+  if (filtered.append.length > 0) {
+    const joined = filtered.append.map((line) => `${prefix} ${line}`).join('\n');
+    const nextNotes = existing.length > 0 ? `${existing}\n${joined}` : joined;
+    try {
+      await deps.contacts.update(contactId, { notes: nextNotes });
+      notedLines = filtered.append.length;
+      // WP1 B1 spec D5.3 (S5 C4): every line appended, model then system,
+      // exactly as joined into nextNotes - the job counts feedback lines over it.
+      appendedLines = filtered.append;
+    } catch (err) {
+      logger.warn({ contactId, err }, 'extraction notes append failed');
     }
   }
 
@@ -755,7 +970,11 @@ export async function applyExtraction(
     deps.events.emit('suggestion.updated', { contactId });
   }
 
-  return { wrote, suggested, notedLines, displaced, decisions };
+  return {
+    wrote, suggested, notedLines, appendedLines,
+    notesBelowFloor: filtered.belowFloor, notesDemoted: filtered.demoted,
+    displaced, decisions,
+  };
 }
 
 /**

@@ -14,7 +14,7 @@
 // reached, because every takeover here is REFUSED on purpose: a refused
 // takeover still consumes its attempt, which is exactly the property the cap
 // exists to bound - a contact whose journals keep failing must not walk all
-// twelve keys on an ordinary page read.
+// sixteen keys on an ordinary page read.
 import { describe, expect, it, vi } from 'vitest';
 import type { AiRunsRepo } from '../src/repos/aiRunsRepo.js';
 import type { ContactsRepo } from '../src/repos/contactsRepo.js';

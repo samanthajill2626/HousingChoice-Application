@@ -910,3 +910,39 @@ describe('ListingEditForm - property requirements and fields (spec 2026-10-20)',
     await waitFor(() => expect(onSaved).toHaveBeenCalled());
   });
 });
+
+describe('ListingEditForm - Priority (WP1 B1 spec D6)', () => {
+  const save = (): HTMLElement => screen.getByRole('button', { name: /^Save$/i });
+
+  it('checking it on a property with none sends priority true', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT, priority: true });
+    render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    const priority = screen.getByRole('checkbox', { name: 'Priority' });
+    expect(priority).not.toBeChecked();
+    await user.click(priority);
+    await user.click(save());
+    expect(updateUnit).toHaveBeenCalledWith('u1', { priority: true });
+  });
+
+  it('unchecking a stored true sends false (off is stored, never removed)', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT, priority: false });
+    render(<ListingEditForm unit={{ ...UNIT, priority: true }} onClose={vi.fn()} onSaved={vi.fn()} />);
+    const priority = screen.getByRole('checkbox', { name: 'Priority' });
+    expect(priority).toBeChecked();
+    await user.click(priority);
+    await user.click(save());
+    expect(updateUnit).toHaveBeenCalledWith('u1', { priority: false });
+  });
+
+  it('a legacy stored string reads as off and is never sent untouched (WI12)', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ListingEditForm unit={{ ...UNIT, priority: 'high' as never }} onClose={onClose} onSaved={vi.fn()} />);
+    expect(screen.getByRole('checkbox', { name: 'Priority' })).not.toBeChecked();
+    await user.click(save());
+    expect(updateUnit).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});

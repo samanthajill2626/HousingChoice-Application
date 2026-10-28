@@ -56,6 +56,11 @@ export interface AiRunRecord {
    *  D8); absent on runs that skipped before reading the list. putRun spreads
    *  its input, so no write change. Dashboard twin: AiRunRecordView (S11). */
   orgListFingerprint?: string;
+  /** sha256 hex of the PROPERTIES SENT block the run sent (WP1 B1 spec D5.1);
+   *  absent on runs that exited before reading the sends, and on every run
+   *  recorded before B1. putRun spreads its input, so no write change.
+   *  Dashboard twin: AiRunRecordView. */
+  sentPropertiesFingerprint?: string;
   usage?: RunUsage;
   window?: RunWindow;
   profileFieldsPopulated?: string[];
@@ -63,6 +68,20 @@ export interface AiRunRecord {
   rawResult?: unknown;
   decisions: Partial<Record<DecisionTarget, RunDecision>>;
   notedLines: number;
+  /** B1 spec D4: model note lines dropped below EXTRACTION_FACT_MIN_CONFIDENCE.
+   *  Absent on runs that never reached apply and on runs recorded before B1.
+   *  putRun spreads its input, so no write change. Dashboard twin:
+   *  AiRunRecordView. */
+  notesBelowFloor?: number;
+  /** B1 spec D4: note lines a demoted (unknown-speaker) run withheld. Absent
+   *  as notesBelowFloor is. */
+  notesDemoted?: number;
+  /** WP1 B1 spec D5.3: of the appended lines, those naming a property in the
+   *  PROPERTIES SENT block, and those carrying a street address that names
+   *  none. Absent on runs that never reached apply and on runs recorded
+   *  before B1. Dashboard twin: AiRunRecordView. */
+  feedbackLines?: number;
+  unlabeledAddressLines?: number;
   expires_at: number;
 }
 

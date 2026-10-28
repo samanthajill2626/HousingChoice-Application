@@ -18,6 +18,9 @@ export interface SuggestionChipProps {
    *  "status"). Forms the group's accessible name `AI suggestion for <label>`. */
   label: string;
   suggestion: SuggestionItem;
+  /** The value as the field's row shows it (WP1 B1 spec D2: a portion reads
+   *  `$1,200 / month`); defaults to the suggestion's own value. */
+  value?: string;
   onAccept: () => void;
   onDismiss: () => void;
   /** In-flight: disables both actions. */
@@ -29,6 +32,7 @@ export interface SuggestionChipProps {
 export function SuggestionChip({
   label,
   suggestion,
+  value,
   onAccept,
   onDismiss,
   busy = false,
@@ -40,7 +44,7 @@ export function SuggestionChip({
   const when = formatSourceDate(suggestion.createdAt);
   return (
     <div role="group" aria-label={`AI suggestion for ${label}`} className={styles.chip}>
-      <span className={styles.heard}>{`AI heard "${suggestion.suggestedValue}"`}</span>
+      <span className={styles.heard}>{`AI heard "${value ?? suggestion.suggestedValue}"`}</span>
       {when.length > 0 ? <span className={styles.date}>{`(${when})`}</span> : null}
       {suggestion.reason ? <span className={styles.reason}>{suggestion.reason}</span> : null}
       <span className={styles.actions}>

@@ -10,6 +10,27 @@
 // utterances and older markers are ignored. Malformed JSON or no marker ->
 // empty result (warn, never throw). config refuses driver 'fake' in production.
 //
+// The payload is NOT run through parseExtractionText, so nothing here is
+// validated. noteLines items are { "text": ..., "confidence": ... } (B1 spec
+// D4); every value rule - the floor included - is apply.ts filterNoteLines,
+// which drops a legacy string item without throwing (B1 watch item WI1). A
+// marker line meant to land needs a confidence at or above
+// EXTRACTION_FACT_MIN_CONFIDENCE (default 0.7).
+//
+// WP1 B1 payload examples (spec 2026-10-26-wp1-b1-ranking-inputs D3-D5); the
+// fake passes them through as above:
+//
+//   EXTRACT:{"fields":{"<field key>":{"op":"write","value":"Decatur"}}}
+//   EXTRACT:{"noteLines":[{"text":"<label>: on the fence - wants to see others","confidence":0.9}]}
+//   EXTRACT:{"noteLines":[{"text":"Might have a cat","confidence":0.4}]}
+//
+// <field key> is any key of TENANT_MATCHING_INPUTS (lib/tenantMatchingInputs.ts)
+// or another extractable field. <label> is the sent property's propertyLabel
+// (lib/propertyLabel.ts); the second line is a feedback line (counted in
+// feedbackLines when the run's PROPERTIES SENT block lists that property) and
+// the third falls below the default 0.7 floor (counted in notesBelowFloor).
+// The fake never reads the PROPERTIES SENT block itself.
+//
 // FAILURE MARKER (dev/test only, F7c). The driver's discriminated `ok: false`
 // arm - the one that produces outcome 'failed', an error block, a burned
 // attempt and eventually a parked row - had NO hermetic reachability, because

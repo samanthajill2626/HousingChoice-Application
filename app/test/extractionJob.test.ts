@@ -21,6 +21,7 @@ import {
   SEEN_MESSAGE_CHAR_CAP,
   TRUNCATION_MARKER,
   runDueExtractions,
+  toProfile,
   type ExtractionJobDeps,
 } from '../src/jobs/extraction.js';
 import type {
@@ -30,7 +31,7 @@ import type {
   SuggestionItem,
 } from '../src/repos/extractionRepo.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
-import type { ContactItem } from '../src/repos/contactsRepo.js';
+import { IncompleteBatchReadError, type ContactItem } from '../src/repos/contactsRepo.js';
 import type { MessageItem } from '../src/repos/messagesRepo.js';
 import { FakeExtractionDriver } from '../src/adapters/extractionFake.js';
 import {
@@ -45,6 +46,10 @@ import type { OrgEntry } from '../src/lib/orgNames.js';
 import { buildStartingEntries } from '../src/lib/orgStartingList.js';
 import type { OrgListItem } from '../src/repos/orgListRepo.js';
 import { renderOrgListBlock } from '../src/services/extraction/orgListBlock.js';
+import { renderSentPropertiesBlock } from '../src/services/extraction/sentPropertiesBlock.js';
+import type { Address } from '../src/lib/address.js';
+import type { ListingSendItem } from '../src/repos/listingSendsRepo.js';
+import type { UnitDisplayItem } from '../src/repos/unitsRepo.js';
 
 const NOW = '2026-07-17T00:00:00.000Z';
 /** The job's WALL clock for run-record timestamps - deliberately DIFFERENT from
@@ -233,6 +238,8 @@ interface Harness {
   applyEvents: { emit: ReturnType<typeof vi.fn> };
   jobEvents: { emit: ReturnType<typeof vi.fn> };
   orgListRepo: { get: ReturnType<typeof vi.fn> };
+  listingSends: { listByContact: ReturnType<typeof vi.fn> };
+  units: { getDisplaysByIds: ReturnType<typeof vi.fn> };
 }
 
 function makeHarness(opts: {
@@ -245,6 +252,8 @@ function makeHarness(opts: {
   aiRuns?: { beginFinalization: ReturnType<typeof vi.fn>; putRun: ReturnType<typeof vi.fn>; setVerdict: ReturnType<typeof vi.fn> };
   logger?: Logger;
   orgListRepo?: { get: ReturnType<typeof vi.fn> };
+  listingSends?: { listByContact: ReturnType<typeof vi.fn> };
+  units?: { getDisplaysByIds: ReturnType<typeof vi.fn> };
 }): Harness {
   const repo = makeRepo(opts.dueRows, opts.claimResult ?? true);
   const seen: ExtractionInput[] = [];
@@ -291,12 +300,18 @@ function makeHarness(opts: {
     events: applyEvents,
     logger: opts.logger ?? silentLogger,
     now: () => NOW,
+    factMinConfidence: 0.7,
   };
 
   const orgListRepo = opts.orgListRepo ?? { get: vi.fn(async () => orgListItem()) };
+  // WP1 B1 spec D5.1: no sends (so no units read) unless a test supplies its own.
+  const listingSends = opts.listingSends ?? { listByContact: vi.fn(async () => []) };
+  const units = opts.units ?? { getDisplaysByIds: vi.fn(async () => new Map()) };
   const deps: ExtractionJobDeps = {
     repo,
     orgListRepo,
+    listingSends,
+    units,
     aiRuns,
     events: jobEvents,
     now: () => WALL_NOW,
@@ -309,7 +324,7 @@ function makeHarness(opts: {
     logger: opts.logger ?? silentLogger,
   };
 
-  return { deps, repo, seen, contactsUpdate, runs, aiRuns, applyEvents, jobEvents, orgListRepo };
+  return { deps, repo, seen, contactsUpdate, runs, aiRuns, applyEvents, jobEvents, orgListRepo, listingSends, units };
 }
 
 function dueRow(overrides: Partial<DueExtractionItem> = {}): DueExtractionItem {
@@ -1126,7 +1141,7 @@ describe('runDueExtractions - the run log envelope', () => {
       await runDueExtractions(NOW, h.deps);
       expect(h.runs[0]).toMatchObject({ outcome: 'failed', error: { kind: failure } });
       expect(h.runs[0]!.window!.detail).toBe('full');
-      expect(Object.keys(h.runs[0]!.decisions)).toHaveLength(12);
+      expect(Object.keys(h.runs[0]!.decisions)).toHaveLength(16);
       expect(h.runs[0]!.rawText).toBe('{broken');
     }
   });
@@ -1929,5 +1944,366 @@ describe('runDueExtractions - apply resolves against the list the run read (spec
     expect(h.runs[0]!.decisions['housingAuthority']).toMatchObject({
       proposedOp: 'write', outcome: 'dropped', dropReason: 'agency_not_authority', verdict: 'not_presented',
     });
+  });
+});
+
+// B1 spec D3: the model reconciles the four against CURRENT PROFILE, so the
+// profile must carry them - text kinds as strings, the dollars kind as a number.
+describe('toProfile - the tenant matching inputs (B1 spec D3)', () => {
+  it('carries each text input as a string and the dollars input as a number', () => {
+    const profile = toProfile(tenantContactWith({
+      area_preference: 'Decatur or Tucker',
+      max_tenant_portion: 1200,
+      accessibility_need: 'ground floor',
+      preferences_constraints: 'no apartments',
+    }));
+    expect(profile).toMatchObject({
+      area_preference: 'Decatur or Tucker',
+      max_tenant_portion: 1200,
+      accessibility_need: 'ground floor',
+      preferences_constraints: 'no apartments',
+    });
+  });
+
+  it('omits an unset or empty input, and a dollars value that is not a number', () => {
+    const profile = toProfile(tenantContactWith({
+      area_preference: '',
+      max_tenant_portion: '1200' as unknown as number,
+    }));
+    expect('area_preference' in profile).toBe(false);
+    expect('max_tenant_portion' in profile).toBe(false);
+    expect('accessibility_need' in profile).toBe(false);
+  });
+
+  it('reaches the model and the run record (names only)', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')],
+      contact: tenantContactWith({ area_preference: 'Decatur', max_tenant_portion: 900 }),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.seen[0]!.profile).toMatchObject({ area_preference: 'Decatur', max_tenant_portion: 900 });
+    expect(h.runs[0]!.profileFieldsPopulated).toEqual(expect.arrayContaining(['area_preference', 'max_tenant_portion']));
+    expect(h.runs[0]!.profileFieldsPopulated!.join(',')).not.toContain('Decatur');
+  });
+});
+
+// B1 spec D4: the run record carries the floor and demotion counts beside
+// notedLines (record fields, not decision targets).
+describe('runDueExtractions - Notes line counts in the run record (B1 spec D4)', () => {
+  const TWO_LINES = 'EXTRACT:{"noteLines":[{"text":"works nights downtown","confidence":0.9},{"text":"might move in spring","confidence":0.3}]}';
+
+  it('records notedLines, notesBelowFloor and notesDemoted for a run that reached apply', async () => {
+    const h = makeHarness({ dueRows: [dueRow()], messages: [msg(10, 'inbound', TWO_LINES)], contact: tenantContact(), conversation: convWith('c1') });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]).toMatchObject({ outcome: 'applied', notedLines: 1, notesBelowFloor: 1, notesDemoted: 0 });
+  });
+
+  it('records the withheld lines of a demoted (unknown-speaker) run, and writes none', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [
+        callMsg(5, 'inbound', 'Speaker 1: I work nights downtown\nSpeaker 2: thanks for calling', 'completed'),
+        msg(10, 'inbound', TWO_LINES),
+      ],
+      contact: tenantContact(), conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]).toMatchObject({ notedLines: 0, notesBelowFloor: 1, notesDemoted: 1 });
+    const notesWrites = (h.contactsUpdate.mock.calls as unknown[][]).filter(
+      (call) => typeof (call[1] as Record<string, unknown> | undefined)?.['notes'] === 'string',
+    );
+    expect(notesWrites).toEqual([]);
+  });
+
+  it('(PIN) a run that never reached apply carries neither count', async () => {
+    const h = makeHarness({ dueRows: [dueRow()], messages: [msg(10, 'inbound', TWO_LINES)], contact: landlordContact(), conversation: convWith('c1') });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]!.outcome).toBe('skipped');
+    expect('notesBelowFloor' in h.runs[0]!).toBe(false);
+    expect('notesDemoted' in h.runs[0]!).toBe(false);
+  });
+});
+
+// --- WP1 B1 spec D5.1: the PROPERTIES SENT block ---------------------------
+const MAIN: Address = { line1: '123 Main St', city: 'Decatur', state: 'GA' };
+const OAK: Address = { line1: '9 Oak Ave', line2: 'Apt 2', city: 'Atlanta', state: 'GA' };
+const FLYER_AT = '2026-07-15T10:00:00.000Z';
+const OLDER_AT = '2026-07-01T10:00:00.000Z';
+
+function sendRow(unitId: string, sentAt: string, shares?: ListingSendItem['shares']): ListingSendItem {
+  return {
+    unitId, contactId: 'c1', sentAt, via: 'broadcast', created_at: sentAt, updated_at: sentAt,
+    ...(shares !== undefined && { shares }),
+  };
+}
+
+function displayMap(entries: Array<[string, Address]>): Map<string, UnitDisplayItem> {
+  return new Map(entries.map(([unitId, address]) => [unitId, { unitId, address }]));
+}
+
+/** u-main signed up through the flyer (its only counted share); u-oak sent earlier. */
+const FLYER_ROW = sendRow('u-main', FLYER_AT, {
+  flyer: { attempt: `${FLYER_AT}#flyer`, state: 'counted', by: 'acceptance', countedAt: FLYER_AT },
+});
+const OAK_ROW = sendRow('u-oak', OLDER_AT);
+const SENT_TEXT = [
+  'PROPERTIES SENT',
+  '- 123 Main St, Decatur - signed up 2026-07-15',
+  '- 9 Oak Ave Apt 2, Atlanta - sent 2026-07-01',
+].join('\n');
+
+/** Harness options for a contact with both sends and both units on record. */
+function withSends(): Pick<Parameters<typeof makeHarness>[0], 'listingSends' | 'units'> {
+  return {
+    // Oldest first on purpose: the job must order newest first itself.
+    listingSends: { listByContact: vi.fn(async () => [OAK_ROW, FLYER_ROW]) },
+    units: { getDisplaysByIds: vi.fn(async () => displayMap([['u-main', MAIN], ['u-oak', OAK]])) },
+  };
+}
+
+describe('runDueExtractions - the PROPERTIES SENT block (WP1 B1 spec D5.1)', () => {
+  it('reads the sends ONCE, labels them through ONE complete units read, and hands the block to the driver', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+      ...withSends(),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.listingSends.listByContact).toHaveBeenCalledTimes(1);
+    expect(h.listingSends.listByContact).toHaveBeenCalledWith('c1');
+    expect(h.units.getDisplaysByIds).toHaveBeenCalledTimes(1);
+    expect(h.units.getDisplaysByIds).toHaveBeenCalledWith(['u-main', 'u-oak'], { requireComplete: true });
+    expect(h.seen[0]!.sentPropertiesBlock).toBe(SENT_TEXT);
+    expect(h.runs[0]!.sentPropertiesFingerprint).toBe(
+      renderSentPropertiesBlock([
+        { unit: { address: MAIN }, sentAt: FLYER_AT, signedUp: true },
+        { unit: { address: OAK }, sentAt: OLDER_AT, signedUp: false },
+      ]).fingerprint,
+    );
+  });
+
+  it('reads them for an UNKNOWN contact too - a flyer lead often still is one', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: unknownContact(), conversation: convWith('c1'),
+      ...withSends(),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.listingSends.listByContact).toHaveBeenCalledWith('c1');
+    expect(h.seen[0]!.sentPropertiesBlock).toBe(SENT_TEXT);
+  });
+
+  it('sends "PROPERTIES SENT: none" and reads no units when the contact has no sends', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.seen[0]!.sentPropertiesBlock).toBe('PROPERTIES SENT: none');
+    expect(h.units.getDisplaysByIds).not.toHaveBeenCalled();
+    expect(h.runs[0]!.sentPropertiesFingerprint).toBe(renderSentPropertiesBlock([]).fingerprint);
+  });
+
+  it('skips a unit the read COMPLETED without finding (it no longer exists)', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+      listingSends: { listByContact: vi.fn(async () => [OAK_ROW, FLYER_ROW]) },
+      units: { getDisplaysByIds: vi.fn(async () => displayMap([['u-oak', OAK]])) },
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.seen[0]!.sentPropertiesBlock).toBe('PROPERTIES SENT\n- 9 Oak Ave Apt 2, Atlanta - sent 2026-07-01');
+    expect(h.runs[0]!.outcome).toBe('no_op');
+  });
+
+  it('records the fingerprint on a FAILED model call too - it is stamped before the call', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+      ...withSends(),
+      driver: { kind: 'fake', extract: async () => ({ ok: false, meta: { driver: 'fake' }, failure: 'driver', message: 'boom' }) },
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]).toMatchObject({ outcome: 'failed', error: { kind: 'driver' } });
+    expect(h.runs[0]!.sentPropertiesFingerprint).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('(PIN) never reads on a skip path', async () => {
+    const landlord = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: landlordContact(), conversation: convWith('c1'),
+      ...withSends(),
+    });
+    await runDueExtractions(NOW, landlord.deps);
+    expect(landlord.listingSends.listByContact).not.toHaveBeenCalled();
+    expect(landlord.units.getDisplaysByIds).not.toHaveBeenCalled();
+    expect(landlord.runs[0]!.sentPropertiesFingerprint).toBeUndefined();
+
+    const seen = msg(10, 'inbound', 'older');
+    const noNew = makeHarness({
+      dueRows: [dueRow({ cursor: seen.tsMsgId })], messages: [seen], contact: tenantContact(), conversation: convWith('c1'),
+      ...withSends(),
+    });
+    await runDueExtractions(NOW, noNew.deps);
+    expect(noNew.listingSends.listByContact).not.toHaveBeenCalled();
+  });
+
+  it('FAILS the run as a repo error, before any model call, when listByContact throws', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+      listingSends: { listByContact: vi.fn(async () => { throw new Error('listing sends down'); }) },
+    });
+    const out = await runDueExtractions(NOW, h.deps);
+    expect(out).toEqual({ processed: 0, failed: 1 });
+    expect(h.seen).toHaveLength(0);
+    expect(h.repo.fail).toHaveBeenCalledTimes(1);
+    expect(h.runs[0]).toMatchObject({ outcome: 'failed', error: { kind: 'repo', message: 'listing sends down' } });
+  });
+
+  it('FAILS the run when the units read is incomplete - never a block with a property missing', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+      listingSends: { listByContact: vi.fn(async () => [OAK_ROW, FLYER_ROW]) },
+      units: { getDisplaysByIds: vi.fn(async () => { throw new IncompleteBatchReadError(1, 2, 'units'); }) },
+    });
+    const out = await runDueExtractions(NOW, h.deps);
+    expect(out).toEqual({ processed: 0, failed: 1 });
+    expect(h.seen).toHaveLength(0);
+    expect(h.repo.fail).toHaveBeenCalledTimes(1);
+    expect(h.runs[0]).toMatchObject({
+      outcome: 'failed',
+      error: { kind: 'repo', message: expect.stringContaining('units batch read incomplete') },
+    });
+  });
+
+  it('WARNs with counts only when a label holds the word TRANSCRIPT', async () => {
+    const warn = vi.fn();
+    const logger = { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() } as unknown as Logger;
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+      listingSends: { listByContact: vi.fn(async () => [OAK_ROW]) },
+      units: { getDisplaysByIds: vi.fn(async () => displayMap([['u-oak', { line1: '1 Transcript Way', city: 'Decatur' }]])) },
+      logger,
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.seen[0]!.sentPropertiesBlock).toBe('PROPERTIES SENT: none');
+    expect(warn).toHaveBeenCalledWith(
+      { conversationId: 'conv1', droppedProperties: 1 },
+      'extraction: a sent property label holds the word TRANSCRIPT - left out of the block',
+    );
+  });
+
+  it('WARNs with counts only when the block is over budget', async () => {
+    const rows = Array.from({ length: 20 }, (_, i) => sendRow(`u-${i}`, `2026-07-${String(i + 1).padStart(2, '0')}T10:00:00.000Z`));
+    const addresses = rows.map((row, i): [string, Address] => [row.unitId, { line1: `${i + 1} ${'Long'.repeat(45)} St`, city: 'Decatur' }]);
+    const expected = renderSentPropertiesBlock(
+      rows.map((row, i) => ({ unit: { address: addresses[i]![1] }, sentAt: row.sentAt!, signedUp: false })),
+    ).dropped.budget;
+    expect(expected).toBeGreaterThan(0);
+    const warn = vi.fn();
+    const logger = { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() } as unknown as Logger;
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+      listingSends: { listByContact: vi.fn(async () => rows) },
+      units: { getDisplaysByIds: vi.fn(async () => displayMap(addresses)) },
+      logger,
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(warn).toHaveBeenCalledWith(
+      { conversationId: 'conv1', droppedProperties: expected },
+      'extraction: properties sent over the prompt budget - oldest left out',
+    );
+  });
+
+  it('(PIN) does not WARN when every property fits', async () => {
+    const warn = vi.fn();
+    const logger = { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() } as unknown as Logger;
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+      ...withSends(),
+      logger,
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(warn.mock.calls.filter((call) => /property|properties/.test(String(call[1])))).toHaveLength(0);
+  });
+
+  it('WI10: the run only READS - listByContact and getDisplaysByIds are the only members it touches', async () => {
+    const touched: string[] = [];
+    function recorder<T>(name: string, members: Record<string, unknown>): T {
+      return new Proxy({}, {
+        get(_target, prop) {
+          touched.push(`${name}.${String(prop)}`);
+          if (typeof prop === 'string' && prop in members) return members[prop];
+          return () => { throw new Error(`unexpected ${name}.${String(prop)}`); };
+        },
+      }) as T;
+    }
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+    });
+    h.deps.listingSends = recorder<ExtractionJobDeps['listingSends']>('listingSends', { listByContact: async () => [FLYER_ROW] });
+    h.deps.units = recorder<ExtractionJobDeps['units']>('units', { getDisplaysByIds: async () => displayMap([['u-main', MAIN]]) });
+    const out = await runDueExtractions(NOW, h.deps);
+    expect(out).toEqual({ processed: 1, failed: 0 });
+    expect([...new Set(touched)].sort()).toEqual(['listingSends.listByContact', 'units.getDisplaysByIds']);
+  });
+});
+
+describe('runDueExtractions - feedback counts (WP1 B1 spec D5.3)', () => {
+  /** A client text carrying the fake driver's EXTRACT marker (S4 noteLine shape). */
+  function extractMsg(lines: Array<{ text: string; confidence: number }>) {
+    return msg(10, 'inbound', `EXTRACT:${JSON.stringify({ noteLines: lines })}`);
+  }
+
+  it('counts, over the APPENDED lines, those naming a sent property and those with an unlabeled street address', async () => {
+    const feedback = '123 Main St., Decatur: on the fence - likes the yard, wants to see other homes first';
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [extractMsg([
+        { text: feedback, confidence: 0.9 },
+        { text: 'Asked whether 77 Pine Rd takes pets', confidence: 0.9 },
+        { text: 'Works nights downtown', confidence: 0.9 },
+      ])],
+      contact: tenantContact(), conversation: convWith('c1'),
+      ...withSends(),
+    });
+    await runDueExtractions(NOW, h.deps);
+    // The free-form feedback line lands verbatim - no shape check, no rewrite.
+    expect(h.contactsUpdate).toHaveBeenCalledWith('c1', {
+      notes: [feedback, 'Asked whether 77 Pine Rd takes pets', 'Works nights downtown']
+        .map((line) => `[Auto - Jul 17] ${line}`).join('\n'),
+    });
+    expect(h.runs[0]).toMatchObject({ outcome: 'applied', notedLines: 3, feedbackLines: 1, unlabeledAddressLines: 1 });
+  });
+
+  it('counts only what was appended: a line already in the notes, or below the confidence floor, is not counted', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [extractMsg([
+        { text: '123 Main St, Decatur: on the fence', confidence: 0.9 },
+        { text: '9 Oak Ave Apt 2, Atlanta: likes it', confidence: 0.5 },
+        { text: 'Works nights downtown', confidence: 0.9 },
+      ])],
+      contact: tenantContactWith({ notes: '[Auto - Jul 17] 123 Main St, Decatur: on the fence' }),
+      conversation: convWith('c1'),
+      ...withSends(),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]).toMatchObject({ notedLines: 1, feedbackLines: 0, unlabeledAddressLines: 0 });
+  });
+
+  it('a run that appends nothing records both counts as 0', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+      ...withSends(),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]).toMatchObject({ outcome: 'no_op', notedLines: 0, feedbackLines: 0, unlabeledAddressLines: 0 });
+  });
+
+  it('records no counts on a FAILED model call - nothing was applied', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+      ...withSends(),
+      driver: { kind: 'fake', extract: async () => ({ ok: false, meta: { driver: 'fake' }, failure: 'driver', message: 'boom' }) },
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]!.feedbackLines).toBeUndefined();
+    expect(h.runs[0]!.unlabeledAddressLines).toBeUndefined();
   });
 });

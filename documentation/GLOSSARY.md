@@ -172,6 +172,55 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   `staff_notes_updated_at` is server-stamped on every write and renders as
   "Last edited <date>" while the box holds text.
 
+- **Tenant matching inputs** (WP1 B1, 2026-10-26) - four tenant fields
+  collected for Work Package 1's ranker (B2), declared ONCE in
+  `app/src/lib/tenantMatchingInputs.ts` (dashboard mirror
+  `dashboard/src/routes/contact/tenantMatchingInputs.ts`):
+  **Area preference** (`area_preference`) - where the tenant wants to live
+  (neighborhoods, cities, zips, "near X");
+  **Maximum tenant portion** (`max_tenant_portion`) - the most the tenant
+  says they can pay themselves per month toward rent, whole dollars 0 to
+  20000, shown as "$1,200 / month"; not the full rent and not the voucher
+  amount;
+  **Accessibility need** (`accessibility_need`) - a feature the HOME must
+  have for the tenant or a household member ("no stairs", "ground floor");
+  the bare need, never a diagnosis;
+  **Preferences and constraints** (`preferences_constraints`) - anything
+  else the tenant wants or cannot accept in a home.
+  The text fields hold at most 500 characters. Staff see them on the
+  tenant record's Eligibility intake card and edit form (the create form
+  does not carry them). Extraction fills an EMPTY text field, suggests a
+  contradicting value, and adds to a filled text field only as a Notes
+  line. They are attributes of the tenant CONTACT, never of the unit.
+
+- **"Preferences & notes" vs "Preferences and constraints"** - two
+  different things that sound alike. "Preferences & notes" is the CARD
+  title for the Notes box (contact `notes`: staff-typed text plus
+  `[Auto - <date>]` lines). "Preferences and constraints" is one of the
+  four tenant matching input FIELDS (`preferences_constraints`). Copy and
+  code never use one name for the other.
+
+- **Notes line** - one `[Auto - <date>] <text>` line extraction appends
+  to the Notes box. Since WP1 B1 each carries the model's confidence and is
+  appended only at or above `EXTRACTION_FACT_MIN_CONFIDENCE` (default
+  0.7); a demoted (unknown-speaker) run appends none; and the
+  never-written list keeps race, color, religion, sex (including sexual orientation and gender identity),
+  national origin,
+  familial facts beyond household size, and disability or medical facts
+  other than the accessibility need out of every line.
+
+- **Feedback line** (WP1 B1) - a Notes line, in free form, recording what
+  a tenant said about a property sent to them and naming that property by
+  its **label**: `<address line 1>[ <address line 2>], <city>`, built by
+  `propertyLabel` (`app/src/lib/propertyLabel.ts`), e.g. "412 Oak Ave,
+  Decatur: on the fence - wants to see other homes first". Extraction
+  learns the labels from the PROPERTIES SENT block - the tenant's
+  **properties sent**, the listed listing_sends rows (sent, or signed up
+  for through a flyer). There is no fixed shape and no stored reaction; a
+  feedback line never changes an outcome or a status. A stopgap: WP3
+  redesigns property feedback against the send
+  (docs/issues/wp3-property-feedback-redesign.md).
+
 - **Unit `notes`** - free-form INTERNAL notes on a property (the
   counterpart of contact `notes`, the Preferences & notes field - not of the
   contact's Staff notes): amenity/quirk facts that are neither utilities nor

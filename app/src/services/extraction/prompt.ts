@@ -2,12 +2,22 @@
 //
 // The system prompt is the model contract; keep it verbatim and ASCII-only.
 // The user content lays out the CURRENT PROFILE (what we already know), then
-// the ORGANIZATION LIST block (spec 2026-10-06 D8), then a chronological
-// TRANSCRIPT, so the model can reconcile new facts against known ones per the
-// reconciliation rules below.
+// the ORGANIZATION LIST block (spec 2026-10-06 D8), then the PROPERTIES SENT
+// block (WP1 B1 spec D5.1), then a chronological TRANSCRIPT, so the model can
+// reconcile new facts against known ones per the reconciliation rules below.
 import { createHash } from 'node:crypto';
 import type { ExtractionInput, TranscriptUtterance } from '../../adapters/extraction.js';
-import { EXTRACTION_SCHEMA } from './schema.js';
+import { EXTRACTABLE_FIELDS, EXTRACTION_SCHEMA } from './schema.js';
+import { TENANT_MATCHING_INPUTS } from '../../lib/tenantMatchingInputs.js';
+
+/** B1 spec D3: the text-kind tenant matching inputs, which collect facts over time. */
+const MATCHING_TEXT_KEYS = TENANT_MATCHING_INPUTS
+  .filter((input) => input.kind === 'text')
+  .map((input) => input.key);
+/** B1 spec D3: the dollars-kind tenant matching inputs. */
+const MATCHING_DOLLAR_KEYS = TENANT_MATCHING_INPUTS
+  .filter((input) => input.kind === 'dollars')
+  .map((input) => input.key);
 
 export function buildExtractionSystemPrompt(): string {
   return [
@@ -19,7 +29,10 @@ export function buildExtractionSystemPrompt(): string {
     '',
     'The user message contains a CURRENT PROFILE JSON block (what we already know',
     'about this contact), an ORGANIZATION LIST block (the housing authorities and',
-    'agencies we already know), and a TRANSCRIPT of the conversation in chronological',
+    'agencies we already know), a PROPERTIES SENT block (the properties staff sent',
+    'this contact, or that the contact signed up for through a flyer, one per line',
+    'as "- <label> - sent <date>" or "- <label> - signed up <date>", or',
+    '"PROPERTIES SENT: none"), and a TRANSCRIPT of the conversation in chronological',
     'order. Each transcript line is "<timestamp> [<speaker>/<channel>] <text>"',
     'where <speaker> is staff, client, or unknown and <channel> is sms, email, or voice.',
     '[unknown] lines come from a two-party phone call whose speakers are labeled',
@@ -40,9 +53,12 @@ export function buildExtractionSystemPrompt(): string {
     'Every "write" or "suggest" must carry a short reason. When unsure, use op',
     '"none" for that field.',
     '',
-    'OUTPUT SHAPE - every schema key is REQUIRED. Always emit ALL of: every one',
-    'of the eight field entries (use { "op": "none", "value": "", "reason": "" }',
-    'when there is nothing to record for a field), statusAdvance (suggest false,',
+    'OUTPUT SHAPE - every schema key is REQUIRED. Always emit ALL of: fields, a',
+    `list with exactly one entry for each of the ${EXTRACTABLE_FIELDS.length} field entries, in this order:`,
+    `${EXTRACTABLE_FIELDS.join(', ')}. Each entry is`,
+    '{ "field": "<name>", "op": ..., "value": ..., "reason": ... } (use op "none",',
+    'value "" and reason "" when there is nothing to record for a field; never',
+    'list a field twice), statusAdvance (suggest false,',
     'reason "" when not applicable), typeSuggestion (value "none", reason "" when',
     'not applicable), phoneAddition (phone "", label "", reason "" when none),',
     'noteLines (the empty array [] when none), speakerRoles (the empty array []',
@@ -74,6 +90,20 @@ export function buildExtractionSystemPrompt(): string {
     '    record what they said (op "write"). Never answer op "none" merely',
     '    because an authority is missing from the list; a human confirms it.',
     '- porting value is the string "true" or "false".',
+    '- The tenant matching fields record what the client says about the home',
+    '  they want. Record only what the client states:',
+    ...TENANT_MATCHING_INPUTS.map((input) => `  - ${input.key}: ${input.promptGuidance}`),
+    `- ${MATCHING_TEXT_KEYS.join(', ')} collect several facts over time:`,
+    '  - When the field is empty, op "write" fills it.',
+    '  - When the field already holds a value, a new fact that ADDS to it without',
+    '    contradicting it (a second neighborhood, another constraint) is not a',
+    '    field op: write it as a noteLine instead.',
+    '  - Use op "suggest" only when the new fact CONTRADICTS the stored value (for',
+    '    example "now wants Decatur, not Marietta"), with the FULL replacement',
+    '    value, never only the new part.',
+    '  - Never use op "write" on one of these fields when it already holds a value.',
+    '    For these fields this replaces the "same fact in a better form" write.',
+    `- ${MATCHING_DOLLAR_KEYS.join(', ')} value is whole dollars per month as a digit string (for example "1200").`,
     '- statusAdvance.suggest is true ONLY when the client clearly states that their',
     '  voucher or RTA (request for tenancy approval) is now in hand or approved.',
     '- typeSuggestion is about the CURRENT external contact whose transcript lines',
@@ -104,11 +134,25 @@ export function buildExtractionSystemPrompt(): string {
     '  A clear property manager identification can add "Identified as property manager for Example Homes" when stated.',
     '- phoneAddition ONLY when the client states that another phone number is also',
     '  theirs.',
-    '- noteLines are secondary facts about the client that no other output covers',
-    '  (for example: stairs are OK or a problem, when they last moved, household',
-    '  size, their rent portion, utility debt, other useful screening facts).',
+    '- noteLines are facts that might matter to matching this client with a home,',
+    '  or to staff understanding their situation, that no field or other output',
+    '  covers (for example: when they last moved, household size, work hours,',
+    '  utility debt, other useful screening facts). A fact that adds to an',
+    '  already-filled tenant matching text field is also a noteLine (see above).',
     '  Profile notes lines beginning "[Auto - <date>]" are your own notes from',
     '  earlier runs.',
+    '- Each noteLine is an object: "text" is the line, "confidence" is a number',
+    '  from 0 to 1 for how sure you are that the client stated the fact. Lines with',
+    '  low confidence are not written, so never inflate it.',
+    '- NEVER write a noteLine stating any of these, even when the client says it:',
+    '  race, color, religion, sex (including sexual orientation and gender',
+    '  identity), national origin; familial facts beyond',
+    '  household size (no pregnancy, marital status, children\'s ages or custody);',
+    '  disability or medical facts, other than the accessibility need (its field,',
+    '  or a noteLine when it adds to the filled field) and an assistance animal.',
+    '  Write a need as a feature of the home ("needs a ground floor"), never as a',
+    '  diagnosis. Household size, the client\'s own rent portion and an assistance',
+    '  animal are allowed. This is the never-written list.',
     '- RECONCILE every noteLine against the profile notes, the same way you',
     '  reconcile a field against its current value. If the notes already express',
     '  the fact and you have nothing to add, omit the line. A fact learned again',
@@ -123,14 +167,36 @@ export function buildExtractionSystemPrompt(): string {
     '  retelling of the tour and the application intent.',
     '- Keep every noteLine SHORT: a phrase, not a paragraph. Do not re-establish',
     '  context the notes above it already give.',
+    '- FEEDBACK ON A SENT PROPERTY: when the client says anything about a',
+    '  property listed in PROPERTIES SENT (likes it, does not, is unsure, asks',
+    '  about it, toured it), write a noteLine that NAMES that property by',
+    '  copying its label exactly as PROPERTIES SENT writes it (the text after',
+    '  "- " and before " - sent" or " - signed up"), then says what the client',
+    '  thought in a short phrase, in the client\'s own sense, with the reason',
+    '  when one is given. Example: "123 Main St, Decatur: on the fence - likes',
+    '  the yard, worried about the commute, wants to see other homes first".',
+    '  The wording is yours; no fixed shape, no fixed set of reaction words.',
+    '- Say plainly when the client is unsure ("on the fence", "maybe").',
+    '  Never turn a maybe into a no.',
+    '- Feedback about a place rather than one home ("doesn\'t like that part of',
+    '  town") is an ordinary noteLine. Name a sent property only when the',
+    '  client tied the feedback to it.',
+    '- Feedback the notes already record is not repeated; a CHANGE of mind is',
+    '  a new noteLine that still NAMES the property by copying its label, then',
+    '  SAYS the view changed, e.g. "123 Main St, Decatur: now likes it" or',
+    '  "123 Main St, Decatur: back on the fence". The label is the one wording',
+    '  already in the notes that a noteLine may repeat. A line identical to an',
+    '  earlier notes line is never written again, so word a change back so it',
+    '  differs from the earlier line, e.g. "123 Main St, Decatur: likes it',
+    '  again".',
+    '- Every other noteLine rule applies to feedback, the never-written list',
+    '  included.',
     '- address is the client\'s OWN CURRENT residential address ONLY - a place',
     '  the client states they live at NOW. It is NEVER the address of a unit or',
     '  property they are asking about, touring, applying to, or that staff sent',
     '  or mentioned to them; NEVER a previous address; NEVER a prospective or',
     '  future address. When unsure, use op "none". Put each component in its',
     '  part (line1, line2, city, state, zip); leave unknown parts "".',
-    '- Addresses NEVER go in noteLines - the address output is the only place',
-    '  for address information.',
   ].join('\n');
 }
 
@@ -192,5 +258,10 @@ export function buildExtractionUserContent(input: ExtractionInput): string {
   // header - every line after that header must be a rendered transcript line
   // (the run log hashes them), and the block never contains the word.
   const listBlock = input.orgListBlock.length > 0 ? [input.orgListBlock, ''] : [];
-  return ['CURRENT PROFILE', profileJson, '', ...listBlock, 'TRANSCRIPT', ...lines].join('\n');
+  // WP1 B1 spec D5.1: the PROPERTIES SENT block follows, still BEFORE the
+  // TRANSCRIPT header, for the same reason; it never holds the word either
+  // (sentPropertiesBlock.ts leaves such a line out). The transcript lines and
+  // so the run log's per-message hash are untouched.
+  const sentBlock = input.sentPropertiesBlock.length > 0 ? [input.sentPropertiesBlock, ''] : [];
+  return ['CURRENT PROFILE', profileJson, '', ...listBlock, ...sentBlock, 'TRANSCRIPT', ...lines].join('\n');
 }

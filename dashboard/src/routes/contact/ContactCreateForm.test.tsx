@@ -17,6 +17,7 @@ vi.mock('./useContactVocabulary.js', () => ({
 
 // Import AFTER mocking.
 import { ContactCreateForm } from './ContactCreateForm.js';
+import { TENANT_MATCHING_INPUTS } from './tenantMatchingInputs.js';
 
 const CANDIDATES: Contact[] = [];
 
@@ -417,5 +418,14 @@ describe('ContactCreateForm - Caseworker (spec 2026-10-06 D16)', () => {
     await waitFor(() =>
       expect(createContact).toHaveBeenCalledWith({ type: 'partner', role: 'Caseworker', firstName: 'Ana' }),
     );
+  });
+});
+
+describe('ContactCreateForm - no tenant matching inputs (WP1 B1 spec D2)', () => {
+  it('(PIN) the create form collects none of the four - the API accepts them, the form does not send them', async () => {
+    const user = userEvent.setup();
+    setup();
+    await user.click(screen.getByRole('button', { name: 'Tenant' }));
+    for (const input of TENANT_MATCHING_INPUTS) expect(screen.queryByLabelText(input.label)).toBeNull();
   });
 });

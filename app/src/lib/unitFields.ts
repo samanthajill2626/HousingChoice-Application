@@ -103,7 +103,12 @@ const WRITABLE_FIELDS: Record<string, FieldKind> = {
   // in the new shape at once (the 'pets' case below). Staff only since
   // flyer-leads D1 (spec 2026-10-21), like the whole Pets item.
   pets: 'pets',
-  priority: 'string',
+  // WP1 B1 (spec 2026-10-26 D6): an on/off switch, the same_day_rta template
+  // - true or false; a string (the retired free-form kind) is a 400. Off and
+  // absent read the same: `unit.priority === true` is the only on test, so a
+  // stored legacy string reads as off (production held none). Staff only:
+  // NEVER on the flyer projection below, never a model input.
+  priority: 'boolean',
   media: 'string[]',
   listing_link: 'string',
   // Public flyer fields (flyer-full-info): tenant-useful facts shown upfront on

@@ -29,6 +29,15 @@ content demotes"). It is surfaced as a DECISION, not a bug: the persistence
 sharper edge than "voice extraction is conservative", and is worth an explicit
 product call rather than an implicit side effect.
 
+**Since WP1 B1 (2026-10-27).** A demoted run also appends NO Notes line -
+model and system lines alike, feedback lines included - and counts them as
+`notesDemoted` in the run record (spec 2026-10-26-wp1-b1-ranking-inputs D4;
+Cameron kept the rule at the spec gate, Q1). So while an un-attributed call
+stays in the window, the conversation records no Notes lines at all and the
+Possible caseworkers `ai_note` signal cannot fire there. That is a loss, not a
+downgrade to a review chip; weigh it when this decision is taken. (Recorded by
+the WP1 B1 build research, reader E2.)
+
 **Suggested fix.** Optional, if the behavior is judged too broad: scope
 demotion to the fact's own SOURCE utterance (tag each extracted fact with the
 speaker/channel it came from and demote only facts tracing to an

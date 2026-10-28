@@ -1,6 +1,7 @@
 import { aiRunDropReasonLabel, type AiRunDetailResponse, type AiRunWindowMessage } from '../../../api/index.js';
 import { Spinner } from '../../../ui/index.js';
 import { suggestedContactKindLabel } from '../../contact/contactProfile.js';
+import { TENANT_MATCHING_INPUTS } from '../../contact/tenantMatchingInputs.js';
 import { aiRunContactLabel } from './contactLabel.js';
 import styles from './AiRunsSection.module.css';
 
@@ -32,14 +33,17 @@ function proposedDecisionValue(
 }
 
 /**
- * Mirrors DECISION_TARGETS in app/src/services/extraction/runTypes.ts:5-9 -
+ * Mirrors DECISION_TARGETS in app/src/services/extraction/runTypes.ts -
  * "Order is the display order". This package cannot import server code, and the
  * decisions map round-trips through an UNORDERED DynamoDB map attribute (it
- * comes back sorted), so the declared order has to be imposed here.
+ * comes back sorted), so the declared order has to be imposed here. The tenant
+ * matching inputs come from the dashboard mirror of their one list (B1 spec
+ * D1), whose drift test pins it to the app list, so the four are never named.
  */
 const DECISION_TARGET_ORDER: readonly string[] = [
   'firstName', 'lastName', 'voucherSize', 'housingAuthority',
   'pets', 'evictions', 'tenure', 'porting',
+  ...TENANT_MATCHING_INPUTS.map((input) => input.key),
   'address', 'status', 'type', 'phone',
 ];
 
@@ -52,6 +56,33 @@ function WindowMessages({ messages, full }: { messages: AiRunWindowMessage[]; fu
   return <div className={styles.tableWrap}><table className={styles.table} aria-label="Window messages"><thead><tr><th>Message</th><th>Tier</th><th>Text</th>{full ? <><th>Truncated</th><th>Chars</th><th>Hash</th><th>Hash status</th></> : null}</tr></thead><tbody>
     {messages.map((message) => <tr key={message.tsMsgId}><td>{message.tsMsgId}</td><td>{message.tier}</td><td>{message.available ? message.text ?? 'No text available' : 'Unavailable'}</td>{full ? <><td>{message.truncated ? 'yes' : 'no'}</td><td>{message.chars ?? '-'}</td><td>{message.hash ?? '-'}</td><td>{message.hashStatus ?? 'unavailable'}</td></> : null}</tr>)}
   </tbody></table></div>;
+}
+
+/**
+ * B1 spec D4: what happened to the run's Notes lines. Counts only - the lines
+ * themselves are in the Parsed result. A run recorded before B1 carries only
+ * notedLines; a run with nothing to report renders nothing. The region renders
+ * when a line was appended or any count is PRESENT (a present 0 renders as 0).
+ * WP1 B1 spec D5.1 / D5.3 (PR34, PR42, PR46): it also carries the feedback
+ * counts (feedbackLines, unlabeledAddressLines) and the PROPERTIES SENT block's
+ * fingerprint; a run carrying only the fingerprint (it read the sends, then
+ * failed before apply) shows that item alone, with no "appended" row.
+ */
+function NotesLines({ run }: { run: AiRunDetailResponse['run'] }): React.JSX.Element | null {
+  // Any S4/S5 count present = apply ran (PR46); the fingerprint alone = the
+  // run read the sends and failed before apply (PR42).
+  const counted = run.notesBelowFloor !== undefined || run.notesDemoted !== undefined
+    || run.feedbackLines !== undefined || run.unlabeledAddressLines !== undefined;
+  const fingerprinted = run.sentPropertiesFingerprint !== undefined;
+  if (!counted && !fingerprinted && run.notedLines === 0) return null;
+  return <section className={styles.block} aria-label="Notes lines"><h4>Notes lines</h4><ul className={styles.countList}>
+    {counted || run.notedLines > 0 ? <li>{run.notedLines} appended</li> : null}
+    {run.notesBelowFloor !== undefined ? <li>{run.notesBelowFloor} below the confidence floor</li> : null}
+    {run.notesDemoted !== undefined ? <li>{run.notesDemoted} withheld by the unknown-speaker rule</li> : null}
+    {run.feedbackLines !== undefined ? <li>Feedback lines: {run.feedbackLines}</li> : null}
+    {run.unlabeledAddressLines !== undefined ? <li>Unlabeled address lines: {run.unlabeledAddressLines}</li> : null}
+    {run.sentPropertiesFingerprint ? <li>Properties sent fingerprint: {run.sentPropertiesFingerprint}</li> : null}
+  </ul></section>;
 }
 
 export function AiRunDetail({ detail, status, onRetry }: { detail: AiRunDetailResponse | undefined; status: 'idle' | 'loading' | 'ready' | 'error'; onRetry: () => void }): React.JSX.Element {
@@ -84,6 +115,7 @@ export function AiRunDetail({ detail, status, onRetry }: { detail: AiRunDetailRe
       {storedWindow.excluded.length ? <div role="region" aria-label="Excluded messages" className={styles.auditList}><h4>Excluded messages</h4><ul>{storedWindow.excluded.map((excluded) => <li key={excluded.tsMsgId}>{excluded.tsMsgId}: {excluded.cause}</li>)}</ul></div> : null}
     </section> : null}
     {decisions.length ? <section className={styles.block}><h4>Decision ledger</h4><div className={styles.tableWrap}><table className={styles.table} aria-label="Decisions"><thead><tr><th>Target</th><th>Proposed</th><th>Was</th><th>Outcome</th><th>Verdict</th><th>Reason</th></tr></thead><tbody>{decisions.map(([target, decision]) => <tr key={target}><td>{target}</td><td>{proposedDecisionValue(target, decision)}</td><td>{value(decision.previousValue)}</td><td>{humanizeEnum(decision.outcome)}</td><td>{humanizeEnum(decision.verdict)}</td><td>{reasonText(decision)}</td></tr>)}</tbody></table></div></section> : null}
+    <NotesLines run={run} />
     {run.rawText !== undefined ? <details className={styles.raw}><summary>Raw model response</summary><pre>{run.rawText}</pre></details> : null}
     {run.rawResult !== undefined ? <details className={styles.raw}><summary>Parsed result</summary><pre>{JSON.stringify(run.rawResult, null, 2)}</pre></details> : null}
   </section>;

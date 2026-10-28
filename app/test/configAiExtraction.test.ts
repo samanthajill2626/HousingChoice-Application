@@ -1,6 +1,6 @@
 // app/test/configAiExtraction.test.ts
 import { describe, expect, it } from 'vitest';
-import { loadConfig } from '../src/lib/config.js';
+import { loadConfig, parseExtractionFactMinConfidence } from '../src/lib/config.js';
 
 const base = { CF_ORIGIN_SECRET: 's' };
 
@@ -103,5 +103,32 @@ describe('AI extraction config', () => {
   it('warns and falls back to 30000 on a non-positive debounce', () => {
     const cfg = loadConfig({ ...base, NODE_ENV: 'development', AI_EXTRACTION_DEBOUNCE_MS: '0' });
     expect(cfg.aiExtractionDebounceMs).toBe(30000);
+  });
+});
+
+// B1 spec D4: the Notes line confidence floor. Fail-fast, unlike the debounce:
+// a floor typo silently writing (or dropping) every line is worse than a crash.
+describe('EXTRACTION_FACT_MIN_CONFIDENCE', () => {
+  it('defaults to 0.7 in development and production', () => {
+    expect(loadConfig({ ...base, NODE_ENV: 'development' }).extractionFactMinConfidence).toBe(0.7);
+    expect(loadConfig({ ...prodBase }).extractionFactMinConfidence).toBe(0.7);
+  });
+
+  it('honors a value in (0, 1], 1 included, and treats empty as unset', () => {
+    expect(loadConfig({ ...base, NODE_ENV: 'development', EXTRACTION_FACT_MIN_CONFIDENCE: '0.85' }).extractionFactMinConfidence).toBe(0.85);
+    expect(loadConfig({ ...base, NODE_ENV: 'development', EXTRACTION_FACT_MIN_CONFIDENCE: ' 1 ' }).extractionFactMinConfidence).toBe(1);
+    expect(loadConfig({ ...base, NODE_ENV: 'development', EXTRACTION_FACT_MIN_CONFIDENCE: '' }).extractionFactMinConfidence).toBe(0.7);
+  });
+
+  it.each(['0', '1.5', 'abc', '-0.1', 'NaN', 'Infinity'])('refuses to start on %s', (raw) => {
+    expect(() => loadConfig({ ...base, NODE_ENV: 'development', EXTRACTION_FACT_MIN_CONFIDENCE: raw })).toThrow(
+      /EXTRACTION_FACT_MIN_CONFIDENCE/,
+    );
+  });
+
+  it('the exported parser is the same rule (the probe reads the floor through it, B1 PR4)', () => {
+    expect(parseExtractionFactMinConfidence(undefined)).toBe(0.7);
+    expect(parseExtractionFactMinConfidence('0.9')).toBe(0.9);
+    expect(() => parseExtractionFactMinConfidence('0')).toThrow(/EXTRACTION_FACT_MIN_CONFIDENCE/);
   });
 });

@@ -743,6 +743,10 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
         // run, like the worker. Reusing one repo INSTANCE is fine - D1 forbids
         // caching the LIST, and get() reads it every time.
         orgListRepo: createOrgListRepo({ logger: log }),
+        // WP1 B1 spec D5.1: the PROPERTIES SENT block's two READ-only reads,
+        // as the worker builds them.
+        listingSends: createListingSendsRepo({ logger: log }),
+        units: createUnitsRepo({ logger: log }),
         // AI run log: the dev tick records runs too, which is what makes
         // /settings/ai-runs exercisable in e2e and local development.
         aiRuns: createAiRunsRepo({ logger: log }),
@@ -769,6 +773,8 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
           events: appEvents,
           logger: log,
           now: () => new Date().toISOString(),
+          // B1 spec D4: the Notes line confidence floor, from config.
+          factMinConfidence: config.extractionFactMinConfidence,
         },
         config,
         logger: log,

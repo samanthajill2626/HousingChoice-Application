@@ -430,6 +430,20 @@ describe('aiRunsRepo - putRun', () => {
     for (const id of store.keys()) expect(store.get(id)!['expires_at']).toBe(ttl);
   });
 
+  it('(PIN) WP1 B1 D5: the PROPERTIES SENT fingerprint and the feedback counts ride on the run row as given', async () => {
+    const { doc, store } = makeFakeDoc();
+    await repoWith(doc).putRun(draftRecord({
+      sentPropertiesFingerprint: 'f'.repeat(64),
+      feedbackLines: 2,
+      unlabeledAddressLines: 1,
+    }));
+    expect(store.get('run#run-1')).toMatchObject({
+      sentPropertiesFingerprint: 'f'.repeat(64),
+      feedbackLines: 2,
+      unlabeledAddressLines: 1,
+    });
+  });
+
   it('writes the run and its pointers ATOMICALLY - a rejected transaction leaves nothing', async () => {
     const { doc, store } = makeFakeDoc({ failTransactAfter: 2 });
     await expect(repoWith(doc).putRun(draftRecord())).rejects.toThrow();

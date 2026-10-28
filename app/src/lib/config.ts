@@ -371,6 +371,15 @@ export interface AppConfig {
    */
   aiExtractionDebounceMs: number;
   /**
+   * The Notes line confidence floor (B1 spec D4;
+   * EXTRACTION_FACT_MIN_CONFIDENCE, default 0.7). A model noteLine whose
+   * confidence is below it is dropped and counted (notesBelowFloor). FAIL-FAST:
+   * a finite number with 0 < x <= 1, else startup throws. System lines are
+   * never floored. Read by services/extraction/apply.ts filterNoteLines via
+   * ApplyDeps.factMinConfidence.
+   */
+  extractionFactMinConfidence: number;
+  /**
    * Anthropic API key (operator secret) the extraction driver authenticates
    * with. Required only when extraction is ENABLED with the anthropic driver in
    * production (loadConfig fails fast on that combination). Never log.
@@ -511,6 +520,27 @@ export function resolveAppEnv(env: NodeJS.ProcessEnv = process.env): string {
  */
 export function tableName(base: string, env: NodeJS.ProcessEnv = process.env): string {
   return `${env.TABLE_PREFIX ?? DEFAULT_TABLE_PREFIX}${base}`;
+}
+
+/** B1 spec D4: the default Notes line confidence floor. */
+export const EXTRACTION_FACT_MIN_CONFIDENCE_DEFAULT = 0.7;
+
+/**
+ * Parse EXTRACTION_FACT_MIN_CONFIDENCE (B1 spec D4). Unset or blank -> the
+ * default. Anything else must be a finite number with 0 < x <= 1, or this
+ * THROWS - a new range check (config.ts has no decimal precedent). Exported so
+ * the never-written probe (spec D7) reads the floor through the same rule
+ * without a full loadConfig().
+ */
+export function parseExtractionFactMinConfidence(raw: string | undefined): number {
+  if (raw === undefined || raw.trim().length === 0) return EXTRACTION_FACT_MIN_CONFIDENCE_DEFAULT;
+  const parsed = Number(raw.trim());
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 1) {
+    throw new Error(
+      `EXTRACTION_FACT_MIN_CONFIDENCE must be a number greater than 0 and at most 1, got: ${raw}`,
+    );
+  }
+  return parsed;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -904,6 +934,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       );
     }
   }
+
+  // B1 spec D4: the Notes line confidence floor. Fail-fast (throws on a bad value).
+  const extractionFactMinConfidence = parseExtractionFactMinConfidence(env.EXTRACTION_FACT_MIN_CONFIDENCE);
 
   // === Email channel (SES) config - email-channel-v1 A3 =====================
   // Dev-only SES REST redirect (fake-SES host). MUST NOT be set in production.
@@ -1330,6 +1363,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     extractionDriver,
     aiExtractionModel,
     aiExtractionDebounceMs,
+    extractionFactMinConfidence,
     anthropicApiKey,
     anthropicApiBaseUrl:
       anthropicApiBaseUrl !== undefined && anthropicApiBaseUrl.length > 0 ? anthropicApiBaseUrl : undefined,

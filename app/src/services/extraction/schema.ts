@@ -14,13 +14,19 @@
 import type {
   ExtractableField,
   ExtractionFieldOp,
+  ExtractionNoteLine,
   ExtractionResult,
   SuggestedContactKind,
 } from '../../adapters/extraction.js';
 import { cleanAddressParts, normalizeAddressForCompare } from './address.js';
 import { DECISION_TARGETS, type DecisionTarget, type ProposedOp } from './runTypes.js';
+import { TENANT_MATCHING_INPUTS } from '../../lib/tenantMatchingInputs.js';
 
-/** The eight client-profile fields the model may operate on. */
+/**
+ * The twelve client-profile fields the model may operate on: the eight
+ * original scalars, then the tenant matching inputs from their one list, in
+ * list order (B1 spec D1/D3). No reader names the four.
+ */
 export const EXTRACTABLE_FIELDS: readonly ExtractableField[] = [
   'firstName',
   'lastName',
@@ -30,12 +36,15 @@ export const EXTRACTABLE_FIELDS: readonly ExtractableField[] = [
   'evictions',
   'tenure',
   'porting',
+  ...TENANT_MATCHING_INPUTS.map((input) => input.key),
 ];
 
 /**
- * Fields carrying `<field>_source` AI provenance a human PATCH must clear: the
- * eight scalar extractables plus the compound `address`. ONE shared const so the
- * apply layer and the contacts PATCH provenance-clear gate always agree.
+ * Fields carrying `<field>_source` AI provenance a human PATCH must clear:
+ * every scalar extractable (twelve) plus the compound `address`. ONE shared
+ * const so the apply layer and the contacts PATCH provenance-clear gate
+ * (routes/contacts.ts) always agree - which is how the four tenant matching
+ * inputs get their staff-edit clear (B1 spec D2).
  */
 export const PROVENANCE_FIELDS: readonly string[] = [...EXTRACTABLE_FIELDS, 'address'];
 
@@ -51,15 +60,25 @@ function isSuggestedContactKind(value: unknown): value is SuggestedContactKind {
     && (SUGGESTED_CONTACT_KINDS as readonly string[]).includes(value);
 }
 
-const fieldOpSchema = {
+/**
+ * One field's op on the wire: `{ field, op, value, reason }`, the field named
+ * by an enum. `fields` is a LIST of these, never an object with one key per
+ * field: twelve named field objects exceed the structured-output compiler's
+ * grammar size limit (400 "The compiled grammar is too large", WP1 B1's first
+ * never-written gate run; eight compiled). Measured with
+ * app/scripts/extraction-schema-compile-check.ts - re-run it after any schema
+ * change, because no offline test can see this limit.
+ */
+const fieldEntrySchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
+    field: { type: 'string', enum: [...EXTRACTABLE_FIELDS] },
     op: { type: 'string', enum: ['none', 'write', 'suggest'] },
     value: { type: 'string' },
     reason: { type: 'string' },
   },
-  required: ['op', 'value', 'reason'],
+  required: ['field', 'op', 'value', 'reason'],
 } as const;
 
 /** Draft-07 subset compatible with structured outputs (json_schema format). */
@@ -67,29 +86,14 @@ export const EXTRACTION_SCHEMA: Record<string, unknown> = {
   type: 'object',
   additionalProperties: false,
   properties: {
+    // One entry per extractable field (the prompt asks for all of them, in
+    // EXTRACTABLE_FIELDS order); every entry key is REQUIRED, so the schema
+    // stays at zero optional parameters - the 24-optional grammar cap
+    // tripwire. The field enum is built from EXTRACTABLE_FIELDS so the two
+    // cannot drift.
     fields: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        firstName: fieldOpSchema,
-        lastName: fieldOpSchema,
-        voucherSize: fieldOpSchema,
-        housingAuthority: fieldOpSchema,
-        pets: fieldOpSchema,
-        evictions: fieldOpSchema,
-        tenure: fieldOpSchema,
-        porting: fieldOpSchema,
-      },
-      required: [
-        'firstName',
-        'lastName',
-        'voucherSize',
-        'housingAuthority',
-        'pets',
-        'evictions',
-        'tenure',
-        'porting',
-      ],
+      type: 'array',
+      items: fieldEntrySchema,
     },
     statusAdvance: {
       type: 'object',
@@ -121,9 +125,19 @@ export const EXTRACTION_SCHEMA: Record<string, unknown> = {
       },
       required: ['phone', 'label', 'reason'],
     },
+    // B1 spec D4: each line carries the model's confidence; both keys required
+    // (zero optional parameters). The floor is applied in apply.ts.
     noteLines: {
       type: 'array',
-      items: { type: 'string' },
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          text: { type: 'string' },
+          confidence: { type: 'number' },
+        },
+        required: ['text', 'confidence'],
+      },
     },
     // Layer-2 role attribution for `Speaker N` (unknown) call lines. Modeled as
     // an ARRAY OF PAIRS, not a dynamic-key map: structured outputs require
@@ -165,8 +179,8 @@ export const EXTRACTION_SCHEMA: Record<string, unknown> = {
 };
 
 const MAX_REASON_CHARS = 200;
-const MAX_NOTE_CHARS = 200;
-const MAX_NOTE_LINES = 5;
+/** B1 spec D4: the parser keeps at most this many noteLines; it filters no value. */
+const MAX_PARSED_NOTE_LINES = 20;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -174,6 +188,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function clamp(text: string, max: number): string {
   return text.length > max ? text.slice(0, max) : text;
+}
+
+/**
+ * The model's `fields` output keyed by field name. The wire shape is a LIST of
+ * `{ field, op, value, reason }` (EXTRACTION_SCHEMA); a field listed twice
+ * keeps its first entry whose op is "write" or "suggest" - so a "none"
+ * placeholder never hides a real op listed after it - else its first entry
+ * (code review PA-S-2). An entry naming no extractable field is ignored.
+ * The older object shape (`{ <field>: { op, value, reason } }`) is still read:
+ * the AI run log stores each run's raw response text, and parseExtractionOps
+ * re-reads runs recorded before the list shape.
+ */
+function rawFieldOps(raw: unknown): Record<string, unknown> {
+  if (isRecord(raw)) return raw;
+  const byField: Record<string, unknown> = {};
+  if (!Array.isArray(raw)) return byField;
+  const acts = (entry: unknown): boolean => isRecord(entry) && (entry.op === 'write' || entry.op === 'suggest');
+  for (const entry of raw) {
+    if (!isRecord(entry) || typeof entry.field !== 'string') continue;
+    if (!(EXTRACTABLE_FIELDS as readonly string[]).includes(entry.field)) continue;
+    const kept = byField[entry.field];
+    if (kept === undefined || (!acts(kept) && acts(entry))) byField[entry.field] = entry;
+  }
+  return byField;
 }
 
 /**
@@ -187,7 +225,7 @@ export function parseExtractionText(text: string): ExtractionResult {
 
   const result: ExtractionResult = { fields: {} };
 
-  const rawFields = isRecord(root.fields) ? root.fields : {};
+  const rawFields = rawFieldOps(root.fields);
   const fields: Partial<Record<ExtractableField, ExtractionFieldOp>> = {};
   for (const field of EXTRACTABLE_FIELDS) {
     const rawOp = rawFields[field];
@@ -265,11 +303,17 @@ export function parseExtractionText(text: string): ExtractionResult {
     }
   }
 
+  // B1 spec D4: keep up to MAX_PARSED_NOTE_LINES STRUCTURALLY valid items - an
+  // object with a string text and a number confidence - unmodified. No value
+  // filtering here: clamping, the floor, the guard and the cap are
+  // apply.ts filterNoteLines, which the fake driver's bypass also reaches.
   if (Array.isArray(root.noteLines)) {
-    const lines = root.noteLines
-      .filter((line): line is string => typeof line === 'string' && line.trim().length > 0)
-      .slice(0, MAX_NOTE_LINES)
-      .map((line) => clamp(line, MAX_NOTE_CHARS));
+    const lines: ExtractionNoteLine[] = [];
+    for (const item of root.noteLines) {
+      if (lines.length >= MAX_PARSED_NOTE_LINES) break;
+      if (!isRecord(item) || typeof item.text !== 'string' || typeof item.confidence !== 'number') continue;
+      lines.push({ text: item.text, confidence: item.confidence });
+    }
     if (lines.length > 0) result.noteLines = lines;
   }
 
@@ -326,7 +370,7 @@ function absentView(): ExtractionOpsView {
   return view;
 }
 
-/** All twelve targets absent. Frozen - callers must never mutate it. */
+/** All sixteen targets absent. Frozen - callers must never mutate it. */
 export const EMPTY_OPS_VIEW: ExtractionOpsView = Object.freeze(absentView());
 
 /** The clamped reason, when the raw value is a non-blank string. */
@@ -361,8 +405,8 @@ export function parseExtractionOps(rawText: string | undefined): ExtractionOpsVi
   }
   if (!isRecord(parsed)) return view;
 
-  // The eight scalars: fields.<name>.op, verbatim.
-  const rawFields = isRecord(parsed.fields) ? parsed.fields : {};
+  // The twelve scalars: each field's op, verbatim (list or older object shape).
+  const rawFields = rawFieldOps(parsed.fields);
   for (const field of EXTRACTABLE_FIELDS) {
     const rawOp = rawFields[field];
     if (!isRecord(rawOp)) continue;

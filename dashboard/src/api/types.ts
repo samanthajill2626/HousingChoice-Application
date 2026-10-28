@@ -6,6 +6,11 @@
 // Type-only, and `.js`-suffixed: the APP's typecheck also compiles this file
 // (app/test/contactTimeline.test.ts imports it under NodeNext resolution).
 import type { RETRY_OUTCOME_UNCONFIRMED } from '../routes/contact/retryPromise.js';
+import type {
+  TenantMatchingInputKey,
+  TenantMatchingInputPatch,
+  TenantMatchingInputValues,
+} from '../routes/contact/tenantMatchingInputs.js';
 
 /** Team role. admin = the founder role; va = virtual assistant. */
 export type UserRole = 'admin' | 'va';
@@ -311,6 +316,9 @@ export const AI_RUN_DROP_REASON_LABELS: Readonly<Record<string, string>> = {
   empty_value_at_parse: 'empty value at parse',
   // Spec 2026-10-06 D8: an agency name the model returned for housingAuthority.
   agency_not_authority: 'Agency, not a housing authority',
+  // B1 spec D3: a write on a text tenant matching input that already holds a
+  // value (an added fact goes to a Notes line instead).
+  text_field_filled: 'Field already filled',
 };
 
 /** A drop reason's label; a code this build does not know is humanized. */
@@ -354,6 +362,10 @@ export interface AiRunRecordView {
    *  (spec 2026-10-06 D8; plan 3.10). Absent when the run exited at a skip
    *  gate before reading the list. */
   orgListFingerprint?: string;
+  /** sha256 hex of the PROPERTIES SENT block the run's prompt carried (WP1 B1
+   *  spec D5.1). Absent on a run that exited before reading the sends, and on
+   *  every run recorded before B1. */
+  sentPropertiesFingerprint?: string;
   usage?: { inputTokens: number; outputTokens: number };
   window?: {
     detail: 'light' | 'full'; cursor: string; newestTsMsgId?: string; hasInferredRoleContent?: boolean;
@@ -371,6 +383,17 @@ export interface AiRunRecordView {
   rawResult?: unknown;
   decisions: Partial<Record<string, AiRunDecision>>;
   notedLines: number;
+  /** B1 spec D4: model note lines dropped below the confidence floor. Absent
+   *  on runs that never reached apply and on runs recorded before B1.
+   *  Mirrors AiRunRecord in app/src/repos/aiRunsRepo.ts. */
+  notesBelowFloor?: number;
+  /** B1 spec D4: note lines a demoted (unknown-speaker) run withheld. */
+  notesDemoted?: number;
+  /** WP1 B1 spec D5.3: of the appended lines, those naming a property in the
+   *  PROPERTIES SENT block, and those carrying a street address that names
+   *  none. Absent on runs that never reached apply and on runs before B1. */
+  feedbackLines?: number;
+  unlabeledAddressLines?: number;
   expires_at?: number;
 }
 
@@ -2250,12 +2273,20 @@ export interface FieldSource {
   accepted_by?: string;
 }
 
+/** WP1 B1 (spec 2026-10-26 D2): each tenant matching input's AI provenance
+ *  stamp, `<key>_source` - present when extraction wrote or a human accepted
+ *  the value; drives the AutoBadge on its Eligibility intake row. Read-only:
+ *  no write body carries one (the server never copies a client `_source`). */
+export type TenantMatchingInputSources = {
+  [K in TenantMatchingInputKey as `${K}_source`]?: FieldSource;
+};
+
 export interface SuggestionItem {
   itemId: string;
   ownerContactId: string;
   /** Immutable server-minted identity for resolution fencing. */
   revision?: string;
-  /** One of the eight ExtractableField values, or 'status' | 'phone' | 'type' | 'address'. */
+  /** One of the twelve ExtractableField values, or 'status' | 'phone' | 'type' | 'address'. */
   target: string;
   currentValue?: string;
   suggestedValue: string;
@@ -2303,7 +2334,9 @@ export interface ContactVocabulary {
  *  `consent_*` fields let staff record text consent at create time (CONTRACT 4);
  *  `consent_method` is a HUMAN value only (the server stamps consent_captured_by).
  *  Left blank → nothing sent (the just-in-time gate catches it later). */
-export interface ContactCreate {
+// WP1 B1 (spec D2): the create API accepts the four tenant matching inputs
+// (the create form sends none - the API stays symmetric with the PATCH).
+export interface ContactCreate extends TenantMatchingInputValues {
   type: ContactType;
   firstName?: string;
   lastName?: string;
@@ -2329,7 +2362,7 @@ export interface ContactCreate {
 
 /** A contact (GET /api/contacts/:id → { contact }). Flexible document. C1 adds
  *  an optional `phones[]`; when absent, synthesize [{phone, primary:true}]. */
-export interface Contact {
+export interface Contact extends TenantMatchingInputValues, TenantMatchingInputSources {
   contactId: string;
   type: ContactType;
   status?: string;
@@ -2473,7 +2506,9 @@ export interface Contact {
 /** Editable contact fields (PATCH /api/contacts/:id). Every field is optional —
  *  only the changed ones are sent; the server SET-merges (absent leaves a value
  *  untouched; an empty string clears it). `type` doubles as the triage action. */
-export interface ContactPatch {
+// WP1 B1 (spec D2): the four tenant matching inputs - each optional; null
+// clears it (built by buildTenantMatchingPatch, routes/contact/tenantMatchingInputs.ts).
+export interface ContactPatch extends TenantMatchingInputPatch {
   type?: ContactType;
   firstName?: string;
   lastName?: string;
@@ -2721,6 +2756,10 @@ export interface UnitItem {
   application_fee?: number;
   /** Public flyer details (public-pages §3): same-day RTA available. */
   same_day_rta?: boolean;
+  /** WP1 B1 (spec D6): the staff Priority switch. `priority === true` is the
+   *  only on test - false, absent and a legacy stored string read as off.
+   *  Staff only: never on the flyer. */
+  priority?: boolean;
   // --- Requirements (spec 2026-10-20 D1, D2): the property's OWN copy of each
   // item, flat keys named as in the registry (routes/listing/requirements.ts).
   // Checkboxes are true or absent; text and money are absent when blank.

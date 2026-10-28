@@ -240,6 +240,8 @@ describe('PROPERTY_FORM_FIELDS (the D10a tag table)', () => {
       ['Public listing link', 'on_flyer'],
       ['Video URL', 'on_flyer'],
       ['Same-day RTA', 'on_flyer'],
+      // WP1 B1 spec D6: the Priority switch, its own row after Same-day RTA.
+      ['Priority', 'staff_only'],
       ['No evictions while on the program', 'staff_only'],
       ['Evictions (details)', 'staff_only'],
       ['Credit score', 'staff_only'],
@@ -596,8 +598,8 @@ describe('isOwnValue - the D6 OWN VALUE definition', () => {
 // From app/test/propertyFormFlyerParity.test.ts (its "names only writable unit
 // keys" case runs the app's validateUnitBody, server-only, so it is not here).
 describe('PROPERTY_FORM_FIELDS - the D10a tag table', () => {
-  it('lists every property-form field in form order with its tag (D10, D10a, plan AR1) - 35 rows', () => {
-    expect(PROPERTY_FORM_FIELDS).toHaveLength(35);
+  it('lists every property-form field in form order with its tag (D10, D10a, plan AR1) - 36 rows', () => {
+    expect(PROPERTY_FORM_FIELDS).toHaveLength(36);
     expect(PROPERTY_FORM_FIELDS.map((f) => [f.label, [...f.keys], f.flyer])).toEqual([
       // New form only (plan AR1): the landlord picker; landlordId never reaches the flyer.
       ['Owning landlord', ['landlordId'], 'staff_only'],
@@ -619,6 +621,8 @@ describe('PROPERTY_FORM_FIELDS - the D10a tag table', () => {
       ['Public listing link', ['listing_link'], 'on_flyer'],
       ['Video URL', ['video_url'], 'on_flyer'],
       ['Same-day RTA', ['same_day_rta'], 'on_flyer'],
+      // WP1 B1 spec D6: the Priority switch, its own row after Same-day RTA.
+      ['Priority', ['priority'], 'staff_only'],
       ['No evictions while on the program', ['no_evictions_on_program'], 'staff_only'],
       ['Evictions (details)', ['evictions_notes'], 'staff_only'],
       ['Credit score', ['credit_requirements'], 'staff_only'],

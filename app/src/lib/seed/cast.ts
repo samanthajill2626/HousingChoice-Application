@@ -451,6 +451,13 @@ const searchingTenant = {
     rta_expiration_date: '2026-09-30',
     porting: false,
     preferences_notes: 'No stairs (uses a walker); near MARTA; must fit a king-size bed; close to Grady Hospital.',
+    // WP1 B1 (spec 2026-10-26 D1/D2; plan PR3): the full world's one tenant
+    // with every tenant matching input recorded, stored as the contacts PATCH
+    // stores them (trimmed text, whole dollars). Lean is untouched.
+    area_preference: 'Near MARTA, close to Grady Hospital',
+    max_tenant_portion: 450,
+    accessibility_need: 'No stairs',
+    preferences_constraints: 'Bedroom must fit a king-size bed',
     consent_method: 'inbound_call',
     consent_at: CK,
     sms_unreachable: true, // flag demo

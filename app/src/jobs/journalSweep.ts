@@ -74,6 +74,7 @@ import {
   createSuggestionResolutionService,
   type SuggestionResolutionService,
 } from '../services/suggestionResolution.js';
+import { DECISION_TARGETS } from '../services/extraction/runTypes.js';
 
 export const JOURNAL_SWEEP_PERIOD_MS = 24 * 60 * 60 * 1000;
 export const JOURNAL_SWEEP_MIN_AGE_MS = 24 * 60 * 60 * 1000;
@@ -81,9 +82,10 @@ export const MAX_CONTACTS_PER_RUN = 25;
 export const MAX_RECOVERY_CALLS_PER_RUN = 100;
 export const MAX_SCAN_PAGES = 20;
 export const SCAN_PAGE_LIMIT = 200;
-/** The closed DECISION_TARGETS key-set size - one recovery call can attempt
- *  every target, so a poison pair cannot starve the rest. */
-export const SWEEP_MAX_ATTEMPTS_PER_CALL = 12;
+/** The closed DECISION_TARGETS key-set size (sixteen since B1) - one recovery
+ *  call can attempt every target, so a poison pair cannot starve the rest.
+ *  Derived, so a new target can never leave the sweep a key short. */
+export const SWEEP_MAX_ATTEMPTS_PER_CALL = DECISION_TARGETS.length;
 
 export interface JournalSweepDeps {
   settingsRepo?: Pick<SettingsRepo, 'claimGroupPeriod' | 'getJournalSweepCursor' | 'putJournalSweepCursor'>;
@@ -226,7 +228,7 @@ export async function runJournalSweep(
       outcome.contactsVisited += 1;
       // PER-CONTACT ISOLATION. recoverAbandoned's own listJournals BatchGet
       // sits in its for-of HEADER, outside its per-journal try, so one
-      // throttled 12-key read used to propagate out of this loop into the
+      // throttled journal-key read used to propagate out of this loop into the
       // run-level catch and abandon EVERY remaining contact - and the cursor
       // was already persisted past their page, so they waited a full cursor
       // cycle for a transient blip. One bad contact is now a WARN plus a
@@ -248,7 +250,7 @@ export async function runJournalSweep(
         }
         if (stateChanged) events.emit('suggestion.updated', { contactId });
         if (!completedCleanly) continue; // budget cut - deferral, not poison
-        // POST-LOOP TRUTH CHECK on the contact's closed 12-key journal set.
+        // POST-LOOP TRUTH CHECK on the contact's closed journal key set (sixteen since B1).
         // Persistent actives past the gate = poison journals nothing will
         // scrub without attention -> ERROR (alarm). A failed READ here is
         // WARN - loud, not silent, not a false poison alarm.

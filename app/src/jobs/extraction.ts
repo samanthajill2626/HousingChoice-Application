@@ -49,6 +49,15 @@ import { parseExtractionOps } from '../services/extraction/schema.js';
 import type { OrgEntry } from '../lib/orgNames.js';
 import type { OrgListRepo } from '../repos/orgListRepo.js';
 import { renderOrgListBlock } from '../services/extraction/orgListBlock.js';
+import type { ListingSendsRepo } from '../repos/listingSendsRepo.js';
+import type { UnitDisplayItem, UnitsRepo } from '../repos/unitsRepo.js';
+import {
+  countFeedbackLines,
+  renderSentPropertiesBlock,
+  selectSentRows,
+  type SentPropertyEntry,
+} from '../services/extraction/sentPropertiesBlock.js';
+import { TENANT_MATCHING_INPUTS } from '../lib/tenantMatchingInputs.js';
 
 /** Consecutive failures before an item is PARKED (no further auto-retries). */
 export const MAX_EXTRACTION_ATTEMPTS = 5;
@@ -107,6 +116,19 @@ export interface ExtractionJobDeps {
    */
   orgListRepo: Pick<OrgListRepo, 'get'>;
   /**
+   * WP1 B1 spec D5.1: the PROPERTIES SENT block's two reads, made ONCE per run
+   * after the skip gates, for tenant and unknown contacts alike - the
+   * contact's listed listing_sends rows, then the units' labels through a
+   * COMPLETE batch read (`requireComplete`). READ ONLY: the extraction path
+   * never writes listing_sends (no reaction is stored, charter 6.3 amended).
+   * A failed read of either FAILS THE RUN like the organization list read.
+   * REQUIRED, like `orgListRepo`, so a missed construction site is a
+   * typecheck failure: worker.ts, routes/dev.ts, and the extractionJob and
+   * extractionJobDraftGuard harnesses.
+   */
+  listingSends: Pick<ListingSendsRepo, 'listByContact'>;
+  units: Pick<UnitsRepo, 'getDisplaysByIds'>;
+  /**
    * The run-log writer. REQUIRED so a missed construction site is a typecheck
    * failure, not a silently empty log. All three sites must supply it:
    * worker.ts (the worker poll), routes/dev.ts (the deterministic dev tick), and
@@ -160,6 +182,19 @@ export function toProfile(contact: ContactItem): ExtractionProfileSnapshot {
   const tenure = str(contact['tenure']);
   if (tenure !== undefined) profile.tenure = tenure;
   if (typeof contact.porting === 'boolean') profile.porting = contact.porting;
+  // B1 spec D3: the tenant matching inputs, by kind, from their one list - so
+  // the model reconciles a new fact against what is already recorded.
+  const matching: Record<string, string | number> = {};
+  for (const input of TENANT_MATCHING_INPUTS) {
+    const raw = contact[input.key];
+    if (input.kind === 'dollars') {
+      if (typeof raw === 'number') matching[input.key] = raw;
+    } else {
+      const text = str(raw);
+      if (text !== undefined) matching[input.key] = text;
+    }
+  }
+  Object.assign(profile, matching);
   const notes = str(contact['notes']);
   if (notes !== undefined) profile.notes = notes;
   // Single-line current address for reconciliation (object doc -> formatted
@@ -314,6 +349,8 @@ export interface RunDraft {
   promptFingerprint?: string;
   /** sha256 hex of the organization list block this run sent (spec 2026-10-06 D8). */
   orgListFingerprint?: string;
+  /** sha256 hex of the PROPERTIES SENT block this run sent (WP1 B1 spec D5.1). */
+  sentPropertiesFingerprint?: string;
   usage?: { inputTokens: number; outputTokens: number };
   window?: RunWindow;
   profileFieldsPopulated?: string[];
@@ -321,6 +358,14 @@ export interface RunDraft {
   rawResult?: ExtractionResult;
   decisions?: Partial<Record<DecisionTarget, RunDecision>>;
   notedLines?: number;
+  /** B1 spec D4: model note lines dropped below the floor. Set only once apply ran. */
+  notesBelowFloor?: number;
+  /** B1 spec D4: note lines a demoted run withheld. Set only once apply ran. */
+  notesDemoted?: number;
+  /** WP1 B1 spec D5.3: of the appended lines, those naming a block label, and
+   *  those carrying a street address that names none. Set only once apply ran. */
+  feedbackLines?: number;
+  unlabeledAddressLines?: number;
   /** Counts for the completion event, sourced from applyOutcome where they
    *  exist - NOT re-derived from `decisions`, which is best-effort. */
   wrote?: number;
@@ -580,10 +625,51 @@ async function processRow(
   // Before the call, so a FAILED call still records which list it was sent.
   draft.orgListFingerprint = orgBlock.fingerprint;
 
+  // WP1 B1 spec D5.1: the PROPERTIES SENT block - the properties staff sent
+  // this contact (or it signed up for through a flyer), each named by its
+  // label, so a feedback noteLine can name the property it is about. Read ONCE
+  // per run, after every skip gate, for tenant and unknown contacts. A failed
+  // read - listByContact, or a units read that could not fetch every key -
+  // FAILS THE RUN like the organization list read above: without the labels
+  // the model writes feedback it cannot name, and the reconcile rule then
+  // treats that line as already recorded, so the named line never follows. A
+  // unit the read COMPLETED without finding (it no longer exists) is skipped.
+  let sentEntries: SentPropertyEntry[];
+  try {
+    const sent = selectSentRows(await deps.listingSends.listByContact(contact.contactId));
+    const unitsById = sent.length === 0
+      ? new Map<string, UnitDisplayItem>()
+      : await deps.units.getDisplaysByIds(sent.map((row) => row.unitId), { requireComplete: true });
+    sentEntries = sent.flatMap((row) => {
+      const unit = unitsById.get(row.unitId);
+      return unit === undefined ? [] : [{ unit, sentAt: row.sentAt, signedUp: row.signedUp }];
+    });
+  } catch (err) {
+    return failed('repo', err);
+  }
+  const sentBlock = renderSentPropertiesBlock(sentEntries);
+  // Counts only, never a label (spec D5.1: each drop WARNs).
+  if (sentBlock.dropped.transcript > 0) {
+    logger.warn(
+      { conversationId, droppedProperties: sentBlock.dropped.transcript },
+      'extraction: a sent property label holds the word TRANSCRIPT - left out of the block',
+    );
+  }
+  if (sentBlock.dropped.budget > 0) {
+    logger.warn(
+      { conversationId, droppedProperties: sentBlock.dropped.budget },
+      'extraction: properties sent over the prompt budget - oldest left out',
+    );
+  }
+  // Before the call, so a FAILED call still records which block it was sent.
+  draft.sentPropertiesFingerprint = sentBlock.fingerprint;
+
   const profile = toProfile(contact);
   const profileFields = draftPiece(logger, draft, () => profileFieldNames(profile));
   if (profileFields !== undefined) draft.profileFieldsPopulated = profileFields;
-  const call = await driver.extract({ transcript, profile, orgListBlock: orgBlock.text });
+  const call = await driver.extract({
+    transcript, profile, orgListBlock: orgBlock.text, sentPropertiesBlock: sentBlock.text,
+  });
   draft.driver = call.meta.driver;
   if (call.meta.model !== undefined) draft.model = call.meta.model;
   if (call.meta.promptFingerprint !== undefined) draft.promptFingerprint = call.meta.promptFingerprint;
@@ -627,6 +713,15 @@ async function processRow(
   }));
   if (appliedDecisions !== undefined) draft.decisions = appliedDecisions;
   draft.notedLines = applyOutcome.notedLines;
+  draft.notesBelowFloor = applyOutcome.notesBelowFloor;
+  draft.notesDemoted = applyOutcome.notesDemoted;
+  // WP1 B1 spec D5.3: counts only - nothing is dropped or rewritten on them.
+  // Best-effort like every other record piece (draftPiece).
+  const feedback = draftPiece(logger, draft, () => countFeedbackLines(applyOutcome.appendedLines, sentBlock.labels));
+  if (feedback !== undefined) {
+    draft.feedbackLines = feedback.feedbackLines;
+    draft.unlabeledAddressLines = feedback.unlabeledAddressLines;
+  }
   // `wrote` and `suggested` are string[] of target names on applyOutcome; the
   // event carries COUNTS only.
   draft.wrote = applyOutcome.wrote.length;
@@ -663,6 +758,7 @@ async function recordRun(deps: ExtractionJobDeps, outcome: RunOutcome, draft: Ru
       ...(draft.model !== undefined && { model: draft.model }),
       ...(draft.promptFingerprint !== undefined && { promptFingerprint: draft.promptFingerprint }),
       ...(draft.orgListFingerprint !== undefined && { orgListFingerprint: draft.orgListFingerprint }),
+      ...(draft.sentPropertiesFingerprint !== undefined && { sentPropertiesFingerprint: draft.sentPropertiesFingerprint }),
       ...(draft.usage !== undefined && { usage: draft.usage }),
       ...(draft.window !== undefined && { window: draft.window }),
       ...(draft.profileFieldsPopulated !== undefined && { profileFieldsPopulated: draft.profileFieldsPopulated }),
@@ -670,6 +766,10 @@ async function recordRun(deps: ExtractionJobDeps, outcome: RunOutcome, draft: Ru
       ...(draft.rawResult !== undefined && { rawResult: draft.rawResult }),
       decisions: draft.decisions ?? {},
       notedLines: draft.notedLines ?? 0,
+      ...(draft.notesBelowFloor !== undefined && { notesBelowFloor: draft.notesBelowFloor }),
+      ...(draft.notesDemoted !== undefined && { notesDemoted: draft.notesDemoted }),
+      ...(draft.feedbackLines !== undefined && { feedbackLines: draft.feedbackLines }),
+      ...(draft.unlabeledAddressLines !== undefined && { unlabeledAddressLines: draft.unlabeledAddressLines }),
     };
     await deps.aiRuns.putRun(record);
   } catch (err) {

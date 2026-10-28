@@ -7,7 +7,7 @@
 // PATCHed (the server SET-merges, so an untouched field is never blanked) -
 // switching type leaves the other type's old fields on the record (harmless; they
 // just stop showing). On success the parent applies the returned contact in place.
-import { useRef, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import {
   ApiError,
   setTenantStatus,
@@ -60,6 +60,11 @@ import { KindPicker, type KindPickerValue } from './KindPicker.js';
 import { TypeChangeRefusalList } from './TypeChangeRefusalList.js';
 import { isCaseworkerContact } from './caseworkerRole.js';
 import { useContactVocabulary } from './useContactVocabulary.js';
+import {
+  TENANT_MATCHING_INPUTS,
+  buildTenantMatchingPatch,
+  tenantMatchingFormValues,
+} from './tenantMatchingInputs.js';
 import { NewOrgDialog } from '../orgs/NewOrgDialog.js';
 import { OrgPicker, type OrgPickerHandle } from '../orgs/OrgPicker.js';
 import {
@@ -280,6 +285,21 @@ export function ContactEditForm({
   const [evictions, setEvictions] = useState(str(contact['evictions']));
   const [tenure, setTenure] = useState(str(contact['tenure']));
   const [lifEligible, setLifEligible] = useState(contact['lifEligible'] === true);
+  // WP1 B1 (spec D2): the tenant matching inputs, one value per entry of the
+  // mirror list (tenantMatchingInputs.ts) - this form names none of the four.
+  const [matching, setMatching] = useState<Record<string, string>>(() => tenantMatchingFormValues(contact));
+  const matchingId = useId();
+  // WP1 B1 FW-11 (code review R1 CONF-1): the dollars controls' DOM nodes,
+  // read at Save. DEFENSE IN DEPTH only (WP1 B1 FW2-2, code review R2-2): this
+  // form sets no `noValidate`, so in a browser native validation refuses an
+  // entry the number input cannot parse (its value reads '' with
+  // `validity.badInput` set) with the browser's own message (Chromium:
+  // "Please enter a number.") before Save runs - no role="alert", no request.
+  // Only a form or test that skips native validation gets here, where
+  // `validity.badInput` alone tells such an entry from a cleared control
+  // (React fires no change for it). Parseable bad values (12.5, -5, 20001) do
+  // reach Save and show the server's copy in the form's role="alert".
+  const dollarsInputs = useRef(new Map<string, HTMLInputElement>());
   const [relRows, setRelRows] = useState<Relationship[]>(contact.relationships ?? []);
   const [cfRows, setCfRows] = useState<CustomField[]>(contact.customFields ?? []);
   // Track whether the editors have been expanded (start collapsed to keep the
@@ -467,6 +487,17 @@ export function ContactEditForm({
       if (evictions !== str(base['evictions'])) patch.evictions = evictions;
       if (tenure !== str(base['tenure'])) patch.tenure = tenure;
       if (lifEligible !== (base['lifEligible'] === true)) patch.lifEligible = lifEligible;
+      // WP1 B1 (spec D2): only the changed matching inputs, trimmed; a
+      // cleared one sends null (the server REMOVEs it). A bad value stops the
+      // save with the server's own copy (the mirror drift test pins it). An
+      // entry its number input could not parse is refused here too (FW-11),
+      // though in a browser native validation refuses it first (WP1 B1 FW2-2).
+      const unparseable = new Set(
+        [...dollarsInputs.current].filter(([, el]) => el.validity?.badInput === true).map(([key]) => key),
+      );
+      const matchingPatch = buildTenantMatchingPatch(matching, base, unparseable);
+      if (!matchingPatch.ok) return { error: matchingPatch.error };
+      Object.assign(patch, matchingPatch.patch);
       // Address: if ANY part changed, send the whole object (the server keeps only
       // the non-empty parts).
       if (
@@ -893,6 +924,64 @@ export function ContactEditForm({
               />
               <span className={styles.label}>LIF eligible</span>
             </label>
+            {/* WP1 B1 (spec D2): the tenant matching inputs, in list order,
+                each by its `control`. The label sits outside the control
+                (htmlFor) so the portion's "$" stays out of its name. The
+                portion takes step="any" and no min / max ON PURPOSE: native
+                validation would refuse a bad value in the browser's words
+                first, and spec D2 wants the server's (C3). The text controls
+                take no maxLength for the same reason (FW-12, R1 CONF-6): a
+                cap would cut a long paste silently - and count the
+                surrounding spaces the trim drops - so an over-long value
+                reaches Save and the server's own copy instead. */}
+            {TENANT_MATCHING_INPUTS.map((input) => {
+              const id = `${matchingId}-${input.key}`;
+              const value = matching[input.key] ?? '';
+              const onChange = (next: string): void =>
+                setMatching((prev) => ({ ...prev, [input.key]: next }));
+              return (
+                <div key={input.key} className={styles.field}>
+                  <label className={styles.label} htmlFor={id}>
+                    {input.label}
+                  </label>
+                  {input.control === 'textarea' ? (
+                    <textarea
+                      id={id}
+                      className={styles.textarea}
+                      value={value}
+                      onChange={(e) => onChange(e.target.value)}
+                      rows={3}
+                    />
+                  ) : input.control === 'dollars' ? (
+                    <span className={styles.dollarsRow}>
+                      <span aria-hidden="true">$</span>
+                      <input
+                        id={id}
+                        ref={(el) => {
+                          if (el === null) dollarsInputs.current.delete(input.key);
+                          else dollarsInputs.current.set(input.key, el);
+                        }}
+                        className={styles.input}
+                        type="number"
+                        inputMode="numeric"
+                        step="any"
+                        value={value}
+                        onChange={(e) => onChange(e.target.value)}
+                        placeholder="e.g. 400"
+                      />
+                    </span>
+                  ) : (
+                    <input
+                      id={id}
+                      className={styles.input}
+                      value={value}
+                      onChange={(e) => onChange(e.target.value)}
+                      autoComplete="off"
+                    />
+                  )}
+                </div>
+              );
+            })}
           </div>
         ) : null}
 

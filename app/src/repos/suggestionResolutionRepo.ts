@@ -201,7 +201,7 @@ export interface ActiveResolutionRow {
 export interface SuggestionResolutionRepo {
   get(contactId: string, target: string): Promise<SuggestionResolutionItem | undefined>;
   /**
-   * Every journal row this contact can have, in one BatchGet of the twelve
+   * Every journal row this contact can have, in one BatchGet of the sixteen
    * fixed `resolve#<contactId>#<target>` keys. The key set is closed: a journal
    * is only ever created from a stored `sugg#` row, and those rows only ever
    * carry a DECISION_TARGETS target. Best-effort: keys DynamoDB leaves

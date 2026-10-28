@@ -1,17 +1,25 @@
-// EligibilityIntakeCard — the tenant-only "Eligibility intake" section of the
+// EligibilityIntakeCard - the tenant-only "Eligibility intake" section of the
 // Details pane: the structured intake recorded during onboarding (pets, evictions,
-// time at current address, LIF eligibility). EVERY field always renders - an
-// unrecorded one reads as BLANK - so Team can SEE both what was captured and what
-// is still missing, and so a pending suggestion always has a row to hang its chip on.
+// time at current address, LIF eligibility), then the tenant matching inputs
+// (WP1 B1 spec D2: one row per entry of the list in tenantMatchingInputs.ts).
+// EVERY field always renders - an unrecorded one reads as BLANK - so Team can SEE
+// both what was captured and what is still missing, and so a pending suggestion
+// always has a row to hang its chip on.
 //
 // AI review (conversation-fact-extraction): a field written from an extraction
-// carries an AutoBadge; a pending suggestion for pets/evictions/tenure renders a
-// SuggestionChip on the line below its row.
-import type { Contact, FieldSource, SuggestionItem } from '../../api/index.js';
-import { BLANK, Card, KV } from './Card.js';
+// carries an AutoBadge; a pending suggestion for an extractable row renders a
+// SuggestionChip on the line below it (a portion shows as `$1,200 / month` in
+// both the row and the chip).
+import type { Contact, FieldSource, SuggestionItem, TenantMatchingInputSources } from '../../api/index.js';
+import { BLANK, Card, KV, proseValueClass } from './Card.js';
 import { AutoBadge } from './AutoBadge.js';
 import { SuggestionChip } from './SuggestionChip.js';
 import { SUGGESTION_TARGET_LABEL, suggestionFor } from './suggestionTargets.js';
+import {
+  TENANT_MATCHING_INPUTS,
+  formatTenantMatchingValue,
+  type TenantMatchingInputValues,
+} from './tenantMatchingInputs.js';
 
 export interface EligibilityIntakeCardProps {
   contact: Pick<
@@ -24,8 +32,10 @@ export interface EligibilityIntakeCardProps {
     | 'pets_source'
     | 'evictions_source'
     | 'tenure_source'
-  >;
-  /** Pending AI suggestions for this contact (chips for pets/evictions/tenure). */
+  > &
+    TenantMatchingInputValues &
+    TenantMatchingInputSources;
+  /** Pending AI suggestions for this contact (a chip for every extractable row: pets, evictions, tenure and the tenant matching inputs). */
   suggestions?: SuggestionItem[];
   onAcceptSuggestion?: (target: string) => void;
   onDismissSuggestion?: (target: string) => void;
@@ -69,7 +79,30 @@ export function EligibilityIntakeCard({
   const voucherExpires = contact.voucher_expiration_date
     ? friendlyDate(contact.voucher_expiration_date)
     : '';
-  const rows: Array<{ k: string; v: string; field?: string; src?: FieldSource }> = [
+  // WP1 B1 (spec D2): one row per tenant matching input, in list order; an
+  // entry's `formatSuggested` shows its chip's value as the row shows it, and
+  // a free-text entry renders as prose (its line breaks kept, a long value
+  // wrapped - E2-readers-2).
+  const matchingRows = TENANT_MATCHING_INPUTS.map((input) => {
+    const sourceKey = `${input.key}_source` as const;
+    const src = aiSource(contact[sourceKey]);
+    return {
+      k: input.label,
+      v: formatTenantMatchingValue(input, contact[input.key]) || BLANK,
+      field: input.key,
+      ...(src && { src }),
+      prose: input.kind === 'text',
+      formatSuggested: (raw: string): string => formatTenantMatchingValue(input, raw) || raw,
+    };
+  });
+  const rows: Array<{
+    k: string;
+    v: string;
+    field?: string;
+    src?: FieldSource;
+    prose?: boolean;
+    formatSuggested?: (raw: string) => string;
+  }> = [
     {
       k: 'Pets',
       v: contact.pets || BLANK,
@@ -93,15 +126,17 @@ export function EligibilityIntakeCard({
       v: typeof contact.lifEligible === 'boolean' ? (contact.lifEligible ? 'Yes' : 'No') : BLANK,
     },
     { k: 'Voucher expires', v: voucherExpires || BLANK },
+    ...matchingRows,
   ];
 
-  const chipFor = (target: string): React.JSX.Element | null => {
+  const chipFor = (target: string, format?: (raw: string) => string): React.JSX.Element | null => {
     const s = suggestionFor(suggestions, target);
     if (!s) return null;
     return (
       <SuggestionChip
         label={SUGGESTION_TARGET_LABEL[target] ?? target}
         suggestion={s}
+        {...(format && { value: format(s.suggestedValue) })}
         onAccept={() => onAcceptSuggestion?.(target)}
         onDismiss={() => onDismissSuggestion?.(target)}
         busy={suggestionBusy === target}
@@ -114,8 +149,8 @@ export function EligibilityIntakeCard({
     <Card title="Eligibility intake">
       {rows.map((r) => (
         <div key={r.k}>
-          <KV k={r.k} v={<>{r.v}{r.src ? <AutoBadge {...(r.src.at !== undefined && { at: r.src.at })} /> : null}</>} />
-          {r.field ? chipFor(r.field) : null}
+          <KV k={r.k} v={<>{r.prose ? <span className={proseValueClass}>{r.v}</span> : r.v}{r.src ? <AutoBadge {...(r.src.at !== undefined && { at: r.src.at })} /> : null}</>} />
+          {r.field ? chipFor(r.field, r.formatSuggested) : null}
         </div>
       ))}
     </Card>

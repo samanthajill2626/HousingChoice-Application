@@ -499,3 +499,8 @@ export const responseClass = {
   placed: styles.statusPlaced ?? '',
   inactive: styles.statusInactive ?? '',
 };
+
+/** The CSS-module class for a free-text KV value (WP1 B1 spec D2): keeps the
+ *  author's line breaks and wraps a long unbroken value, so a caller can mark a
+ *  prose row without importing the module. */
+export const proseValueClass = styles.vProse ?? '';

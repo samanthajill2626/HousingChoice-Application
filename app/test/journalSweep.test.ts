@@ -132,7 +132,8 @@ describe('journal sweep: constants are the operator-approved values', () => {
     expect(MAX_RECOVERY_CALLS_PER_RUN).toBe(100);
     expect(MAX_SCAN_PAGES).toBe(20);
     expect(SCAN_PAGE_LIMIT).toBe(200);
-    expect(SWEEP_MAX_ATTEMPTS_PER_CALL).toBe(12);
+    // B1 spec D3: the closed DECISION_TARGETS key set is sixteen.
+    expect(SWEEP_MAX_ATTEMPTS_PER_CALL).toBe(16);
   });
 });
 
@@ -509,7 +510,7 @@ describe('journal sweep: one contact failing never abandons its siblings', () =>
         },
       ],
       recover: async (contactId) => {
-        // recoverAbandoned reads the contact's 12 journals with a consistent
+        // recoverAbandoned reads the contact's 16 journal keys with a consistent
         // BatchGet that sits in its for-of HEADER, outside its per-journal
         // try, so a throttled read propagates out of the call exactly here.
         if (contactId === 'second') throw new Error('batchget throttled');

@@ -522,7 +522,7 @@ const REQUIREMENT_FORM_FIELDS: readonly FormFieldVisibility[] = REQUIREMENT_ITEM
 /**
  * D10a: every field on the New / Edit property forms, in D10 form order
  * (the New form's landlord picker, then Property details, then Requirements,
- * then Application process and Notes), with its tag - 35 rows. The first row,
+ * then Application process and Notes), with its tag - 36 rows. The first row,
  * "Owning landlord", is on the New form only (plan AR1); the Edit form has no
  * landlord field. The app-side parity walk
  * (app/test/propertyFormFlyerParity.test.ts) fails when a tag disagrees with
@@ -549,6 +549,9 @@ export const PROPERTY_FORM_FIELDS: readonly FormFieldVisibility[] = Object.freez
   formField('Public listing link', ['listing_link'], 'on_flyer'),
   formField('Video URL', ['video_url'], 'on_flyer'),
   formField('Same-day RTA', ['same_day_rta'], 'on_flyer'),
+  // WP1 B1 (spec 2026-10-26 D6): the staff Priority switch, its own row at
+  // the end of Property details. Never on the flyer.
+  formField('Priority', ['priority'], 'staff_only'),
   ...REQUIREMENT_FORM_FIELDS,
   formField('Application process', ['application_process'], 'staff_only'),
   formField('Notes', ['notes'], 'staff_only'),

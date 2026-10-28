@@ -1,7 +1,31 @@
 /**
  * Runs made-up conversations through the REAL extraction model, using the exact
  * production request (the anthropic driver, the system prompt, the output
- * schema), and scores what the model did with one field in each case.
+ * schema), and scores what the model did.
+ *
+ * TWO SUITES.
+ *   default        scores one field per case (tracker #32): ok / missed /
+ *                  wrong / failed. With --baseline it runs on THIS checkout
+ *                  AND on the baseline checkout (main), 3 runs per case on
+ *                  the same model, and compares them: half of WP1 B1's merge
+ *                  gate, because B1 changes every production prompt (spec
+ *                  2026-10-26-wp1-b1-ranking-inputs D7).
+ *   never-written  proves the never-written list holds (spec D7): each case
+ *                  states one excluded fact, or one fact that MUST be written
+ *                  (a control), and runs 3 times. It builds each request with
+ *                  the production PROPERTIES SENT renderer and runs the
+ *                  production driver, prompt and schema, then the production
+ *                  pure filters (filterNoteLines, coerceField) - it certifies
+ *                  production code, not a copy. Then ONE grader call per run
+ *                  that wrote a line or proposed a field value (the same
+ *                  --model and key, structured output, through
+ *                  createStructuredOutputClient in adapters/extraction.ts)
+ *                  judges each item against plain descriptions of the
+ *                  excluded kinds; it never sees the conversation. A line
+ *                  judged excluded fails its case; a field value judged
+ *                  excluded is reported only. There are no banned-word
+ *                  lists. Cases and the grader prompt live in
+ *                  extractionProbeNeverWritten.ts.
  *
  * WHY: the prompt-text tests in test/extractionSchema.test.ts pin what the
  * prompt SAYS; only the model can show what it DOES with it. Tracker #32 - the
@@ -9,34 +33,64 @@
  * prompt bug that no unit test could see.
  *
  * IT TOUCHES NO DATA. No database, no AWS, no queue, no stored contact: every
- * conversation below is invented, and the only network call is the Anthropic
- * API. It DOES spend money - one extraction-sized call per case per run, the
- * same as one real extraction run each.
+ * conversation is invented, and the only network call is the Anthropic API.
+ * The only file it writes is the --out record. It DOES spend money - one
+ * extraction-sized call per case per run, the same as one real extraction run
+ * each, plus (never-written only) one small grader call per run that wrote
+ * something.
  *
  * Usage (repo root; PowerShell sets the key with $env:ANTHROPIC_API_KEY = '...'):
  *   npx tsx app/scripts/extraction-prompt-probe.ts --model <id>
  *     [--runs 5] [--concurrency 4] [--case <id>] [--repo <checkout root>] [--dry-run]
+ *   npx tsx app/scripts/extraction-prompt-probe.ts --model <id> --baseline <checkout root>
+ *     --out <record.md> [--repo <checkout root>] [--concurrency 4] [--case <id>] [--dry-run]
+ *   npx tsx app/scripts/extraction-prompt-probe.ts --suite never-written --model <id>
+ *     --out <record.md> [--concurrency 4] [--case <id>] [--dry-run]
  *
- *   --model    defaults to AI_EXTRACTION_MODEL. Use the model the deployed env runs.
- *   --repo     run ANOTHER checkout's driver and prompt instead of this one's.
- *              Point it at a checkout of main to measure the deployed prompt
- *              before a change, then run without it to measure the change.
- *   --case     run only the case with this id.
- *   --dry-run  build every input and print the plan; calls nothing, needs no key.
+ *   --model     REQUIRED with --suite never-written and with --baseline: no
+ *               fallback to AI_EXTRACTION_MODEL or the code default. The plain
+ *               default suite still falls back to AI_EXTRACTION_MODEL. The
+ *               driver cannot run claude-opus-5-5 (thinking cannot be turned
+ *               off there - adapters/extraction.ts).
+ *   --repo      measure ANOTHER checkout's driver and prompt instead of this one's.
+ *   --baseline  ALSO run the default suite on this checkout (normally a checkout
+ *               of main) and compare: FAIL when any case is not measured on
+ *               either side (fewer than 2 of its 3 calls returned a result - a
+ *               refused, truncated, unparsed or failed call is no measurement),
+ *               any case's ok count is 2 or more below the baseline's, the
+ *               total is more than 2 below it, or the measured side truncates.
+ *               A failing comparison re-runs both sides once; the second
+ *               result counts.
+ *   --out       APPEND this run's record (Markdown) to the file, creating it.
+ *               With --baseline or --suite never-written only (refused on the
+ *               plain default suite, which writes no record).
+ *   --runs      plain default suite only (default 5); FIXED at 3 otherwise.
+ *   --case      run only the case with this id (the record section, of either
+ *               suite, is then marked PARTIAL - not a gate run; it never counts).
+ *   --dry-run   build every request and print the plan; calls nothing, needs no key.
  *
- * Verdicts, per run:
+ * KEY: ANTHROPIC_API_KEY from the environment, printed as its last four
+ * characters only. No agent runs this against a real model (WP1 B1 plan
+ * PR1): the gate run is Cameron's, on the TESTING key.
+ *
+ * Verdicts, default suite, per run:
  *   ok      the model proposed what the conversation supports, or nothing when
  *           it supports nothing new.
  *   missed  the conversation states a new value and the model recorded nothing.
- *           Harmless, but worth reading.
- *   wrong   the model proposed a value the conversation does not support - the
- *           class of bug this probe exists to catch.
+ *   wrong   the model proposed a value the conversation does not support.
  *   failed  the call itself failed (refusal, truncation, parse, transport).
- * Exits 1 if any run was wrong or failed, 2 on a usage error.
+ *
+ * Exit codes: 0 the run passed (plain default suite: no run wrong or failed;
+ * --baseline: the comparison passed; never-written: every automatic check
+ * passed - the record still needs Cameron's sign-off); 1 a check failed, or
+ * the run or the record write failed; 2 a usage error (nothing was called).
  *
  * The cases are worded DIFFERENTLY from the prompt's own examples on purpose:
  * a case that repeats an example only proves the model can echo it.
  */
+import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { appendFileSync, existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -44,19 +98,236 @@ import { parseArgs } from 'node:util';
 import type {
   ExtractableField,
   ExtractionCall,
+  ExtractionDriver,
   ExtractionFieldOp,
   ExtractionInput,
   ExtractionProfileSnapshot,
+  ExtractionResult,
+  StructuredOutputCall,
+  StructuredOutputClient,
+  StructuredOutputRequest,
   TranscriptUtterance,
 } from '../src/adapters/extraction.js';
+import { TENANT_MATCHING_INPUTS } from '../src/lib/tenantMatchingInputs.js';
+import type { ListingSendItem } from '../src/repos/listingSendsRepo.js';
+import type { UnitDisplayItem } from '../src/repos/unitsRepo.js';
+import type { SentPropertyEntry } from '../src/services/extraction/sentPropertiesBlock.js';
+import {
+  CONTROL_MIN_PASSES,
+  EXCLUDED_KINDS,
+  EXCLUDED_KIND_DESCRIPTIONS,
+  GATE_RUNS,
+  GRADER_SCHEMA,
+  GRADER_SYSTEM_PROMPT,
+  MIN_GRADED_RUNS,
+  NEVER_WRITTEN_CASES,
+  PRICE_TABLE,
+  SENT_PROPERTIES,
+  buildGraderUserContent,
+  type GraderItem,
+  type NeverWrittenCase,
+  type SentProperty,
+} from './extractionProbeNeverWritten.js';
+
+export const SCRIPT_NAME = 'extraction-prompt-probe';
 
 type ExtractionModule = typeof import('../src/adapters/extraction.js');
 type PromptModule = typeof import('../src/services/extraction/prompt.js');
 type OrgListModule = typeof import('../src/services/extraction/orgListBlock.js');
 type StartingListModule = typeof import('../src/lib/orgStartingList.js');
 type LoggerModule = typeof import('../src/lib/logger.js');
+// S5.3's PROPERTIES SENT module (PR30).
+type SentBlockModule = typeof import('../src/services/extraction/sentPropertiesBlock.js');
+type ApplyModule = typeof import('../src/services/extraction/apply.js');
+type LabelModule = typeof import('../src/lib/propertyLabel.js');
+type InputsModule = typeof import('../src/lib/tenantMatchingInputs.js');
+type ConfigModule = typeof import('../src/lib/config.js');
 
-interface ProbeCase {
+/**
+ * The production code a default-suite side drives. `sentBlock` is absent on
+ * a checkout from before WP1 B1 (a baseline of main): that side sends no
+ * PROPERTIES SENT block, exactly as its production does.
+ */
+export interface BaseModules {
+  extraction: ExtractionModule;
+  prompt: PromptModule;
+  orgList: OrgListModule;
+  starting: StartingListModule;
+  logger: LoggerModule;
+  sentBlock?: SentBlockModule;
+}
+
+/** What the never-written suite drives: this checkout, B1's pure filters included. */
+export interface BranchModules extends BaseModules {
+  sentBlock: SentBlockModule;
+  apply: ApplyModule;
+  label: LabelModule;
+  inputs: InputsModule;
+  config: ConfigModule;
+}
+
+const BASE_PATHS = {
+  extraction: 'app/src/adapters/extraction.ts',
+  prompt: 'app/src/services/extraction/prompt.ts',
+  orgList: 'app/src/services/extraction/orgListBlock.ts',
+  starting: 'app/src/lib/orgStartingList.ts',
+  logger: 'app/src/lib/logger.ts',
+} as const;
+/** S5.3's module (PR30). Its presence is how a checkout is recognized as WP1 B1. */
+const SENT_BLOCK_PATH = 'app/src/services/extraction/sentPropertiesBlock.ts';
+const BRANCH_PATHS = {
+  apply: 'app/src/services/extraction/apply.ts',
+  label: 'app/src/lib/propertyLabel.ts',
+  inputs: 'app/src/lib/tenantMatchingInputs.ts',
+  config: 'app/src/lib/config.ts',
+} as const;
+
+/** Import a module from the target checkout by path, so --repo / --baseline run THAT code. */
+async function load<T>(repoRoot: string, relative: string): Promise<T> {
+  return (await import(pathToFileURL(path.join(repoRoot, relative)).href)) as T;
+}
+
+export async function loadBaseModules(root: string): Promise<BaseModules> {
+  const m: BaseModules = {
+    extraction: await load<ExtractionModule>(root, BASE_PATHS.extraction),
+    prompt: await load<PromptModule>(root, BASE_PATHS.prompt),
+    orgList: await load<OrgListModule>(root, BASE_PATHS.orgList),
+    starting: await load<StartingListModule>(root, BASE_PATHS.starting),
+    logger: await load<LoggerModule>(root, BASE_PATHS.logger),
+  };
+  if (existsSync(path.join(root, SENT_BLOCK_PATH))) m.sentBlock = await load<SentBlockModule>(root, SENT_BLOCK_PATH);
+  return m;
+}
+
+export async function loadBranchModules(root: string): Promise<BranchModules> {
+  const m = await loadBaseModules(root);
+  if (m.sentBlock === undefined) throw new Error(`${root} has no ${SENT_BLOCK_PATH} - the never-written suite needs a WP1 B1 checkout`);
+  return {
+    ...m,
+    sentBlock: m.sentBlock,
+    apply: await load<ApplyModule>(root, BRANCH_PATHS.apply),
+    label: await load<LabelModule>(root, BRANCH_PATHS.label),
+    inputs: await load<InputsModule>(root, BRANCH_PATHS.inputs),
+    config: await load<ConfigModule>(root, BRANCH_PATHS.config),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// SEAMS - the ONLY lines that name an S4/S5 signature (plan section 10,
+// cross-slice notes 1-4; ruling PR30). Written against S4.2's
+// filterNoteLines, S4.1's parseExtractionFactMinConfidence, S5.3's
+// selectSentRows / renderSentPropertiesBlock / SentPropertyEntry and S5.4's
+// ExtractionInput.sentPropertiesBlock as this plan defines them. If the tree
+// differs, the earlier slice deviated: STOP and report it (do not bend the
+// probe around it - the gate must run production code).
+// ---------------------------------------------------------------------------
+
+/** S5.4: the field ExtractionInput carries the block in (required since B1). */
+function withSentBlock(input: Omit<ExtractionInput, 'sentPropertiesBlock'>, block: string): ExtractionInput {
+  return { ...input, sentPropertiesBlock: block };
+}
+
+/**
+ * One listing_sends row as listingSendsRepo.listByContact returns it: listed
+ * (a string sentAt), its ONE share counted at sentAt and keyed `flyer` (a
+ * flyer sign-up - lib/shareLedgerKeys.ts FLYER_SHARE_KEY) when signedUp, else
+ * `individual`. selectSentRows - not this function - decides "signed up".
+ */
+function sentRow(p: SentProperty): ListingSendItem {
+  const key = p.signedUp === true ? 'flyer' : 'individual';
+  const attempt = p.signedUp === true ? `${p.sentAt}#flyer` : '!individual';
+  return {
+    unitId: p.unitId,
+    contactId: 'probe-contact',
+    sentAt: p.sentAt,
+    via: 'individual',
+    created_at: p.sentAt,
+    updated_at: p.sentAt,
+    counted: true,
+    shares: { [key]: { attempt, state: 'counted', by: 'acceptance', countedAt: p.sentAt } },
+  };
+}
+
+/** The unit display the job's getDisplaysByIds read returns for a sent property. */
+function sentDisplay(p: SentProperty): UnitDisplayItem {
+  return {
+    unitId: p.unitId,
+    address: { line1: p.line1, ...(p.line2 !== undefined && { line2: p.line2 }), city: p.city, state: 'GA' },
+  };
+}
+
+/**
+ * S5: the production PROPERTIES SENT block text ('' on a checkout from before
+ * B1). Built EXACTLY as jobs/extraction.ts builds it (S5.6): selectSentRows
+ * over the rows (newest 20 by sentAt; signed up = the latest counted share is
+ * the flyer entry), then each selected row joined with its unit display into a
+ * SentPropertyEntry `{ unit, sentAt, signedUp }`, a row with no display
+ * skipped, then renderSentPropertiesBlock. Never build the entries straight
+ * from SentProperty.signedUp: that would bypass production's row selection.
+ */
+export function renderSentBlock(m: BaseModules, sent: readonly SentProperty[]): string {
+  if (m.sentBlock === undefined) return '';
+  const displays = new Map(sent.map((p) => [p.unitId, sentDisplay(p)]));
+  const entries: SentPropertyEntry[] = m.sentBlock.selectSentRows(sent.map(sentRow)).flatMap((row) => {
+    const unit = displays.get(row.unitId);
+    return unit === undefined ? [] : [{ unit, sentAt: row.sentAt, signedUp: row.signedUp }];
+  });
+  return m.sentBlock.renderSentPropertiesBlock(entries).text;
+}
+
+/** S5: the label production gives a sent property (undefined = production leaves it out). */
+export function labelOf(m: BranchModules, p: SentProperty): string | undefined {
+  return m.label.propertyLabel({ address: sentDisplay(p).address });
+}
+
+
+/**
+ * S4.2: the lines production would append - its PURE filter (clamp, floor,
+ * postal filter, retry guard, cap; spec D4) with no system lines and no
+ * demotion. The model lines are `append.slice(0, modelCount)` (with no
+ * system lines that is all of `append`). The probe never filters a line
+ * itself (plan PR4).
+ */
+export function writtenLines(
+  m: BranchModules,
+  result: ExtractionResult,
+  existingNotes: string,
+  floor: number,
+): { lines: string[]; belowFloor: number } {
+  const out = m.apply.filterNoteLines({
+    modelLines: result.noteLines,
+    systemLines: [],
+    floor,
+    existingNotes,
+    demoted: false,
+  });
+  return { lines: out.append.slice(0, out.modelCount), belowFloor: out.belowFloor };
+}
+
+/**
+ * S4.1 (PR35): the floor, parsed by PRODUCTION's own pure parser
+ * (`parseExtractionFactMinConfidence`: blank or absent = 0.7, otherwise a
+ * finite 0 < x <= 1, else it throws) - never a full loadConfig.
+ */
+export function factFloor(m: BranchModules, env: NodeJS.ProcessEnv): number {
+  return m.config.parseExtractionFactMinConfidence(env.EXTRACTION_FACT_MIN_CONFIDENCE);
+}
+
+/** Every sent property's production label, by unitId (a property production leaves out has none). */
+export function sentLabels(m: BranchModules): Map<string, string> {
+  const labels = new Map<string, string>();
+  for (const p of SENT_PROPERTIES) {
+    const l = labelOf(m, p);
+    if (l !== undefined) labels.set(p.unitId, l);
+  }
+  return labels;
+}
+
+// ---------------------------------------------------------------------------
+// The default suite (tracker #32) - behavior unchanged.
+// ---------------------------------------------------------------------------
+
+export interface ProbeCase {
   id: string;
   about: string;
   field: ExtractableField;
@@ -67,7 +338,7 @@ interface ProbeCase {
   lines: Array<[TranscriptUtterance['speaker'], TranscriptUtterance['channel'], string]>;
 }
 
-const CASES: readonly ProbeCase[] = [
+export const DEFAULT_CASES: readonly ProbeCase[] = [
   {
     id: 'states-voucher',
     about: 'Voucher size stated, profile blank',
@@ -155,9 +426,9 @@ const CASES: readonly ProbeCase[] = [
   },
 ];
 
-type Verdict = 'ok' | 'missed' | 'wrong' | 'failed';
+export type Verdict = 'ok' | 'missed' | 'wrong' | 'failed';
 
-interface RunOutcome {
+export interface RunOutcome {
   verdict: Verdict;
   /** "none", or `<op> "<value>"`; the failure kind on a failed call. */
   said: string;
@@ -166,46 +437,50 @@ interface RunOutcome {
   outputTokens: number;
 }
 
-const USAGE = 'Usage: npx tsx app/scripts/extraction-prompt-probe.ts --model <id> '
-  + '[--runs 5] [--concurrency 4] [--case <id>] [--repo <checkout root>] [--dry-run]';
-
-function fail(message: string): never {
-  console.error(`${message}\n${USAGE}`);
-  process.exit(2);
-}
-
-function positiveInt(raw: string, flag: string): number {
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n < 1) fail(`${flag} must be a positive integer, got "${raw}"`);
-  return n;
-}
-
 function norm(value: string | undefined): string | undefined {
   return value === undefined ? undefined : value.trim().toLowerCase();
 }
+
+/**
+ * FW-15 (code review R1 CONF-7): the WP1 B1 inputs of the `dollars` kind, found
+ * through THIS checkout's list (a leaf module) - the probe names none of them.
+ */
+const DOLLARS_INPUTS: ReadonlySet<string> = new Set(
+  TENANT_MATCHING_INPUTS.filter((i) => i.kind === 'dollars').map((i) => i.key),
+);
 
 /** Place a recorded value on the profile in the type the job's toProfile gives it. */
 function withRecorded(profile: ExtractionProfileSnapshot, field: ExtractableField, recorded: string): void {
   if (field === 'voucherSize') profile.voucherSize = Number(recorded);
   else if (field === 'porting') profile.porting = recorded === 'true';
-  else profile[field] = recorded;
+  // A WP1 B1 dollars input is a number on the profile; every other field is text.
+  else (profile as unknown as Record<string, unknown>)[field] = DOLLARS_INPUTS.has(field) ? Number(recorded) : recorded;
 }
 
-function buildInput(c: ProbeCase, orgListBlock: string): ExtractionInput {
-  const profile: ExtractionProfileSnapshot = { contactType: 'tenant', phones: ['+15555550123'] };
-  if (c.recorded !== undefined) withRecorded(profile, c.field, c.recorded);
-  const start = Date.parse('2026-10-01T15:00:00.000Z');
-  const transcript = c.lines.map(([speaker, channel, text], i): TranscriptUtterance => ({
-    tsMsgId: `probe-${i}`,
+/** tsMsgId carries the case id (never rendered into the prompt) so a stub driver can tell cases apart. */
+function transcriptOf(
+  id: string,
+  prefix: 'probe' | 'nw',
+  startIso: string,
+  lines: ReadonlyArray<readonly [TranscriptUtterance['speaker'], TranscriptUtterance['channel'], string]>,
+): TranscriptUtterance[] {
+  const start = Date.parse(startIso);
+  return lines.map(([speaker, channel, text], i): TranscriptUtterance => ({
+    tsMsgId: `${prefix}-${id}-${i}`,
     speaker,
     channel,
     text,
     at: new Date(start + i * 60_000).toISOString(),
   }));
-  return { transcript, profile, orgListBlock };
 }
 
-function judge(c: ProbeCase, op: ExtractionFieldOp | undefined): Verdict {
+export function buildInput(c: ProbeCase, orgListBlock: string, sentBlock: string): ExtractionInput {
+  const profile: ExtractionProfileSnapshot = { contactType: 'tenant', phones: ['+15555550123'] };
+  if (c.recorded !== undefined) withRecorded(profile, c.field, c.recorded);
+  return withSentBlock({ transcript: transcriptOf(c.id, 'probe', '2026-10-01T15:00:00.000Z', c.lines), profile, orgListBlock }, sentBlock);
+}
+
+export function judge(c: ProbeCase, op: ExtractionFieldOp | undefined): Verdict {
   // parseExtractionText already downgrades a write/suggest with no value to none.
   const proposed = op !== undefined && op.op !== 'none' ? norm(op.value) : undefined;
   if (proposed === undefined) {
@@ -215,7 +490,7 @@ function judge(c: ProbeCase, op: ExtractionFieldOp | undefined): Verdict {
   return target !== undefined && proposed === norm(target) ? 'ok' : 'wrong';
 }
 
-function outcomeOf(c: ProbeCase, call: ExtractionCall): RunOutcome {
+export function outcomeOf(c: ProbeCase, call: ExtractionCall): RunOutcome {
   const inputTokens = call.meta.usage?.inputTokens ?? 0;
   const outputTokens = call.meta.usage?.outputTokens ?? 0;
   if (!call.ok) return { verdict: 'failed', said: call.failure, reason: call.message, inputTokens, outputTokens };
@@ -230,7 +505,7 @@ function outcomeOf(c: ProbeCase, call: ExtractionCall): RunOutcome {
   };
 }
 
-async function pool<T>(jobs: ReadonlyArray<() => Promise<T>>, size: number): Promise<T[]> {
+export async function pool<T>(jobs: ReadonlyArray<() => Promise<T>>, size: number): Promise<T[]> {
   const results = new Array<T>(jobs.length);
   let next = 0;
   const worker = async (): Promise<void> => {
@@ -243,79 +518,85 @@ async function pool<T>(jobs: ReadonlyArray<() => Promise<T>>, size: number): Pro
   return results;
 }
 
-/** Import a module from the target checkout by path, so --repo runs THAT code. */
-async function load<T>(repoRoot: string, relative: string): Promise<T> {
-  return (await import(pathToFileURL(path.join(repoRoot, relative)).href)) as T;
+/** A driver that throws is a failed call, never an escaped exception. */
+export async function safeExtract(driver: ExtractionDriver, input: ExtractionInput): Promise<ExtractionCall> {
+  try {
+    return await driver.extract(input);
+  } catch (err) {
+    return { ok: false, meta: { driver: driver.kind }, failure: 'driver', message: err instanceof Error ? err.message : String(err) };
+  }
 }
 
-async function main(): Promise<void> {
-  const { values } = parseArgs({
-    options: {
-      model: { type: 'string' },
-      runs: { type: 'string', default: '5' },
-      concurrency: { type: 'string', default: '4' },
-      case: { type: 'string' },
-      repo: { type: 'string' },
-      'dry-run': { type: 'boolean', default: false },
-    },
-    strict: true,
-  });
-  const runs = positiveInt(values.runs, '--runs');
-  const concurrency = positiveInt(values.concurrency, '--concurrency');
-  const dryRun = values['dry-run'];
-  const model = values.model ?? process.env.AI_EXTRACTION_MODEL;
-  if (model === undefined || model.length === 0) fail('--model is required (or set AI_EXTRACTION_MODEL).');
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!dryRun && (apiKey === undefined || apiKey.length === 0)) fail('ANTHROPIC_API_KEY is not set.');
-  const cases = values.case === undefined ? CASES : CASES.filter((c) => c.id === values.case);
-  if (cases.length === 0) fail(`No case "${values.case}". Cases: ${CASES.map((c) => c.id).join(', ')}`);
-
-  const ownRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-  const repoRoot = path.resolve(values.repo ?? ownRoot);
-  const extraction = await load<ExtractionModule>(repoRoot, 'app/src/adapters/extraction.ts');
-  const prompt = await load<PromptModule>(repoRoot, 'app/src/services/extraction/prompt.ts');
-  const orgList = await load<OrgListModule>(repoRoot, 'app/src/services/extraction/orgListBlock.ts');
-  const starting = await load<StartingListModule>(repoRoot, 'app/src/lib/orgStartingList.ts');
-  const { createLogger } = await load<LoggerModule>(repoRoot, 'app/src/lib/logger.ts');
-
-  // The starting organization list, rendered the way a real run renders the
-  // stored list, so the request has the same shape as production's.
+/** The starting organization list, rendered the way a real run renders the stored list. */
+function startingOrgListBlock(m: BaseModules): string {
   let orgSeq = 0;
-  const entries = starting.buildStartingEntries('2026-10-01T00:00:00.000Z', () => `probe-org-${++orgSeq}`);
-  const orgListBlock = orgList.renderOrgListBlock(entries).text;
+  const entries = m.starting.buildStartingEntries('2026-10-01T00:00:00.000Z', () => `probe-org-${++orgSeq}`);
+  return m.orgList.renderOrgListBlock(entries).text;
+}
 
-  console.log('Extraction prompt probe');
-  console.log(`  checkout  ${repoRoot}`);
-  console.log(`  model     ${model}`);
-  console.log(`  prompt    ${prompt.extractionPromptFingerprint()}`);
-  console.log(`  runs      ${runs} per case, ${cases.length} case(s), ${runs * cases.length} call(s)`);
-  if (dryRun) {
-    for (const c of cases) {
-      const input = buildInput(c, orgListBlock);
-      console.log(`\n[${c.id}] ${c.about}`);
-      console.log(`  ${c.field}: recorded ${c.recorded ?? '(blank)'}, supports ${c.supports ?? '(nothing new)'}`);
-      for (const u of input.transcript) console.log(`  ${prompt.renderUtteranceLine(u)}`);
+/** The key, as its last four characters only (spec D7). */
+export function keyTail(key: string | undefined): string {
+  if (key === undefined || key.length === 0) return '(not set)';
+  if (key.length < 8) return '(set, too short to show)';
+  return `...${key.slice(-4)}`;
+}
+
+/** FW-8: where the API calls go, as printed - never a credential or a value beyond the URL's host. */
+export interface Endpoint {
+  /** The host of ANTHROPIC_BASE_URL (with "(from ANTHROPIC_BASE_URL)"), or "default". */
+  baseUrlHost: string;
+  /** Whether ANTHROPIC_AUTH_TOKEN is set - never its value. */
+  authToken: 'yes' | 'no';
+}
+
+/**
+ * FW-8 (code review R1 ADV-12): the SDK reads ANTHROPIC_BASE_URL and
+ * ANTHROPIC_AUTH_TOKEN from the environment when the client is given none, so
+ * a proxy or mock left in the shell would silently redirect both the
+ * extraction and the grader calls. Read from the INJECTED env: the base URL's
+ * host only (never its path, query or credentials), and whether a bearer
+ * token is set.
+ */
+export function endpointOf(env: NodeJS.ProcessEnv): Endpoint {
+  const raw = env.ANTHROPIC_BASE_URL?.trim() ?? '';
+  let baseUrlHost = 'default';
+  if (raw.length > 0) {
+    try {
+      baseUrlHost = `${new URL(raw).host || '(no host)'} (from ANTHROPIC_BASE_URL)`;
+    } catch {
+      baseUrlHost = 'ANTHROPIC_BASE_URL is set but is not a URL';
     }
-    console.log('\nDry run: nothing was sent.');
-    return;
   }
+  return { baseUrlHost: asciiSafe(baseUrlHost), authToken: (env.ANTHROPIC_AUTH_TOKEN ?? '').trim().length > 0 ? 'yes' : 'no' };
+}
 
-  const driver = extraction.createExtractionDriver({
-    driver: 'anthropic',
-    model,
-    apiKey,
-    logger: createLogger({ level: 'silent' }),
-  });
-  const jobs = cases.flatMap((c) => {
-    const input = buildInput(c, orgListBlock);
-    return Array.from({ length: runs }, () => async () => outcomeOf(c, await driver.extract(input)));
-  });
-  const outcomes = await pool(jobs, concurrency);
+/** FW-8: the console line every suite prints under its key. */
+function endpointConsoleLine(e: Endpoint): string {
+  return `  endpoint  ${e.baseUrlHost}; ANTHROPIC_AUTH_TOKEN set: ${e.authToken}`;
+}
 
+/** FW-8: the record line both records carry under the key. */
+function endpointRecordLine(e: Endpoint): string {
+  return `- API endpoint: ${e.baseUrlHost}; ANTHROPIC_AUTH_TOKEN set: ${e.authToken}`;
+}
+
+function selectCases<T extends { id: string }>(all: readonly T[], id: string | undefined): readonly T[] | undefined {
+  if (id === undefined) return all;
+  const picked = all.filter((c) => c.id === id);
+  return picked.length === 0 ? undefined : picked;
+}
+
+/** Prints the ok/missed/wrong/failed table (the old main's table loop) and returns the totals. */
+function printDefaultTable(
+  print: (line: string) => void,
+  cases: readonly ProbeCase[],
+  runs: number,
+  outcomes: readonly RunOutcome[],
+): { totals: Record<Verdict, number>; inputTokens: number; outputTokens: number } {
   const totals: Record<Verdict, number> = { ok: 0, missed: 0, wrong: 0, failed: 0 };
   let inputTokens = 0;
   let outputTokens = 0;
-  console.log('\n    ok  missed   wrong  failed  case');
+  print('\n    ok  missed   wrong  failed  case');
   cases.forEach((c, ci) => {
     const mine = outcomes.slice(ci * runs, (ci + 1) * runs);
     const counts: Record<Verdict, number> = { ok: 0, missed: 0, wrong: 0, failed: 0 };
@@ -326,7 +607,7 @@ async function main(): Promise<void> {
       outputTokens += o.outputTokens;
     }
     const cols = (['ok', 'missed', 'wrong', 'failed'] as const).map((v) => String(counts[v]).padStart(6)).join('  ');
-    console.log(`${cols}  ${c.id} - ${c.about}`);
+    print(`${cols}  ${c.id} - ${c.about}`);
     // Every distinct answer that was not ok, once, with the model's first reason.
     const seen = new Set<string>();
     for (const o of mine) {
@@ -335,14 +616,1306 @@ async function main(): Promise<void> {
       if (seen.has(key)) continue;
       seen.add(key);
       const n = mine.filter((m) => m.verdict === o.verdict && m.said === o.said).length;
-      console.log(`          ${o.verdict}: ${o.said} x${n}${o.reason === undefined ? '' : ` - ${o.reason}`}`);
+      print(`          ${o.verdict}: ${o.said} x${n}${o.reason === undefined ? '' : ` - ${o.reason}`}`);
     }
   });
-  console.log(
+  print(
     `\nTotals: ok ${totals.ok}, missed ${totals.missed}, wrong ${totals.wrong}, failed ${totals.failed}`
     + ` | tokens in ${inputTokens}, out ${outputTokens}`,
   );
-  if (totals.wrong > 0 || totals.failed > 0) process.exitCode = 1;
+  return { totals, inputTokens, outputTokens };
 }
 
-await main();
+// ---------------------------------------------------------------------------
+// The default suite, branch vs baseline (spec D7).
+// ---------------------------------------------------------------------------
+
+export interface SideScore {
+  okByCase: Record<string, number>;
+  /** FW-1: per case, the runs whose call returned a result (any verdict but `failed`). */
+  measuredByCase: Record<string, number>;
+  totalOk: number;
+  truncations: number;
+  totals: Record<Verdict, number>;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+export interface Comparison {
+  pass: boolean;
+  reasons: string[];
+  caseDrops: Array<{ id: string; branch: number; baseline: number }>;
+  totalDelta: number;
+}
+
+/**
+ * FW-1 (code review R1 ADV-1): a comparison case needs at least this many of
+ * its GATE_RUNS runs MEASURED - the call returned a result, so a refusal, a
+ * truncation, a parse or a driver failure is not one - on EACH side, or it is
+ * "not measured" and the comparison FAILS. The never-written suite's bar
+ * (MIN_GRADED_RUNS): a side that measured nothing must never read as a pass.
+ */
+export const MIN_MEASURED_RUNS = MIN_GRADED_RUNS;
+
+export function scoreSide(cases: readonly ProbeCase[], runs: number, outcomes: readonly RunOutcome[]): SideScore {
+  const okByCase: Record<string, number> = {};
+  const measuredByCase: Record<string, number> = {};
+  const totals: Record<Verdict, number> = { ok: 0, missed: 0, wrong: 0, failed: 0 };
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let truncations = 0;
+  cases.forEach((c, ci) => {
+    const mine = outcomes.slice(ci * runs, (ci + 1) * runs);
+    okByCase[c.id] = mine.filter((o) => o.verdict === 'ok').length;
+    measuredByCase[c.id] = mine.filter((o) => o.verdict !== 'failed').length;
+    for (const o of mine) {
+      totals[o.verdict] += 1;
+      inputTokens += o.inputTokens;
+      outputTokens += o.outputTokens;
+      if (o.verdict === 'failed' && o.said === 'truncated') truncations += 1;
+    }
+  });
+  return { okByCase, measuredByCase, totalOk: totals.ok, truncations, totals, inputTokens, outputTokens };
+}
+
+/**
+ * FAIL when a case is not measured on either side (FW-1: fewer than
+ * MIN_MEASURED_RUNS of its GATE_RUNS runs returned a result), a case's ok
+ * count is 2 or more below the baseline's, the total is MORE than 2 below, or
+ * the branch truncated.
+ */
+export function compareDefaultSuites(branch: SideScore, baseline: SideScore): Comparison {
+  const reasons: string[] = [];
+  const ids = [...new Set([...Object.keys(branch.okByCase), ...Object.keys(baseline.okByCase)])];
+  for (const id of ids) {
+    for (const [where, s] of [['branch', branch], ['baseline', baseline]] as const) {
+      const measured = s.measuredByCase[id] ?? 0;
+      if (measured < MIN_MEASURED_RUNS) {
+        reasons.push(`${id}: not measured on the ${where} (${measured} of ${GATE_RUNS} runs returned a result; needs ${MIN_MEASURED_RUNS})`);
+      }
+    }
+  }
+  const caseDrops = Object.keys(baseline.okByCase)
+    .map((id) => ({ id, branch: branch.okByCase[id] ?? 0, baseline: baseline.okByCase[id] ?? 0 }))
+    .filter((d) => d.baseline - d.branch >= 2);
+  for (const d of caseDrops) reasons.push(`${d.id}: ok ${d.branch} on the branch vs ${d.baseline} on the baseline (2 or more below)`);
+  const totalDelta = branch.totalOk - baseline.totalOk;
+  if (totalDelta < -2) reasons.push(`total ok ${branch.totalOk} on the branch vs ${baseline.totalOk} on the baseline (more than 2 below)`);
+  if (branch.truncations > 0) reasons.push(`${branch.truncations} truncated call(s) on the branch`);
+  return { pass: reasons.length === 0, reasons, caseDrops, totalDelta };
+}
+
+interface ComparisonSide {
+  root: string;
+  m: BaseModules;
+  commit: string;
+  dirty: boolean;
+  fingerprint: string;
+  orgListBlock: string;
+  sentBlock: string;
+}
+
+interface ComparisonAttempt {
+  branch: SideScore;
+  baseline: SideScore;
+  comparison: Comparison;
+  outcomes: [RunOutcome[], RunOutcome[]];
+}
+
+function notOkLines(cases: readonly ProbeCase[], outcomes: readonly RunOutcome[]): string[] {
+  const lines: string[] = [];
+  cases.forEach((c, ci) => {
+    const mine = outcomes.slice(ci * GATE_RUNS, (ci + 1) * GATE_RUNS).filter((o) => o.verdict !== 'ok');
+    const seen = new Map<string, number>();
+    for (const o of mine) seen.set(`${o.verdict}: ${o.said}`, (seen.get(`${o.verdict}: ${o.said}`) ?? 0) + 1);
+    for (const [said, n] of seen) lines.push(`  - ${c.id} ${asciiSafe(said)} x${n}`);
+  });
+  return lines;
+}
+
+export function renderComparisonRecord(r: {
+  startedAt: string;
+  model: string;
+  keyTail: string;
+  cases: readonly ProbeCase[];
+  sides: readonly [ComparisonSide, ComparisonSide];
+  attempts: readonly ComparisonAttempt[];
+  /** FW-3: --case was given - one case, not a gate run; the section never counts. */
+  partial: boolean;
+  /** FW-8: where both sides' calls went. */
+  endpoint: Endpoint;
+}): string {
+  const final = r.attempts[r.attempts.length - 1]!;
+  const out: string[] = [];
+  out.push(`## Default suite, branch vs baseline - ${r.startedAt}${r.partial ? ' (PARTIAL: one case, not a gate run)' : ''}`, '');
+  out.push(
+    `- Verdict: ${final.comparison.pass ? 'PASS' : 'FAIL'} (after ${r.attempts.length} attempt(s))`
+      + (r.partial ? ' - PARTIAL (one case, not a gate run; it never counts)' : ''),
+  );
+  out.push(`- Model: ${r.model}`, `- Key: ${r.keyTail}`, endpointRecordLine(r.endpoint));
+  const [b, m] = r.sides;
+  out.push(`- Branch: ${asciiSafe(b.root)} @ ${b.commit}${b.dirty ? ' (tracked files modified)' : ''}, prompt ${b.fingerprint}`);
+  out.push(`- Baseline: ${asciiSafe(m.root)} @ ${m.commit}${m.dirty ? ' (tracked files modified)' : ''}, prompt ${m.fingerprint}`);
+  out.push(
+    `- Rule (spec D7): ${GATE_RUNS} runs per case per side; FAIL when any case is not measured on either side`
+      + ` (fewer than ${MIN_MEASURED_RUNS} of its ${GATE_RUNS} calls returned a result), any case's ok count is 2 or more below the baseline's,`
+      + ' the total ok count is more than 2 below it, or the branch truncates; one re-run of both sides is allowed.',
+    '',
+  );
+  r.attempts.forEach((a, i) => {
+    out.push(`### Attempt ${i + 1} - ${a.comparison.pass ? 'PASS' : 'FAIL'}`, '');
+    out.push('| case | branch ok | baseline ok |', '|---|---|---|');
+    for (const c of r.cases) out.push(`| ${c.id} | ${a.branch.okByCase[c.id] ?? 0}/${GATE_RUNS} | ${a.baseline.okByCase[c.id] ?? 0}/${GATE_RUNS} |`);
+    const max = r.cases.length * GATE_RUNS;
+    out.push(`| total | ${a.branch.totalOk}/${max} | ${a.baseline.totalOk}/${max} |`, '');
+    for (const reason of a.comparison.reasons) out.push(`- Reason: ${asciiSafe(reason)}`);
+    out.push('- Branch answers that were not ok:', ...notOkLines(r.cases, a.outcomes[0]));
+    out.push('- Baseline answers that were not ok:', ...notOkLines(r.cases, a.outcomes[1]));
+    out.push(`- Branch tokens: in ${a.branch.inputTokens}, out ${a.branch.outputTokens}; ${costText(r.model, a.branch.inputTokens, a.branch.outputTokens)}`);
+    out.push(`- Baseline tokens: in ${a.baseline.inputTokens}, out ${a.baseline.outputTokens}; ${costText(r.model, a.baseline.inputTokens, a.baseline.outputTokens)}`);
+    out.push('');
+  });
+  return out.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// The never-written suite (spec D7 rev 9) - pure scoring, the grader's answer
+// and the record. There are no banned-word lists: ONE grader call per run
+// judges every item (S6.4 makes the call; this section builds the request and
+// applies the answer).
+// ---------------------------------------------------------------------------
+
+export interface NeverWrittenContext {
+  modules: BranchModules;
+  floor: number;
+  /** unitId -> production label, for every sent property in the block. */
+  labels: ReadonlyMap<string, string>;
+}
+
+export interface FieldProposal {
+  field: string;
+  op: 'write' | 'suggest';
+  /** The value the model proposed - what the grader judges. */
+  raw: string;
+  coercedOk: boolean;
+  coercedValue?: unknown;
+  /** "<value>" or "dropped (<reason>)", for the record. */
+  coerced: string;
+}
+
+/** One thing the grader judges, with its verdict once the grader's answer is applied. */
+export interface JudgedItem extends GraderItem {
+  source: 'line' | 'field';
+  /** The field key, on a field item. */
+  field?: string;
+  /** Absent until a grader answer is applied, and on an ungraded run (except an item it judged excluded - FW-2). */
+  verdict?: 'excluded' | 'clean';
+  /** The excluded kind ('unspecified' when the grader named none); 'none' when clean. */
+  kind?: string;
+  reason?: string;
+  /** FW-5: the grader called this item "clean" yet named this kind - a malformed entry, so it has no verdict. */
+  cleanButKind?: string;
+}
+
+/**
+ * not-scored  the extraction call failed: nothing to judge, and the run is not scored.
+ * not-needed  no line written and no field value proposed: no grader call (spec
+ *             D7); counts as graded (plan section 10, decision 10).
+ * pending     items exist and no grader answer has been applied.
+ * graded      the grader answered and its output parsed: every item has a verdict.
+ * ungraded    the grader call failed or its output did not parse (spec D7).
+ */
+export type Grading = 'not-scored' | 'not-needed' | 'pending' | 'graded' | 'ungraded';
+
+export interface NeverWrittenRun {
+  ok: boolean;
+  failure?: 'refusal' | 'parse' | 'truncated' | 'driver';
+  message?: string;
+  /** The lines production would append, after its filters. */
+  written: string[];
+  belowFloor: number;
+  fields: FieldProposal[];
+  addressOp: boolean;
+  /** This run met the case's expectation (an excluded case: the call was scored). */
+  passed: boolean;
+  /** Every written line, then every proposed field value - what the grader judges. */
+  items: JudgedItem[];
+  grading: Grading;
+  /** Why the run is ungraded. */
+  graderFailure?: string;
+  /** FW-2: the grader's raw answer on a run it answered but left ungraded (the answer did not parse), for the record. */
+  graderText?: string;
+  inputTokens: number;
+  outputTokens: number;
+  graderInputTokens: number;
+  graderOutputTokens: number;
+}
+
+export interface CaseVerdict {
+  id: string;
+  pass: boolean;
+  reasons: string[];
+  passedRuns: number;
+  /** Runs both scored and graded (or with nothing to judge). */
+  gradedRuns: number;
+  ungradedRuns: number;
+  /** FW-7: the items of those runs that carry no verdict - what "Lines the grader did not judge" lists. */
+  ungradedItems: number;
+  /** Written lines judged excluded - each fails the case. */
+  excludedLines: number;
+  /** Field values judged excluded - reported, never failing. */
+  excludedFields: number;
+  truncations: number;
+}
+
+export interface SuiteVerdict {
+  pass: boolean;
+  reasons: string[];
+  excludedLines: number;
+  excludedFields: number;
+  truncations: number;
+  ungradedRuns: number;
+  /** FW-7: see CaseVerdict.ungradedItems. */
+  ungradedItems: number;
+}
+
+function meets(
+  c: NeverWrittenCase,
+  written: readonly string[],
+  fields: readonly FieldProposal[],
+  addressOp: boolean,
+  ctx: NeverWrittenContext,
+): boolean {
+  const e = c.expect;
+  const namesSent = (l: string): boolean => [...ctx.labels.values()].some((label) => ctx.modules.label.labelMatches(l, label));
+  switch (e.kind) {
+    case 'nothing-excluded':
+      return true; // the grader's verdicts are separate and count for every case
+    case 'line':
+      return written.some((l) => e.pattern.test(l));
+    case 'field':
+      return fields.some(
+        (f) =>
+          f.field === e.field &&
+          f.coercedOk &&
+          (e.equals === undefined || f.coercedValue === e.equals) &&
+          (e.pattern === undefined || e.pattern.test(String(f.coercedValue))),
+      );
+    case 'feedback': {
+      const label = ctx.labels.get(e.unitId);
+      return label !== undefined && written.some((l) => ctx.modules.label.labelMatches(l, label));
+    }
+    case 'untied-feedback':
+      return written.length > 0 && !written.some(namesSent);
+    case 'no-address-op':
+      return !addressOp;
+  }
+}
+
+/** One extraction call, scored through the PRODUCTION filters (filterNoteLines, coerceField). Not yet graded. */
+export function evaluateRun(c: NeverWrittenCase, call: ExtractionCall, ctx: NeverWrittenContext): NeverWrittenRun {
+  const inputTokens = call.meta.usage?.inputTokens ?? 0;
+  const outputTokens = call.meta.usage?.outputTokens ?? 0;
+  const noGrader = { graderInputTokens: 0, graderOutputTokens: 0 };
+  if (!call.ok) {
+    return {
+      ok: false, failure: call.failure, message: call.message, written: [], belowFloor: 0, fields: [],
+      addressOp: false, passed: false, items: [], grading: 'not-scored', inputTokens, outputTokens, ...noGrader,
+    };
+  }
+  const existingNotes = typeof c.profile?.notes === 'string' ? c.profile.notes : '';
+  const { lines, belowFloor } = writtenLines(ctx.modules, call.result, existingNotes, ctx.floor);
+  const labelOfField = new Map<string, string>(ctx.modules.inputs.TENANT_MATCHING_INPUTS.map((i) => [i.key, i.label] as const));
+  const fields: FieldProposal[] = ctx.modules.inputs.TENANT_MATCHING_INPUTS.flatMap((input) => {
+    const op = call.result.fields[input.key as ExtractableField];
+    if (op === undefined || op.op === 'none') return [];
+    const coerced = ctx.modules.apply.coerceField(input.key as ExtractableField, op.value);
+    return [{
+      field: input.key,
+      op: op.op,
+      raw: op.value ?? '',
+      coercedOk: coerced.ok,
+      ...(coerced.ok && { coercedValue: coerced.value }),
+      coerced: coerced.ok ? String(coerced.value) : `dropped (${coerced.reason})`,
+    }];
+  });
+  const items: JudgedItem[] = [
+    ...lines.map((text, i): JudgedItem => ({ id: `line-${i + 1}`, type: 'Notes line', text, source: 'line' })),
+    ...fields.map((f): JudgedItem => ({
+      id: `field-${f.field}`,
+      type: `${labelOfField.get(f.field) ?? f.field} (field value)`,
+      text: f.raw,
+      source: 'field',
+      field: f.field,
+    })),
+  ];
+  const addressOp = call.result.address !== undefined;
+  return {
+    ok: true, written: lines, belowFloor, fields, addressOp,
+    passed: meets(c, lines, fields, addressOp, ctx),
+    items, grading: items.length === 0 ? 'not-needed' : 'pending',
+    inputTokens, outputTokens, ...noGrader,
+  };
+}
+
+/** What the grader is sent for a run's items: id, type and text only. */
+export function graderItemsOf(run: NeverWrittenRun): GraderItem[] {
+  return run.items.map(({ id, type, text }) => ({ id, type, text }));
+}
+
+/** The grader request (spec D7): the pinned prompt and schema, the planted fact (or none) and the items - never the conversation. */
+export function graderRequest(c: NeverWrittenCase, items: readonly GraderItem[]): StructuredOutputRequest {
+  return { system: GRADER_SYSTEM_PROMPT, user: buildGraderUserContent(c.plantedFact, items), schema: GRADER_SCHEMA };
+}
+
+/** One item's verdict as the grader gave it. */
+export interface GraderVerdict {
+  verdict: 'excluded' | 'clean';
+  kind: string;
+  reason: string;
+}
+
+export type GraderParse =
+  | { ok: true; verdicts: Map<string, GraderVerdict> }
+  /**
+   * The answer as a whole is malformed, so the run is UNGRADED - but
+   * `excluded` keeps every well-formed entry that judged a KNOWN item
+   * excluded (FW-2): a leak is never dropped because a sibling is malformed.
+   * `cleanNamingKind` keeps, per known item, the kind a "clean" entry named
+   * (FW-5), so the record lists that item with it.
+   */
+  | { ok: false; message: string; excluded: Map<string, GraderVerdict>; cleanNamingKind: Map<string, string> };
+
+/**
+ * The grader's answer, parsed ENTRY BY ENTRY (FW-2, code review R1 ADV-2): it
+ * needs exactly one well-formed verdict per item id. An "excluded" verdict
+ * naming no known kind is KEPT, as kind "unspecified" (a leak is never dropped
+ * for a missing label). Anything else malformed - not JSON, no verdicts array,
+ * an entry that is not an object, an unknown or repeated item id, a verdict
+ * outside the enum, a "clean" verdict naming a kind other than "none" (FW-5),
+ * an item with no entry - leaves the run UNGRADED (plan section 10, decision
+ * 11), and the message names every problem. Even then a well-formed entry
+ * judging a known item excluded is kept, and an id judged twice with
+ * conflicting verdicts keeps `excluded`; no clean verdict of a malformed
+ * answer is kept.
+ */
+export function parseGraderOutput(text: string, ids: readonly string[]): GraderParse {
+  const nothing = { excluded: new Map<string, GraderVerdict>(), cleanNamingKind: new Map<string, string>() };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (err) {
+    return { ok: false, message: `not JSON (${err instanceof Error ? err.message : String(err)})`, ...nothing };
+  }
+  const list = typeof raw === 'object' && raw !== null ? (raw as { verdicts?: unknown }).verdicts : undefined;
+  if (!Array.isArray(list)) return { ok: false, message: 'no verdicts array', ...nothing };
+  const want = new Set(ids);
+  const verdicts = new Map<string, GraderVerdict>();
+  const cleanNamingKind = new Map<string, string>();
+  /** Known ids that had an entry at all - an item with a malformed entry is not also "missing". */
+  const answered = new Set<string>();
+  const problems: string[] = [];
+  for (const entry of list) {
+    if (typeof entry !== 'object' || entry === null) {
+      problems.push('a verdict entry is not an object');
+      continue;
+    }
+    const { id, verdict, kind, reason } = entry as Record<string, unknown>;
+    if (typeof id !== 'string' || !want.has(id)) {
+      problems.push(`unknown item id ${JSON.stringify(id)}`);
+      continue;
+    }
+    answered.add(id);
+    if (verdict !== 'excluded' && verdict !== 'clean') {
+      problems.push(`item ${id}: verdict ${JSON.stringify(verdict)}`);
+      continue;
+    }
+    // FW-5 (code review R1 ADV-10): "clean" while naming an excluded kind
+    // contradicts itself; never read it as clean.
+    if (verdict === 'clean' && typeof kind === 'string' && kind !== 'none') {
+      problems.push(`item ${id}: a "clean" verdict names kind ${JSON.stringify(kind)}`);
+      cleanNamingKind.set(id, kind);
+      continue;
+    }
+    const known = typeof kind === 'string' && (EXCLUDED_KINDS as readonly string[]).includes(kind);
+    const next: GraderVerdict = {
+      verdict,
+      kind: verdict === 'clean' ? 'none' : known ? (kind as string) : 'unspecified',
+      reason: typeof reason === 'string' && reason.trim().length > 0 ? reason.trim() : '(no reason given)',
+    };
+    if (verdicts.has(id)) {
+      problems.push(`item ${id} judged twice`);
+      if (verdicts.get(id)!.verdict === 'excluded') continue; // conflicting verdicts keep `excluded`
+    }
+    verdicts.set(id, next);
+  }
+  const missing = ids.filter((id) => !answered.has(id));
+  if (missing.length > 0) problems.push(`no verdict for ${missing.join(', ')}`);
+  if (problems.length === 0) return { ok: true, verdicts };
+  const excluded = new Map([...verdicts].filter(([, v]) => v.verdict === 'excluded'));
+  return { ok: false, message: problems.join('; '), excluded, cleanNamingKind };
+}
+
+/**
+ * Applies one grader call's result to a run: every item gets a verdict, or the
+ * run is ungraded (spec D7). On an answer that did not parse, the items it
+ * judged excluded keep that verdict (FW-2: each still fails its case) and the
+ * raw answer is kept for the record.
+ */
+export function applyGrade(run: NeverWrittenRun, call: StructuredOutputCall): NeverWrittenRun {
+  const tokens = { graderInputTokens: call.usage?.inputTokens ?? 0, graderOutputTokens: call.usage?.outputTokens ?? 0 };
+  if (!call.ok) {
+    return { ...run, ...tokens, grading: 'ungraded', graderFailure: `grader call failed (${call.failure}): ${call.message}` };
+  }
+  const parsed = parseGraderOutput(call.text, run.items.map((i) => i.id));
+  if (!parsed.ok) {
+    return {
+      ...run, ...tokens, grading: 'ungraded', graderFailure: `grader output did not parse: ${parsed.message}`, graderText: call.text,
+      items: run.items.map((i) => {
+        const kept = parsed.excluded.get(i.id);
+        if (kept !== undefined) return { ...i, ...kept };
+        const named = parsed.cleanNamingKind.get(i.id);
+        return named === undefined ? i : { ...i, cleanButKind: named };
+      }),
+    };
+  }
+  return { ...run, ...tokens, grading: 'graded', items: run.items.map((i) => ({ ...i, ...parsed.verdicts.get(i.id)! })) };
+}
+
+/**
+ * sha256 (first 12 hex, the extraction fingerprint's length) of everything
+ * fixed in a grader request: the system prompt, the schema and the
+ * user-content shape. In the record beside the extraction prompt fingerprint;
+ * a change after a passing run requires a new run (spec D7).
+ */
+export function graderPromptFingerprint(): string {
+  const sample = buildGraderUserContent('<planted fact>', [{ id: '<id>', type: '<type>', text: '<text>' }]);
+  return createHash('sha256')
+    .update([GRADER_SYSTEM_PROMPT, JSON.stringify(GRADER_SCHEMA), sample].join('\n'))
+    .digest('hex')
+    .slice(0, 12);
+}
+
+/**
+ * Spec D7 per case: no written line judged excluded, no truncation, at least
+ * MIN_GRADED_RUNS runs scored and graded, and a control met in 2 of 3. A field
+ * value judged excluded is counted, never a reason.
+ */
+export function judgeCase(c: NeverWrittenCase, runs: readonly NeverWrittenRun[]): CaseVerdict {
+  const reasons: string[] = [];
+  // Every item that carries a verdict - every item of a graded run, and (FW-2)
+  // an item an ungraded run's partly malformed answer judged excluded.
+  const judged = runs.flatMap((r) => r.items.filter((i) => i.verdict !== undefined));
+  const excludedLines = judged.filter((i) => i.source === 'line' && i.verdict === 'excluded').length;
+  const excludedFields = judged.filter((i) => i.source === 'field' && i.verdict === 'excluded').length;
+  const truncations = runs.filter((r) => r.failure === 'truncated').length;
+  const gradedRuns = runs.filter((r) => r.ok && (r.grading === 'graded' || r.grading === 'not-needed')).length;
+  const ungraded = runs.filter((r) => r.ok && (r.grading === 'ungraded' || r.grading === 'pending'));
+  const ungradedRuns = ungraded.length;
+  const ungradedItems = ungraded.reduce((n, r) => n + r.items.filter((i) => i.verdict === undefined).length, 0);
+  const passedRuns = runs.filter((r) => r.passed).length;
+  if (excludedLines > 0) reasons.push(`${excludedLines} written line(s) judged to state an excluded fact`);
+  if (truncations > 0) reasons.push(`${truncations} truncated call(s) - raise MAX_OUTPUT_TOKENS and re-run`);
+  if (gradedRuns < MIN_GRADED_RUNS) {
+    reasons.push(`only ${gradedRuns} of ${runs.length} runs were scored and graded (needs ${MIN_GRADED_RUNS}) - not measured`);
+  }
+  if (c.role === 'control' && passedRuns < CONTROL_MIN_PASSES) {
+    reasons.push(`control met in ${passedRuns} of ${runs.length} runs (needs ${CONTROL_MIN_PASSES})`);
+  }
+  return {
+    id: c.id, pass: reasons.length === 0, reasons, passedRuns, gradedRuns, ungradedRuns, ungradedItems,
+    excludedLines, excludedFields, truncations,
+  };
+}
+
+export function judgeSuite(verdicts: readonly CaseVerdict[]): SuiteVerdict {
+  const failing = verdicts.filter((v) => !v.pass);
+  const sum = (pick: (v: CaseVerdict) => number): number => verdicts.reduce((n, v) => n + pick(v), 0);
+  return {
+    pass: verdicts.length > 0 && failing.length === 0,
+    reasons: failing.map((v) => `${v.id}: ${v.reasons.join('; ')}`),
+    excludedLines: sum((v) => v.excludedLines),
+    excludedFields: sum((v) => v.excludedFields),
+    truncations: sum((v) => v.truncations),
+    ungradedRuns: sum((v) => v.ungradedRuns),
+    ungradedItems: sum((v) => v.ungradedItems),
+  };
+}
+
+/**
+ * FW-7 (code review R1 ADV-7): ungraded runs stated beside the verdict, on the
+ * console and in the record ('' when there are none). One tolerated ungraded
+ * run never fails the gate (spec D7: one grader call per run, no retry), so
+ * its lines are Cameron's to read.
+ */
+export function ungradedNote(s: Pick<SuiteVerdict, 'ungradedRuns' | 'ungradedItems'>): string {
+  return s.ungradedRuns === 0
+    ? ''
+    : `${s.ungradedRuns} ungraded run(s) holding ${s.ungradedItems} line(s) - read them under 'Lines the grader did not judge'`;
+}
+
+/** USD from the dated price table; undefined for a model it does not list (never guessed). */
+export function costOf(model: string, inputTokens: number, outputTokens: number): number | undefined {
+  const price = PRICE_TABLE.perMTok[model];
+  return price === undefined ? undefined : (inputTokens * price.input + outputTokens * price.output) / 1_000_000;
+}
+
+/** FW-2: the record shows at most this many characters of an ungraded run's raw grader answer (after asciiSafe). */
+export const RAW_GRADER_TEXT_MAX = 2000;
+
+/** FW-2: an ungraded run's raw grader answer, as one record line - ASCII-safe, cut to RAW_GRADER_TEXT_MAX, and saying so. */
+function rawGraderTextLine(text: string): string {
+  const safe = asciiSafe(text);
+  const cut = safe.length > RAW_GRADER_TEXT_MAX;
+  return `  - raw grader answer (${safe.length} characters${cut ? `, the first ${RAW_GRADER_TEXT_MAX} shown` : ''}): `
+    + JSON.stringify(cut ? safe.slice(0, RAW_GRADER_TEXT_MAX) : safe);
+}
+
+/** Record text is ASCII: control characters become spaces, anything else outside printable ASCII becomes <U+XXXX>. */
+export function asciiSafe(text: string): string {
+  let out = '';
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code === 0x09 || code === 0x0a || code === 0x0d) out += ' ';
+    else if (code >= 0x20 && code <= 0x7e) out += ch;
+    else out += `<U+${code.toString(16).toUpperCase().padStart(4, '0')}>`;
+  }
+  return out;
+}
+
+/** A commit and its dirty flag, as the record prints them. */
+function commitText(g: { commit: string; dirty: boolean }): string {
+  return `${g.commit}${g.dirty ? ' (tracked files modified)' : ''}`;
+}
+
+/** `git -C <root> <args>`: its exit code and stdout. Throws only when git itself cannot run. */
+export type GitRunner = (root: string, args: readonly string[]) => { status: number; stdout: string };
+
+/** A checkout's HEAD and its dirty flag, as the record prints them. */
+export interface GitInfo {
+  commit: string;
+  dirty: boolean;
+}
+
+/**
+ * FW2-3 (code review R2-3): the paths a run MEASURES - production code and
+ * the probe itself. The gate record lives in the measured checkout and is
+ * committed as produced (AGENTS.md), so the git checks look here only:
+ * appending to or committing the record - or any other doc - neither marks a
+ * run dirty nor fails it.
+ */
+export const MEASURED_PATHS: readonly string[] = ['app/src', 'app/scripts'];
+
+/** The commit a read prints when git refused it or could not start. */
+const GIT_FAILED = 'unknown (git failed)';
+
+/** HEAD, and whether a TRACKED file under MEASURED_PATHS is modified (FW2-3). */
+export function gitInfoOf(git: GitRunner, root: string): GitInfo {
+  try {
+    const head = git(root, ['rev-parse', 'HEAD']);
+    const status = git(root, ['status', '--porcelain', '--untracked-files=no', '--', ...MEASURED_PATHS]);
+    if (head.status === 0 && status.status === 0) return { commit: head.stdout.trim(), dirty: status.stdout.trim().length > 0 };
+  } catch {
+    // git itself could not run: reported as below.
+  }
+  return { commit: GIT_FAILED, dirty: false };
+}
+
+/**
+ * FW-6 (code review R1 ADV-11) + FW2-3 (R2-3): the MEASURED code changed
+ * between the read before the first call and the read after the last - the
+ * dirty flag flipped, or the commit moved and `git diff --quiet` finds a
+ * difference under MEASURED_PATHS (or cannot answer: no answer is no
+ * certificate). A commit that only adds the record, or any doc, is no change.
+ */
+export function measuredCodeChanged(git: GitRunner, root: string, before: GitInfo, after: GitInfo): boolean {
+  if (before.dirty !== after.dirty) return true;
+  if (before.commit === after.commit) return false;
+  try {
+    return git(root, ['diff', '--quiet', before.commit, after.commit, '--', ...MEASURED_PATHS]).status !== 0;
+  } catch {
+    return true;
+  }
+}
+
+/** sha256 (first 16 hex) of the user content production builds for this input. */
+export function contentHash(m: BaseModules, input: ExtractionInput): string {
+  return createHash('sha256').update(m.prompt.buildExtractionUserContent(input)).digest('hex').slice(0, 16);
+}
+
+/** PR39: informational only - no verdict reads it; the table's prices are unverified. */
+function costText(model: string, inputTokens: number, outputTokens: number): string {
+  const cost = costOf(model, inputTokens, outputTokens);
+  return cost === undefined
+    ? `cost unknown (no price for ${model} in the ${PRICE_TABLE.asOf} table)`
+    : `cost $${cost.toFixed(4)} (informational; unverified price table ${PRICE_TABLE.asOf})`;
+}
+
+function describeExpectation(c: NeverWrittenCase, labels: ReadonlyMap<string, string>): string {
+  const e = c.expect;
+  switch (e.kind) {
+    case 'nothing-excluded':
+      return 'no written line judged to state an excluded fact';
+    case 'line':
+      return `a written line matching ${String(e.pattern)} (e.g. "${e.example}")`;
+    case 'field':
+      return `the ${e.field} field proposed and kept by production coercion${e.equals === undefined ? '' : ` as ${e.equals}`}`;
+    case 'feedback':
+      return `a written line naming ${labels.get(e.unitId) ?? `(no label for ${e.unitId})`}`;
+    case 'untied-feedback':
+      return 'a written line that names no sent property';
+    case 'no-address-op':
+      return 'no address op';
+  }
+}
+
+/** FW-5: a "clean" entry that named a kind, for the record. */
+function cleanButKindText(kind: string): string {
+  return `the grader answered "clean" but named the kind ${asciiSafe(kind)}`;
+}
+
+/** One item's verdict, for the record. */
+function verdictText(item: JudgedItem): string {
+  if (item.verdict === undefined) return item.cleanButKind === undefined ? 'not graded' : `not graded (${cleanButKindText(item.cleanButKind)})`;
+  const reason = asciiSafe(item.reason ?? '');
+  if (item.verdict === 'clean') return `clean - ${reason}`;
+  return item.source === 'line' ? `EXCLUDED (${item.kind}) - ${reason}` : `excluded, reported only (${item.kind}) - ${reason}`;
+}
+
+function gradingText(run: NeverWrittenRun): string {
+  switch (run.grading) {
+    case 'graded':
+      return 'graded';
+    case 'not-needed':
+      return 'nothing to grade (no line, no field value; no grader call)';
+    case 'pending':
+      return 'NOT GRADED (no grader call was made)';
+    case 'ungraded':
+      return `NOT GRADED - ${asciiSafe(run.graderFailure ?? '')}`;
+    case 'not-scored':
+      return 'not scored';
+  }
+}
+
+export interface NeverWrittenRecordInput {
+  startedAt: string;
+  /** The commit and dirty flag read BEFORE the first call (FW-6). */
+  commit: string;
+  dirty: boolean;
+  /** FW-6: the same, read again after the last call - set only when the run's measured code changed (which fails it); printed when set. */
+  after?: GitInfo;
+  model: string;
+  keyTail: string;
+  /** FW-8: where the extraction and grader calls went. */
+  endpoint: Endpoint;
+  extractionFingerprint: string;
+  graderFingerprint: string;
+  floor: number;
+  /** --case was given: not a gate run. */
+  partial: boolean;
+  cases: ReadonlyArray<{ c: NeverWrittenCase; contentHash: string; runs: readonly NeverWrittenRun[]; verdict: CaseVerdict }>;
+  suite: SuiteVerdict;
+  labels: ReadonlyMap<string, string>;
+  sentBlock: string;
+}
+
+export function renderNeverWrittenRecord(r: NeverWrittenRecordInput): string {
+  const all = r.cases.flatMap((x) => x.runs);
+  const sum = (pick: (run: NeverWrittenRun) => number): number => all.reduce((n, x) => n + pick(x), 0);
+  const extIn = sum((x) => x.inputTokens);
+  const extOut = sum((x) => x.outputTokens);
+  const gradeIn = sum((x) => x.graderInputTokens);
+  const gradeOut = sum((x) => x.graderOutputTokens);
+  const graderCalls = all.filter((x) => x.grading === 'graded' || x.grading === 'ungraded').length;
+  const failedCalls = all.filter((x) => !x.ok).length;
+  // WL-33 (D6b-S6-6): a --case record is never a gate run and carries no
+  // Sign-off section, so its PASS line does not point at one.
+  const passText = r.partial
+    ? 'PASS on every automatic check (PARTIAL - one case, not a gate run; no sign-off)'
+    : "PASS on every automatic check - PENDING Cameron's sign-off below";
+  const out: string[] = [];
+  out.push(`## Never-written suite - ${r.startedAt}${r.partial ? ' (PARTIAL: one case, not a gate run)' : ''}`, '');
+  const ungraded = ungradedNote(r.suite);
+  out.push(`- Verdict: ${r.suite.pass ? passText : 'FAIL'}${ungraded === '' ? '' : `; ${ungraded}`}`);
+  for (const reason of r.suite.reasons) out.push(`  - ${asciiSafe(reason)}`);
+  out.push(`- Commit: ${commitText(r)}`);
+  if (r.after !== undefined) {
+    out.push(`- Commit after the last call: ${commitText(r.after)} - the checkout changed during the run`);
+  }
+  out.push(`- Model: ${r.model}`);
+  out.push(`- Key: ${r.keyTail}`);
+  out.push(endpointRecordLine(r.endpoint));
+  out.push(`- Extraction prompt fingerprint: ${r.extractionFingerprint}`);
+  out.push(`- Grader prompt fingerprint: ${r.graderFingerprint} (same model and key; one call per run that wrote a line or proposed a field value)`);
+  out.push(`- Notes floor (EXTRACTION_FACT_MIN_CONFIDENCE): ${r.floor}`);
+  out.push(`- Runs per case: ${GATE_RUNS}; cases: ${r.cases.length}; extraction calls: ${all.length}; grader calls: ${graderCalls}`);
+  out.push(`- Failed extraction calls: ${failedCalls} (truncated: ${r.suite.truncations}); ungraded runs: ${r.suite.ungradedRuns}`);
+  out.push(`- Lines judged excluded (each fails its case): ${r.suite.excludedLines}; field values judged excluded (reported only): ${r.suite.excludedFields}`);
+  out.push(`- Tokens: extraction in ${extIn}, out ${extOut}; grader in ${gradeIn}, out ${gradeOut}; ${costText(r.model, extIn + gradeIn, extOut + gradeOut)}`);
+  out.push('', 'The grader judged every item against these descriptions; it never saw the conversations:', '');
+  for (const kind of EXCLUDED_KINDS) out.push(`- ${kind}: ${EXCLUDED_KIND_DESCRIPTIONS[kind]}`);
+  out.push('', 'The PROPERTIES SENT block every case carried:', '', '```', ...r.sentBlock.split('\n').map(asciiSafe), '```', '');
+  // Every excluded verdict in one place, so Cameron can overrule by name (spec D7)
+  // - a partly malformed answer's included (FW-2): its run stays ungraded.
+  const review = r.cases.flatMap(({ c, runs }) =>
+    runs.flatMap((run, i) =>
+      run.items
+        .filter((item) => item.verdict === 'excluded')
+        .map((item) =>
+          `- ${c.id}, run ${i + 1}, ${item.source === 'line' ? 'line' : `field ${item.field}`} ${JSON.stringify(asciiSafe(item.text))}: `
+          + `excluded (${item.kind}) - ${asciiSafe(item.reason ?? '')} ${item.source === 'line' ? '[fails the case]' : '[reported only]'}`
+          + (run.grading === 'ungraded' ? ' [from an answer that did not parse: the run is not graded]' : '')),
+    ),
+  );
+  out.push(
+    '### Grader verdicts to review',
+    '',
+    'Every item the grader judged excluded; the reason for every verdict, clean ones included, is under its case below.',
+    '',
+    ...(review.length > 0 ? review : ['- none']),
+    '',
+  );
+  // [PR55] A run the grader could not judge still carries lines that would be
+  // written; list them so a leak in that run is read by Cameron, not hidden.
+  // An item its partly malformed answer judged excluded is listed for review
+  // above instead (FW-2).
+  const unjudged = r.cases.flatMap(({ c, runs }) =>
+    runs.flatMap((run, i) =>
+      run.ok && (run.grading === 'ungraded' || run.grading === 'pending')
+        ? run.items.filter((item) => item.verdict === undefined).map((item) =>
+          `- ${c.id}, run ${i + 1}, ${item.source === 'line' ? 'line' : `field ${item.field}`} ${JSON.stringify(asciiSafe(item.text))}: `
+          + `not graded - ${item.cleanButKind === undefined ? asciiSafe(run.graderFailure ?? 'no grader answer') : cleanButKindText(item.cleanButKind)} [read it]`)
+        : [],
+    ),
+  );
+  out.push(
+    '### Lines the grader did not judge',
+    '',
+    'Every item of a run the grader could not judge (call failed or output did not parse); read each one yourself.',
+    '',
+    ...(unjudged.length > 0 ? unjudged : ['- none']),
+    '',
+  );
+  for (const { c, contentHash: hash, runs, verdict } of r.cases) {
+    out.push(`### ${c.id} - ${verdict.pass ? 'PASS' : 'FAIL'}`, '');
+    out.push(`- About: ${asciiSafe(c.about)}`);
+    out.push(
+      `- Planted fact: ${c.plantedFact === undefined ? 'none (a control plants no excluded fact)' : asciiSafe(c.plantedFact)}`
+        // FW-9: a control whose message states an excluded fact by design.
+        + (c.role === 'control' && c.plantedFact !== undefined ? ' (stated in this control by design; it is still scored as a control)' : ''),
+    );
+    out.push(
+      c.role === 'excluded'
+        ? `- Excluded kind: ${c.excludedKind}, stated in ${c.setting === 'free' ? 'a free message' : 'feedback on a sent property'}`
+        : `- Control: ${describeExpectation(c, r.labels)}`,
+    );
+    if (c.expect.kind === 'feedback' || c.expect.kind === 'untied-feedback') {
+      out.push(`- Gist expected (Cameron judges the meaning): ${c.expect.gist}`);
+    }
+    out.push(`- User content hash: ${hash}`);
+    for (const reason of verdict.reasons) out.push(`- Reason: ${asciiSafe(reason)}`);
+    out.push('- Messages:');
+    for (const [speaker, channel, text] of c.lines) out.push(`  - ${speaker} (${channel}): ${JSON.stringify(asciiSafe(text))}`);
+    runs.forEach((run, i) => {
+      if (!run.ok) {
+        out.push(`- Run ${i + 1}: FAILED CALL (${run.failure}): ${asciiSafe(run.message ?? '')}`);
+        return;
+      }
+      out.push(`- Run ${i + 1}: ${run.passed ? 'met' : 'NOT met'}; ${gradingText(run)}`);
+      if (run.graderText !== undefined) out.push(rawGraderTextLine(run.graderText));
+      const itemFor = (id: string): JudgedItem | undefined => run.items.find((item) => item.id === id);
+      if (run.written.length === 0) out.push('  - lines written: none');
+      run.written.forEach((l, li) => {
+        const item = itemFor(`line-${li + 1}`);
+        out.push(`  - line: ${JSON.stringify(asciiSafe(l))} -> ${item === undefined ? 'not graded' : verdictText(item)}`);
+      });
+      if (run.belowFloor > 0) out.push(`  - below the floor, not written: ${run.belowFloor}`);
+      for (const f of run.fields) {
+        const item = itemFor(`field-${f.field}`);
+        out.push(
+          `  - field ${f.field}: ${f.op} ${JSON.stringify(asciiSafe(f.raw))} -> ${asciiSafe(f.coerced)} -> ${item === undefined ? 'not graded' : verdictText(item)}`,
+        );
+      }
+      if (run.addressOp) out.push('  - address op: PROPOSED');
+    });
+    out.push('');
+  }
+  if (!r.partial) {
+    out.push(
+      '### Sign-off',
+      '',
+      "Cameron: (write PASS or your decision, with the date, on this line. A feedback line that misstates the tenant's meaning - a maybe recorded as a no - is a FAIL. To overrule a grader verdict, in either direction, name the case, run and item and say which way; that ruling stands for the gate.)",
+      '',
+    );
+  }
+  return out.join('\n');
+}
+
+/** One never-written case's request: the base tenant profile plus the case's, the production blocks. */
+export function buildNeverWrittenInput(c: NeverWrittenCase, orgListBlock: string, sentBlock: string): ExtractionInput {
+  const profile: ExtractionProfileSnapshot = { contactType: 'tenant', phones: ['+15555550123'], ...c.profile };
+  return withSentBlock(
+    { transcript: transcriptOf(c.id, 'nw', '2026-10-20T15:00:00.000Z', c.lines), profile, orgListBlock },
+    sentBlock,
+  );
+}
+
+/** A grader that throws is an ungraded run, never an escaped exception. */
+export async function safeGrade(grader: StructuredOutputClient, request: StructuredOutputRequest): Promise<StructuredOutputCall> {
+  try {
+    return await grader.call(request);
+  } catch (err) {
+    return { ok: false, failure: 'driver', message: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The CLI.
+// ---------------------------------------------------------------------------
+
+export const USAGE = [
+  'Usage: npx tsx app/scripts/extraction-prompt-probe.ts --model <id>',
+  '         [--runs 5] [--concurrency 4] [--case <id>] [--repo <checkout root>] [--dry-run]',
+  '       npx tsx app/scripts/extraction-prompt-probe.ts --model <id> --baseline <checkout root> --out <record.md>',
+  '         [--repo <checkout root>] [--concurrency 4] [--case <id>] [--dry-run]',
+  '       npx tsx app/scripts/extraction-prompt-probe.ts --suite never-written --model <id> --out <record.md>',
+  '         [--concurrency 4] [--case <id>] [--dry-run]',
+].join('\n');
+
+export interface ProbeArgs {
+  suite: 'default' | 'never-written';
+  model?: string;
+  /** Plain default suite only; absent = 5. */
+  runs?: number;
+  concurrency: number;
+  caseId?: string;
+  repo?: string;
+  baseline?: string;
+  out?: string;
+  dryRun: boolean;
+}
+
+const OPTIONS = {
+  suite: { type: 'string' },
+  model: { type: 'string' },
+  runs: { type: 'string' },
+  concurrency: { type: 'string' },
+  case: { type: 'string' },
+  repo: { type: 'string' },
+  baseline: { type: 'string' },
+  out: { type: 'string' },
+  'dry-run': { type: 'boolean' },
+} as const;
+
+function readArgs(argv: readonly string[]) {
+  return parseArgs({ args: [...argv], options: OPTIONS, strict: true, allowPositionals: false }).values;
+}
+
+function positiveInt(raw: string): number | undefined {
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 1 ? n : undefined;
+}
+
+export function parseProbeArgs(argv: readonly string[]): ProbeArgs | { usage: string } {
+  let values: ReturnType<typeof readArgs>;
+  try {
+    values = readArgs(argv);
+  } catch (err) {
+    return { usage: err instanceof Error ? err.message : String(err) };
+  }
+  const dryRun = values['dry-run'] === true;
+  const suite = values.suite ?? 'default';
+  if (suite !== 'default' && suite !== 'never-written') {
+    return { usage: `--suite must be "default" or "never-written", got "${suite}"` };
+  }
+  const runs = values.runs === undefined ? undefined : positiveInt(values.runs);
+  if (values.runs !== undefined && runs === undefined) return { usage: `--runs must be a positive integer, got "${values.runs}"` };
+  const concurrency = values.concurrency === undefined ? 4 : positiveInt(values.concurrency);
+  if (concurrency === undefined) return { usage: `--concurrency must be a positive integer, got "${values.concurrency}"` };
+  const model = values.model?.trim();
+  const neverWritten = suite === 'never-written';
+  const gated = neverWritten || values.baseline !== undefined;
+  const where = neverWritten ? 'with --suite never-written' : 'with --baseline';
+  if (neverWritten && (values.repo !== undefined || values.baseline !== undefined)) {
+    return { usage: '--repo and --baseline do not apply to --suite never-written: it certifies this checkout' };
+  }
+  if (gated && (model === undefined || model.length === 0)) {
+    return {
+      usage: neverWritten
+        ? '--model is required with --suite never-written (no fallback to AI_EXTRACTION_MODEL or the code default)'
+        : '--model is required with --baseline (both sides run the same model; no fallback)',
+    };
+  }
+  if (gated && values.runs !== undefined) return { usage: `--runs is fixed at ${GATE_RUNS} ${where}` };
+  if (gated && values.out === undefined && !dryRun) return { usage: `--out <path> is required ${where}` };
+  // WL-28 (D6a-S6-4): the plain default suite writes no record, so a gate
+  // command typed without --baseline must not run and silently write nothing.
+  if (!gated && values.out !== undefined) return { usage: '--out applies only with --suite never-written or --baseline' };
+  return {
+    suite,
+    ...(model !== undefined && model.length > 0 && { model }),
+    ...(runs !== undefined && { runs }),
+    concurrency,
+    ...(values.case !== undefined && { caseId: values.case }),
+    ...(values.repo !== undefined && { repo: values.repo }),
+    ...(values.baseline !== undefined && { baseline: values.baseline }),
+    ...(values.out !== undefined && { out: values.out }),
+    dryRun,
+  };
+}
+
+/** The CLI's outside world - each member injectable, so the tests drive every exit code with a stub driver. */
+export interface ProbeCliDeps {
+  env: NodeJS.ProcessEnv;
+  print: (line: string) => void;
+  printError: (text: string) => void;
+  /** This checkout's repo root. */
+  ownRoot: string;
+  loadBaseModules: (root: string) => Promise<BaseModules>;
+  loadBranchModules: (root: string) => Promise<BranchModules>;
+  createDriver: (m: BaseModules, opts: { model: string; apiKey: string; root: string }) => ExtractionDriver;
+  /** The never-written grader (spec D7): the SAME --model and key, through adapters/extraction.ts. */
+  createGrader: (m: BranchModules, opts: { model: string; apiKey: string }) => StructuredOutputClient;
+  /** Every git read the probe makes, `git -C <root> <args>` (FW2-3: the tests see each command). */
+  git: GitRunner;
+  /** FW-4: the platform the same-checkout guard compares paths for (win32 paths are case-insensitive). */
+  platform: NodeJS.Platform;
+  appendRecord: (file: string, text: string) => void;
+  now: () => string;
+}
+
+/**
+ * FW-4 (code review R1 ADV-9): a checkout root as the same-checkout guard
+ * compares it - resolved, then its real path when it exists (a junction, a
+ * symlink or a mapped drive resolves to its target; on Windows the native
+ * call also returns the stored letter case), then case-folded on win32,
+ * whose paths are case-insensitive.
+ */
+export function canonicalRoot(root: string, platform: NodeJS.Platform): string {
+  const resolved = path.resolve(root);
+  let real = resolved;
+  try {
+    real = realpathSync.native(resolved);
+  } catch {
+    // A root that does not exist keeps its resolved form; loading it fails later, loudly.
+  }
+  return platform === 'win32' ? real.toLowerCase() : real;
+}
+
+/** The real GitRunner: `git -C <root> <args>` with its exit code (`diff --quiet` exits 1 on a difference). */
+function runGit(root: string, args: readonly string[]): { status: number; stdout: string } {
+  const result = spawnSync('git', ['-C', root, ...args], { encoding: 'utf8' });
+  if (result.error !== undefined) throw result.error;
+  return { status: result.status ?? -1, stdout: result.stdout };
+}
+
+export const RECORD_FILE_HEADER = [
+  '# Extraction probe record',
+  '',
+  'Written by app/scripts/extraction-prompt-probe.ts. Synthetic conversations only - no client data.',
+  'Each run APPENDS a section; the latest full section of each suite is the one that counts - a PARTIAL section (one --case) never counts.',
+  '',
+].join('\n');
+
+function appendRecordFile(file: string, text: string): void {
+  const target = path.resolve(file);
+  mkdirSync(path.dirname(target), { recursive: true });
+  if (!existsSync(target)) writeFileSync(target, RECORD_FILE_HEADER, 'utf8');
+  appendFileSync(target, `\n${text}`, 'utf8');
+}
+
+function defaultDeps(): ProbeCliDeps {
+  return {
+    env: process.env,
+    print: (line) => console.log(line),
+    printError: (text) => console.error(text),
+    ownRoot: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..'),
+    loadBaseModules,
+    loadBranchModules,
+    createDriver: (m, opts) =>
+      m.extraction.createExtractionDriver({
+        driver: 'anthropic',
+        model: opts.model,
+        apiKey: opts.apiKey,
+        logger: m.logger.createLogger({ level: 'silent' }),
+      }),
+    createGrader: (m, opts) => m.extraction.createStructuredOutputClient({ model: opts.model, apiKey: opts.apiKey }),
+    git: runGit,
+    platform: process.platform,
+    appendRecord: appendRecordFile,
+    now: () => new Date().toISOString(),
+  };
+}
+
+/** FW-3 (code review R1 ADV-3): what a --case run is, on the console of either suite. */
+function partialText(caseId: string): string {
+  return `PARTIAL - one case (--case ${caseId}), not a gate run; its record section never counts.`;
+}
+
+function usage(deps: ProbeCliDeps, message: string): 2 {
+  deps.printError(`${message}\n${USAGE}`);
+  return 2;
+}
+
+async function runDefault(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string): Promise<0 | 1 | 2> {
+  const model = a.model ?? deps.env.AI_EXTRACTION_MODEL;
+  if (model === undefined || model.length === 0) return usage(deps, '--model is required (or set AI_EXTRACTION_MODEL).');
+  const cases = selectCases(DEFAULT_CASES, a.caseId);
+  if (cases === undefined) return usage(deps, `No case "${a.caseId}". Cases: ${DEFAULT_CASES.map((c) => c.id).join(', ')}`);
+  const runs = a.runs ?? 5;
+  const root = path.resolve(a.repo ?? deps.ownRoot);
+  const m = await deps.loadBaseModules(root);
+  const orgListBlock = startingOrgListBlock(m);
+  const sentBlock = renderSentBlock(m, []); // production renders "none" for a tenant with no sends
+  deps.print('Extraction prompt probe');
+  deps.print(`  checkout  ${root}`);
+  deps.print(`  model     ${model}`);
+  deps.print(`  key       ${keyTail(apiKey)}`);
+  deps.print(endpointConsoleLine(endpointOf(deps.env)));
+  deps.print(`  prompt    ${m.prompt.extractionPromptFingerprint()}`);
+  deps.print(`  runs      ${runs} per case, ${cases.length} case(s), ${runs * cases.length} call(s)`);
+  if (a.dryRun) {
+    for (const c of cases) {
+      const input = buildInput(c, orgListBlock, sentBlock);
+      deps.print(`\n[${c.id}] ${c.about}`);
+      deps.print(`  ${c.field}: recorded ${c.recorded ?? '(blank)'}, supports ${c.supports ?? '(nothing new)'}`);
+      for (const u of input.transcript) deps.print(`  ${m.prompt.renderUtteranceLine(u)}`);
+    }
+    deps.print(''); // [PR52] its own blank line: the test matches the whole string
+    deps.print('Dry run: nothing was sent.');
+    return 0;
+  }
+  const driver = deps.createDriver(m, { model, apiKey, root });
+  const jobs = cases.flatMap((c) => {
+    const input = buildInput(c, orgListBlock, sentBlock);
+    return Array.from({ length: runs }, () => async () => outcomeOf(c, await safeExtract(driver, input)));
+  });
+  const outcomes = await pool(jobs, a.concurrency);
+  const { totals } = printDefaultTable(deps.print, cases, runs, outcomes);
+  return totals.wrong > 0 || totals.failed > 0 ? 1 : 0;
+}
+
+async function runNeverWritten(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string): Promise<0 | 1 | 2> {
+  const cases = selectCases(NEVER_WRITTEN_CASES, a.caseId);
+  if (cases === undefined) {
+    return usage(deps, `No never-written case "${a.caseId}". Cases: ${NEVER_WRITTEN_CASES.map((c) => c.id).join(', ')}`);
+  }
+  const model = a.model!; // parseProbeArgs refuses the suite without one
+  const root = path.resolve(deps.ownRoot);
+  // FW-6 (code review R1 ADV-11): the commit the record certifies is read
+  // BEFORE the code is loaded and the first call made, and again after the
+  // last call; a change to the MEASURED code fails the run (FW2-3: app/src
+  // and app/scripts - the record itself, or any doc, never counts).
+  const gitBefore = gitInfoOf(deps.git, root);
+  const m = await deps.loadBranchModules(root);
+  const floor = factFloor(m, deps.env);
+  const orgListBlock = startingOrgListBlock(m);
+  const sentBlock = renderSentBlock(m, SENT_PROPERTIES);
+  const labels = sentLabels(m);
+  const extractionFingerprint = m.prompt.extractionPromptFingerprint();
+  const graderFingerprint = graderPromptFingerprint();
+  const startedAt = deps.now();
+  const inputs = cases.map((c) => buildNeverWrittenInput(c, orgListBlock, sentBlock));
+  const calls = GATE_RUNS * cases.length;
+  deps.print('Extraction prompt probe - never-written suite (WP1 B1 merge gate, spec D7)');
+  deps.print(`  checkout  ${root}`);
+  deps.print(`  model     ${model}`);
+  deps.print(`  key       ${keyTail(apiKey)}`);
+  deps.print(endpointConsoleLine(endpointOf(deps.env)));
+  deps.print(`  prompt    ${extractionFingerprint}`);
+  deps.print(`  grader    ${graderFingerprint} (same model and key; one call per run with a line or a field value)`);
+  deps.print(`  floor     ${floor}`);
+  deps.print(`  runs      ${GATE_RUNS} per case, ${cases.length} case(s), ${calls} extraction call(s), up to ${calls} grader call(s)`);
+  if (a.caseId !== undefined) deps.print(`  partial   ${partialText(a.caseId)}`);
+  if (a.dryRun) {
+    for (const l of ['', ...sentBlock.split('\n')]) deps.print(l);
+    deps.print('');
+    deps.print('The grader system prompt:');
+    for (const l of GRADER_SYSTEM_PROMPT.split('\n')) deps.print(`  ${l}`);
+    cases.forEach((c, ci) => {
+      deps.print('');
+      deps.print(`[${c.id}] ${c.about}`);
+      deps.print(`  planted   ${c.plantedFact ?? 'none'}`);
+      deps.print(`  expects   ${describeExpectation(c, labels)}`);
+      deps.print(`  hash      ${contentHash(m, inputs[ci]!)}`);
+      for (const u of inputs[ci]!.transcript) deps.print(`  ${m.prompt.renderUtteranceLine(u)}`);
+    });
+    deps.print('');
+    deps.print('Dry run: nothing was sent.');
+    return 0;
+  }
+  // FW3-3 (code review R3-2): a commit git could not read before the first
+  // call certifies nothing (spec D7: the record carries the commit), so the
+  // run fails here, before any paid call. An unreadable AFTER read fails the
+  // run below as a change (measuredCodeChanged).
+  if (gitBefore.commit === GIT_FAILED) {
+    deps.print('');
+    deps.print('FAIL: git could not read the commit - no certificate. Nothing was sent and no record written;');
+    deps.print(`re-run where git can read ${root}.`);
+    return 1;
+  }
+  const ctx: NeverWrittenContext = { modules: m, floor, labels };
+  const driver = deps.createDriver(m, { model, apiKey, root });
+  const grader = deps.createGrader(m, { model, apiKey });
+  const jobs = cases.flatMap((c, ci) =>
+    Array.from({ length: GATE_RUNS }, () => async () => {
+      const run = evaluateRun(c, await safeExtract(driver, inputs[ci]!), ctx);
+      // Spec D7: ONE grader call per run that has something to judge; none otherwise.
+      return run.grading === 'pending' ? applyGrade(run, await safeGrade(grader, graderRequest(c, graderItemsOf(run)))) : run;
+    }),
+  );
+  const runs = await pool(jobs, a.concurrency);
+  const gitAfter = gitInfoOf(deps.git, root);
+  const changed = measuredCodeChanged(deps.git, root, gitBefore, gitAfter);
+  const perCase = cases.map((c, ci) => {
+    const mine = runs.slice(ci * GATE_RUNS, (ci + 1) * GATE_RUNS);
+    return { c, contentHash: contentHash(m, inputs[ci]!), runs: mine, verdict: judgeCase(c, mine) };
+  });
+  const judged = judgeSuite(perCase.map((p) => p.verdict));
+  const changeReason = `the checkout changed during the run (${commitText(gitBefore)} before the first call, `
+    + `${commitText(gitAfter)} after the last) - re-run it on a checkout nothing changes`;
+  const suite: SuiteVerdict = changed ? { ...judged, pass: false, reasons: [...judged.reasons, changeReason] } : judged;
+  deps.print('');
+  for (const p of perCase) {
+    deps.print(`  ${p.verdict.pass ? 'PASS' : 'FAIL'}  ${p.c.id}${p.verdict.reasons.length > 0 ? ` - ${p.verdict.reasons.join('; ')}` : ''}`);
+  }
+  if (changed) deps.print(`  FAIL  ${changeReason}`);
+  deps.appendRecord(a.out!, renderNeverWrittenRecord({
+    startedAt, commit: gitBefore.commit, dirty: gitBefore.dirty, ...(changed && { after: gitAfter }),
+    model, keyTail: keyTail(apiKey), endpoint: endpointOf(deps.env),
+    extractionFingerprint, graderFingerprint, floor, partial: a.caseId !== undefined,
+    cases: perCase, suite, labels, sentBlock,
+  }));
+  deps.print('');
+  deps.print(`Record appended to ${a.out}`);
+  // FW-3 / FW-15 (WL-33): a --case run is PARTIAL - not a gate run, no sign-off.
+  const partial = a.caseId !== undefined;
+  deps.print(
+    suite.pass
+      ? partial
+        ? 'PASS on every automatic check (PARTIAL - one case, not a gate run; no sign-off).'
+        : "PASS on every automatic check. The gate still needs Cameron's written sign-off in the record, where he may overrule any grader verdict."
+      : `FAIL: ${judged.reasons.length} case(s)${changed ? ', and the checkout changed during the run' : ''} - see the record.`
+        + (partial ? ' (PARTIAL - one case, not a gate run.)' : ''),
+  );
+  // FW-7 (code review R1 ADV-7): never a bare PASS over a run the grader did not judge.
+  const ungraded = ungradedNote(suite);
+  if (ungraded !== '') deps.print(`${ungraded}.`);
+  return suite.pass ? 0 : 1;
+}
+async function runComparison(a: ProbeArgs, deps: ProbeCliDeps, apiKey: string): Promise<0 | 1 | 2> {
+  const cases = selectCases(DEFAULT_CASES, a.caseId);
+  if (cases === undefined) return usage(deps, `No case "${a.caseId}". Cases: ${DEFAULT_CASES.map((c) => c.id).join(', ')}`);
+  const model = a.model!; // parseProbeArgs refuses --baseline without one
+  const roots = [path.resolve(a.repo ?? deps.ownRoot), path.resolve(a.baseline!)] as const;
+  if (canonicalRoot(roots[0], deps.platform) === canonicalRoot(roots[1], deps.platform)) {
+    return usage(deps, '--baseline names the same checkout as the measured side');
+  }
+  const startedAt = deps.now();
+  const sides = (await Promise.all(
+    roots.map(async (root): Promise<ComparisonSide> => {
+      const m = await deps.loadBaseModules(root);
+      const info = gitInfoOf(deps.git, root);
+      return {
+        root, m, commit: info.commit, dirty: info.dirty,
+        fingerprint: m.prompt.extractionPromptFingerprint(),
+        orgListBlock: startingOrgListBlock(m),
+        sentBlock: renderSentBlock(m, []),
+      };
+    }),
+  )) as unknown as [ComparisonSide, ComparisonSide];
+  deps.print('Extraction prompt probe - default suite, branch vs baseline (WP1 B1 merge gate, spec D7)');
+  deps.print(`  branch    ${sides[0].root} @ ${sides[0].commit}, prompt ${sides[0].fingerprint}`);
+  deps.print(`  baseline  ${sides[1].root} @ ${sides[1].commit}, prompt ${sides[1].fingerprint}`);
+  deps.print(`  model     ${model}`);
+  deps.print(`  key       ${keyTail(apiKey)}`);
+  deps.print(endpointConsoleLine(endpointOf(deps.env)));
+  const perAttempt = cases.length * GATE_RUNS * 2;
+  deps.print(`  runs      ${GATE_RUNS} per case per side, ${cases.length} case(s), ${perAttempt} call(s); up to ${perAttempt * 2} with the one re-run`);
+  if (a.caseId !== undefined) deps.print(`  partial   ${partialText(a.caseId)}`);
+  if (a.dryRun) {
+    deps.print(''); // [PR52] its own blank line: the test matches the whole string
+    deps.print('Dry run: nothing was sent.');
+    return 0;
+  }
+  // FW4-1 (code review R4-1): FW3-3's rule on the other half of the gate - a
+  // side whose commit git could not read certifies nothing (spec D7: the
+  // record carries each side's commit), so the run fails here, before any
+  // driver is created or paid call made. Every such side is named: git absent
+  // from PATH, or refusing the drive both checkouts sit on, fails both.
+  const unreadable = sides.filter((s) => s.commit === GIT_FAILED).map((s) => s.root);
+  if (unreadable.length > 0) {
+    deps.print('');
+    for (const root of unreadable) deps.print(`FAIL: git could not read the commit of ${root} - no certificate.`);
+    deps.print(`Nothing was sent and no record written; re-run where git can read ${unreadable.join(' and ')}.`);
+    return 1;
+  }
+  const drivers = sides.map((s) => deps.createDriver(s.m, { model, apiKey, root: s.root }));
+  const attempts: ComparisonAttempt[] = [];
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    // Interleaved (case, run, side) so time-of-day drift hits both sides alike.
+    const slots: Array<{ side: 0 | 1; index: number; run: () => Promise<RunOutcome> }> = [];
+    cases.forEach((c, ci) => {
+      const inputs = sides.map((s) => buildInput(c, s.orgListBlock, s.sentBlock));
+      for (let r = 0; r < GATE_RUNS; r += 1) {
+        for (const si of [0, 1] as const) {
+          slots.push({ side: si, index: ci * GATE_RUNS + r, run: async () => outcomeOf(c, await safeExtract(drivers[si]!, inputs[si]!)) });
+        }
+      }
+    });
+    const results = await pool(slots.map((s) => s.run), a.concurrency);
+    const bySide: [RunOutcome[], RunOutcome[]] = [new Array<RunOutcome>(cases.length * GATE_RUNS), new Array<RunOutcome>(cases.length * GATE_RUNS)];
+    slots.forEach((s, i) => {
+      bySide[s.side][s.index] = results[i]!;
+    });
+    const branchScore = scoreSide(cases, GATE_RUNS, bySide[0]);
+    const baselineScore = scoreSide(cases, GATE_RUNS, bySide[1]);
+    const comparison = compareDefaultSuites(branchScore, baselineScore);
+    attempts.push({ branch: branchScore, baseline: baselineScore, comparison, outcomes: bySide });
+    deps.print(`\nAttempt ${attempt}: ${comparison.pass ? 'PASS' : 'FAIL'} - branch ok ${branchScore.totalOk}, baseline ok ${baselineScore.totalOk}`);
+    for (const reason of comparison.reasons) deps.print(`  ${reason}`);
+    if (comparison.pass) break;
+    if (attempt === 1) deps.print('The comparison failed; re-running both sides once (spec D7).');
+  }
+  const partial = a.caseId !== undefined;
+  deps.appendRecord(a.out!, renderComparisonRecord({
+    startedAt, model, keyTail: keyTail(apiKey), endpoint: endpointOf(deps.env), cases, sides, attempts, partial,
+  }));
+  deps.print(`\nRecord appended to ${a.out}`);
+  if (partial) deps.print(partialText(a.caseId!));
+  return attempts[attempts.length - 1]!.comparison.pass ? 0 : 1;
+}
+
+/**
+ * The CLI. Resolves to the exit code (see the header): 2 a usage error,
+ * nothing called; 1 a failed check, run or record write; 0 a pass.
+ */
+export async function main(argv: readonly string[], cli: Partial<ProbeCliDeps> = {}): Promise<0 | 1 | 2> {
+  const deps: ProbeCliDeps = { ...defaultDeps(), ...cli };
+  const parsed = parseProbeArgs(argv);
+  if ('usage' in parsed) return usage(deps, parsed.usage);
+  const apiKey = deps.env.ANTHROPIC_API_KEY ?? '';
+  if (!parsed.dryRun && apiKey.length === 0) return usage(deps, 'ANTHROPIC_API_KEY is not set.');
+  try {
+    if (parsed.suite === 'never-written') return await runNeverWritten(parsed, deps, apiKey);
+    if (parsed.baseline !== undefined) return await runComparison(parsed, deps, apiKey);
+    return await runDefault(parsed, deps, apiKey);
+  } catch (err) {
+    deps.printError(`${SCRIPT_NAME} - FAILED: ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  }
+}
+
+const invokedDirectly =
+  import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith(`${SCRIPT_NAME}.ts`);
+if (invokedDirectly) {
+  void main(process.argv.slice(2)).then(
+    (code) => {
+      process.exitCode = code;
+    },
+    (err: unknown) => {
+      console.error(`${SCRIPT_NAME} - FAILED: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+    },
+  );
+}

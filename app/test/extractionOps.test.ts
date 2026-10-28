@@ -24,7 +24,7 @@ describe('parseExtractionOps - totality', () => {
     }
   });
 
-  it('the empty view marks all twelve targets absent - never none', () => {
+  it('the empty view marks all sixteen targets absent - never none', () => {
     for (const target of DECISION_TARGETS) expect(EMPTY_OPS_VIEW[target]).toEqual({ op: 'absent' });
   });
 
@@ -54,13 +54,36 @@ describe('parseExtractionOps - the two cases a parsed-result reading gets wrong'
 });
 
 describe('parseExtractionOps - per-target mapping', () => {
-  it('maps the eight scalars off fields.<name>.op, dropping the sentinels on a none', () => {
+  it('maps the twelve scalars off the older object shape fields.<name>.op (run records before the list shape), dropping the sentinels on a none', () => {
     const view = parseExtractionOps(
       '{"fields":{"firstName":{"op":"write","value":"Ann","reason":"stated"},"pets":{"op":"none","value":"","reason":""}}}',
     );
     expect(view.firstName).toEqual({ op: 'write', value: 'Ann', reason: 'stated' });
     expect(view.pets).toEqual({ op: 'none' });
     expect(view.lastName).toEqual({ op: 'absent' });
+  });
+
+  it('maps a tenant matching input off fields.<name>.op like any scalar (B1 spec D3)', () => {
+    const view = parseExtractionOps(
+      '{"fields":{"area_preference":{"op":"suggest","value":"Decatur","reason":"now wants Decatur"},"max_tenant_portion":{"op":"none","value":"","reason":""}}}',
+    );
+    expect(view.area_preference).toEqual({ op: 'suggest', value: 'Decatur', reason: 'now wants Decatur' });
+    expect(view.max_tenant_portion).toEqual({ op: 'none' });
+    expect(view.accessibility_need).toEqual({ op: 'absent' });
+  });
+
+  it('maps the wire LIST shape { field, op, value, reason } - first entry per field wins, an unlisted field stays absent', () => {
+    const view = parseExtractionOps(JSON.stringify({
+      fields: [
+        { field: 'area_preference', op: 'suggest', value: 'Decatur', reason: 'now wants Decatur' },
+        { field: 'area_preference', op: 'none', value: '', reason: '' },
+        { field: 'pets', op: 'none', value: '', reason: '' },
+        { field: 'notAField', op: 'write', value: 'x', reason: '' },
+      ],
+    }));
+    expect(view.area_preference).toEqual({ op: 'suggest', value: 'Decatur', reason: 'now wants Decatur' });
+    expect(view.pets).toEqual({ op: 'none' });
+    expect(view.firstName).toEqual({ op: 'absent' });
   });
 
   it('maps statusAdvance.suggest to suggest/none', () => {

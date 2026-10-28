@@ -13,7 +13,7 @@ import {
 import type { ExtractionResult } from '../src/adapters/extraction.js';
 import { createLogger, type Logger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
-import { applyExtraction, type ApplyDeps } from '../src/services/extraction/apply.js';
+import { applyExtraction, coerceField, type ApplyDeps } from '../src/services/extraction/apply.js';
 import type { OrgEntry } from '../src/lib/orgNames.js';
 import { buildStartingEntries } from '../src/lib/orgStartingList.js';
 import { normalizeSuggestionValue } from '../src/services/extraction/schema.js';
@@ -26,6 +26,11 @@ const ORG_ENTRIES: OrgEntry[] = buildStartingEntries(NOW, () => `org-${(orgSeq +
 
 function makeContact(overrides: Partial<ContactItem> = {}): ContactItem {
   return { contactId: 'c1', type: 'tenant', ...overrides };
+}
+
+/** A model Notes line (B1 spec D4). 0.9 clears the default 0.7 floor. */
+function note(text: string, confidence = 0.9): { text: string; confidence: number } {
+  return { text, confidence };
 }
 
 interface StubRecords {
@@ -43,6 +48,8 @@ function makeDeps(opts: {
   updateImpl?: (id: string, patch: Record<string, unknown>) => Promise<ContactItem>;
   /** Tombstoned values as `target#normValue` pairs (hasDismissal stub). */
   dismissedValues?: string[];
+  /** EXTRACTION_FACT_MIN_CONFIDENCE for this run (B1 spec D4); default 0.7. */
+  factMinConfidence?: number;
 } = {}): { deps: ApplyDeps; records: StubRecords; logger: Logger; logCapture: ReturnType<typeof createLogCapture> } {
   const records: StubRecords = { updates: [], suggestions: [], audits: [], emits: [] };
   const logCapture = createLogCapture();
@@ -99,7 +106,10 @@ function makeDeps(opts: {
     }),
   };
 
-  const deps: ApplyDeps = { contacts, extraction, audit, events, logger, now: () => NOW };
+  const deps: ApplyDeps = {
+    contacts, extraction, audit, events, logger, now: () => NOW,
+    factMinConfidence: opts.factMinConfidence ?? 0.7,
+  };
   return { deps, records, logger, logCapture };
 }
 
@@ -204,7 +214,7 @@ describe('applyExtraction - field writes (items 1-3)', () => {
   it('op:none does nothing', async () => {
     const { deps, records } = makeDeps();
     const outcome = await run(deps, makeContact(), { fields: { pets: { op: 'none' } } });
-    expect(outcome).toEqual({ wrote: [], suggested: [], notedLines: 0, displaced: [], decisions: [] });
+    expect(outcome).toEqual({ wrote: [], suggested: [], notedLines: 0, notesBelowFloor: 0, notesDemoted: 0, appendedLines: [], displaced: [], decisions: [] });
     expect(records.updates).toHaveLength(0);
     expect(records.emits).toHaveLength(0);
   });
@@ -269,6 +279,9 @@ describe('applyExtraction - type gating (item 1)', () => {
       wrote: [],
       suggested: [],
       notedLines: 0,
+      notesBelowFloor: 0,
+      notesDemoted: 0,
+      appendedLines: [],
       displaced: [],
       decisions: [
         { target: 'firstName', outcome: 'dropped', dropReason: 'wrong_contact_type', proposedValue: 'Pat' },
@@ -649,7 +662,7 @@ describe('applyExtraction - noteLines (item 8)', () => {
     const { deps, records } = makeDeps();
     const outcome = await run(deps, makeContact({ type: 'tenant' }), {
       fields: {},
-      noteLines: ['a', 'b', 'c', 'd', 'e', 'f', 'g'],
+      noteLines: ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((text) => note(text)),
     });
     expect(outcome.notedLines).toBe(5);
     const notes = records.updates[0]!.patch['notes'] as string;
@@ -662,7 +675,7 @@ describe('applyExtraction - noteLines (item 8)', () => {
     const { deps } = makeDeps();
     const outcome = await run(deps, makeContact({ type: 'tenant' }), {
       fields: {},
-      noteLines: ['  ', '', 'real fact'],
+      noteLines: ['  ', '', 'real fact'].map((text) => note(text)),
     });
     expect(outcome.notedLines).toBe(1);
   });
@@ -671,7 +684,7 @@ describe('applyExtraction - noteLines (item 8)', () => {
     const { deps, records } = makeDeps();
     const outcome = await run(deps, makeContact({ type: 'tenant', notes: 'existing note' }), {
       fields: {},
-      noteLines: ['new fact'],
+      noteLines: [note('new fact')],
     });
     expect(outcome.notedLines).toBe(1);
     expect(records.updates[0]!.patch['notes']).toBe('existing note\n[Auto - Jul 16] new fact');
@@ -683,7 +696,7 @@ describe('applyExtraction - noteLines (item 8)', () => {
     // identical transcript. The guard must drop the already-present line so the
     // second run writes no notes (notedLines 0) - no double-append (F1).
     const { deps, records } = makeDeps();
-    const result: ExtractionResult = { fields: {}, noteLines: ['stairs are a problem'] };
+    const result: ExtractionResult = { fields: {}, noteLines: [note('stairs are a problem')] };
 
     const first = await run(deps, makeContact({ type: 'tenant', notes: 'seed note' }), result);
     expect(first.notedLines).toBe(1);
@@ -708,7 +721,7 @@ describe('applyExtraction - emit + best-effort isolation (items 9-10)', () => {
     await run(deps, makeContact({ type: 'tenant', status: 'onboarding' }), {
       fields: { pets: { op: 'write', value: 'dog' } },
       statusAdvance: { suggest: true },
-      noteLines: ['likes the neighborhood'],
+      noteLines: [note('likes the neighborhood')],
     });
     const emits = records.emits.filter((e) => e.name === 'suggestion.updated');
     expect(emits).toHaveLength(1);
@@ -785,7 +798,12 @@ describe('applyExtraction - inferred-role demotion (spec Layer 3)', () => {
     expect(records.emits.filter((e) => e.name === 'suggestion.updated')).toHaveLength(1);
   });
 
-  it('leaves native suggestions and notes appends untouched under the flag (no demotion audit)', async () => {
+  // B1 spec D4 / charter 6.4 ("appends no lines"), Cameron's spec-gate answer
+  // Q1: a demoted run now appends NO Notes line. This case used to pin the
+  // opposite ("notes are additive - the append still lands directly"). The
+  // consequence Q1 accepted: an AI caseworker note (lib/caseworkers.ts
+  // hasAiCaseworkerNote) is not written from such a window (WI6).
+  it('leaves native suggestions untouched under the flag, appends NO note line, and counts it (no demotion audit)', async () => {
     const { deps, records } = makeDeps();
     const contact = makeContact({ type: 'tenant', voucherSize: 2 });
     const outcome = await applyExtraction(deps, {
@@ -795,7 +813,7 @@ describe('applyExtraction - inferred-role demotion (spec Layer 3)', () => {
       cursorTsMsgId: 'ts-9',
       result: {
         fields: { voucherSize: { op: 'suggest', value: '3', reason: 'voucher reissued as a 3-bedroom' } },
-        noteLines: ['likes the neighborhood'],
+        noteLines: [note('likes the neighborhood')],
       },
       hasInferredRoleContent: true,
     });
@@ -807,10 +825,10 @@ describe('applyExtraction - inferred-role demotion (spec Layer 3)', () => {
       currentValue: '2',
       suggestedValue: '3',
     });
-    // Notes are additive - the append still lands directly.
-    expect(outcome.notedLines).toBe(1);
-    const noteUpdate = records.updates.find((u) => typeof u.patch['notes'] === 'string');
-    expect(noteUpdate!.patch['notes']).toContain('[Auto - Jul 16] likes the neighborhood');
+    // A demoted run appends no line - withheld and counted, never written.
+    expect(outcome.notedLines).toBe(0);
+    expect(outcome.notesDemoted).toBe(1);
+    expect(records.updates.find((u) => typeof u.patch['notes'] === 'string')).toBeUndefined();
     // No write op was present, so no demotion audit fires.
     expect(records.audits.find((a) => a.type === 'ai_extraction_demoted')).toBeUndefined();
   });
@@ -1049,7 +1067,7 @@ describe('applyExtraction - address (ninth target)', () => {
     const { deps, records } = makeDeps();
     const outcome = await run(deps, makeContact({ type: 'tenant' }), {
       fields: {},
-      noteLines: ['Current address: 1 Main St', 'Has a service dog'],
+      noteLines: [note('Current address: 1 Main St'), note('Has a service dog')],
     });
 
     expect(outcome.notedLines).toBe(1);
@@ -1066,8 +1084,8 @@ describe('applyExtraction - address (ninth target)', () => {
     const outcome = await run(deps, makeContact({ type: 'tenant' }), {
       fields: {},
       noteLines: [
-        'Current address is unstable, couch-surfing with family',
-        'Current address: 535 Seal Pl NE, Atlanta',
+        note('Current address is unstable, couch-surfing with family'),
+        note('Current address: 535 Seal Pl NE, Atlanta'),
       ],
     });
 
@@ -1257,7 +1275,7 @@ describe('applyExtraction - per-target decisions for the run log', () => {
   it('does NOT record a decision for a filtered note line (note lines are not targets)', async () => {
     const { deps } = makeDeps();
     const out = await run(deps, makeContact({ type: 'tenant' }), {
-      fields: {}, noteLines: ['Current address is 1 Main St 30303', 'stairs are fine'],
+      fields: {}, noteLines: [note('Current address is 1 Main St 30303'), note('stairs are fine')],
     });
     expect(out.decisions).toEqual([]);
     expect(out.notedLines).toBe(1);
@@ -1529,5 +1547,347 @@ describe('applyExtraction - a list match honors dismissals of its other spelling
     expect(outcome.decisions[0]).toMatchObject({
       target: 'housingAuthority', outcome: 'dropped', dropReason: 'dismissed_before',
     });
+  });
+});
+
+// B1 spec D3: a tenant matching input coerces by its KIND (from the one list),
+// never by name. coerceField is pure and exported - the probe (spec D7) and
+// the accept path (suggestionResolution.ts coerceAccept) use the same rule.
+describe('coerceField - the tenant matching inputs by kind (B1 spec D3)', () => {
+  it('trims a text value and keeps one of exactly 500 characters', () => {
+    expect(coerceField('area_preference', '  Decatur or Tucker  ')).toEqual({ ok: true, value: 'Decatur or Tucker' });
+    const max = 'x'.repeat(500);
+    expect(coerceField('preferences_constraints', max)).toEqual({ ok: true, value: max });
+  });
+
+  it('DROPS (never truncates) a text value over 500 characters, and an empty one', () => {
+    expect(coerceField('accessibility_need', 'x'.repeat(501))).toMatchObject({ ok: false });
+    expect(coerceField('area_preference', '   ')).toMatchObject({ ok: false });
+    expect(coerceField('area_preference', undefined)).toMatchObject({ ok: false });
+  });
+
+  it('reads dollars with $, commas and spaces stripped, as a whole number 0..20000', () => {
+    expect(coerceField('max_tenant_portion', '$1,200')).toEqual({ ok: true, value: 1200 });
+    expect(coerceField('max_tenant_portion', ' 1 200 ')).toEqual({ ok: true, value: 1200 });
+    expect(coerceField('max_tenant_portion', '0')).toEqual({ ok: true, value: 0 });
+    expect(coerceField('max_tenant_portion', '20000')).toEqual({ ok: true, value: 20000 });
+  });
+
+  it('drops a fractional, negative, out-of-range or non-numeric dollar value (1200.50 is not rounded)', () => {
+    for (const raw of ['1200.50', '-5', '20001', 'about 1200', '', '$']) {
+      expect(coerceField('max_tenant_portion', raw), raw).toMatchObject({ ok: false });
+    }
+  });
+
+  it('(PIN) leaves the eight original fields exactly as they were', () => {
+    expect(coerceField('pets', 'x'.repeat(121))).toMatchObject({ ok: false });
+    expect(coerceField('pets', '  two cats ')).toEqual({ ok: true, value: 'two cats' });
+    expect(coerceField('voucherSize', '3')).toEqual({ ok: true, value: 3 });
+    expect(coerceField('porting', 'true')).toEqual({ ok: true, value: true });
+  });
+});
+
+// B1 spec D3: the four follow the existing write/suggest/demotion rule, as pets
+// does. (The filled-text-field write drop is S3.4.)
+describe('applyExtraction - the tenant matching inputs (B1 spec D3)', () => {
+  it('writes an EMPTY text field directly, trimmed, with ai provenance', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: { area_preference: { op: 'write', value: ' Decatur or Tucker ', reason: 'said so' } },
+    });
+    expect(outcome.wrote).toEqual(['area_preference']);
+    expect(records.updates[0]!.patch['area_preference']).toBe('Decatur or Tucker');
+    expect(records.updates[0]!.patch['area_preference_source']).toEqual({
+      source: 'ai', at: NOW, conversationId: CONV, tsMsgId: 'ts-9',
+    });
+  });
+
+  it('writes the dollars field as a whole NUMBER', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: { max_tenant_portion: { op: 'write', value: '$1,200', reason: 'can pay 1200' } },
+    });
+    expect(outcome.wrote).toEqual(['max_tenant_portion']);
+    expect(records.updates[0]!.patch['max_tenant_portion']).toBe(1200);
+  });
+
+  it('suggests a contradiction on a filled text field, carrying the full replacement value', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant', area_preference: 'Marietta' }), {
+      fields: { area_preference: { op: 'suggest', value: 'Decatur, not Marietta', reason: 'changed her mind' } },
+    });
+    expect(outcome.suggested).toEqual(['area_preference']);
+    expect(records.updates).toHaveLength(0);
+    expect(records.suggestions[0]).toMatchObject({
+      target: 'area_preference', currentValue: 'Marietta', suggestedValue: 'Decatur, not Marietta',
+    });
+  });
+
+  it('demotes a write on an EMPTY field to a suggestion under inferred-role content, and audits it', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await applyExtraction(deps, {
+      orgEntries: ORG_ENTRIES,
+      contact: makeContact({ type: 'tenant' }),
+      conversationId: CONV,
+      cursorTsMsgId: 'ts-9',
+      result: { fields: { accessibility_need: { op: 'write', value: 'ground floor' } } },
+      hasInferredRoleContent: true,
+    });
+    expect(outcome.wrote).toEqual([]);
+    expect(outcome.suggested).toEqual(['accessibility_need']);
+    expect(outcome.decisions[0]).toMatchObject({ target: 'accessibility_need', outcome: 'suggested', demotedFrom: 'write' });
+    expect(records.audits.find((a) => a.type === 'ai_extraction_demoted')?.payload).toMatchObject({
+      fields: ['accessibility_need'],
+    });
+  });
+
+  it('drops the four for a contact that is not a tenant (wrong_contact_type)', async () => {
+    const { deps, records } = makeDeps();
+    const out = await run(deps, makeContact({ type: 'unknown' }), {
+      fields: { preferences_constraints: { op: 'write', value: 'no apartments' } },
+    });
+    expect(out.decisions).toEqual([
+      { target: 'preferences_constraints', outcome: 'dropped', dropReason: 'wrong_contact_type', proposedValue: 'no apartments' },
+    ]);
+    expect(records.updates).toHaveLength(0);
+  });
+
+  it('records invalid_value for an over-cap text value and a fractional dollar amount', async () => {
+    const { deps } = makeDeps();
+    const out = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: {
+        preferences_constraints: { op: 'write', value: 'x'.repeat(501) },
+        max_tenant_portion: { op: 'write', value: '1200.50' },
+      },
+    });
+    expect(out.wrote).toEqual([]);
+    expect(out.decisions.map((d) => [d.target, d.dropReason])).toEqual([
+      ['max_tenant_portion', 'invalid_value'],
+      ['preferences_constraints', 'invalid_value'],
+    ]);
+  });
+});
+
+// B1 spec D3: for the three TEXT tenant matching inputs "write" means "fill an
+// empty field" and nothing else. An added fact is a Notes line (D4); only a
+// `suggest` (a contradiction) creates a suggestion. So the model never
+// rewrites staff text live and suggestions do not churn on rewordings.
+describe('applyExtraction - a write never rewrites a filled text field (B1 spec D3)', () => {
+  it('drops a write on a NON-EMPTY text field as text_field_filled - not a write, not a suggestion', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant', area_preference: 'Marietta' }), {
+      fields: { area_preference: { op: 'write', value: 'Marietta or Smyrna', reason: 'added Smyrna' } },
+    });
+    expect(outcome.wrote).toEqual([]);
+    expect(outcome.suggested).toEqual([]);
+    expect(records.updates).toHaveLength(0);
+    expect(records.suggestions).toHaveLength(0);
+    expect(outcome.decisions).toEqual([{
+      target: 'area_preference', outcome: 'dropped', dropReason: 'text_field_filled',
+      proposedValue: 'Marietta or Smyrna', reason: 'added Smyrna',
+    }]);
+  });
+
+  it('drops it under inferred-role content too, and keeps it OUT of the Layer-3 demotion audit', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await applyExtraction(deps, {
+      orgEntries: ORG_ENTRIES,
+      contact: makeContact({ type: 'tenant', preferences_constraints: 'no apartments' }),
+      conversationId: CONV,
+      cursorTsMsgId: 'ts-9',
+      result: { fields: { preferences_constraints: { op: 'write', value: 'no apartments, needs a yard' } } },
+      hasInferredRoleContent: true,
+    });
+    expect(outcome.suggested).toEqual([]);
+    expect(records.suggestions).toHaveLength(0);
+    expect(outcome.decisions[0]).toMatchObject({ outcome: 'dropped', dropReason: 'text_field_filled' });
+    expect(outcome.decisions[0]?.demotedFrom).toBeUndefined();
+    expect(records.audits.find((a) => a.type === 'ai_extraction_demoted')).toBeUndefined();
+  });
+
+  it('(PIN) a whitespace-only stored value is empty: the write fills it', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant', accessibility_need: '   ' }), {
+      fields: { accessibility_need: { op: 'write', value: 'ground floor' } },
+    });
+    expect(outcome.wrote).toEqual(['accessibility_need']);
+    expect(records.updates[0]!.patch['accessibility_need']).toBe('ground floor');
+  });
+
+  it('(PIN) the dollars field keeps the pets rule: a same-fact write on a filled value lands', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant', max_tenant_portion: 1100 }), {
+      fields: { max_tenant_portion: { op: 'write', value: '1,200', reason: 'corrected' } },
+    });
+    expect(outcome.wrote).toEqual(['max_tenant_portion']);
+    expect(records.updates[0]!.patch['max_tenant_portion']).toBe(1200);
+  });
+
+  it('(PIN) a suggest on a filled text field still suggests - a contradiction is a suggestion', async () => {
+    const { deps } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant', area_preference: 'Marietta' }), {
+      fields: { area_preference: { op: 'suggest', value: 'Decatur' } },
+    });
+    expect(outcome.suggested).toEqual(['area_preference']);
+  });
+});
+
+// B1 spec D4: applyExtraction appends exactly what filterNoteLines returns, the
+// floor arriving through ApplyDeps from config.
+describe('applyExtraction - Notes lines through filterNoteLines (B1 spec D4)', () => {
+  it('drops a line below the floor, keeps one AT it, and reports the count', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: {}, noteLines: [note('below the floor', 0.69), note('at the floor', 0.7)],
+    });
+    expect(outcome.notedLines).toBe(1);
+    expect(outcome.notesBelowFloor).toBe(1);
+    expect(records.updates[0]!.patch['notes']).toBe('[Auto - Jul 16] at the floor');
+  });
+
+  it('applies the floor before the five-line cap: seven lines, first five below -> two land', async () => {
+    const { deps, records } = makeDeps();
+    const lines = [1, 2, 3, 4, 5].map((n) => note(`low ${n}`, 0.2)).concat([note('high 6'), note('high 7')]);
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), { fields: {}, noteLines: lines });
+    expect(outcome.notedLines).toBe(2);
+    expect(outcome.notesBelowFloor).toBe(5);
+    expect(records.updates[0]!.patch['notes']).toBe('[Auto - Jul 16] high 6\n[Auto - Jul 16] high 7');
+  });
+
+  it('reads the floor from ApplyDeps: a system line bypasses it, a model line does not', async () => {
+    const { deps, records } = makeDeps({
+      factMinConfidence: 1,
+      findByPhone: async () => makeContact({ contactId: 'other', type: 'tenant' }),
+    });
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: {}, noteLines: [note('nearly sure', 0.99)], phoneAddition: { phone: '555-010-9999' },
+    });
+    expect(outcome.notedLines).toBe(1);
+    expect(outcome.notesBelowFloor).toBe(1);
+    expect(records.updates[0]!.patch['notes']).toBe('[Auto - Jul 16] Mentioned number +15550109999 which belongs to another contact');
+  });
+
+  it('a guarded duplicate no longer takes a cap slot (WI5)', async () => {
+    // Whole words: written for the substring guard, which matched a single
+    // letter inside "seed". FW2-1 compares whole lines; the words stay.
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant', notes: 'seed\n[Auto - Jul 16] alpha' }), {
+      fields: {}, noteLines: ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot'].map((text) => note(text)),
+    });
+    expect(outcome.notedLines).toBe(5);
+    expect(records.updates[0]!.patch['notes']).toBe(
+      'seed\n[Auto - Jul 16] alpha\n[Auto - Jul 16] bravo\n[Auto - Jul 16] charlie\n[Auto - Jul 16] delta\n[Auto - Jul 16] echo\n[Auto - Jul 16] foxtrot',
+    );
+  });
+
+  it('appends feedback on 12 Oak St beside an earlier line on 112 Oak St - the guard compares whole lines (FW2-1)', async () => {
+    const { deps, records } = makeDeps();
+    const earlier = '[Auto - Jul 10] 112 Oak St, Decatur: likes it';
+    const outcome = await run(deps, makeContact({ type: 'tenant', notes: earlier }), {
+      fields: {}, noteLines: [note('12 Oak St, Decatur: likes it')],
+    });
+    expect(outcome.appendedLines).toEqual(['12 Oak St, Decatur: likes it']);
+    expect(records.updates[0]!.patch['notes']).toBe(`${earlier}\n[Auto - Jul 16] 12 Oak St, Decatur: likes it`);
+  });
+
+  it('drops a fact re-extracted from an old message on a later day, writes the new one (any-date guard, handback ruling)', async () => {
+    const { deps, records } = makeDeps();
+    const earlier = '[Auto - Jul 10] 412 Oak Ave, Decatur: on the fence\n[Auto - Jul 12] works nights downtown';
+    const outcome = await run(deps, makeContact({ type: 'tenant', notes: earlier }), {
+      fields: {}, noteLines: [note('works nights downtown'), note('412 Oak Ave, Decatur: now likes it')],
+    });
+    expect(outcome.appendedLines).toEqual(['412 Oak Ave, Decatur: now likes it']);
+    expect(records.updates[0]!.patch['notes']).toBe(`${earlier}\n[Auto - Jul 16] 412 Oak Ave, Decatur: now likes it`);
+  });
+
+  it('writes a new line the model copied with an old prefix under ONE prefix, and drops a copied old line (R3-4)', async () => {
+    const { deps, records } = makeDeps();
+    const earlier = '[Auto - Jul 10] works nights downtown';
+    const outcome = await run(deps, makeContact({ type: 'tenant', notes: earlier }), {
+      fields: {}, noteLines: [note('[Auto - Jul 10] works nights downtown'), note('[Auto - Jul 10] has a car')],
+    });
+    expect(outcome.appendedLines).toEqual(['has a car']);
+    expect(records.updates[0]!.patch['notes']).toBe(`${earlier}\n[Auto - Jul 16] has a car`);
+  });
+
+  it('a demoted run appends NO line of either kind and emits nothing for notes', async () => {
+    const { deps, records } = makeDeps({ findByPhone: async () => makeContact({ contactId: 'other', type: 'tenant' }) });
+    const outcome = await applyExtraction(deps, {
+      orgEntries: ORG_ENTRIES,
+      contact: makeContact({ type: 'tenant' }),
+      conversationId: CONV,
+      cursorTsMsgId: 'ts-9',
+      result: { fields: {}, noteLines: [note('works nights downtown')], phoneAddition: { phone: '555-010-9999' } },
+      hasInferredRoleContent: true,
+    });
+    expect(outcome.notedLines).toBe(0);
+    expect(outcome.notesDemoted).toBe(2);
+    expect(records.updates).toHaveLength(0);
+    expect(records.emits).toHaveLength(0);
+  });
+
+  it('drops a legacy string item without throwing (only the fake driver can deliver one, WI1)', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: {}, noteLines: ['a legacy string line'] as unknown as ExtractionResult['noteLines'],
+    });
+    expect(outcome.notedLines).toBe(0);
+    expect(records.updates).toHaveLength(0);
+  });
+});
+
+// WP1 B1 spec D5.3: the job counts feedback lines over what apply APPENDED, so
+// apply reports the appended lines themselves - bare text, no prefix, exactly
+// the lines joined into notes. A feedback line is an ordinary Notes line: it
+// passes the D4 path unchanged (no new filter, no shape check, no rewrite).
+describe('applyExtraction - appendedLines (WP1 B1 spec D5.3)', () => {
+  const FEEDBACK = '123 Main St, Decatur: on the fence - likes the yard, worried about the commute';
+
+  it('carries the bare text of each appended line, model lines then system lines; a free-form feedback line unchanged', async () => {
+    const { deps, records } = makeDeps({
+      findByPhone: async () => makeContact({ contactId: 'other', type: 'tenant' }),
+    });
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: {},
+      phoneAddition: { phone: '555-010-9999' },
+      noteLines: [
+        { text: FEEDBACK, confidence: 0.9 },
+        { text: 'Works nights downtown', confidence: 0.8 },
+      ],
+    });
+    const system = 'Mentioned number +15550109999 which belongs to another contact';
+    expect(outcome.appendedLines).toEqual([FEEDBACK, 'Works nights downtown', system]);
+    expect(outcome.notedLines).toBe(3);
+    const noteUpdate = records.updates.find((u) => typeof u.patch['notes'] === 'string');
+    expect(noteUpdate!.patch['notes']).toBe(
+      [FEEDBACK, 'Works nights downtown', system].map((line) => `[Auto - Jul 16] ${line}`).join('\n'),
+    );
+  });
+
+  it('leaves out a line the retry guard finds already in the notes', async () => {
+    const { deps } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant', notes: `[Auto - Jul 16] ${FEEDBACK}` }), {
+      fields: {},
+      noteLines: [
+        { text: FEEDBACK, confidence: 0.9 },
+        { text: 'Works nights downtown', confidence: 0.9 },
+      ],
+    });
+    expect(outcome.appendedLines).toEqual(['Works nights downtown']);
+    expect(outcome.notedLines).toBe(1);
+  });
+
+  it('is empty when the notes write fails - nothing was appended', async () => {
+    const { deps } = makeDeps({
+      updateImpl: async () => {
+        throw new Error('contacts down');
+      },
+    });
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: {},
+      noteLines: [{ text: FEEDBACK, confidence: 0.9 }],
+    });
+    expect(outcome.appendedLines).toEqual([]);
+    expect(outcome.notedLines).toBe(0);
   });
 });

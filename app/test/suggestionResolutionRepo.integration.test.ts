@@ -258,8 +258,8 @@ describe.skipIf(!reachable)('suggestion resolution protocol against DynamoDB Loc
 
   // F1: recovery has to find abandoned work WITHOUT the suggestion row that a
   // claim already deleted. The journal key set for one contact is closed (the
-  // twelve DECISION_TARGETS), so one BatchGet enumerates it.
-  it('enumerates a contact bounded journals from the twelve fixed keys', async () => {
+  // sixteen DECISION_TARGETS), so one BatchGet enumerates it.
+  it('enumerates a contact bounded journals from the sixteen fixed keys', async () => {
     const contactId = 'enumerate';
     const finished = await putSuggestion(contactId, 'pets');
     const finishedClaim = await resolutions.claim(claimInput(finished));

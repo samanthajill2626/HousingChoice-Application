@@ -21,6 +21,7 @@ import { getTableSpec } from '../lib/tables.js';
 import type { ConsentMethod } from '../lib/smsCompliance.js';
 import type { TransitionSource } from '../lib/statusModel.js';
 import type { TourType } from '../lib/toursModel.js';
+import type { TenantMatchingInputValues } from '../lib/tenantMatchingInputs.js';
 import type { RepoDeps } from './conversationsRepo.js';
 import { normalizeInstant } from '../lib/heardFrom.js';
 
@@ -110,7 +111,15 @@ export interface CaseworkerConversionRecord {
   agency?: string;
 }
 
-export interface ContactItem {
+/**
+ * A contact record. WP1 B1 (spec 2026-10-26 D1, D2): it also carries the
+ * tenant matching inputs, typed FROM the one list
+ * (lib/tenantMatchingInputs.ts TenantMatchingInputValues: text a string, the
+ * portion whole dollars), so this type names none of the four. Absent = not
+ * recorded (a clear REMOVEs; never ''). Tenant-only is a UI guarantee (not
+ * repo-gated), like the intake fields below.
+ */
+export interface ContactItem extends TenantMatchingInputValues {
   contactId: string;
   type: ContactType;
   /** Monotonic fence for committed type or role classifications. */
@@ -678,9 +687,12 @@ export class IncompleteBatchReadError extends Error {
   constructor(
     public readonly unprocessed: number,
     public readonly requested: number,
+    /** The table read, for the message only (WP1 B1: unitsRepo.getDisplaysByIds
+     *  raises it too). Defaults to contacts, so every contacts caller reads as before. */
+    table = 'contacts',
   ) {
     super(
-      `contacts batch read incomplete: ${unprocessed} of ${requested} keys unread ` +
+      `${table} batch read incomplete: ${unprocessed} of ${requested} keys unread ` +
         'after retries; the caller requires a complete read',
     );
     this.name = 'IncompleteBatchReadError';

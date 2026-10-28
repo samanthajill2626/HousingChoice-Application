@@ -611,7 +611,7 @@ await (await fetch('/api/contacts/<contactId>/caseworker-review', { method: 'POS
 5. Threads. The conversion re-typed the contact's own threads to `partner_1to1`, and nothing in the app types them back: the edit form's type change flips only `unknown_1to1` threads. Texting works on them as they are. What does not: tour reminders and the timeline look for a `tenant_1to1` (or `unknown_1to1`) thread and placement nudges for the thread type of their rung, so a contact going back to TENANT with tours or placements ahead needs its thread type restored by hand: in the AWS console, DynamoDB table `hc-<env>-conversations`, the conversation items whose `participant_phone` is one of the contact's phones (or whose `participant_email` is one of its addresses) and whose `type` is `partner_1to1` - set `type` to `tenant_1to1` (or `landlord_1to1`). Edit only `type`; leave the phone-claim rows (no `type` attribute) alone. Ask before touching prod data.
 6. AI suggestions the conversion superseded stay superseded; the next extraction run on the contact's thread suggests afresh.
 
-**What the conversion does not fence: an extraction run already in flight, and the importer.** Since `fix/caseworker-integrity` (spec `docs/superpowers/specs/2026-10-12-caseworker-integrity-design.md`, D1) a staff Accept of an AI suggestion cannot put tenant facts on a caseworker: an Accept of a tenant-only suggestion (housing authority, voucher size, pets, evictions, time at current address, porting, status) on a contact that is not a tenant is refused before anything is written, and the chip stays so it can be dismissed (409 `suggestion_contact_not_tenant`); an Accept that spans a type or role change - the conversion included, and also when crash recovery or the daily journal sweep finishes it hours later - writes nothing (409 `suggestion_contact_reclassified`). One gap remains there: an Accept claimed before that deploy and finished after it is fenced against the conversion but not against an ordinary type change. So a housing authority on a caseworker can now come from two writers only. One is an extraction run already in flight: a run that read the contact while it was still a tenant or unknown can still write tenant facts (a housing authority included) or new suggestions onto it after the conversion, because its writes are not conditional on the contact's type (filed: `extraction-in-flight-writes-onto-converted-caseworker`). The other is the importer: `import:apply` leaves a contact's type, status, housing authority and agency alone only when the contact carries `type_source: 'manual'` - every converted caseworker does, a contact created directly as a caseworker does not - and it applies none of the contact-type rules (filed: `import-bypasses-contact-type-rules`). `make` again (the repair above) supersedes an in-flight run's suggestions, but it does NOT remove a housing authority either writer put there. Remove that by hand in the console: `await fetch('/api/contacts/<contactId>', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ housingAuthority: '' }) })`.
+**What the conversion does not fence: an extraction run already in flight, and the importer.** Since `fix/caseworker-integrity` (spec `docs/superpowers/specs/2026-10-12-caseworker-integrity-design.md`, D1) a staff Accept of an AI suggestion cannot put tenant facts on a caseworker: an Accept of a tenant-only suggestion (housing authority, voucher size, pets, evictions, time at current address, porting, status, and since WP1 B1 area preference, maximum tenant portion, accessibility need, preferences and constraints) on a contact that is not a tenant is refused before anything is written, and the chip stays so it can be dismissed (409 `suggestion_contact_not_tenant`); an Accept that spans a type or role change - the conversion included, and also when crash recovery or the daily journal sweep finishes it hours later - writes nothing (409 `suggestion_contact_reclassified`). One gap remains there: an Accept claimed before that deploy and finished after it is fenced against the conversion but not against an ordinary type change. So a housing authority on a caseworker can now come from two writers only. One is an extraction run already in flight: a run that read the contact while it was still a tenant or unknown can still write tenant facts (a housing authority included) or new suggestions onto it after the conversion, because its writes are not conditional on the contact's type (filed: `extraction-in-flight-writes-onto-converted-caseworker`). The other is the importer: `import:apply` leaves a contact's type, status, housing authority and agency alone only when the contact carries `type_source: 'manual'` - every converted caseworker does, a contact created directly as a caseworker does not - and it applies none of the contact-type rules (filed: `import-bypasses-contact-type-rules`). `make` again (the repair above) supersedes an in-flight run's suggestions, but it does NOT remove a housing authority either writer put there. Remove that by hand in the console: `await fetch('/api/contacts/<contactId>', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ housingAuthority: '' }) })`.
 
 **The contact-type checks are reads, not locks.** Also since `fix/caseworker-integrity` (D2, D3): a contact's type change is refused while it is the tenant of an open tour or placement, or the landlord of record of a live property; a tour or placement is created, reopened, revived or moved out of Lost / Moved in only for a contact typed tenant; a property's landlord of record must be typed landlord; and a caseworker cannot take a new seat on a property's contact list. Each check reads first and writes after, and the reads of a contact's open tours, open placements and owned properties go through indexes, which trail a write by a moment (normally well under a second). Two people acting on the same contact at the same time - or one person scheduling a tour and changing the contact's type within that moment - can therefore both get through and leave, say, a landlord-typed contact on an open tour (spec L1: no lock was built, by decision). The two contact-list checks - a caseworker's new seat, and a landlord claim on a property with no landlord of record - are different: they are decided again inside the contact-list write itself, on the property as that write reads it, so the property side is atomic with the write (a seat removed or a landlord cleared a moment earlier is refused, never re-created or claimed); only the added contact's TYPE is still read before the write. The same holds for "Restore without a landlord": the remaining contacts are read before its write (when the cleared landlord was the primary contact, to pick who takes over: since `feat/primary-contact-integrity` the earliest-added contact eligible for automatic routing, and a read that fails refuses the restore with nothing written), and the write is conditioned on the contact list it read, so a concurrent contact-list change answers 409 `unit_roster_conflict`. A move out of Lost or Moved in has a second window: the transition decides whether the placement is leaving a closed stage from its own read of the placement (`transitionPlacement`, `app/src/services/statusTransition.ts`, its `placementsRepo.getById` before the tenant check), and the stage write that follows is NOT conditioned on the stage it read. So the check can be passed by read lag (that read is eventually consistent: a placement moved to Lost, its tenant re-typed and the placement moved back out, all within that moment) and also by a concurrent move landing between the read and the write (a move that read the placement open writes its new stage after someone else moved it to Lost and re-typed its tenant) - either way an open placement ends up on a contact that is not a tenant. The fix, a stage write conditioned on the stage read, is recorded in `placement-terminal-stage-exit-unguarded`. Nothing sweeps for it, and records made before the deploy that break these rules stay as they are (spec L2). Put one right by hand in the dashboard: change the contact's type back on its page (a change back to Tenant is refused only while the contact is also the landlord of record of a live property), or cancel or close the tour or placement.
 
@@ -1443,8 +1443,8 @@ both polls), then look for `… poll error` lines in the worker logs.
 
 On every fresh inbound SMS from a tenant/unknown 1:1 conversation, a debounced worker poll runs
 one structured-output LLM call over the recent transcript and applies a guarded write policy to
-the contact (write empty fields with provenance, suggest on conflicts, append secondary facts to
-notes). It is a **durable-row poll** like the two above (state in the new `ai_extraction` table,
+the contact (write empty fields with provenance, suggest on conflicts, append dated Notes lines -
+facts that might matter to matching the tenant with a home - to notes). It is a **durable-row poll** like the two above (state in the new `ai_extraction` table,
 never in process): a third 60-second `setInterval` in the worker, gated on `AI_EXTRACTION_ENABLED`.
 
 A saved **voice transcript** (a completed call OR a voicemail) ALSO schedules an extraction run -
@@ -1453,8 +1453,10 @@ once). Extraction windows are therefore **channel-mixed**: recent texts AND tran
 chronological transcript. Bridge-call speaker attribution is fixed in three layers - source-attributed
 `Staff:`/`Client:` line prefixes when the leg roles are known at ring time; in-call role inference
 otherwise; and any window containing inferred-role (`Speaker N`) lines **demotes every field write to
-a suggestion**, so an unattributed transcript can only ever suggest a profile FIELD, never silently
-write one (additive `notes` appends are not field writes and are never demoted).
+a suggestion** and **appends no Notes line at all** (model lines and system lines alike; since WP1 B1,
+2026-10-26), so an unattributed transcript can only ever suggest a profile FIELD, never silently
+write one, and adds nothing to the Notes box. The run record counts the lines it held back
+(`notesDemoted`).
 
 **Environment flags** (all in `.env.<env>`, pushed via the [Secrets](#secrets) flow):
 
@@ -1462,11 +1464,36 @@ write one (additive `notes` appends are not field writes and are never demoted).
 |---|---|---|
 | `AI_EXTRACTION_ENABLED` | `false` in production, `true` otherwise | Master kill switch. When off, the webhook schedules nothing and the worker starts no poll - the feature is inert. |
 | `EXTRACTION_DRIVER` | `anthropic` in production, `console` otherwise | LLM driver. `anthropic` = real call; `console` = logs a summary and returns nothing (keeps local dev offline); `fake` = deterministic test seam. **`fake` is REFUSED by the prod config validator** (throws at boot). |
-| `AI_EXTRACTION_MODEL` | `claude-opus-4-8` | Model id for the anthropic driver. Deployed envs currently set `claude-sonnet-5`. Read "Changing `AI_EXTRACTION_MODEL`" just below before swapping it - the output budget and the thinking-off form are both model-sensitive. |
+| `AI_EXTRACTION_MODEL` | `claude-opus-4-8` | Model id for the anthropic driver. Deployed envs currently set `claude-sonnet-5-5`. Read "Changing `AI_EXTRACTION_MODEL`" just below before swapping it - the output budget and the thinking-off form are both model-sensitive. |
 | `AI_EXTRACTION_DEBOUNCE_MS` | `30000` | Sliding debounce: each inbound text slides the due time out this far, so a burst yields one run. Unparseable/non-positive -> WARN + default. |
+| `EXTRACTION_FACT_MIN_CONFIDENCE` | `0.7` | Confidence floor for Notes lines: a model line whose confidence is below it is not appended and is counted as `notesBelowFloor` in the run record. Must be a finite number with 0 < x <= 1, or the app and worker refuse to start (fail-fast). Not required to deploy - unset or blank (`EXTRACTION_FACT_MIN_CONFIDENCE=`, as `secrets:sync` writes a key new to the real file) means 0.7. |
 | `ANTHROPIC_API_KEY` | (unset) | Anthropic REST key. Required when `AI_EXTRACTION_ENABLED` and `EXTRACTION_DRIVER=anthropic` in production, or the config fails fast at boot. |
 
-**Changing `AI_EXTRACTION_MODEL` (read before you swap it).** The driver turns thinking off
+**What extraction reads and writes since WP1 B1 (2026-10-26).** Four more tenant fields are
+extracted - Area preference, Maximum tenant portion, Accessibility need, Preferences and
+constraints (one list: `app/src/lib/tenantMatchingInputs.ts`). For the three text fields a model
+`write` only FILLS AN EMPTY field; a write on a filled one is dropped (run log reason
+`text_field_filled`) and a fact that adds to it becomes a Notes line instead; a contradiction
+arrives as a suggestion. Notes lines widened to facts that might matter to matching the tenant with
+a home, each with a confidence (floor `EXTRACTION_FACT_MIN_CONFIDENCE`), and a never-written list
+keeps race, color, religion, sex (including sexual orientation and gender identity), national origin, familial facts beyond household size and
+disability or medical facts other than the accessibility need out of every line. Each run also
+sends a PROPERTIES SENT block (the tenant's listed listing_sends rows, newest 20, at most 4,000 characters) so a **feedback
+line** - what the tenant said about a property sent to them - names that property by its label;
+the run detail counts `feedbackLines` and `unlabeledAddressLines` (a line with a street address
+that names no sent property, i.e. an attach miss). A property left out of the block logs a WARN
+with counts only (never a label):
+`extraction: properties sent over the prompt budget - oldest left out` (the oldest beyond 4,000
+characters) or `extraction: a sent property label holds the word TRANSCRIPT - left out of the block`.
+Extraction only READS listing_sends and units;
+**a failed listing_sends or units read fails the run**, which retries under the normal attempt
+count and parks after five failures like an organization-list failure - if one conversation keeps
+parking with a read error, check those two tables' health first.
+
+**Changing `AI_EXTRACTION_MODEL` (read before you swap it).** First run the schema compile check
+(`npx tsx app/scripts/extraction-schema-compile-check.ts --model <the new model id>`, TESTING key,
+see "Changing a structured-output schema" below): the grammar size limit is per model, and a schema
+the new model will not compile fails every extraction run with a 400. The driver turns thinking off
 explicitly on every call and budgets `max_tokens` (`MAX_OUTPUT_TOKENS`, currently 4096
 in `app/src/adapters/extraction.ts`) for the JSON alone. **Never drop that parameter.** What an ABSENT
 `thinking` means is decided per model - `claude-opus-4-8` runs without thinking, `claude-sonnet-5` runs
@@ -1489,11 +1516,39 @@ construction (a `speakerRoles` pair per `Speaker N` label on top of the all-requ
 truncate first.
 
 **Checking a prompt or model change against the real model.** `app/scripts/extraction-prompt-probe.ts`
-sends invented conversations through the production driver, prompt and schema and scores what the
-model did with each case's field (ok / missed / wrong). It reads and writes no data; it does call the
-Anthropic API (one extraction-sized call per case per run). Measure before and after a change by
-running it once with `--repo <a checkout of main>` and once from the branch; `--dry-run` prints the
-plan without a key. Usage is in the script's header.
+sends invented conversations through the production driver, prompt and schema. It reads and writes no
+data (the only file it writes is its `--out` record); it does call the Anthropic API (one
+extraction-sized call per case per run). Two suites:
+- the default suite scores each case's field (ok / missed / wrong). `--baseline <a checkout of main>`
+  runs it on this checkout AND on main, 3 runs per case on one `--model`, and FAILS when any case is
+  not measured on either side (fewer than 2 of its 3 calls returned a result - a refused, truncated,
+  unparsed or failed call is no measurement, so an expired key or a mistyped `--model` can never
+  pass), any case's ok count is 2 or more below main's, the total is more than 2 below, or the branch
+  side truncates at all (one automatic re-run of both sides); `--repo` still measures another
+  checkout alone;
+- `--suite never-written --model <id> --out <record.md>` runs one case per
+  never-written kind, stated in a free message and inside feedback on a sent property, plus controls
+  that must be written, 3 runs each, through the production PROPERTIES SENT renderer and the
+  production note and field filters. After each run ONE grader call (the same model and key, a small
+  structured-output call) judges every written line and every proposed field value against a plain
+  description of each excluded kind; it never sees the conversation, and there are no banned-word
+  lists. The suite passes on zero lines judged to state an excluded fact, every case graded in 2 of 3
+  runs, every control in 2 of 3 runs and zero truncations - and then needs a person's written
+  sign-off in the record, because whether each feedback line keeps the tenant's meaning, and whether
+  the grader judged right, is a judgment (the sign-off may overrule a verdict either way).
+WP1 B1's merge gate is BOTH commands - the `--baseline` comparison and `--suite never-written` - each
+passing on the final prompt. Both append a dated section to `--out` (the latest full section of each
+counts; a `--case` re-run writes a PARTIAL section that never counts); `--dry-run` builds every
+request without a key. Run it with the TESTING key and the model production runs
+(`claude-sonnet-5-5`); agents never run it against a real model. Usage is in the script's header.
+
+**Changing a structured-output schema.** The API compiles `EXTRACTION_SCHEMA` (and the probe's
+`GRADER_SCHEMA`) into a grammar with a size limit no offline test can see: past it, EVERY call fails
+400 "The compiled grammar is too large". WP1 B1 hit it (twelve named field objects failed, eight
+compiled), which is why `fields` is one list of `{ field, op, value, reason }` entries. After any
+schema change, run `npx tsx app/scripts/extraction-schema-compile-check.ts --model claude-sonnet-5-5`
+with the TESTING key - three tiny calls (a control, the extraction schema, the grader schema); it
+exits 1 when one fails to compile.
 
 **Housing authority: why an extracted one sometimes arrives as a suggestion.** The field holds only
 names from the organization list (Settings > Housing authorities & agencies), because a Matching
@@ -1593,7 +1648,7 @@ debounce (so you need not wait it out) and responds `{ processed, failed }`. Thi
 `suggestion.updated` emits do not (single-instance seam) - poller-driven changes surface on the
 dashboard's next fetch.
 
-**Smoke test (address target).** The extracted fields are the eight scalar profile fields plus the
+**Smoke test (address target).** The extracted fields are the twelve scalar profile fields (the eight intake fields and the four tenant matching inputs) plus the
 client's structured **CURRENT address** (written into the contact's Details "Current address" row).
 Quick manual check on the dev stack once live: as a **TENANT**, text the business line a current
 address, run a tick (`POST /__dev/extraction/tick`) or wait out the debounce, and confirm the

@@ -117,6 +117,14 @@
   color: var(--c-text);
 }
 
+/* A free-text tenant matching input (WP1 B1 spec D2): Preferences and
+ * constraints is a textarea, so keep the author's line breaks, and break a
+ * long unbroken value rather than overflowing the card. */
+.vProse {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* A small ⓘ hover affordance next to a KV key (KV `hint`) — reveals the field's
  * explanation on mouseover instead of an always-on caption. */
 .info {

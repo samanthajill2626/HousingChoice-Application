@@ -74,6 +74,19 @@
   vertical-align: middle;
 }
 
+/* WP1 B1 (spec D6): the staff Priority pill beside the status. Amber darkened for white text (tokens.css type pills); --c-warning is 4.28:1 (code review RD-8). */
+.priorityBadge {
+  display: inline-flex;
+  align-items: center;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-pill);
+  background: var(--c-pill-unknown-bg);
+  color: var(--c-text-inverse);
+  vertical-align: middle;
+}
+
 /* Standing banner under the header when the property is soft-deleted. */
 .deletedBanner {
   display: flex;

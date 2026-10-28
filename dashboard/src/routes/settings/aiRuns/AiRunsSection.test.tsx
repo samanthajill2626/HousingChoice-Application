@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
@@ -22,7 +25,7 @@ const row: AiRunListRow = { runId: 'run-1', sortKey: 's1', expired: false, start
 // it round-trips through an unordered DynamoDB map attribute, so the writer's
 // DECISION_TARGETS order is gone by the time the dashboard sees it. Building the
 // fixture in display order would make the ordering test unable to fail.
-const decisions: Record<string, AiRunDecision> = Object.fromEntries(['address','evictions','firstName','housingAuthority','lastName','pets','phone','porting','status','tenure','type','voucherSize'].map((target) => [target, { proposedOp: 'write', proposedValue: 'yes', outcome: 'wrote', verdict: 'auto_applied' }]));
+const decisions: Record<string, AiRunDecision> = Object.fromEntries(['accessibility_need','address','area_preference','evictions','firstName','housingAuthority','lastName','max_tenant_portion','pets','phone','porting','preferences_constraints','status','tenure','type','voucherSize'].map((target) => [target, { proposedOp: 'write', proposedValue: 'yes', outcome: 'wrote', verdict: 'auto_applied' }]));
 const detail: AiRunDetailResponse = { run: { runId: 'run-1', startedAt: '2026-08-07T10:00:00.000Z', finishedAt: '2026-08-07T10:00:01.000Z', durationMs: 4, conversationId: 'c1', contactId: 'contact-1', trigger: 'sms', outcome: 'applied', driver: 'fake', model: 'fake-v1', promptFingerprint: 'abcdef123456', usage: { inputTokens: 12, outputTokens: 4 }, decisions, notedLines: 0, window: { detail: 'full', cursor: 'x', windowCappedAtLimit: false, messages: [], excluded: [{ tsMsgId: 'old', cause: 'age_30d' }, { tsMsgId: 'budget', cause: 'char_budget' }], noContent: ['empty-call'] } }, contact: { firstName: 'Ada', lastName: 'Lovelace', phone: '+14040100007' }, window: { messages: [{ tsMsgId: 'm1', type: 'sms', direction: 'inbound', tier: 'new', truncated: true, chars: 12, hash: 'abc', hashStatus: 'mismatch', available: true, text: 'hello' }] } };
 
 function Location(): React.JSX.Element { return <output data-testid="location">{useLocation().search}</output>; }
@@ -84,13 +87,16 @@ describe('AiRunsSection', () => {
     expect(screen.getByRole('radio', { name: 'Contact: Empty Scope' })).toBeChecked();
   });
   it('shows the window with excluded causes and the no-content list', () => { renderSection(); expect(screen.getByRole('table', { name: 'Window messages' })).toBeInTheDocument(); expect(screen.getByRole('region', { name: 'Excluded messages' })).toHaveTextContent('age_30d'); expect(screen.getByRole('region', { name: 'Excluded messages' })).toHaveTextContent('char_budget'); expect(screen.getByRole('region', { name: 'No content' })).toHaveTextContent('empty-call'); });
-  it('shows every decision with its verdict', () => { renderSection(); const table = screen.getByRole('table', { name: 'Decisions' }); expect(within(table).getAllByRole('row')).toHaveLength(13); expect(screen.getByRole('row', { name: /^pets/ })).toHaveTextContent('auto applied'); });
+  it('shows every decision with its verdict', () => { renderSection(); const table = screen.getByRole('table', { name: 'Decisions' }); expect(within(table).getAllByRole('row')).toHaveLength(17); expect(screen.getByRole('row', { name: /^pets/ })).toHaveTextContent('auto applied'); });
   it('renders the ledger in the declared display order, not the map order the API returns', () => {
     renderSection();
     const body = within(screen.getByRole('table', { name: 'Decisions' })).getAllByRole('row').slice(1);
+    // B1 spec D3: the four tenant matching inputs sit after porting, in their
+    // list order (the dashboard mirror of app/src/lib/tenantMatchingInputs.ts).
     expect(body.map((tr) => within(tr).getAllByRole('cell')[0]?.textContent)).toEqual([
       'firstName', 'lastName', 'voucherSize', 'housingAuthority', 'pets', 'evictions',
-      'tenure', 'porting', 'address', 'status', 'type', 'phone',
+      'tenure', 'porting', 'area_preference', 'max_tenant_portion', 'accessibility_need',
+      'preferences_constraints', 'address', 'status', 'type', 'phone',
     ]);
   });
   it('shows WHEN the run happened in the detail header (spec section 9)', () => {
@@ -106,12 +112,12 @@ describe('AiRunsSection', () => {
     expect(header).not.toHaveTextContent('contact-1');
   });
   it('counts what an operator scanning the log cares about, not a pending cross-tab', () => {
-    // `pending` is a VERDICT cross-tab over the same twelve targets the five
+    // `pending` is a VERDICT cross-tab over the same sixteen targets the five
     // outcome buckets already partition, so the old total double-counted every
-    // pending decision. Both of these rows summed to 12 under it - the column
+    // pending decision. Both of these rows summed to 16 under it - the column
     // could not tell "wrote a field" apart from "changed nothing".
-    const wroteOne: AiRunListRow = { ...row, runId: 'run-wrote', decisionCounts: { wrote: 1, suggested: 0, dropped: 0, no_finding: 0, not_addressed: 11, pending: 0 } };
-    const changedNothing: AiRunListRow = { ...row, runId: 'run-noop', outcome: 'no_op', decisionCounts: { wrote: 0, suggested: 0, dropped: 0, no_finding: 0, not_addressed: 12, pending: 0 } };
+    const wroteOne: AiRunListRow = { ...row, runId: 'run-wrote', decisionCounts: { wrote: 1, suggested: 0, dropped: 0, no_finding: 0, not_addressed: 15, pending: 0 } };
+    const changedNothing: AiRunListRow = { ...row, runId: 'run-noop', outcome: 'no_op', decisionCounts: { wrote: 0, suggested: 0, dropped: 0, no_finding: 0, not_addressed: 16, pending: 0 } };
     useAiRunList.mockReturnValueOnce({ rows: [wroteOne, changedNothing], status: 'ready', hasMore: false, loadingMore: false, loadMoreFailed: false, loadMore: vi.fn(), retry: vi.fn() });
     renderSection();
     const runs = within(screen.getByRole('list', { name: 'AI runs' })).getAllByRole('listitem');
@@ -242,5 +248,141 @@ describe('AiRunsSection - the organization list', () => {
   it('(PIN) a run that never read the list (a skip) shows no organization list line', () => {
     renderSection();
     expect(screen.queryByText(/Organization list fingerprint/)).not.toBeInTheDocument();
+  });
+
+  // WP1 B1 spec D5.1 / D5.3 (PR34): the PROPERTIES SENT block's fingerprint
+  // and the two feedback counts are items in the "Notes lines" region, after
+  // S4's counts. Nothing new goes in the header.
+  it('shows the properties sent fingerprint and the feedback counts in the Notes lines region', () => {
+    const sentPropertiesFingerprint = 'a'.repeat(64);
+    useAiRun.mockReturnValueOnce({
+      detail: { ...detail, run: { ...detail.run, notedLines: 3, notesBelowFloor: 0, notesDemoted: 0, sentPropertiesFingerprint, feedbackLines: 2, unlabeledAddressLines: 1 } },
+      status: 'ready',
+      retry: vi.fn(),
+    });
+    renderSection();
+    const notes = within(screen.getByRole('region', { name: 'Notes lines' }));
+    expect(notes.getByText('Feedback lines: 2')).toBeInTheDocument();
+    expect(notes.getByText('Unlabeled address lines: 1')).toBeInTheDocument();
+    expect(notes.getByText(`Properties sent fingerprint: ${sentPropertiesFingerprint}`)).toBeInTheDocument();
+    const header = screen.getByRole('heading', { name: /run run-1/i }).parentElement as HTMLElement;
+    expect(header).not.toHaveTextContent('Properties sent fingerprint');
+  });
+
+  // The guard widens (PR34): a run whose ONLY B1 counts are the two feedback
+  // counts, both 0, with notedLines 0, still renders the region.
+  it('shows a zero count as 0, not as missing', () => {
+    useAiRun.mockReturnValueOnce({
+      detail: { ...detail, run: { ...detail.run, notedLines: 0, feedbackLines: 0, unlabeledAddressLines: 0 } },
+      status: 'ready',
+      retry: vi.fn(),
+    });
+    renderSection();
+    const notes = within(screen.getByRole('region', { name: 'Notes lines' }));
+    expect(notes.getByText('Feedback lines: 0')).toBeInTheDocument();
+    expect(notes.getByText('Unlabeled address lines: 0')).toBeInTheDocument();
+  });
+
+  // PR42 / PR46: a run that read the sends and then failed before apply
+  // carries only the fingerprint (recordRun writes notedLines 0: the job's
+  // failed-call path sets it to 0 and recordRun defaults it with `?? 0`). The
+  // region shows the fingerprint item alone: no "appended" row, because apply
+  // never ran.
+  it('shows a fingerprint-only run as the fingerprint item alone, with no appended row', () => {
+    const sentPropertiesFingerprint = 'b'.repeat(64);
+    useAiRun.mockReturnValueOnce({
+      detail: { ...detail, run: { ...detail.run, notedLines: 0, sentPropertiesFingerprint } },
+      status: 'ready',
+      retry: vi.fn(),
+    });
+    renderSection();
+    const region = screen.getByRole('region', { name: 'Notes lines' });
+    const notes = within(region);
+    expect(notes.getByText(`Properties sent fingerprint: ${sentPropertiesFingerprint}`)).toBeInTheDocument();
+    expect(region).not.toHaveTextContent('appended');
+    expect(notes.getAllByRole('listitem')).toHaveLength(1);
+  });
+
+  // PR46: a run recorded before B1 that appended a line still shows the
+  // appended row (no counts, notedLines > 0).
+  it('keeps the appended row for a pre-B1 run that appended a line', () => {
+    useAiRun.mockReturnValueOnce({
+      detail: { ...detail, run: { ...detail.run, notedLines: 2 } },
+      status: 'ready',
+      retry: vi.fn(),
+    });
+    renderSection();
+    expect(within(screen.getByRole('region', { name: 'Notes lines' })).getByText('2 appended')).toBeInTheDocument();
+  });
+
+  it('(PIN) a run recorded before B1 shows no properties sent line and no feedback counts', () => {
+    renderSection();
+    expect(screen.queryByRole('region', { name: 'Notes lines' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Properties sent fingerprint/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Feedback lines/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Unlabeled address lines/)).not.toBeInTheDocument();
+  });
+});
+
+// B1 spec D3: a write on a filled text field is a labeled drop, never a raw token.
+describe('AiRunsSection - the tenant matching inputs', () => {
+  it('labels a write dropped on a filled text field', () => {
+    useAiRun.mockReturnValueOnce({ detail: { ...detail, run: { ...detail.run, decisions: {
+      area_preference: { proposedOp: 'write', proposedValue: 'Marietta or Smyrna', outcome: 'dropped', verdict: 'not_presented', dropReason: 'text_field_filled' },
+    } } }, status: 'ready', retry: vi.fn() });
+    renderSection();
+    const row = screen.getByRole('row', { name: /^area_preference/ });
+    expect(within(row).getAllByRole('cell').at(-1)).toHaveTextContent(/^Field already filled$/);
+  });
+});
+
+// B1 spec D4: what happened to a run's Notes lines - counts only.
+describe('AiRunsSection - Notes lines', () => {
+  it('shows the appended, below-floor and withheld counts of a run that reached apply', () => {
+    useAiRun.mockReturnValueOnce({ detail: { ...detail, run: { ...detail.run, notedLines: 2, notesBelowFloor: 3, notesDemoted: 0 } }, status: 'ready', retry: vi.fn() });
+    renderSection();
+    const notes = screen.getByRole('region', { name: 'Notes lines' });
+    expect(notes).toHaveTextContent('2 appended');
+    expect(notes).toHaveTextContent('3 below the confidence floor');
+    expect(notes).toHaveTextContent('0 withheld by the unknown-speaker rule');
+  });
+
+  it('shows only the appended count for a run recorded before the counts existed', () => {
+    useAiRun.mockReturnValueOnce({ detail: { ...detail, run: { ...detail.run, notedLines: 1 } }, status: 'ready', retry: vi.fn() });
+    renderSection();
+    const notes = screen.getByRole('region', { name: 'Notes lines' });
+    expect(notes).toHaveTextContent('1 appended');
+    expect(notes).not.toHaveTextContent('confidence floor');
+  });
+
+  it('(PIN) shows no Notes lines block when there is nothing to report', () => {
+    renderSection();
+    expect(screen.queryByRole('region', { name: 'Notes lines' })).not.toBeInTheDocument();
+  });
+
+  // PR34: a present 0 is reported, not hidden.
+  it('shows the region for a run whose counts are all 0', () => {
+    useAiRun.mockReturnValueOnce({ detail: { ...detail, run: { ...detail.run, notedLines: 0, notesBelowFloor: 0, notesDemoted: 0 } }, status: 'ready', retry: vi.fn() });
+    renderSection();
+    const notes = screen.getByRole('region', { name: 'Notes lines' });
+    expect(notes).toHaveTextContent('0 appended');
+    expect(notes).toHaveTextContent('0 below the confidence floor');
+  });
+});
+
+// Self-QA SQA-1 (WP1 B1): the Notes lines region lists the 64-character
+// properties-sent fingerprint, one unbroken token, in the narrow detail
+// column. The unit tests run with `css: false`, so no test can measure
+// layout; this source pin keeps the wrap rule in place (the
+// Timeline.styles.test.ts mechanism; the e2e run-detail case measures it).
+describe('AiRunsSection.module.css .countList (WP1 B1 self-QA SQA-1)', () => {
+  it('breaks a long unbroken value instead of spilling past the region', () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'AiRunsSection.module.css'), 'utf8').replace(
+      /\/\*[\s\S]*?\*\//g,
+      '',
+    );
+    const match = css.match(/(?:^|\n|\})\.countList\s*\{([^}]*)\}/);
+    expect(match, 'missing CSS rule for .countList').not.toBeNull();
+    expect(match?.[1] ?? '').toMatch(/overflow-wrap:\s*anywhere/);
   });
 });

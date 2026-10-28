@@ -6,7 +6,7 @@ severity: med
 status: open
 area: app
 created: 2026-10-21
-updated: 2026-10-24
+updated: 2026-10-28
 refs: app/src/routes/public.ts:690-747, app/src/repos/activityEventsRepo.ts:136-154, app/src/repos/activityEventsRepo.ts:214-245, app/src/app.ts:185-191, app/src/routes/public.ts:198-211, app/src/routes/public.ts:253-260, app/src/routes/public.ts:760-777, app/src/jobs/rosterActions.ts:236-237, app/src/jobs/rosterActions.ts:261-304, app/src/routes/public.ts:541-578, app/src/routes/public.ts:637, app/src/routes/today.ts:784-840, dashboard/src/routes/listing/listingFormat.ts:352, app/test/publicSignupLeads.test.ts:750-761, dashboard/src/routes/contact/Timeline.module.css:467-471, app/src/services/shareLedger.ts:50, app/src/services/shareLedger.ts:205-224, app/src/jobs/broadcastFanOut.ts:1270, app/src/services/shareAttemptOutcome.ts:188, app/scripts/repair-share-outcomes.ts, app/src/routes/today.ts:182, app/src/routes/today.ts:704-754, app/src/lib/config.ts:1008-1014, app/src/routes/units.ts:1495-1520, app/src/services/followUps.ts:141-161
 ---
 
@@ -32,7 +32,12 @@ anonymous caller do; round 2 (`R2-review.md` F4 and N2, same directory)
 corrected what main did before and added the new-phone case; round 3
 (`R3-review.md` findings 2 and 3, with round 2's P-a and P-c) corrected the
 new-phone bound and added what a wrapping pin lets a typed name do, the
-ledger contention in point 5 and the strip list's wider scope.
+ledger contention in point 5 and the strip list's wider scope. Since
+permanent-flyer-links (2026-10-28; spec
+`docs/superpowers/specs/2026-10-27-permanent-flyer-links-design.md` D5) the
+reach is wider: every unitId whose property is public - every status but
+Setup, not only Available - is a live 24-hour pin source and properties-sent
+rewrite target, the ids in every old Matching and broadcast text included.
 
 **1. The 24-hour cap is read-then-write, not atomic.** The repeat check
 (`app/src/routes/public.ts:690-705`) is `activityEventsRepo.hasEventSince`, a
@@ -60,7 +65,7 @@ Reproduction (proof A, adversarial R1; harness world fakes, as in
 `app/test/publicSignupLeads.test.ts` - `makeWebhookHarness` with
 `PUBLIC_RATE_LIMIT_MAX` raised so no case is rate limited):
 1. Seed an existing tenant on the sign-up phone, its open 1:1 thread
-   (`conv-1`, `unread_count` 0) and a shareable unit (`status: 'available'`).
+   (`conv-1`, `unread_count` 0) and a public unit (`status: 'available'`).
 2. Wrap `world.activityEventsRepo.hasEventSince` so the original is CALLED
    first (its answer computed at call time, as the Query is evaluated) and the
    answer is returned about 25 ms later (one round trip).
@@ -123,14 +128,18 @@ partner, team member, unknown):
   it. That also puts the contact on Today: under Unreplied, or under Needs you
   now as a "New unknown contact" for an unknown contact
   (`app/src/routes/today.ts:784-840`).
-- (c) for a tenant or unknown contact and a shareable unit, rewrite the pair's
-  properties-sent state on EVERY request, outside the 24-hour cap
-  (`public.ts:760-777`): `sentAt` moves to now, a Replied or No reply yet pair
-  reads Signed up, files under Interested on the property's Sent to card and
-  leaves Follow up. No writer removes a share entry, so staff's only remedy is
-  a decline, which later sign-ups then respect.
-- (d) multiply (a) and (b) by every shareable unitId it knows - each is its own
-  24-hour source, and unitIds ride every Matching text's flyer link - and get
+- (c) for a tenant or unknown contact and a public unit (every status but
+  Setup since permanent-flyer-links, spec
+  `docs/superpowers/specs/2026-10-27-permanent-flyer-links-design.md` D5),
+  rewrite the pair's properties-sent state on EVERY request, outside the
+  24-hour cap (`public.ts:760-777`): `sentAt` moves to now, a Replied or No
+  reply yet pair reads Signed up, files under Interested on the property's
+  Sent to card and, for an Available property, leaves Follow up (Follow up
+  lists Available properties only). No writer removes a share entry, so
+  staff's only remedy is a decline, which later sign-ups then respect.
+- (d) multiply (a) and (b) by every public unitId it knows (every status but
+  Setup - not only Available ones) - each is its own 24-hour source, and
+  unitIds ride every Matching text's flyer link, old ones included - and get
   past the cap altogether with overlapping requests (point 1).
 
 **New phones** (code review round 2, N2). A phone with NO holder - any made-up
@@ -142,7 +151,7 @@ welcome; now each such sign-up ALSO leaves:
   unread, pinned by `app/test/publicSignupLeads.test.ts:750-761`);
 - a Today row under Unreplied (`app/src/routes/today.ts:809-841`), which a read
   thread never made;
-- for a shareable unit's flyer, a "Signed up" row filed under Interested on
+- for a public unit's flyer, a "Signed up" row filed under Interested on
   that property's Sent to card (`public.ts:760-777`;
   `dashboard/src/routes/listing/listingFormat.ts:352`).
 
@@ -210,7 +219,9 @@ add when it hits that cap before reaching the add's creation instant (WARN
 "removal-history scan hit the page cap without reaching the row - refusing the
 add"). A caller who writes 250 `signed_up` pins on one contact inside a
 deferral window (up to about 11 hours) would block a staff-confirmed relay add.
-It needs many shareable unitIds, many IPs, or point 1's overlapping bursts.
+It needs many public unitIds (every status but Setup, so the ids in old
+Matching and broadcast texts count too), many IPs, or point 1's overlapping
+bursts.
 
 **4. Response latency tells a deleted holder from a live one** (adversarial R1
 P4, not reproduced). The deleted path (`public.ts:541-578`) answers after the
@@ -241,10 +252,12 @@ fresh one.
 
 **What the spec accepted.** Spec D6.1 accepts, as a stated residual, that
 someone who knows a phone number can plant at most one pin a day per shareable
-property plus one "no property" pin, each carrying a typed name of their
-choosing (100 characters per part), with the endpoint's per-IP rate limit
-applying; and that the cap governs the pin and the bump only, while the flyer's
-sent-list entry (D7) is written on every sign-up it applies to. The round 1
+property (flyer-leads' word; since permanent-flyer-links D5 that is every
+public property - every status but Setup) plus one "no property" pin, each
+carrying a typed name of their choosing (100 characters per part), with the
+endpoint's per-IP rate limit applying; and that the cap governs the pin and
+the bump only, while the flyer's sent-list entry (D7) is written on every
+sign-up it applies to. The round 1
 adjudication
 (`docs/superpowers/reviews/2026-10-21-flyer-leads/code-review/adjudications.md`,
 rows A1 / C1, A2, P1 and P4) kept the build as specified, corrected the

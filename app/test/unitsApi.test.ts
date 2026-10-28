@@ -670,7 +670,7 @@ describe('REGRESSION: route-created unit derives forward on a placement transiti
     // (the create-time 'setup' baseline is derivation-eligible and was NOT pinned,
     // so the create's derived write drives the listing forward immediately). This
     // is the latent-bug fix — a freshly created placement no longer leaves its
-    // listing publicly shareable while the deal progresses.
+    // listing Available (the one sendable status) while the deal progresses.
     expect(world.units.get(unitId)!.status).toBe('under_application');
 
     // 4) A later stage transition (still within the Application phase) re-derives

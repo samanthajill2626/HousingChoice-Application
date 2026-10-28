@@ -147,7 +147,11 @@ export type LeftOutReason =
   | 'pending_suggestion'
   | 'dismissed_atlanta';
 
-/** The capture_source only the sign-up route writes (a /join sign-up, or a flyer one for an unshareable unit). */
+/**
+ * The capture_source only the sign-up route writes (a /join sign-up, or a
+ * flyer one whose unit earned no flyer credit when it was written - before
+ * permanent-flyer-links, any status but available).
+ */
 const JOIN_CAPTURE_SOURCE = 'housing_fair';
 
 /** Spec D5: every contact the sign-up creates after the change carries it. */

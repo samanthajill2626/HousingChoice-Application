@@ -979,8 +979,8 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     // status is NOT a writable CRUD field (§8: property-status changes route
     // through PATCH /api/units/:unitId/listing-status). Create is not a
     // transition, but the denormalized provenance must be initialized: a new
-    // property starts in 'setup' (§6: being prepped, NOT yet shareable — only
-    // 'available' is shareable), stamped status_source 'derived' (NOT 'manual')
+    // property starts in 'setup' (sec 6: being prepped, not yet on the public flyer,
+    // and only 'available' can be sent), stamped status_source 'derived' (NOT 'manual')
     // so it stays a derivation-permitting baseline. Staff move setup → available
     // (the publish/ready action) via PATCH /api/units/:unitId/listing-status,
     // and a committed placement then derives it onward to under_application/

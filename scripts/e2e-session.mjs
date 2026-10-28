@@ -166,9 +166,10 @@ const childEnv = {
   // single e2e run legitimately drives /public/* far more often than that from
   // ONE IP (every flyer teaser load + housing-fair POST + details reveal across
   // the public-pages, proof-of-send, settings, and tenant-onboarding specs share
-  // the window) — so the default trips and 429s cascade into "no longer available"
-  // funnels + missing welcomes. Raise the ceiling for the hermetic suite ONLY
-  // (this never touches a deployed env); an externally-set value still wins.
+  // the window) - so the default trips and 429s cascade into flyer loads that
+  // show the fallback sign-up page + missing welcomes. Raise the ceiling for
+  // the hermetic suite ONLY (this never touches a deployed env); an
+  // externally-set value still wins.
   PUBLIC_RATE_LIMIT_MAX: process.env.PUBLIC_RATE_LIMIT_MAX ?? '100000',
   // NOT raised by that variable: GET /public/housing-authorities (the /join
   // form's housing authority list) has its OWN hard-coded limit of 60 reads per

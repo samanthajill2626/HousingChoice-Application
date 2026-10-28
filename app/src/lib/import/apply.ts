@@ -1619,7 +1619,7 @@ function mapUnitStatus(raw: string): string {
   if (v === 'placed') return 'occupied';
   if (v === 'coming soon') return 'setup';
   // Anything unrecognized (including empty) starts in `setup` — visible to the
-  // operator, never publicly shareable.
+  // operator, not on the public flyer (setup is the one status it does not serve).
   return 'setup';
 }
 

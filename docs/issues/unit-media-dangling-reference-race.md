@@ -33,9 +33,10 @@ Proven interleaving (initial media = [K1, K2], both objects present in S3):
 5. A's update commits LAST: DB = [K2, K1].
 
 Final state: unit.media = [K2, K1], but K1's object was deleted. K1 renders as a
-broken <img> in the staff gallery and, if the unit is shareable, on the PUBLIC
-flyer, until a staffer re-edits the unit. The same shape occurs when the losing
-write is a raw PATCH that re-persists a key a concurrent removal just deleted.
+broken <img> in the staff gallery and, if the unit is public (every status but
+Setup), on the PUBLIC flyer, until a staffer re-edits the unit. The same shape
+occurs when the losing write is a raw PATCH that re-persists a key a
+concurrent removal just deleted.
 
 **Why this is ACCEPTED (documented, not re-architected).**
 

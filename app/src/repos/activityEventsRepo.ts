@@ -71,9 +71,9 @@ export type ActivityEventType =
   | 'listing_interested'
   // flyer-leads D6: a public sign-up (the flyer's sign-up box or /join) by an
   // existing or new contact, pinned in its thread. refType 'unit' + refId the
-  // unitId when the flyer's property was shareable; NO ref for /join and any
-  // other flyer - the one shared "no property" source of the 24-hour repeat
-  // check (hasEventSince).
+  // unitId when the flyer's property was public (every status but setup -
+  // permanent-flyer-links D5); NO ref for /join and any other flyer - the one
+  // shared "no property" source of the 24-hour repeat check (hasEventSince).
   | 'signed_up';
 
 /** What a milestone can deep-link out to (C2 `TimelineMilestone.refType`). */

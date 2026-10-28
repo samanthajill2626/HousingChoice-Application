@@ -70,7 +70,7 @@ single place to change it.
 
 - `listing_link` — the field holding the unit's public/external listing URL.
 - "public listing" in comments referring to that external URL.
-- The shareable flyer is the public face of a unit; "listing" wording there is fine.
+- The public flyer (`/p/:unitId`) is the public face of a unit; "listing" wording there is fine.
 
 Likewise, "property" in its plain programming sense (an object property/attribute)
 is unrelated to this entity and stays.
@@ -654,6 +654,22 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   up pair never waits: the person reached out, and the sign-up already
   marked their thread unread.
 
+- **public flyer statuses** (public vs sendable; permanent-flyer-links,
+  2026-10-27) - the flyer `/p/:unitId`
+  (`dashboard/src/routes/public/FlyerPage.tsx`, API
+  `GET /public/units/:unitId/flyer`) serves a property in every status but
+  Setup - a "public property" (`FLYER_PUBLIC` in
+  `app/src/lib/statusModel.ts`, `FLYER_PUBLIC_STATUSES` in `unitsRepo.ts`).
+  Only an Available property can be SENT (Matching; `SHAREABLE` /
+  `SHAREABLE_STATUSES`, the broadcast send guard), so "public" and
+  "sendable" are two different sets: do not call the flyer's set
+  "shareable". A served flyer never shows the status, and off Available it
+  drops the external listing link (the API sends `listing_link: null`). A
+  missing, deleted or Setup property - or any failed load - shows the flyer
+  **fallback** instead: one neutral sign-up page ("Find a home that fits
+  your voucher") that never says a home is gone. Whether and how a flyer
+  comes down: [STATUS-MODEL.md](STATUS-MODEL.md) section 6.
+
 - **flyer share entry** (flyer-leads, 2026-10-21) - what a flyer sign-up
   writes to a contact's properties-sent list: ONE entry with share key
   `flyer` in the (property, contact) pair's `listing_sends.shares` map,
@@ -661,16 +677,20 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   `acceptance`), through the same ledger path every share uses. It is a
   share ENTRY, not a new row kind, and not a send: no text goes out, it has
   no broadcast, and no "Property sent" pin is written. It is written only
-  for a shareable property and a `tenant` or `unknown` contact, and never
-  while the pair holds a current decline (a sign-up never clears a
-  decline). Code: `FLYER_SHARE_KEY` in `app/src/lib/shareLedgerKeys.ts`.
+  for a public property (every status but Setup since permanent-flyer-links,
+  2026-10-27; Available only before) and a `tenant` or `unknown` contact,
+  and never while the pair holds a current decline (a sign-up never clears
+  a decline). Code: `FLYER_SHARE_KEY` in `app/src/lib/shareLedgerKeys.ts`.
 
 - **signed up** (the pin and the outcome; flyer-leads, 2026-10-21) - a
   sign-up on the flyer or on /join from a live contact records an activity
   event of type `signed_up`, shown as a pin in the contact's thread:
   "Signed up from the flyer for `<address>` as `<First Last>`" (linked to
-  the property), "Signed up from a flyer as `<First Last>`" (the property
-  is not shareable) or "Signed up on the join page as `<First Last>`".
+  the property; when the property was not Available at sign-up, its status
+  label follows the address - "for `<address>` (Occupied) as" -
+  permanent-flyer-links D6, 2026-10-27), "Signed up from a flyer as
+  `<First Last>`" (the property is missing, deleted or in Setup) or "Signed
+  up on the join page as `<First Last>`".
   When texts to the number are off, each form ends with a note worded by
   its cause (Cameron, 2026-10-22). When a 1:1 thread of the signed-up
   number carries `sms_opt_out` (a STOP from that number), it ends with
@@ -698,8 +718,9 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   from the flyer <date>" in place of "Sent <date>" - is a pair whose latest
   counted share entry is the flyer entry (see **send outcome**). A sign-up
   does not move **last heard from**; a later inbound from the person does,
-  so the pair then reads Replied and is back on Follow up once quiet
-  (unknown contacts included; never an **Inactive** contact, see **waiting
+  so the pair then reads Replied and is back on Follow up once quiet while
+  the property is Available (Follow up lists Available properties only;
+  unknown contacts included; never an **Inactive** contact, see **waiting
   on a reply**). On Today only an existing unknown contact's unread thread
   shows, under Identify these contacts as a "New unknown contact" (not when
   that contact is **Inactive**); a tenant's, landlord's or partner's shows

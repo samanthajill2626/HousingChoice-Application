@@ -208,7 +208,8 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       landlordId: IDS.landlord, // byLandlord
       // status MUST be a LISTING_STATUSES value (setup|available|under_application
       // |finalizing|occupied|on_hold|off_market) — it's the byStatus GSI key AND
-      // gates the public flyer (only 'available' is shareable, §6). beds /
+      // gates the public flyer (every status but setup is public, sec 6; only
+      // 'available' can be sent). beds /
       // rent_min / rent_max / pets are the canonical field
       // names the app reads (unitFields WRITABLE_FIELDS + toUnitFlyer + the
       // dashboard UnitItem); the flexible-doc repo would silently store

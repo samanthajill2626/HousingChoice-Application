@@ -190,7 +190,7 @@ describe('isCandidate (spec D10: the stored item alone)', () => {
   });
 
   it.each([
-    ['a flyer sign-up for a shareable unit', { capture_source: 'flyer' }],
+    ['a flyer sign-up for a public unit', { capture_source: 'flyer' }],
     ['an inbound-text stub', { capture_source: 'inbound_sms' }],
     ['no capture_source', { capture_source: undefined }],
     ['a landlord', { type: 'landlord' }],

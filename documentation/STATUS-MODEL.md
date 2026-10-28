@@ -305,9 +305,12 @@ Setup → Available → Under application → Finalizing → Occupied
    overrides: On hold        terminal: Off market
 ```
 
-- **`Setup`** — being prepped; not yet shareable.
-- **`Available`** — the **only publicly-shareable** state (gates the public flyer), as
-  today.
+- **`Setup`** - being prepped; not yet public (the flyer serves every status but
+  Setup: `FLYER_PUBLIC`, permanent-flyer-links, 2026-10-27).
+- **`Available`** - the only status a property can be sent in (broadcasts).
+- Moving a property back to `Setup` is not a take-down: derivation overwrites
+  Setup on the property's next placement event (section 7). Deleting the
+  property is the only durable way to take its flyer down.
 - **`Under application` / `Finalizing` / `Occupied`** are **derived** from the
   committed placement (see §7). **`Off market`** replaces today's `inactive`.
 

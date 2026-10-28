@@ -43,7 +43,7 @@ const LANDLORD_TONE: Record<LandlordStatus, BadgeTone> = {
   parked: 'muted',
 };
 
-/** property status → tone (colour family). `available` is the publicly-shareable
+/** property status -> tone (color family). `available` is the one sendable
  *  status (positive/green); the in-flight ones read as progress; the closed/held
  *  ones read muted. */
 const LISTING_TONE: Record<ListingStatus, BadgeTone> = {

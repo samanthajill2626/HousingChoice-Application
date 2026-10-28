@@ -1030,8 +1030,9 @@ export class Scenario {
   /**
    * [Setup] Create an AVAILABLE property the team can send. Pure setup → API:
    * POST /api/units starts a property in 'setup', then PATCH …/listing-status
-   * publishes it to 'available' (the only shareable status). beds defaults to the
-   * tenant's voucher size so it lands in the broadcast's pre-filled audience.
+   * publishes it to 'available' (the only status a property can be sent in).
+   * beds defaults to the tenant's voucher size so it lands in the broadcast's
+   * pre-filled audience.
    * `landlordId` defaults to the seeded landlord; tour scenarios pass their own
    * fresh landlord so the tour-relay auto-resolve finds a landlord WITH a phone.
    */

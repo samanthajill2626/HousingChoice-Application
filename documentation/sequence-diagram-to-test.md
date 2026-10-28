@@ -170,7 +170,7 @@ a different name, not a gap to build** — the audit's job is to find the mappin
 - **Set up an available property via the API:** `POST /api/units { landlordId, beds,
   accepted_authorities:['Atlanta Housing Authority'], address:{line1,city,state,zip} }` starts a unit in `setup` (status is NOT a
   writable create field; `address` MUST be an object), then `PATCH /api/units/:id/listing-status
-  { toStatus:'available', source:'manual' }` publishes it (only `available` is shareable).
+  { toStatus:'available', source:'manual' }` publishes it (only `available` can be sent; the flyer serves every status but `setup`).
   Set a tenant to searching via `PATCH /api/contacts/:id/tenant-status { toStatus, source }`.
 - **Stubbed-card trap:** the tenant "Properties sent" card is wired to the backend slice but
   hard-codes the empty state (it never renders the rows — issue

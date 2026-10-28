@@ -531,16 +531,26 @@ describe('GET /public/units/:unitId/flyer - public fields only', () => {
     expect(res.body).toEqual({ error: 'not_found', contact_number: OUR_NUMBER });
   });
 
-  // permanent-flyer-links D2 / D3a (spec 2026-10-27): the flyer serves every
-  // FLYER_PUBLIC status - the whole flyer, photos included - and the payload
-  // never names the status. The outside listing link ships only while the home
-  // is Available. One harness per status: a bare harness allows 5 /public
-  // requests a minute.
+  // permanent-flyer-links D2 / D3 / D3a (spec 2026-10-27): the flyer serves
+  // every FLYER_PUBLIC status, and a served flyer "renders exactly as an
+  // Available one" (D3) - so its payload is the Available payload, but for the
+  // outside listing link, which ships only while the home is Available (D3a).
+  // Each row seeds a unit with EVERY public field recorded and pins three
+  // things about the response body:
+  //   - its keys: exactly { flyer }, and the flyer's key set is
+  //     PUBLIC_FLYER_KEYS in every status (code review R1 C-2);
+  //   - no status word: the stored status value appears nowhere in it and,
+  //     off Available, neither that value nor its staff label appears in any
+  //     case;
+  //   - its values: the whole body is { flyer: AVAILABLE_FLYER } - the
+  //     Available payload, written out - with listing_link null off
+  //     Available, so a fact blanked, cut short or changed off Available fails
+  //     too, not only a key (code review R2-3).
+  // One harness per status: a bare harness allows 5 /public requests a minute.
   describe('every public status (permanent-flyer-links D2)', () => {
     // The served payload's whole key set, sorted - the same keys as the
-    // allowlist test above, and IDENTICAL for every public status: D2's "no
-    // status field" also means nothing status-derived under any other key
-    // (code review R1 C-2).
+    // allowlist test above. It catches a key added or dropped off Available;
+    // the values are AVAILABLE_FLYER's to pin.
     const PUBLIC_FLYER_KEYS = [
       'accepted_authorities',
       'address',
@@ -560,11 +570,49 @@ describe('GET /public/units/:unitId/flyer - public fields only', () => {
       'washer_dryer',
     ].sort();
 
+    // The public fields seedFullUnit leaves unset - an unset one reads null in
+    // every status, so blanking it off Available would not show - plus STORED
+    // two-item lists for the authorities and the voucher sizes, so a list cut
+    // short shows too (seedFullUnit has only the one-item fallbacks: the
+    // legacy jurisdiction and beds).
+    const RECORDED_FACTS: Partial<UnitItem> = {
+      utilities: 'Electric and gas',
+      video_url: 'https://example.com/tour/1',
+      application_fee: 50,
+      same_day_rta: true,
+      washer_dryer: 'hookups',
+      voucher_size_accepted: [1, 2],
+      accepted_authorities: ['Atlanta Housing Authority', 'DCA'],
+    };
+
+    // The served flyer for that unit while it is Available, written out in
+    // PUBLIC_FLYER_KEYS order. A literal, not toUnitFlyer(seed), so the code
+    // under test is not its own oracle. Every other row must serve it value
+    // for value, listing_link aside.
+    const AVAILABLE_FLYER = {
+      accepted_authorities: ['Atlanta Housing Authority', 'DCA'],
+      address: { line1: '123 Private St', city: 'Atlanta', state: 'GA', zip: '30303' },
+      application_fee: 50,
+      area: 'Westside',
+      baths: 1,
+      beds: 2,
+      contact_number: OUR_NUMBER,
+      listing_link: 'https://example.com/listing/1',
+      media: ['/unit-media/unit-1/photo1', '/unit-media/unit-1/photo2'],
+      same_day_rta: true,
+      unitId: 'unit-1',
+      utilities: 'Electric and gas',
+      video_url: 'https://example.com/tour/1',
+      voucher_size: 1,
+      voucher_sizes: [1, 2],
+      washer_dryer: 'hookups',
+    };
+
     it.each(['available', 'under_application', 'finalizing', 'occupied', 'on_hold', 'off_market'] as const)(
-      'status %s: 200, no status key, the listing link only while Available',
+      'status %s: 200, the Available payload value for value but for the listing link (null off Available), no status word',
       async (status) => {
         const { app, world } = makeWebhookHarness();
-        seedFullUnit(world, { status });
+        seedFullUnit(world, { ...RECORDED_FACTS, status });
 
         const res = await request(app).get('/public/units/unit-1/flyer').set('x-origin-verify', SECRET);
         expect(res.status).toBe(200);
@@ -580,10 +628,12 @@ describe('GET /public/units/:unitId/flyer - public fields only', () => {
           expect(lowered).not.toContain(status);
           expect(lowered).not.toContain(LISTING_STATUS_LABELS[status].toLowerCase());
         }
-        // D3a: the stored link for Available, null (not absent) for the rest.
-        expect(res.body.flyer.listing_link).toBe(status === 'available' ? 'https://example.com/listing/1' : null);
-        expect(res.body.flyer.media).toEqual(['/unit-media/unit-1/photo1', '/unit-media/unit-1/photo2']);
-        expect(res.body.flyer.contact_number).toBe(OUR_NUMBER);
+        // D3 + D3a: the WHOLE body is the Available one - every value, photos
+        // and contact_number included - with the stored link for Available and
+        // null (not absent) for the rest.
+        expect(res.body).toEqual({
+          flyer: { ...AVAILABLE_FLYER, listing_link: status === 'available' ? AVAILABLE_FLYER.listing_link : null },
+        });
       },
     );
 

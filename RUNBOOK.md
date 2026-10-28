@@ -1490,7 +1490,10 @@ Extraction only READS listing_sends and units;
 count and parks after five failures like an organization-list failure - if one conversation keeps
 parking with a read error, check those two tables' health first.
 
-**Changing `AI_EXTRACTION_MODEL` (read before you swap it).** The driver turns thinking off
+**Changing `AI_EXTRACTION_MODEL` (read before you swap it).** First run the schema compile check
+(`npx tsx app/scripts/extraction-schema-compile-check.ts --model <the new model id>`, TESTING key,
+see "Changing a structured-output schema" below): the grammar size limit is per model, and a schema
+the new model will not compile fails every extraction run with a 400. The driver turns thinking off
 explicitly on every call and budgets `max_tokens` (`MAX_OUTPUT_TOKENS`, currently 4096
 in `app/src/adapters/extraction.ts`) for the JSON alone. **Never drop that parameter.** What an ABSENT
 `thinking` means is decided per model - `claude-opus-4-8` runs without thinking, `claude-sonnet-5` runs

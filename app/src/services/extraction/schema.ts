@@ -193,7 +193,9 @@ function clamp(text: string, max: number): string {
 /**
  * The model's `fields` output keyed by field name. The wire shape is a LIST of
  * `{ field, op, value, reason }` (EXTRACTION_SCHEMA); a field listed twice
- * keeps its FIRST entry, and an entry naming no extractable field is ignored.
+ * keeps its first entry whose op is "write" or "suggest" - so a "none"
+ * placeholder never hides a real op listed after it - else its first entry
+ * (code review PA-S-2). An entry naming no extractable field is ignored.
  * The older object shape (`{ <field>: { op, value, reason } }`) is still read:
  * the AI run log stores each run's raw response text, and parseExtractionOps
  * re-reads runs recorded before the list shape.
@@ -202,10 +204,12 @@ function rawFieldOps(raw: unknown): Record<string, unknown> {
   if (isRecord(raw)) return raw;
   const byField: Record<string, unknown> = {};
   if (!Array.isArray(raw)) return byField;
+  const acts = (entry: unknown): boolean => isRecord(entry) && (entry.op === 'write' || entry.op === 'suggest');
   for (const entry of raw) {
     if (!isRecord(entry) || typeof entry.field !== 'string') continue;
     if (!(EXTRACTABLE_FIELDS as readonly string[]).includes(entry.field)) continue;
-    if (!(entry.field in byField)) byField[entry.field] = entry;
+    const kept = byField[entry.field];
+    if (kept === undefined || (!acts(kept) && acts(entry))) byField[entry.field] = entry;
   }
   return byField;
 }

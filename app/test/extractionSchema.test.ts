@@ -126,6 +126,17 @@ describe('the tenant matching inputs in the schema (B1 spec D3)', () => {
     expect(parsed.fields.firstName).toBeUndefined();
   });
 
+  it('a "none" placeholder never hides a real op listed later for the same field (PA-S-2)', () => {
+    const parsed = parseExtractionText(JSON.stringify({
+      fields: [
+        { field: 'pets', op: 'none', value: '', reason: '' },
+        { field: 'pets', op: 'write', value: 'one small dog', reason: 'said so' },
+        { field: 'pets', op: 'suggest', value: 'two cats', reason: 'later' },
+      ],
+    }));
+    expect(parsed.fields.pets).toEqual({ op: 'write', value: 'one small dog', reason: 'said so' });
+  });
+
   it('still reads the older object shape (run records written before the list shape)', () => {
     const parsed = parseExtractionText(JSON.stringify({ fields: { pets: { op: 'write', value: 'one dog', reason: 'said so' } } }));
     expect(parsed.fields.pets).toEqual({ op: 'write', value: 'one dog', reason: 'said so' });

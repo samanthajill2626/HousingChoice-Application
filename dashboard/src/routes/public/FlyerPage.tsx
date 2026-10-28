@@ -13,10 +13,10 @@
 //   text (?cta=text)  - "I'm interested - text us": a tap-to-text sms: link to
 //                       our main business number (contact_number). No form -
 //                       these visitors are ALREADY onboarded.
-// The fallback (missing, deleted, setup or any failure) is a neutral sign-up
-// page and is variant-aware too (the opaque 404 body carries contact_number so
-// the text CTA still works there). It never says a home is gone
-// (permanent-flyer-links D4).
+// The fallback (missing, deleted, setup, a stored status outside the listing
+// statuses, or any failure) is a neutral sign-up page and is variant-aware
+// too (the opaque 404 body carries contact_number so the text CTA still works
+// there). It never says a home is gone (permanent-flyer-links D4).
 //
 // Tenant-facing copy: the dwelling is a "home" (never unit/property/listing).
 //
@@ -53,7 +53,10 @@ const FALLBACK_PREFILL = "I'm looking for a home that fits my voucher.";
  *  in parseHousingFairBody after the app-wide body trim (app.ts trimJsonBody).
  *  The fallback sends the route id only when it passes, so its one button can
  *  always succeed (permanent-flyer-links D4). A copy, not an import: public.ts
- *  is not a leaf module; FlyerPage.test.tsx pins the 200/201 boundary. */
+ *  is not a leaf module. FlyerPage.test.tsx pins this copy's 200/201 boundary
+ *  and app/test/publicIntake.test.ts pins the server's (200 accepted, also
+ *  inside surrounding spaces; 201 refused), so a change to either cap must
+ *  change both. */
 const MAX_UNIT_ID_LEN = 200;
 
 /** Build the cross-platform tap-to-text href. The `?&body=` form is DELIBERATE
@@ -249,9 +252,10 @@ export function FlyerPage(): React.JSX.Element {
         setStage({ kind: 'ready', flyer });
       } catch (err) {
         if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
-        // Opaque 404 (missing, deleted or setup) or any other failure (5xx,
-        // network, 429) -> the same neutral fallback (permanent-flyer-links
-        // D4); a 404 body may carry our texting number.
+        // Opaque 404 (missing, deleted, setup, or a stored status outside the
+        // listing statuses) or any other failure (5xx, network, 429) -> the
+        // same neutral fallback (permanent-flyer-links D4); a 404 body may
+        // carry our texting number.
         setStage({ kind: 'fallback', contactNumber: contactFromError(err) });
       }
     })();

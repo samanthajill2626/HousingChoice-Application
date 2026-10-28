@@ -6,7 +6,7 @@ severity: low
 status: open
 area: dashboard
 created: 2026-10-28
-refs: dashboard/src/routes/broadcasts/RecipientPreview.tsx:374-397, dashboard/src/routes/broadcasts/RecipientPreview.tsx:417-420, app/src/routes/broadcasts.ts:1187-1193, app/src/routes/units.ts:1025-1038
+refs: dashboard/src/routes/broadcasts/RecipientPreview.tsx:374-397, dashboard/src/routes/broadcasts/RecipientPreview.tsx:417-420, app/src/routes/broadcasts.ts:1187-1193, app/src/routes/units.ts:1025-1038, dashboard/src/routes/broadcasts/RecipientPreview.tsx:436-451, app/src/routes/statusTransition.ts:342-371, app/src/services/statusTransition.ts:684-703, app/src/repos/unitsRepo.ts:1284-1293, app/src/repos/unitsRepo.ts:1413-1427
 ---
 
 **Problem.** The broadcast send guard refuses a soft-deleted property with
@@ -39,11 +39,35 @@ a throwaway app test: a draft for an Available unit, `DELETE /api/units/<id>`,
 then the unit read still says `status: available` with `deleted_at` set and
 the send answers 400 `unit_not_available`.
 
-Not checked: a property deleted while NOT Available gets the pre-flight's
-"Make Available & send" dialog instead; what that status move does on a
-deleted property was not traced.
+A property deleted while NOT Available takes the other path, and it also
+writes to the deleted property. Traced by code review round 2
+(`R2-review.md` R2-4, same directory) with a throwaway app test: a draft for
+an On hold unit, `DELETE /api/units/<id>` answers 200, then the dialog's
+`PATCH /api/units/<id>/listing-status` `{available}` answers 200 - the
+stored status is now available and `deleted_at` is still set - and the send
+answers 400 `unit_not_available`. In the code:
+- the pre-flight sees a status other than available and opens the "Make
+  Available & send" dialog (`RecipientPreview.tsx:391-394`);
+- its button (`onMakeAvailableAndSend`, :436-451) sends that PATCH with
+  `available` (:442) and then sends the broadcast (:444);
+- the PATCH route (`app/src/routes/statusTransition.ts:342-371`) calls the
+  service's `setListingStatus` (`app/src/services/statusTransition.ts:684-703`),
+  which never looks at `deleted_at`: `unitsRepo.getById` returns a deleted unit
+  (`app/src/repos/unitsRepo.ts:1284-1293`), and `update` is conditioned
+  only on the item existing (:1379). So the deleted property's status flips
+  to available, with a `listing_status_changed` audit row;
+- the send guard still refuses it (`isDeleted`, `broadcasts.ts:1189`), and
+  staff read the same copy (`RecipientPreview.tsx:420`), "make it Available,
+  then send", about a property that now reads Available.
+
+A later restore only removes `deleted_at` (`unitsRepo.ts:1413-1427`), so the
+property comes back as Available. The same flow ran on main with main's
+copy.
 
 **Suggested fix.** Either a distinct refusal code for a missing or deleted
 property (for example `unit_deleted`) with its own copy, or a `deleted_at`
 check in the pre-flight - with copy such as "This property was deleted -
-restore it to send."
+restore it to send." The pre-flight check covers both paths, since it runs
+before the dialog. A distinct code alone fixes the copy, but the dialog
+would still write the deleted property's status first; refusing
+`setListingStatus` on a deleted unit closes that.

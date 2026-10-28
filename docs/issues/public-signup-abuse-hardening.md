@@ -7,7 +7,7 @@ status: open
 area: app
 created: 2026-10-21
 updated: 2026-10-28
-refs: app/src/routes/public.ts:710-767, app/src/repos/activityEventsRepo.ts:136-154, app/src/repos/activityEventsRepo.ts:214-245, app/src/app.ts:185-191, app/src/routes/public.ts:209-226, app/src/routes/public.ts:268-275, app/src/routes/public.ts:781-798, app/src/jobs/rosterActions.ts:236-237, app/src/jobs/rosterActions.ts:261-304, app/src/routes/public.ts:560-597, app/src/routes/public.ts:656, app/src/routes/today.ts:784-840, dashboard/src/routes/listing/listingFormat.ts:352, app/test/publicSignupLeads.test.ts:840-851, dashboard/src/routes/contact/Timeline.module.css:467-471, app/src/services/shareLedger.ts:50, app/src/services/shareLedger.ts:205-224, app/src/jobs/broadcastFanOut.ts:1270, app/src/services/shareAttemptOutcome.ts:188, app/scripts/repair-share-outcomes.ts, app/src/routes/today.ts:182, app/src/routes/today.ts:704-754, app/src/lib/config.ts:1008-1014, app/src/routes/units.ts:1495-1520, app/src/services/followUps.ts:141-161, app/src/lib/import/ids.ts:84-86
+refs: app/src/routes/public.ts:710-767, app/src/repos/activityEventsRepo.ts:136-154, app/src/repos/activityEventsRepo.ts:214-245, app/src/app.ts:185-191, app/src/routes/public.ts:209-226, app/src/routes/public.ts:268-275, app/src/routes/public.ts:781-798, app/src/jobs/rosterActions.ts:236-237, app/src/jobs/rosterActions.ts:261-304, app/src/routes/public.ts:560-597, app/src/routes/public.ts:656, app/src/routes/today.ts:784-840, dashboard/src/routes/listing/listingFormat.ts:352, app/test/publicSignupLeads.test.ts:840-851, dashboard/src/routes/contact/Timeline.module.css:467-471, app/src/services/shareLedger.ts:50, app/src/services/shareLedger.ts:205-224, app/src/jobs/broadcastFanOut.ts:1270, app/src/services/shareAttemptOutcome.ts:188, app/scripts/repair-share-outcomes.ts, app/src/routes/today.ts:182, app/src/routes/today.ts:704-754, app/src/lib/config.ts:1008-1014, app/src/routes/units.ts:1495-1520, app/src/services/followUps.ts:141-161, app/src/lib/import/ids.ts:84-86, app/src/lib/import/ids.ts:24
 ---
 
 **Problem.** Since `feat/flyer-leads` (spec
@@ -100,8 +100,10 @@ It can NOT:
 It CAN, per request, on ANY live contact of any type (tenant, landlord,
 partner, team member, unknown):
 - (a) put a staff-visible, system-looking pin in the contact's thread whose
-  name is text of its choosing: "Signed up from the flyer for `<address>` as
-  `<typed first last>`" (`signupPinLabel`, `public.ts:209-226`). The names are
+  name is text of its choosing: "Signed up from the flyer for `<address>`
+  (`<Status>`) as `<typed first last>`", with the status label in
+  parentheses only when the home is not Available (permanent-flyer-links D6;
+  `signupPinLabel`, `public.ts:209-226`). The names are
   only trimmed and length-capped (`parseHousingFairBody`, `public.ts:268-275`,
   100 characters per part), so interior
   newlines, other C0/C1 control characters and bidi overrides are kept: an
@@ -145,9 +147,12 @@ partner, team member, unknown):
   unitIds ride every Matching text's flyer link, old ones included - and get
   past the cap altogether with overlapping requests (point 1). Imported
   properties' unitIds are uuidv5 of the normalized address
-  (`unitIdForAddress`, `app/src/lib/import/ids.ts:84-86`), so anyone holding
-  the namespace can compute a public unitId from an address - such ids count
-  as known ids for (c) and (d).
+  (`unitIdForAddress`, `app/src/lib/import/ids.ts:84-86`), and the import
+  namespace is in the PUBLIC GitHub repository (`app/src/lib/import/ids.ts:24`,
+  on the `github` remote's main since c4d9e069, 2026-08-05;
+  permanent-flyer-links code review R2-1). So ANYONE can compute an imported
+  property's unitId from its address - such ids count as known ids for (c)
+  and (d).
 
 **New phones** (code review round 2, N2). A phone with NO holder - any made-up
 number - still creates a tenant and gets the one welcome, as before the

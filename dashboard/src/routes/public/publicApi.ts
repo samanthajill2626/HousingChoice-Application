@@ -78,7 +78,8 @@ export interface HousingFairInput {
 }
 
 /** GET the full public flyer. Throws ApiError (status 404) for a missing,
- *  deleted or Setup unit. */
+ *  deleted or Setup unit, or one with a stored status outside the listing
+ *  statuses. */
 export async function getFlyer(unitId: string, signal?: AbortSignal): Promise<PublicFlyer> {
   const { flyer } = await request<{ flyer: PublicFlyer }>(
     `/public/units/${encodeURIComponent(unitId)}/flyer`,

@@ -463,8 +463,9 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
 
   const router = Router();
 
-  // The opaque 404 - IDENTICAL for missing, soft-deleted, and setup (no
-  // existence oracle beyond holding the id - permanent-flyer-links D2). It
+  // The opaque 404 - IDENTICAL for missing, soft-deleted, setup, or a stored
+  // status outside the listing statuses
+  // (no existence oracle beyond holding the id - permanent-flyer-links D2). It
   // carries contact_number (config, not unit data) so the public page's neutral
   // fallback can still offer the text-us CTA.
   function sendNotFound(res: Response): void {
@@ -868,8 +869,8 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
     const unitId = String(req.params['unitId'] ?? '');
     const unit = await units.getById(unitId);
     if (!unit || isDeleted(unit) || !FLYER_PUBLIC_STATUSES.has(unit.status)) {
-      // Same 404 for missing, deleted, and setup - no existence oracle beyond
-      // holding the id.
+      // Same 404 for missing, deleted, setup, or a stored status outside the
+      // listing statuses - no existence oracle beyond holding the id.
       sendNotFound(res);
       return;
     }

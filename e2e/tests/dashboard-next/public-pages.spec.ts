@@ -33,28 +33,47 @@ import { expectTodayReady } from '../../support/today.js';
 //      cta flag is stripped from the address bar after load.
 //   4. A staff edit flows straight to the public page (no funnel steps).
 //   5. `/join` - no session -> fill + submit -> thank-you (unchanged).
-//   6. Unavailable - a bogus id and a non-shareable unit stay opaque; BOTH CTA
-//      variants land somewhere (public -> /join, text -> a tap-to-text sms: CTA fed
-//      by the opaque-404 body's contact_number).
+//   6. Fallback (permanent-flyer-links D4, 2026-10-27) - a bogus id and a Setup
+//      property show the neutral sign-up page in both variants (form -> the inline
+//      sign-up, text -> a tap-to-text sms: CTA fed by the opaque-404 body's
+//      contact_number); the seeded under_application unit serves its full flyer.
 //   7. `/join` housing authority (join-housing-authority spec D8/D9, 2026-10-12) -
 //      the select defaults to Atlanta Housing Authority; two sign-ups in a row via
 //      "Sign up another person" (an empty form, consent unchecked, the authority
 //      KEPT, no second list read); each lead starts Onboarding holding its
 //      authority, read through the authenticated contacts API.
+//   8. A sign-up FROM the fallback of a bogus id (D4, D5) - the fallback's own
+//      thank-you; the lead is a plain housing-fair sign-up (no flyer credit, no
+//      unit of interest) that starts in Needs review because a unitId was sent.
 //
 // Seeded data we lean on (app/src/lib/seedData.ts):
 //   - contact-landlord-0001 = Marcus Bell (we own our test units under him).
-//   - unit-0001 is `under_application` (NOT shareable) -> reused as the
-//     "non-shareable id is still an opaque 404" case.
-// No seeded unit is `available`, so the spec CREATES its own shareable unit via the
-// authenticated API (create -> flip to available via listing-status -> set every
-// public field). Every public submit uses a UNIQUE phone so the per-phone idempotent
+//   - unit-0001 is seeded `under_application`, but its status follows the seeded
+//     placement-0001, which other specs move. Every status that derivation yields
+//     is public (every status but Setup - permanent-flyer-links D1), so its flyer is
+//     always SERVED: the read-only UNDER_APPLICATION_UNIT case. Never flipped,
+//     deleted or signed up from here, and its status is never asserted.
+// No seeded unit is reliably `available`, so the spec CREATES its own units via the
+// authenticated API (create with every public field -> flip to available via
+// listing-status; the fallback case skips the flip and keeps its unit in `setup`).
+// Every public submit uses a UNIQUE phone so the per-phone idempotent
 // welcome never collides across cases (or specs). The e2e stack sets BUSINESS_PHONE_NUMBER
 // (scripts/e2e-session.mjs), so the flyer's contact_number is non-null here.
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 const SEEDED_LANDLORD = 'contact-landlord-0001';
-const NON_SHAREABLE_UNIT = 'unit-0001'; // seeded `under_application` -> opaque 404
+// Seeded unit-0001: its status follows placement-0001, and every derived status
+// serves the full flyer (read-only here - never assert its status).
+const UNDER_APPLICATION_UNIT = 'unit-0001';
+/** permanent-flyer-links D4: the fallback page's one h1 - a missing, deleted or
+ *  Setup property, or any failed flyer load, in both variants. */
+const FALLBACK_HEADING = 'Find a home that fits your voucher';
+/** The retired page's words (spec section 1): no page we serve says a home is
+ *  "no longer available", taken or removed. */
+const RETIRED_COPY = /no longer available|taken|removed/i;
+/** Every listing status label but Available (D3: no status word on a served
+ *  flyer). NEVER /available/i - every flyer reads "Same-day tours available". */
+const STATUS_WORDS = /under application|finalizing|occupied|on hold|off market/i;
 // Two seeded housing authority NAMES (app/src/lib/seed/orgList.ts SEED_AUTHORITY;
 // both reseed profiles write the starting list). No spec renames either, so the
 // /join select always lists them.
@@ -94,15 +113,18 @@ interface ShareableUnit {
 }
 
 /**
- * Create an AVAILABLE (shareable) unit through the authenticated API: create
- * (lands in `setup`), flip it to `available` via the listing-status transition,
- * then PATCH the full public field set. `request` MUST carry the staff session
- * (pass `page.request` after devLogin). Returns the unit + the values we assert
- * on the public flyer page.
+ * Create an AVAILABLE (shareable) unit through the authenticated API: create it
+ * with the full public field set (it lands in `setup`), then flip it to
+ * `available` via the listing-status transition. `opts.setup` skips the flip and
+ * returns the unit still in `setup` - the one listing status the public flyer
+ * does not serve (permanent-flyer-links D1), so its /p/<id> shows the fallback.
+ * `request` MUST carry the staff session (pass `page.request` after devLogin).
+ * Returns the unit + the values we assert on the public flyer page.
  */
 async function createShareableUnit(
   request: APIRequestContext,
   overrides: Partial<ShareableUnit> = {},
+  opts: { setup?: boolean } = {},
 ): Promise<ShareableUnit> {
   const stamp = `${Date.now()}`.slice(-6);
   const u: ShareableUnit = {
@@ -143,9 +165,11 @@ async function createShareableUnit(
   });
   expect(createRes.ok()).toBeTruthy();
   u.unitId = (await createRes.json()).unit.unitId as string;
+  if (opts.setup === true) return u;
 
-  // (2) Flip to `available` - the ONLY shareable status. status is not a writable
-  // CRUD field; it routes through the listing-status transition.
+  // (2) Flip to `available` (skipped with opts.setup) - the one status a property
+  // can be sent in. status is not a writable CRUD field; it routes through the
+  // listing-status transition.
   const statusRes = await request.patch(`${NEXT}/api/units/${u.unitId}/listing-status`, {
     data: { toStatus: 'available', source: 'manual' },
   });
@@ -519,32 +543,139 @@ test.describe('Public pages - the unauthenticated full-info flyer + /join', () =
     expect(listReads).toBe(readsBeforeReset);
   });
 
-  test('unavailable: a bogus id and a non-shareable unit stay opaque; both CTA variants land somewhere', async ({
+  test('fallback: a bogus id and a setup property show the neutral sign-up page; the seeded under_application property serves its flyer', async ({
     page,
+    request,
   }) => {
-    // (a) A bogus id, BARE (public variant) -> the friendly "no longer available"
-    // state with the "See other homes" -> /join fallback (no login redirect).
-    await page.goto(`${NEXT}/p/unit-does-not-exist-${Date.now()}`);
-    await expect(page.getByRole('heading', { name: /no longer available/i })).toBeVisible();
-    await expect(page.getByText('Sign in with Google')).toHaveCount(0);
-    await expect(page.getByRole('link', { name: /See other homes/i })).toHaveAttribute('href', '/join');
+    // permanent-flyer-links D4: one neutral page for a missing, deleted or Setup
+    // property. Every absence below is asserted AFTER a positive check on the
+    // same load - the page shows a loading line first (selectors.md).
+    const bogusId = `unit-does-not-exist-${Date.now()}`;
 
-    // (b) A bogus id with ?cta=text (known-tenant variant) -> the SAME friendly state,
-    // but its CTA is a tap-to-text sms: link fed by the opaque-404 body's
-    // contact_number. A FRESH browser context so this flagged visit's sessionStorage
-    // never bleeds into the bare cases in this test (that persistence is EXPECTED).
+    // (a) A bogus id, BARE (form variant) -> the fallback h1, its line and the
+    // inline sign-up form (no login redirect).
+    await page.goto(`${NEXT}/p/${bogusId}`);
+    await expect(page.getByRole('heading', { level: 1, name: FALLBACK_HEADING })).toBeVisible();
+    await expect(
+      page.getByText(
+        "Sign up and we'll text you about homes that fit your voucher. Signing up does not book a tour.",
+        { exact: true },
+      ),
+    ).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Sign up', exact: true })).toBeVisible();
+    await expect(page.getByText(RETIRED_COPY)).toHaveCount(0);
+    await expect(page.getByText('Sign in with Google')).toHaveCount(0);
+    await expect(page.getByRole('link', { name: /See other homes/i })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Sign up for home alerts' })).toHaveCount(0);
+
+    // The opaque 404 body the text variant's CTA is fed by.
+    const bogusRes = await request.get(`${NEXT}/public/units/${bogusId}/flyer`);
+    expect(bogusRes.status()).toBe(404);
+    const notFound = (await bogusRes.json()) as { error: string; contact_number: string | null };
+    expect(notFound).toEqual({ error: 'not_found', contact_number: expect.stringMatching(/^\+1\d{10}$/) });
+
+    // (b) The same bogus id with ?cta=text (known-tenant variant) -> the SAME h1,
+    // and its CTA is a tap-to-text sms: link to the 404 body's contact_number. A
+    // FRESH browser context so this flagged visit's sessionStorage never bleeds
+    // into the bare cases in this test (that persistence is EXPECTED).
     const flaggedContext = await page.context().browser()!.newContext();
     const flaggedPage = await flaggedContext.newPage();
-    await flaggedPage.goto(`${NEXT}/p/unit-does-not-exist-${Date.now()}?cta=text`);
-    await expect(flaggedPage.getByRole('heading', { name: /no longer available/i })).toBeVisible();
+    await flaggedPage.goto(`${NEXT}/p/${bogusId}?cta=text`);
+    await expect(flaggedPage.getByRole('heading', { level: 1, name: FALLBACK_HEADING })).toBeVisible();
     // Assert the sms: href only - never click it.
-    await expect(flaggedPage.getByRole('link', { name: /text us/i })).toHaveAttribute('href', /^sms:/);
+    await expect(
+      flaggedPage.getByRole('link', { name: "I'm looking for a home - text us", exact: true }),
+    ).toHaveAttribute(
+      'href',
+      `sms:${notFound.contact_number}?&body=${encodeURIComponent("I'm looking for a home that fits my voucher.")}`,
+    );
+    await expect(flaggedPage.getByLabel('First name')).toHaveCount(0);
+    await expect(flaggedPage.getByText(RETIRED_COPY)).toHaveCount(0);
     await flaggedContext.close();
 
-    // (c) A REAL but non-shareable unit (seeded `under_application`), BARE -> the SAME
-    // opaque state (no existence oracle, no crash, no login redirect).
-    await page.goto(`${NEXT}/p/${NON_SHAREABLE_UNIT}`);
-    await expect(page.getByRole('heading', { name: /no longer available/i })).toBeVisible();
+    // (c) A fresh property left in Setup (the create's own status, read back
+    // through the staff API first) -> the SAME fallback: the one status the
+    // flyer does not serve (D1). Its flyer API answers the SAME opaque 404 as the
+    // bogus id - no existence oracle (D2).
+    const staff = await page.context().browser()!.newPage();
+    await devLogin(staff);
+    const setupUnit = await createShareableUnit(staff.request, {}, { setup: true });
+    const readBack = await staff.request.get(`${NEXT}/api/units/${setupUnit.unitId}`);
+    expect(readBack.ok()).toBeTruthy();
+    expect(((await readBack.json()) as { unit: { status: string } }).unit.status).toBe('setup');
+    await staff.close();
+
+    const setupRes = await request.get(`${NEXT}/public/units/${setupUnit.unitId}/flyer`);
+    expect(setupRes.status()).toBe(404);
+    expect(await setupRes.json()).toEqual(notFound);
+
+    await page.goto(`${NEXT}/p/${setupUnit.unitId}`);
+    await expect(page.getByRole('heading', { level: 1, name: FALLBACK_HEADING })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Sign up', exact: true })).toBeVisible();
+    await expect(page.getByText(RETIRED_COPY)).toHaveCount(0);
     await expect(page.getByText('Sign in with Google')).toHaveCount(0);
+    // Nothing of the Setup property leaks onto the fallback.
+    await expect(page.getByText(setupUnit.addressLine1)).toHaveCount(0);
+    await expect(page.getByText(setupUnit.area)).toHaveCount(0);
+
+    // (d) The seeded under_application property is SERVED (every status but
+    // Setup - D1, D2): the served flyer's sign-up heading, not the fallback, and
+    // the flyer API answers 200 with no status key. Its status is never asserted
+    // (it follows placement-0001, which other specs move); whatever it is, the
+    // page prints no status word (D3). Its address is a plain seed string the
+    // projection drops, so its h1 is the no-address heading - not asserted.
+    await page.goto(`${NEXT}/p/${UNDER_APPLICATION_UNIT}`);
+    await expect(page.getByRole('heading', { name: 'Sign up for home alerts', exact: true })).toBeVisible();
+    await expect(page.getByText('Sign in with Google')).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: FALLBACK_HEADING })).toHaveCount(0);
+    await expect(page.getByText(RETIRED_COPY)).toHaveCount(0);
+    await expect(page.getByText(STATUS_WORDS)).toHaveCount(0);
+    const servedRes = await request.get(`${NEXT}/public/units/${UNDER_APPLICATION_UNIT}/flyer`);
+    expect(servedRes.status()).toBe(200);
+    const { flyer: served } = (await servedRes.json()) as { flyer: Record<string, unknown> };
+    expect(Object.keys(served)).not.toContain('status');
+  });
+
+  test('fallback sign-up: a bogus id signs up inline - its own thank-you, and a plain housing-fair lead in Needs review', async ({
+    page,
+  }) => {
+    // permanent-flyer-links D4, D5: the fallback's form sends the route id (1 to
+    // 200 characters after the trim) and the server decides the credit. A
+    // made-up id earns none: capture_source 'housing_fair', no
+    // unit_of_interest, and 'needs_review' because a unitId WAS sent (a sign-up
+    // with no unitId would start 'onboarding').
+    await page.goto(`${NEXT}/p/unit-does-not-exist-${Date.now()}`);
+    await expect(page.getByRole('heading', { level: 1, name: FALLBACK_HEADING })).toBeVisible();
+    const phone = uniquePhone();
+    await fillIntake(page, { firstName: 'Fallback', lastName: 'Signup', phone, voucher: '2' });
+    await page.getByRole('button', { name: 'Sign up', exact: true }).click();
+
+    // The fallback's OWN thank-you - not the served flyer's "about this home
+    // and others" - under the same h1.
+    await expect(page.getByRole('heading', { name: /you're all set/i })).toBeVisible();
+    await expect(page.getByText("We'll text you about homes that fit your voucher.", { exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { level: 1, name: FALLBACK_HEADING })).toBeVisible();
+    await expect(page.getByLabel('First name')).toHaveCount(0);
+    await expect(page.getByText(RETIRED_COPY)).toHaveCount(0);
+
+    // The lead, read through the AUTHENTICATED contacts API from a separate
+    // staff context.
+    const staff = await page.context().browser()!.newPage();
+    await devLogin(staff);
+    const contact = await contactByPhone(staff.request, phone);
+    expect(contact).toMatchObject({
+      type: 'tenant',
+      status: 'needs_review',
+      capture_source: 'housing_fair',
+      firstName: 'Fallback',
+      lastName: 'Signup',
+      voucherSize: 2,
+    });
+    expect(contact['unit_of_interest']).toBeUndefined();
+    // The sign-up marked the new thread unread before it answered; leave it
+    // read so no later spec inherits an unread row.
+    const read = await staff.request.post(`${NEXT}/api/inbox/${String(contact['contactId'])}/read`);
+    expect(read.ok(), await read.text()).toBeTruthy();
+    await staff.close();
   });
 });

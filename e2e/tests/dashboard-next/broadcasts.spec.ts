@@ -275,12 +275,17 @@ test.describe('Broadcasts — compose from a property → curate → send → re
     const authority = `Bcast Warn Authority ${stamp}`;
     await addOrg(page.request, { kind: 'housing_authority', name: authority });
     await createTenant(page.request, `Warnme${stamp}`, 2, { housingAuthority: authority });
-    // Fresh unit left in 'setup' - NOT shareable, so the flyer link is dead.
+    // Fresh unit left in 'setup' - not Available, so it cannot be sent (the composer warns early).
     const unitId = await createUnitViaApi(page.request, stamp, { available: false, authorities: [authority] });
 
     await page.goto(`${NEXT}/broadcasts/new?unitId=${unitId}`);
-    // The early banner names the coming ask.
-    await expect(page.getByText(/its flyer link won't work/i)).toBeVisible();
+    // The early banner names the coming ask (permanent-flyer-links D8), at the
+    // COMPOSE step: the preview step's dialog repeats the sentence.
+    const note = page.getByText(/Only Available properties can be sent/);
+    await expect(note).toBeVisible();
+    await expect(note).toHaveText(
+      "This property is Setup. Only Available properties can be sent - you'll be asked to make it Available when you send.",
+    );
 
     await page.getByLabel('Message').fill(`Warn flow ${stamp} - see [FlyerLink]`);
     await page.getByRole('button', { name: 'Preview recipients' }).click();

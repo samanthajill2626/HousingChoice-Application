@@ -21,8 +21,8 @@ import { expectTodayReady } from '../../support/today.js';
 //   (4) the PUBLIC flyer for that available unit renders the photo, same-origin;
 //   (5) NO multipart body ever hits the APP origin during upload (the bytes went
 //       browser->MinIO) - pins the direct-upload architecture;
-//   (6) E1 - flipping the unit to a non-shareable status (On hold) 404s the whole
-//       flyer, photos included (the public must never learn a held unit exists).
+//   (6) E1 - flipping the unit to On hold (not Available) still serves the whole
+//       flyer, photos included (permanent-flyer-links D2: every status but Setup).
 //
 // Isolation: every test owns a RUN-UNIQUE available unit created via the
 // authenticated API (the blessed pattern for mutating specs), so no seeded unit
@@ -304,7 +304,7 @@ test.describe('Property photos - upload, cover, remove, and the public flyer', (
     await expect(page.getByRole('alert')).toHaveCount(0);
   });
 
-  test('E1: a non-shareable (On hold) unit 404s the whole flyer, photos included', async ({
+  test('E1: an On hold property still serves the whole flyer, photos included (permanent-flyer-links D2)', async ({
     page,
     request,
   }) => {
@@ -322,20 +322,30 @@ test.describe('Property photos - upload, cover, remove, and the public flyer', (
     );
     const okFlyer = await request.get(`${NEXT}/public/units/${unitId}/flyer`);
     expect(okFlyer.ok()).toBeTruthy();
-    expect((await okFlyer.json()).flyer.media.length).toBeGreaterThan(0);
+    const okMedia = ((await okFlyer.json()) as { flyer: { media: string[] } }).flyer.media;
+    expect(okMedia.length).toBeGreaterThan(0);
 
-    // Flip to a non-shareable status (On hold) via the listing-status transition.
+    // Flip to On hold (not Available, still public) via the listing-status transition.
     const held = await page.request.patch(`${NEXT}/api/units/${unitId}/listing-status`, {
       data: { toStatus: 'on_hold', source: 'manual' },
     });
     expect(held.ok()).toBeTruthy();
 
-    // The public funnel now shows the friendly whole-page "no longer available"
-    // state (NO photos leak), and the flyer API 404s (no existence oracle).
+    // The public page still shows the whole flyer with its photo, and the flyer
+    // API answers 200 with media (permanent-flyer-links D2) - the SAME media as
+    // the Available read.
     await page.goto(`${NEXT}/p/${unitId}`);
-    await expect(page.getByRole('heading', { name: /no longer available/i })).toBeVisible();
-    await expect(page.getByRole('img', { name: /^Home photo \d+$/ })).toHaveCount(0);
-    const goneFlyer = await request.get(`${NEXT}/public/units/${unitId}/flyer`);
-    expect(goneFlyer.status()).toBe(404);
+    await expectLoadedBytes(
+      page.getByRole('img', { name: 'Home photo 1' }),
+      'the On hold flyer photo never loaded bytes',
+    );
+    const heldFlyer = await request.get(`${NEXT}/public/units/${unitId}/flyer`);
+    expect(heldFlyer.status()).toBe(200);
+    expect(((await heldFlyer.json()) as { flyer: { media: string[] } }).flyer.media).toEqual(okMedia);
+    // No status word on the served flyer (D3) and none of the retired page's
+    // words - asserted after the photo loaded on this same load. Never
+    // /available/i: every flyer reads "Same-day tours available".
+    await expect(page.getByText(/under application|finalizing|occupied|on hold|off market/i)).toHaveCount(0);
+    await expect(page.getByText(/no longer available|taken|removed/i)).toHaveCount(0);
   });
 });

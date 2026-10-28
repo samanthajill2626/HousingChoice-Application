@@ -41,7 +41,10 @@ async function expectPublicIdentity(
     if (route === '/join') {
       await expect(page.getByRole('heading', { name: /Find your next home/i })).toBeVisible();
     } else {
-      await expect(page.getByRole('heading', { name: /no longer available/i })).toBeVisible();
+      // permanent-flyer-links D4: a missing unit shows the neutral fallback page.
+      await expect(
+        page.getByRole('heading', { level: 1, name: 'Find a home that fits your voucher' }),
+      ).toBeVisible();
     }
     await expectSunflowerTheme(page);
     await page.waitForLoadState('networkidle');

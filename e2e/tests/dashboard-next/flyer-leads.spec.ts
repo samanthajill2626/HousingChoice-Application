@@ -25,13 +25,20 @@
 //   3. an EXISTING contact - a landlord with no thread yet - on /join (D4-D6):
 //      the join pin and the unread mark, no text, the contact unchanged;
 //   4. a NEW contact on the flyer (D5, D6 - Cameron 2026-10-21): the welcome
-//      is sent, then the pin, the unread mark and the Signed up entry.
+//      is sent, then the pin, the unread mark and the Signed up entry;
+//   5. a NEW contact on an Occupied property's flyer (permanent-flyer-links
+//      D2, D3, D3a, D5, D6, 2026-10-27): the flyer is still served with no
+//      status word and, off Available, no external listing link; the sign-up
+//      is credited exactly like one from an Available flyer, and its pin names
+//      the status: "Signed up from the flyer for <address> (Occupied) as <name>".
 //
 // ISOLATION: every record is RUN-UNIQUE and made through the real routes.
 // The lean world has no Available property (app/src/lib/seed/lean.ts:
-// unit-0001 is under_application, unit-0002 occupied), and a sign-up from a
-// SEEDED contact would leave a pin, a sent-list row and an unread thread on
-// records other specs read (docs/issues/inbox-specs-flaky-shared-tasha-state.md).
+// unit-0001 is under_application, unit-0002 occupied - both serve their
+// flyers since permanent-flyer-links, but neither is ever signed up from
+// here), and a sign-up from a SEEDED contact would leave a pin, a sent-list
+// row and an unread thread on records other specs read
+// (docs/issues/inbox-specs-flaky-shared-tasha-state.md).
 // Nothing is reseeded. Every case leaves its threads READ, so no later spec
 // inherits an unread row.
 //
@@ -718,4 +725,98 @@ test('a NEW contact on the flyer gets the welcome, then the pin, the unread mark
   // Leave the thread read for later specs.
   const read = await api.post(`${NEXT}/api/inbox/${contactId}/read`);
   expect(read.ok(), await read.text()).toBeTruthy();
+});
+
+test("a sign-up from an Occupied property's flyer: full credit and the pin names the status", async ({
+  page,
+  browser,
+  request,
+}) => {
+  test.slow(); // two flyer loads, a public sign-up, the server reads and the contact page
+  await devLogin(page);
+  const api = page.request;
+  const stamp = `${Date.now()}`.slice(-6);
+  const landlord = await createContact(api, { type: 'landlord', firstName: `Flyerowner${stamp}`, lastName: 'Keptlive' });
+  const unit = await createAvailableUnit(api, {
+    landlordId: landlord.contactId,
+    line1: `${stamp} Flyerlead Keptlive Ln`,
+    area: `Kepthood ${stamp}`,
+    stamp,
+  });
+
+  // permanent-flyer-links D3a positive control: while the property is
+  // Available its flyer links out to the external listing it records.
+  const { visitor, close } = await openVisitor(browser);
+  await visitor.goto(`${NEXT}/p/${unit.unitId}`);
+  await expect(visitor.getByRole('link', { name: 'See the full listing' })).toHaveAttribute('href', unit.listingUrl);
+
+  // Occupied through the manual listing-status transition (any status from any
+  // status), as staff would after a move-in.
+  const occupied = await api.patch(`${NEXT}/api/units/${unit.unitId}/listing-status`, {
+    data: { toStatus: 'occupied', source: 'manual' },
+  });
+  expect(occupied.ok(), await occupied.text()).toBeTruthy();
+
+  // D2, D3: the SAME link still serves the whole flyer (the page fetches once
+  // per load, so load it again). Positive checks on this load first...
+  await visitor.goto(`${NEXT}/p/${unit.unitId}`);
+  await expect(visitor.getByRole('heading', { level: 1 })).toHaveText(unit.line1);
+  await expect(visitor.getByRole('link', { name: 'Watch the tour' })).toHaveAttribute('href', unit.videoUrl);
+  // ...D3a: every detail row but the external Listing (the video tour stays)...
+  await expect(visitor.getByRole('term')).toHaveText([
+    'Application fee',
+    'Tenant pays',
+    'Washer / dryer',
+    'Same-day RTA',
+    'Video tour',
+  ]);
+  // ...then the absences: no listing link, no status word (never /available/i -
+  // every flyer reads "Same-day tours available"), none of the retired page's words.
+  await expect(visitor.getByRole('link', { name: 'See the full listing' })).toHaveCount(0);
+  await expect(visitor.getByText(/under application|finalizing|occupied|on hold|off market/i)).toHaveCount(0);
+  await expect(visitor.getByText(/no longer available|taken|removed/i)).toHaveCount(0);
+  // The public JSON: served, the listing link nulled off Available, and no status key.
+  const flyerRes = await request.get(`${NEXT}/public/units/${unit.unitId}/flyer`);
+  expect(flyerRes.status(), await flyerRes.text()).toBe(200);
+  const { flyer } = (await flyerRes.json()) as { flyer: Record<string, unknown> };
+  expect(flyer['listing_link']).toBeNull();
+  expect(flyer).not.toHaveProperty('status');
+
+  // A NEW person signs up from the Occupied flyer.
+  const phone = uniquePhone();
+  const person = { firstName: `Flyerkept${stamp}`, lastName: 'Lead' };
+  await fillSignUp(visitor, { ...person, phone });
+  await visitor.getByRole('button', { name: 'Sign up', exact: true }).click();
+  await expect(visitor.getByRole('heading', { name: /you're all set/i })).toBeVisible();
+  await expect(
+    visitor.getByText("We'll text you about this home and others that fit your voucher.", { exact: true }),
+  ).toBeVisible();
+  await close();
+
+  // D5: credited exactly like a sign-up from an Available flyer - the welcome,
+  // the pin with the unit ref, the Signed up entry, the flyer capture source and
+  // the unit of interest. D6: the pin names the status the home had at sign-up.
+  await expect
+    .poll(async () => (await getOutboundTo(request, { to: phone })).length, { timeout: 15_000 })
+    .toBe(1);
+  const contactId = await contactIdByPhone(api, phone);
+  const pinLabel = `Signed up from the flyer for ${unit.line1}, ${CITY_LINE} (Occupied) as ${person.firstName} ${person.lastName}`;
+  await expect
+    .poll(() => signedUpPins(api, contactId), { timeout: 15_000, message: 'no signed_up pin' })
+    .toEqual([`${pinLabel}|unit|${unit.unitId}`]);
+  await expect.poll(() => sentOutcome(api, contactId, unit.unitId), { timeout: 15_000 }).toBe('signed_up');
+  expect(await getContact(api, contactId)).toMatchObject({
+    capture_source: 'flyer',
+    unit_of_interest: unit.unitId,
+  });
+
+  // The contact page: the pin links to the property.
+  await page.goto(`${NEXT}/contacts/${contactId}`);
+  const timeline = page.getByRole('region', { name: 'Communications and activity' });
+  const pin = timeline.getByRole('link', { name: pinLabel, exact: true });
+  await expect(pin).toBeVisible({ timeout: 15_000 });
+  await expect(pin).toHaveAttribute('href', `/listings/${unit.unitId}`);
+
+  // The open contact page read the new thread: nothing stays unread for later specs.
+  await expect.poll(() => serverUnread(api, contactId), { timeout: 15_000 }).toBe(0);
 });

@@ -19,6 +19,8 @@ Items 8-11 (2026-10-26 and 2026-10-27) are indexed in section 20.
 AMENDED 2026-10-28 at the B2 slice restatement (section 20, item 12):
 `AI_RANKING_ENABLED` dropped; the counterfactual fair-housing check is
 B2's merge gate, and ranking turns on in production when B2 is deployed.
+AMENDED again 2026-10-28 (section 20, item 13): B2 is built as two
+branches, B2a (the engine) then B2b (the review dataset).
 Mission: Amendment No. 1 Work Package 1 (signed; Cameron 2026-10-20, Sam
 2026-10-21). 52 contracted hours.
 Records: docs/superpowers/reviews/2026-10-24-wp1-matching-charter/
@@ -1006,6 +1008,20 @@ reply yet / Interested / Not interested) remain where they are today.
 | B3 Send property from a tenant | The ranked row; the composer's tenant anchor; priority-only view; completeness banner; Rank/Update; one-step send with the outcome on the pair; agree/disagree with the disagree direction; the tenant record's Send re-pointed. | 10-12 |
 | B4 Send property from a property | The composer's property anchor; ranked tenants replacing the filter-only audience, the window toggle, rows unchecked by default and Select all, with hand-picks, the tour-hold chip and confirm, old filter drafts and the partner flow kept (section 13.1); already-sent No reply filter chip; pick one, a few or many; (the switch-off composer is dropped, amended 2026-10-28); the unlawful-flag display on the property record with the admin Dismiss; the Matching nav entry asking which record to start from; the property page's Send re-pointed; the Similar panel relabeled "similarity". | 13-16 |
 
+AMENDED 2026-10-28 (section 20, item 13): B2 is built as TWO branches,
+each its own feature mission. B2a, the engine: everything in the B2 row
+except the review dataset, with about ten synthetic worked examples and
+the counterfactual check as B2a's merge gate; the Rankings page ships in
+B2a with its runs, pairs, cost and "Rank this anchor". B2b, the review
+dataset: review records with direction and input snapshots, the review
+endpoint, agree / disagree on the Rankings page's pair view, the in-app
+review list, example promotion and `examplesVersion` growth, the thirty
+synthetic evaluation pairs, the de-identified export and the evaluation
+script. B2a stores what B2b needs from day one: the exact model input on
+each run and the examples version on each match and run. Hours: B2a
+about 24-30, B2b about 11-14 (about 2 more than one branch, for the
+second gate, handback, merge and deploy).
+
 RE-ESTIMATE (2026-10-25, after the eight-round review; revised
 2026-10-26 for the gate answers): 64-80 hours against the 52 contracted.
 The review added most of the build: B2's job architecture and
@@ -1019,7 +1035,9 @@ estimate before the scope question is revisited. All four bill to WP1.
 
 ### 15.2 Order
 
-Strictly B1 -> B2 -> B3 -> B4. B1 first so preference data accumulates
+Strictly B1 -> B2 -> B3 -> B4. AMENDED 2026-10-28 (section 20, item 13):
+strictly B1 -> B2a -> B2b -> B3 -> B4; B3's agree / disagree needs B2b's
+review endpoint. B1 first so preference data accumulates
 before anything ranks. B3 before B4 so Sam reviews tenant-side rankings in
 production while B4 builds. B3 and B4 both edit the composer: never in
 parallel worktrees.
@@ -1227,3 +1245,12 @@ date; this list is the index.
      or Cameron decides), and the switch-off behavior goes away - the
      ranking poll always runs, and B4 builds no switch-off composer
      (sections 7.2, 10.2, 15.1 B2 and B4, 15.4).
+  13. B2 is split into two branches, B2a (the engine, with the
+     counterfactual check as its merge gate and the Rankings page with
+     "Rank this anchor") then B2b (the review dataset: review records,
+     promotion, the evaluation set, the export and the evaluation
+     script); the order becomes B1 -> B2a -> B2b -> B3 -> B4. Asked by
+     Cameron at intake, recommended by the planner on size (B1 alone was
+     106 files and four code-review rounds), decided by Cameron: "ok
+     splitting it is fine." Every B2 decision in this charter binds
+     whichever of the two branches builds it (sections 15.1, 15.2).

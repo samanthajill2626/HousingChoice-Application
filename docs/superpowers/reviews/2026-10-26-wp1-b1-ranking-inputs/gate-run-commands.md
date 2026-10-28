@@ -7,8 +7,10 @@ built after review rounds R1-R4 and fix waves FW1-FW4.
 
 - Branch `feat/wp1-b1-ranking-inputs`, worktree `W:\tmp\wp1-b1-ranking-inputs`.
 - The five repo gates ran green at commit 89016353 (the S7 report quotes
-  them). Commits after it are records only (this sheet), so the code you
-  measure is 89016353's. The dry run below prints the extraction prompt
+  them) and again, after the planner's retry-guard fix PF-1 (68168b4c,
+  Cameron's handback ruling; it changes the extraction prompt), at a0371f40
+  (planner-review/adjudications.md). Commits after 68168b4c are records
+  only, so the code you measure is 68168b4c's; run on it or later. The dry run below prints the extraction prompt
   fingerprint and the grader prompt fingerprint the record will carry (the
   extraction prompt changed in the fix waves after the first review, so an
   older fingerprint you may have seen no longer applies). Any extraction
@@ -111,4 +113,5 @@ A prompt fix and a second full run doubles it.
   line must be written in 2 of 3 runs). Overrule if you want "none" back.
 - The gate has no case that sees a change of mind (no case carries earlier
   Notes lines), so it does not measure the change-of-mind wording FW3-2
-  added to the prompt; the retry-guard decision is in the handback.
+  added to the prompt, nor the any-date retry guard (PF-1); both are pinned
+  by unit tests only.

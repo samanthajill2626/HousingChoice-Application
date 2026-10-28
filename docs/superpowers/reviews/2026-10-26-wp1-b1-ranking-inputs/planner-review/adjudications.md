@@ -77,3 +77,6 @@ Gates re-run by the planner at a0371f40 (PF-1 + records), quiet tree,
 2026-10-28 00:07-00:28 UTC: typecheck 0; npm test 0 (app 545 / 11770 passed,
 1 skipped; dashboard 272 / 5633; 22/509, 34/275, 13/111; 0 [dynamoAdmin]);
 smoke 0; e2e 0 (383 passed, 17.6m); eslint on 87 files 0, no output.
+
+Cameron on PA-R-2 (2026-10-28): "We can leave it as it is." The guard stays
+exact whole-line matching.

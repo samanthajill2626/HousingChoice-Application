@@ -2,13 +2,16 @@
 
 ## STATE (replaced at each gate)
 
-- Phase: LAUNCH GATE - spec rev 3 APPROVED; plan v2 final (plan review
-  closed at round 1: 13 precision items, no decision changed).
-- Launch mode: not chosen yet (asked at the launch gate 2026-10-28).
-- In flight: nothing (no orchestrator, watchdog or mirror).
-- Next step: on Cameron's launch-gate pick, compaction gate B (confirm the
-  registration with --show, watcher, offer), then AUTO dispatch of
-  abt:build-orchestrator with the mission block (or MANUAL handover).
+- Phase: COMPACTION GATE B - spec rev 3 APPROVED; plan v2 final (plan
+  review closed at round 1); launch gate passed.
+- Launch mode: AUTO. Cameron 2026-10-28, verbatim: "Go auto with 55 minute
+  watchdog timers". Watchdog checkpoints every 55 minutes (3300 s).
+- In flight: nothing yet (no orchestrator, watchdog or mirror).
+- Next step: after the compaction (or a skip), dispatch
+  abt:build-orchestrator in the background with
+  `mission-block.md` verbatim as its prompt, arm the 55-minute watchdog and
+  start the transcript mirror, per the feature-mission skill's DISPATCH
+  section.
 
 ## What Cameron asked for
 
@@ -67,6 +70,9 @@ application falls through. Shared links should keep pulling in leads.
    contact page for a non-Available home - "I just don't want it to create a
    tour or say a tour needs to be created." (Verified: the sign-up writes no
    tour and no follow-up; only a staff Interested click books one.)
+
+7. Launch gate (2026-10-28), verbatim: "Go auto with 55 minute watchdog
+   timers" -> AUTO dispatch, 55-minute watchdog.
 
 ## Preferences / taste
 

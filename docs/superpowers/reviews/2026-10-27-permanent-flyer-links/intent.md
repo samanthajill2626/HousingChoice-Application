@@ -90,6 +90,13 @@ application falls through. Shared links should keep pulling in leads.
 
 7. Launch gate (2026-10-28), verbatim: "Go auto with 55 minute watchdog
    timers" -> AUTO dispatch, 55-minute watchdog.
+8. Q1 (2026-10-28), verbatim: "Imported properties can have their links stay
+   available. We don't need to update those, I understand they'll go live
+   with a deploy. i'm not sure which option that is, i believe it would be
+   C." -> option (c): accept on the true premise (public repo, computable
+   imported ids); imported Placed/occupied homes go public at deploy. Wording
+   only: spec D2, the public.ts "no existence oracle" comments, the abuse
+   issue.
 
 ## Preferences / taste
 

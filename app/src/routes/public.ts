@@ -48,8 +48,10 @@
 //          listed housing authority, else 400 housing_authority_not_listed;
 //          sent WITH a unitId it is the generic 400.
 //   GET  /public/units/:unitId/flyer
-//        -> 200 { flyer }   (the FULL public payload upfront + contact_number)
-//        -> 404 { error, contact_number }   (missing/deleted/not-shareable;
+//        -> 200 { flyer }   (the FULL public payload upfront + contact_number,
+//           for every status but setup - FLYER_PUBLIC, permanent-flyer-links
+//           D2; listing_link only while the unit is Available, D3a)
+//        -> 404 { error, contact_number }   (missing/deleted/setup;
 //           flyer-full-info: the teaser/reveal split + the /details route are gone)
 //   GET  /public/housing-authorities   (join-housing-authority D1/D2; built by
 //        createPublicHousingAuthoritiesRouter below and mounted in app.ts AHEAD
@@ -68,7 +70,7 @@ import { normalizeToE164 } from '../lib/phone.js';
 import { CONSENT_VERSION, WELCOME_SMS } from '../lib/smsCompliance.js';
 import { resolveWithSettings } from '../messages/index.js';
 import { createRateLimit } from '../middleware/rateLimit.js';
-import { SHAREABLE_STATUSES, isDeleted } from '../repos/unitsRepo.js';
+import { FLYER_PUBLIC_STATUSES, SHAREABLE_STATUSES, isDeleted } from '../repos/unitsRepo.js';
 import { toUnitFlyer } from '../lib/unitFields.js';
 import { resolveUnitMedia } from '../lib/unitMedia.js';
 import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
@@ -379,7 +381,7 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
   // against (read with peek() only - the public surface never creates it).
   const orgList = deps.orgListRepo ?? createOrgListRepo({ logger: deps.logger });
   // flyer-full-info: config.businessPhoneNumber (or null when unconfigured). Rides
-  // on the flyer payload AND every opaque 404 so the page's unavailable state can
+  // on the flyer payload AND every opaque 404 so the page's neutral fallback can
   // still offer the text-us CTA (there is no flyer payload to read it from there).
   const contactNumber = deps.contactNumber ?? null;
   const sendMessage =
@@ -447,9 +449,10 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
 
   const router = Router();
 
-  // The opaque 404 - IDENTICAL for missing, soft-deleted, and not-shareable (no
-  // existence oracle). It carries contact_number (config, not unit data) so the
-  // public page's "unavailable" state can still offer the text-us CTA.
+  // The opaque 404 - IDENTICAL for missing, soft-deleted, and setup (no
+  // existence oracle beyond holding the id - permanent-flyer-links D2). It
+  // carries contact_number (config, not unit data) so the public page's neutral
+  // fallback can still offer the text-us CTA.
   function sendNotFound(res: Response): void {
     res.status(404).json({ error: 'not_found', contact_number: contactNumber });
   }
@@ -835,15 +838,19 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
   });
 
   // GET /public/units/:unitId/flyer - the public flyer view (flyer-full-info).
-  // 404 when the unit is missing, soft-deleted, OR not in a shareable status
-  // (the public must never learn a non-available unit even exists). Returns the
-  // FULL public payload upfront (lib/unitFields.toUnitFlyer) + contact_number -
-  // no internal leak. The teaser/reveal split (and the /details route) are gone.
+  // Served for every public status (FLYER_PUBLIC: every listing status but
+  // setup - permanent-flyer-links D2). 404 when the unit is missing,
+  // soft-deleted, or not public (setup, or a stored value outside the listing
+  // statuses): one opaque body, so the public learns nothing beyond holding the
+  // id. Returns the FULL public payload upfront (lib/unitFields.toUnitFlyer) +
+  // contact_number - no internal leak and no status field. The teaser/reveal
+  // split (and the /details route) are gone.
   router.get('/units/:unitId/flyer', async (req, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     const unit = await units.getById(unitId);
-    if (!unit || isDeleted(unit) || !SHAREABLE_STATUSES.has(unit.status)) {
-      // Same 404 for missing, deleted, and not-shareable - no existence oracle.
+    if (!unit || isDeleted(unit) || !FLYER_PUBLIC_STATUSES.has(unit.status)) {
+      // Same 404 for missing, deleted, and setup - no existence oracle beyond
+      // holding the id.
       sendNotFound(res);
       return;
     }
@@ -851,7 +858,12 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
     // /unit-media URLs (unresolvable entries omitted). contact_number is config
     // (the main 1:1 business number), added here like media - NOT part of the projection.
     const media = resolvePublicMedia(unit);
-    res.json({ flyer: { ...toUnitFlyer(unit), media, contact_number: contactNumber } });
+    const flyer = toUnitFlyer(unit);
+    // permanent-flyer-links D3a: no outside listing link once the home is not
+    // Available - that page is likely to say the home is gone. Nulled here,
+    // beside the gate; the projection (toUnitFlyer) stays status-free.
+    const listing_link = unit.status === 'available' ? flyer.listing_link : null;
+    res.json({ flyer: { ...flyer, listing_link, media, contact_number: contactNumber } });
   });
 
   return router;

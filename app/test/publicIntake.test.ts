@@ -1,6 +1,6 @@
 // M1.5 unit tests: the PUBLIC, UNAUTHENTICATED surface (/public) —
 //   POST /public/housing-fair   (intake → auto welcome text, idempotent)
-//   GET  /public/units/:unitId/flyer   (shareable fields only, 404 otherwise)
+//   GET  /public/units/:unitId/flyer   (public fields only; every status but setup, 404 otherwise)
 // Plus the abuse fence: the per-IP rate limiter trips with 429, and NO PII
 // (name/phone) ever appears in a log line.
 import request from 'supertest';
@@ -333,7 +333,7 @@ describe('POST /public/housing-fair — rate limiting (the abuse fence)', () => 
   });
 });
 
-describe('GET /public/units/:unitId/flyer — shareable view only', () => {
+describe('GET /public/units/:unitId/flyer - public fields only', () => {
   function seedFullUnit(world: ReturnType<typeof createFakeWorld>, overrides: Partial<UnitItem> = {}) {
     const unit: UnitItem = {
       unitId: 'unit-1',
@@ -379,7 +379,7 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
     expect(res.status).toBe(200);
     const { flyer } = res.body;
 
-    // The shareable set is present and correct (voucher_size falls back to beds:
+    // The public set is present and correct (voucher_size falls back to beds:
     // the fixture records no voucher size).
     // unit-photos: media is now the RESOLVED same-origin URL list (each stored
     // key becomes its stable /unit-media path), not a raw key pass-through.
@@ -500,9 +500,9 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
     expect(JSON.stringify(res.body)).not.toContain('unit-OTHER');
   });
 
-  it('404s a missing unit and a non-shareable (placed/inactive) unit — no existence oracle', async () => {
+  it('404s a missing unit and a setup unit - no existence oracle', async () => {
     const { app, world } = makeWebhookHarness();
-    seedFullUnit(world, { status: 'placed' });
+    seedFullUnit(world, { status: 'setup' });
 
     const missing = await request(app)
       .get('/public/units/nope/flyer')
@@ -510,14 +510,14 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
     expect(missing.status).toBe(404);
     expect(missing.body).toEqual({ error: 'not_found', contact_number: OUR_NUMBER });
 
-    const placed = await request(app)
+    const setupRes = await request(app)
       .get('/public/units/unit-1/flyer')
       .set('x-origin-verify', SECRET);
-    expect(placed.status).toBe(404);
-    expect(placed.body).toEqual({ error: 'not_found', contact_number: OUR_NUMBER });
+    expect(setupRes.status).toBe(404);
+    expect(setupRes.body).toEqual({ error: 'not_found', contact_number: OUR_NUMBER });
   });
 
-  it('404s a soft-deleted unit even while its status is still shareable — no existence oracle', async () => {
+  it('404s a soft-deleted unit even while its status is still public - no existence oracle', async () => {
     const { app, world } = makeWebhookHarness();
     // status stays 'available' so the ONLY thing hiding it is the deleted_at
     // stamp — proves the soft-delete guard, not the status gate.
@@ -529,10 +529,56 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ error: 'not_found', contact_number: OUR_NUMBER });
   });
+
+  // permanent-flyer-links D2 / D3a (spec 2026-10-27): the flyer serves every
+  // FLYER_PUBLIC status - the whole flyer, photos included - and the payload
+  // never names the status. The outside listing link ships only while the home
+  // is Available. One harness per status: a bare harness allows 5 /public
+  // requests a minute.
+  describe('every public status (permanent-flyer-links D2)', () => {
+    it.each(['available', 'under_application', 'finalizing', 'occupied', 'on_hold', 'off_market'])(
+      'status %s: 200, no status key, the listing link only while Available',
+      async (status) => {
+        const { app, world } = makeWebhookHarness();
+        seedFullUnit(world, { status });
+
+        const res = await request(app).get('/public/units/unit-1/flyer').set('x-origin-verify', SECRET);
+        expect(res.status).toBe(200);
+        expect(res.body.flyer).not.toHaveProperty('status');
+        // Not under any other key either: the stored value appears nowhere.
+        expect(JSON.stringify(res.body)).not.toContain(status);
+        // D3a: the stored link for Available, null (not absent) for the rest.
+        expect(res.body.flyer.listing_link).toBe(status === 'available' ? 'https://example.com/listing/1' : null);
+        expect(res.body.flyer.media).toEqual(['/unit-media/unit-1/photo1', '/unit-media/unit-1/photo2']);
+        expect(res.body.flyer.contact_number).toBe(OUR_NUMBER);
+      },
+    );
+
+    it('404s setup, soft-deleted (status occupied), off-list and missing units with ONE identical body', async () => {
+      const { app, world } = makeWebhookHarness();
+      seedFullUnit(world, { unitId: 'unit-setup', status: 'setup' });
+      // Deleted while its status is public: the soft-delete guard alone hides it.
+      seedFullUnit(world, { unitId: 'unit-gone', status: 'occupied', deleted_at: '2026-06-30T00:00:00.000Z' });
+      // A stored status outside LISTING_STATUSES is not public (spec D1).
+      seedFullUnit(world, { unitId: 'unit-offlist', status: 'placed' });
+
+      const bodies: unknown[] = [];
+      for (const id of ['unit-setup', 'unit-gone', 'unit-offlist', 'nope']) {
+        const res = await request(app).get(`/public/units/${id}/flyer`).set('x-origin-verify', SECRET);
+        expect(res.status, id).toBe(404);
+        bodies.push(res.body);
+      }
+      // No existence oracle beyond holding the id: the number is config, not unit data.
+      expect(bodies[0]).toEqual({ error: 'not_found', contact_number: OUR_NUMBER });
+      expect(bodies[1]).toEqual(bodies[0]);
+      expect(bodies[2]).toEqual(bodies[0]);
+      expect(bodies[3]).toEqual(bodies[0]);
+    });
+  });
 });
 
 describe('POST /public/housing-fair — flyer attribution (optional unitId)', () => {
-  it('stamps capture_source:flyer + unit_of_interest for a shareable unit', async () => {
+  it('stamps capture_source:flyer + unit_of_interest for a public unit', async () => {
     const { app, world } = makeWebhookHarness();
     world.units.set('unit-flyer', {
       unitId: 'unit-flyer',
@@ -647,12 +693,12 @@ describe('GET /public/units/:unitId/details - REMOVED (flyer-full-info)', () => 
 });
 
 describe('GET /public/units/:unitId/flyer - the opaque 404 carries contact_number', () => {
-  it('missing, deleted, and not-shareable all return the IDENTICAL body', async () => {
+  it('missing, deleted, and setup all return the IDENTICAL body', async () => {
     const { app, world } = makeWebhookHarness();
-    world.units.set('unit-held', {
-      unitId: 'unit-held',
+    world.units.set('unit-setup', {
+      unitId: 'unit-setup',
       landlordId: 'll-1',
-      status: 'on_hold',
+      status: 'setup',
     } as UnitItem);
     world.units.set('unit-gone', {
       unitId: 'unit-gone',
@@ -661,7 +707,7 @@ describe('GET /public/units/:unitId/flyer - the opaque 404 carries contact_numbe
       deleted_at: 'x',
     } as UnitItem);
     const bodies: unknown[] = [];
-    for (const id of ['nope', 'unit-held', 'unit-gone']) {
+    for (const id of ['nope', 'unit-setup', 'unit-gone']) {
       const res = await request(app)
         .get(`/public/units/${id}/flyer`)
         .set('x-origin-verify', SECRET);
@@ -683,7 +729,8 @@ describe('/public sits behind the origin-secret validator (locked chain stage 2)
 });
 
 // unit-photos: the flyer renders the unit's photos via stable same-origin
-// /unit-media URLs (design 2026-07-21), inheriting the whole-flyer shareable gate.
+// /unit-media URLs (design 2026-07-21), inheriting the whole-flyer public gate
+// (FLYER_PUBLIC: every status but setup - permanent-flyer-links D2).
 describe('GET /public/units/:unitId/flyer - photo resolution + E1 gate', () => {
   function seedShareable(world: ReturnType<typeof createFakeWorld>, overrides: Partial<UnitItem> = {}) {
     const unit: UnitItem = {
@@ -710,12 +757,29 @@ describe('GET /public/units/:unitId/flyer - photo resolution + E1 gate', () => {
     ]);
   });
 
-  it('E1: flipping the SAME unit to on_hold 404s the WHOLE flyer (photos included)', async () => {
+  it('E1: flipping the SAME unit to on_hold still serves the whole flyer, photos included (permanent-flyer-links D2)', async () => {
     const { app, world } = makeWebhookHarness();
+    seedShareable(world);
+    const before = await request(app).get('/public/units/unit-photo/flyer').set('x-origin-verify', SECRET);
+    expect(before.status).toBe(200);
+    expect(before.body.flyer.media).toEqual(['/unit-media/unit-photo/k1', '/unit-media/unit-photo/k2']);
+
     seedShareable(world, { status: 'on_hold' });
-    const res = await request(app).get('/public/units/unit-photo/flyer').set('x-origin-verify', SECRET);
-    expect(res.status).toBe(404);
-    expect(res.body).toEqual({ error: 'not_found', contact_number: OUR_NUMBER });
+    const after = await request(app).get('/public/units/unit-photo/flyer').set('x-origin-verify', SECRET);
+    expect(after.status).toBe(200);
+    expect(after.body.flyer.media).toEqual(before.body.flyer.media);
+  });
+
+  it('E1: flipping the SAME unit to setup 404s the WHOLE flyer with the opaque body (permanent-flyer-links D2)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedShareable(world);
+    const before = await request(app).get('/public/units/unit-photo/flyer').set('x-origin-verify', SECRET);
+    expect(before.status).toBe(200);
+
+    seedShareable(world, { status: 'setup' });
+    const after = await request(app).get('/public/units/unit-photo/flyer').set('x-origin-verify', SECRET);
+    expect(after.status).toBe(404);
+    expect(after.body).toEqual({ error: 'not_found', contact_number: OUR_NUMBER });
   });
 
   it('resolves own-namespace keys to relative URLs even with NO media store; legacy URLs pass through (E2/E4)', async () => {

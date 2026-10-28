@@ -98,3 +98,18 @@ grader schema COMPILES. Planner fix PF-2 (bb6464df): the list shape, the
 prompt asks for one entry per field in order, both parsers also read the older
 object shape (the run log re-reads stored response text), spec rev 12, RUNBOOK
 section, the check reduced to three calls with exit 1 on a failure.
+
+## Compile check on bb6464df and the PF-2 re-review (2026-10-28)
+
+Cameron ran the compile check on bb6464df: control, extraction and grader all
+COMPILE (claude-sonnet-5-5). Plan-blind re-review of bb6464df: 0 blocking,
+0 high, 0 medium, 3 low.
+
+| id | sev | ruling |
+|---|---|---|
+| PA-S-1 | low | FILED: docs/issues/extraction-fake-driver-object-fields-shape.md (the fake driver and e2e markers still use the object shape). |
+| PA-S-2 | low | FIXED: rawFieldOps keeps the first write/suggest entry for a field, else its first entry; test pinned. Parser only - the compile check still holds. |
+| PA-S-3 | low | FIXED: RUNBOOK's "Changing AI_EXTRACTION_MODEL" runs the compile check with the new model first. |
+
+Note from the re-review: not_addressed in the AI run counts can now also mean
+"the model skipped a field's entry", not only "no usable response".

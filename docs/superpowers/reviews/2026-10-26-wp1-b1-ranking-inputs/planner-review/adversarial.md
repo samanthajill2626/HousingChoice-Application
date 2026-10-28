@@ -384,3 +384,120 @@ is done only for verbatim copies.**
   writtenLines runs the guard against '' on every gate run. The guard is
   certified only by the unit tests in extractionNoteLines.test.ts, which is
   adequate for a deterministic pure function.
+
+---
+
+## Re-review of bb6464df
+
+Scope:
+- `git show bb6464df`, ignoring the spec: EXTRACTION_SCHEMA, rawFieldOps,
+  parseExtractionText and parseExtractionOps (app/src/services/extraction/schema.ts);
+  the OUTPUT SHAPE paragraph (prompt.ts:56-61); the compile-check script; the
+  RUNBOOK paragraph.
+- A sweep of every reader and writer of the raw `fields` shape: the anthropic
+  driver (adapters/extraction.ts:405-407), the fake driver
+  (adapters/extractionFake.ts:103-129), the job's decision recording
+  (jobs/extraction.ts:683, :711; services/extraction/decisions.ts), the run-log
+  route and detail, the e2e marker builder (e2e/tests/dashboard-next/ai-run-log.spec.ts:141-193),
+  the probe's two suites, and the unit tests feeding the parsers.
+
+Static reading only.
+
+Counts: blocking 0, high 0, medium 0, low 3.
+
+### What checks out
+
+- **The prompt and the schema agree.** The schema's `fields` is an array of
+  `{ field (enum built from EXTRACTABLE_FIELDS), op, value, reason }`, every key
+  required. The prompt asks for one entry per field "in this order:" followed by
+  the same EXTRACTABLE_FIELDS join, the same entry shape, op "none" with empty
+  strings for nothing, and "never list a field twice". No remaining prompt text
+  refers to the old `fields.<name>` object shape. Order is requested but no
+  reader depends on it, which is correct.
+- **The two parsers agree.** Both go through the one rawFieldOps, so the ops
+  view (what the model said) and the parsed result (what apply sees) pick the
+  SAME entry for a duplicated field. That keeps the decisions builder's
+  "unexplained" alarm (decisions.ts rule 4) from firing on a duplicate.
+- **Legacy stored run-log text still parses.** That covers the object branch,
+  and it is the only shape the fake driver and the e2e markers produce.
+- **Odd field names are safe.** A `field` of `__proto__` or `toString` is
+  filtered by the EXTRACTABLE_FIELDS check before the `in` test, so prototype
+  names cannot leak through.
+- **An omitted field is recorded honestly.** It reads as `absent`, which the
+  recorder maps to not_addressed - never inferred as a decline (no_finding).
+  This is the right semantics. Note one change in meaning: before this commit
+  the schema made omission impossible, so not_addressed on a scalar meant "no
+  usable response". Now it can also mean "the model skipped the entry". Anyone
+  reading those counts on the AI runs list should know this; it is not a
+  defect.
+- **No code turns an ExtractionResult back into wire JSON.** rawText is always
+  the model's own text (or the fake's marker payload).
+- **The probe's suites are unaffected.** Both read the parsed `call.result`.
+  The --baseline main side uses main's own schema and parser.
+- **The grader schema is unchanged.**
+
+### PA-S-1 - LOW - CONFIRMED
+**Nothing hermetic exercises the shipped wire shape end to end, and a marker
+written in that shape silently applies nothing.**
+
+- The fake driver hands its marker payload over as the ExtractionResult
+  (extractionFake.ts:124, `{ fields: {}, ...partial }`) and as rawText (:103).
+  The internal `ExtractionResult.fields` is still an OBJECT keyed by field. So
+  every fake marker, its documented examples (extractionFake.ts:23) and the e2e
+  marker builder (ai-run-log.spec.ts:155-192) use the legacy object shape. The
+  anthropic driver's adapter tests also stub replies with object-shaped text
+  (app/test/extractionAdapter.test.ts:42-112).
+- The list shape reaches parseExtractionText and parseExtractionOps only in the
+  new unit cases (extractionSchema.test.ts:117-120, extractionOps.test.ts:78-81).
+- Concrete trap: an e2e author who copies the PROMPT's shape into a marker -
+  `EXTRACT:{"fields":[{"field":"pets","op":"write","value":"cat","reason":"r"}]}` -
+  gets an array as result.fields:
+  - apply's `result.fields[field]` reads undefined for every field, so nothing
+    is written;
+  - parseExtractionOps on the same rawText DOES see the write, so the decisions
+    builder records an UNEXPLAINED reasonless drop and fires onUnexplained.
+
+  The resulting failure points nowhere near the cause.
+- Suggested fix: have the fake run a list-shaped `fields` through the same
+  rawFieldOps (or parseExtractionText's field loop) before returning it, and
+  document both accepted marker shapes. Switch at least one adapter test reply
+  to the list shape so the real driver path parses what production receives.
+
+### PA-S-2 - LOW - PLAUSIBLE
+**First-entry-wins silently discards a later, real op for a duplicated
+field.**
+
+- rawFieldOps keeps the FIRST entry per field
+  (schema.ts rawFieldOps, `if (!(entry.field in byField))`). The array schema
+  cannot forbid duplicates (no uniqueness keyword is allowed), and the only
+  guard is the prompt's "never list a field twice".
+- Concrete outputs:
+  - `[{field:"pets",op:"none",...}, ..., {field:"pets",op:"write",value:"has a cat",...}]`
+    - a model that emits the placeholder pass first and corrects itself later
+    in the list. The write is lost from apply AND from the run log's ops view,
+    because both read the same first entry, and no WARN or count records that a
+    duplicate existed.
+  - The same rule keeps a first entry whose op is malformed and drops a valid
+    later one. That is unreachable under strict structured output, but
+    reachable for stored or hand-built text.
+- Suggested fix: prefer the first entry whose op is not "none" (or the first
+  well-formed one), and count duplicates on the run record (for example
+  `duplicateFieldEntries`), so the trade-off is visible in production.
+
+### PA-S-3 - LOW - CONFIRMED
+**The compile check is wired to schema changes only. A model change can move
+the same limit without anyone running it.**
+
+- The new RUNBOOK paragraph says to run
+  `app/scripts/extraction-schema-compile-check.ts` "After any schema change". The
+  "Changing `AI_EXTRACTION_MODEL`" section above it does not mention the check.
+  But the grammar compile happens per request against the named model; the
+  script itself takes `--model`, and the commit message records the limit as
+  measured on claude-sonnet-5-5 only.
+- Concrete case: an operator points AI_EXTRACTION_MODEL at another model (a
+  config change, no code change). If that model's compiler limit is lower,
+  every extraction run fails 400 and parks after five attempts, and the probe
+  gate (run for the old model) never saw it.
+- Suggested fix: add "run the compile check with the new model id" to the
+  model-change checklist. Optionally, run the check (or a one-call variant of
+  it) in the deploy smoke for the configured model.

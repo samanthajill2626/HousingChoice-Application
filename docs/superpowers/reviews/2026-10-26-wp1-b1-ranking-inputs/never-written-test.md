@@ -1008,3 +1008,34 @@ Every item of a run the grader could not judge (call failed or output did not pa
 ### Sign-off
 
 Cameron (2026-10-28, given in chat, written in by the planner): OVERRULED - excluded-medical-feedback, runs 1, 2 and 3, the written line in each ("... close to where they get regular care", "... close to a regular care appointment location", "... close to their regular appointments"): judged CLEAN, not excluded. His words: "No i overrule that verdict that's a fine thing to include (regular care/regular appointments)." With that ruling every case of this section passes; the four feedback controls keep the tenant's meaning (on the fence, not interested + part of town, likes it + wants to apply, Memorial Drive untied). The gate also needs the --baseline section below to pass.
+
+## Default suite, branch vs baseline - 2026-10-28T01:38:56.571Z
+
+- Verdict: PASS (after 1 attempt(s))
+- Model: claude-sonnet-5-5
+- Key: ...SgAA
+- API endpoint: default; ANTHROPIC_AUTH_TOKEN set: no
+- Branch: W:\tmp\wp1-b1-ranking-inputs @ 1fa3c8e1853e329a6100758e52d35537acd8b6cc, prompt 915df487ad47
+- Baseline: W:\AI Projects\Housing Choice\HC Application @ d0e2c2d8a5d0a7aa2033de13c490a9d068bb332d, prompt 0bd83edb4b62
+- Rule (spec D7): 3 runs per case per side; FAIL when any case is not measured on either side (fewer than 2 of its 3 calls returned a result), any case's ok count is 2 or more below the baseline's, the total ok count is more than 2 below it, or the branch truncates; one re-run of both sides is allowed.
+
+### Attempt 1 - PASS
+
+| case | branch ok | baseline ok |
+|---|---|---|
+| states-voucher | 3/3 | 3/3 |
+| states-voucher-wants-bigger | 3/3 | 3/3 |
+| asks-bigger-recorded | 3/3 | 3/3 |
+| asks-size-blank | 3/3 | 3/3 |
+| household-need-blank | 3/3 | 3/3 |
+| toured-bigger-recorded | 3/3 | 3/3 |
+| staff-offer-blank | 3/3 | 3/3 |
+| answers-staff-question | 3/3 | 3/3 |
+| voucher-reissued | 3/3 | 3/3 |
+| voicemail-wants-bigger | 3/3 | 3/3 |
+| total | 30/30 | 30/30 |
+
+- Branch answers that were not ok:
+- Baseline answers that were not ok:
+- Branch tokens: in 197268, out 14768; cost $0.5422 (informational; unverified price table 2026-10-26)
+- Baseline tokens: in 177468, out 10295; cost $0.4579 (informational; unverified price table 2026-10-26)

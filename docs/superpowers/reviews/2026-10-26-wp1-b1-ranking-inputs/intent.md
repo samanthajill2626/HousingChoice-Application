@@ -11,12 +11,11 @@ cut from main @d0e2c2d8.
 
 ## STATE
 
-Phase: READY FOR CAMERON'S GATE RUN (2026-10-28 01:30 UTC). PF-2 (fields as
-one list, bb6464df) compiles (Cameron's check); PA-S-2 parser fix f5dcca26;
-five gates exit 0 at 2901fa40. Nothing in flight.
-NEXT: Cameron runs gate-run-commands.md on f5dcca26 or later (both paid
-commands), signs off; planner reads and commits the record; Cameron merges;
-unregister compact-resume.
+Phase: MERGE-READY (2026-10-28 01:40 UTC). Never-written gate passed (one
+verdict overruled by Cameron: medical-feedback "regular care" is fine);
+--baseline PASS 30/30 vs 30/30; planner gates green at 2901fa40.
+NEXT: Cameron's PASS on the record, then he merges; deploy dev then prod on
+his ask; unregister compact-resume; cleanup only on his go.
 Registered with compact-resume (--persist) until mission end.
 
 ## What Cameron asked for (verbatim where wording matters)

@@ -73,6 +73,20 @@ B2, or recorded.
 - The prompt fingerprint changed: the never-written gate run must be on
   68168b4c or later.
 
+## Final state (2026-10-28 01:40 UTC)
+
+- Never-written gate, both commands, Cameron on the testing key with
+  claude-sonnet-5-5 (never-written-test.md):
+  - First run (68168b4c): every call 400 "compiled grammar too large" - fixed
+    by PF-2 (bb6464df, fields as one list); compile check COMPILES x3.
+  - Never-written suite on f311ba4e: 28 of 29 pass; excluded-medical-feedback
+    OVERRULED to clean by Cameron ("regular care/regular appointments" is
+    fine). Controls met; feedback lines keep the tenant's meaning.
+  - Default suite vs main (d0e2c2d8) on 1fa3c8e1: PASS, 30/30 vs 30/30.
+- Planner gates at 2901fa40 (code f5dcca26): all five exit 0 (e2e 383).
+- Spend on the gate (informational, unverified prices): about $1.96 + $1.00.
+- Verdict: MERGE-READY. UNMERGED (human gate).
+
 ## Owed
 
 - Cameron: run gate-run-commands.md on the testing key (claude-sonnet-5-5,

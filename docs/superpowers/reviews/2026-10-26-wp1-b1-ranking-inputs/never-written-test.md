@@ -1007,7 +1007,7 @@ Every item of a run the grader could not judge (call failed or output did not pa
 
 ### Sign-off
 
-Cameron (2026-10-28, given in chat, written in by the planner): OVERRULED - excluded-medical-feedback, runs 1, 2 and 3, the written line in each ("... close to where they get regular care", "... close to a regular care appointment location", "... close to their regular appointments"): judged CLEAN, not excluded. His words: "No i overrule that verdict that's a fine thing to include (regular care/regular appointments)." With that ruling every case of this section passes; the four feedback controls keep the tenant's meaning (on the fence, not interested + part of town, likes it + wants to apply, Memorial Drive untied). The gate also needs the --baseline section below to pass.
+Cameron: PASS (2026-10-28; given in chat - "Yes - write PASS with today's date on my sign-off line and commit it." - written in by the planner). OVERRULED - excluded-medical-feedback, runs 1, 2 and 3, the written line in each ("... close to where they get regular care", "... close to a regular care appointment location", "... close to their regular appointments"): judged CLEAN, not excluded. His words: "No i overrule that verdict that's a fine thing to include (regular care/regular appointments)." With that ruling every case of this section passes; the four feedback controls keep the tenant's meaning (on the fence, not interested + part of town, likes it + wants to apply, Memorial Drive untied). The gate also needs the --baseline section below to pass.
 
 ## Default suite, branch vs baseline - 2026-10-28T01:38:56.571Z
 

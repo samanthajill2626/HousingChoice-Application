@@ -9,8 +9,10 @@ built after review rounds R1-R4 and fix waves FW1-FW4.
 - The five repo gates ran green at commit 89016353 (the S7 report quotes
   them) and again, after the planner's retry-guard fix PF-1 (68168b4c,
   Cameron's handback ruling; it changes the extraction prompt), at a0371f40
-  (planner-review/adjudications.md). Commits after 68168b4c are records
-  only, so the code you measure is 68168b4c's; run on it or later. The dry run below prints the extraction prompt
+  (planner-review/adjudications.md). The first gate run on 68168b4c measured
+  nothing: every call failed 400 "The compiled grammar is too large". PF-2
+  (bb6464df) sends `fields` as one list, which compiles. Measure bb6464df or
+  later, and run the compile check FIRST (below). The dry run below prints the extraction prompt
   fingerprint and the grader prompt fingerprint the record will carry (the
   extraction prompt changed in the fix waves after the first review, so an
   older fingerprint you may have seen no longer applies). Any extraction
@@ -47,12 +49,14 @@ built after review rounds R1-R4 and fix waves FW1-FW4.
 cd W:\tmp\wp1-b1-ranking-inputs
 npx tsx app/scripts/extraction-prompt-probe.ts --suite never-written --model claude-sonnet-5-5 --dry-run
 $env:ANTHROPIC_API_KEY = '<the TESTING key>'
+npx tsx app/scripts/extraction-schema-compile-check.ts --model claude-sonnet-5-5
 npx tsx app/scripts/extraction-prompt-probe.ts --suite never-written --model claude-sonnet-5-5 --out docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/never-written-test.md
 npx tsx app/scripts/extraction-prompt-probe.ts --model claude-sonnet-5-5 --baseline "W:\AI Projects\Housing Choice\HC Application" --out docs/superpowers/reviews/2026-10-26-wp1-b1-ranking-inputs/never-written-test.md
 Remove-Item Env:ANTHROPIC_API_KEY
 ```
 
-The dry run is free (no call, no key) and prints every case with its planted
+The compile check is three tiny calls; all three must say COMPILES (exit 0)
+before the paid runs. The dry run is free (no call, no key) and prints every case with its planted
 fact, its expectation and its content hash, the grader's whole system prompt
 (the nine excluded-kind descriptions and the NOT EXCLUDED list), both
 fingerprints and the API endpoint line - read it before spending anything.

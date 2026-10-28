@@ -11,14 +11,13 @@ cut from main @d0e2c2d8.
 
 ## STATE
 
-Phase: PLANNER FIX PF-1 (2026-10-27). Cameron ruled at the verdict: restore
-the any-date Notes retry guard over whole lines (keep prefix stripping and
-whole-line matching); fields stay outside the never-written list. The
-planner applied PF-1 itself (code, prompt sentence, tests, spec rev 11,
-issue update) and re-runs the five gates on the quiet tree.
-NEXT: report gate results; Cameron runs gate-run-commands.md on the PF-1
-commit or later (the prompt fingerprint changed), signs off, merges;
-unregister compact-resume.
+Phase: PLANNER FIX PF-2 (2026-10-28). The first never-written gate run
+failed every call 400 "compiled grammar too large"; Cameron's compile check
+isolated it to twelve named field objects; PF-2 (bb6464df) sends fields as one
+list. Planner re-runs the five gates on the quiet tree.
+NEXT: report gates; Cameron runs gate-run-commands.md on bb6464df or later
+(compile check first, then both paid commands), signs off, merges; unregister
+compact-resume.
 Registered with compact-resume (--persist) until mission end.
 
 ## What Cameron asked for (verbatim where wording matters)
@@ -160,6 +159,10 @@ amendment, and then file the issue and write the spec."
   stay outside the never written list." Then: "Yes - restore the any-date
   retry guard over whole lines, keep the prefix stripping and whole-line
   matching, re-run the gates." -> planner fix PF-1, spec rev 11.
+
+- 2026-10-28, after the first gate run failed every call ("compiled grammar
+  too large"): "Yeah we need to fix it now" -> compile check, then PF-2
+  (fields as one list), spec rev 12.
 
 ## Why
 

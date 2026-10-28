@@ -80,3 +80,21 @@ smoke 0; e2e 0 (383 passed, 17.6m); eslint on 87 files 0, no output.
 
 Cameron on PA-R-2 (2026-10-28): "We can leave it as it is." The guard stays
 exact whole-line matching.
+
+## First gate run and PF-2 (2026-10-28)
+
+Cameron's first never-written run (68168b4c, testing key, claude-sonnet-5-5)
+measured nothing: all 87 extraction calls failed 400 "The compiled grammar is
+too large, which would cause performance issues" (never-written-test.md).
+Production sends the same schema, so B1 would have failed every extraction run
+after deploy; no offline test could see it (every test uses a fake model, and
+PR1 bars agents from the API). Cameron: "Yeah we need to fix it now". The
+planner wrote app/scripts/extraction-schema-compile-check.ts (5fcb0bff);
+Cameron's run: main's shape COMPILES; twelve named field objects FAIL with
+{ text, confidence } or string note lines and with a number or integer
+confidence; eight named objects COMPILE; `fields` as one list of
+{ field, op, value, reason } COMPILES (number or integer confidence); the
+grader schema COMPILES. Planner fix PF-2 (bb6464df): the list shape, the
+prompt asks for one entry per field in order, both parsers also read the older
+object shape (the run log re-reads stored response text), spec rev 12, RUNBOOK
+section, the check reduced to three calls with exit 1 on a failure.

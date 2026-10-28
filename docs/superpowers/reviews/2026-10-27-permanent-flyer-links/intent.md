@@ -9,6 +9,14 @@
   one watchdog on `.superpowers/sdd/progress.md` (3300 s checkpoint, 25 min
   stall); transcript mirror -> `.superpowers/sdd/live.log`. Recoveries so
   far: 0 of budget 2.
+- Open question for Cameron (relayed 2026-10-28 ~04:10Z, from code review
+  R2, records 00f52046): spec D2's premise that imported unitIds are
+  unguessable is FALSE - the github remote is public (planner verified:
+  anon API private=false) and `app/src/lib/import/ids.ts` derives an
+  imported unitId from the normalized address with a namespace in that
+  source. Options put to him: (a) imported units stay Available-only,
+  (b) serve them off Available only once they were Available in the app,
+  (c) accept as is. Build continues (FW2) meanwhile.
 - Next step: on each watchdog wake, read the ledger tail, post one
   "**Checkpoint:**" line, re-arm. On STATUS: DONE, run the handback review
   (re-ground in the full replay, gates bare on a quiet tree, spec-conformance

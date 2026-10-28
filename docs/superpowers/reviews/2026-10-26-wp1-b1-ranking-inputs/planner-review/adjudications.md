@@ -113,3 +113,9 @@ COMPILE (claude-sonnet-5-5). Plan-blind re-review of bb6464df: 0 blocking,
 
 Note from the re-review: not_addressed in the AI run counts can now also mean
 "the model skipped a field's entry", not only "no usable response".
+
+Gates re-run by the planner at 2901fa40 (code f5dcca26: PF-2 + PA-S-2),
+quiet tree, 2026-10-28 01:09-01:30 UTC: typecheck 0; npm test 0 (app 545 /
+11774 passed, 1 skipped; dashboard 272 / 5633; 22/509, 34/275, 13/111;
+0 [dynamoAdmin]); smoke 0; e2e 0 (383 passed, 17.1m); eslint on 88 files 0,
+no output. main still d0e2c2d8 (0 behind). Ready for Cameron's gate run.

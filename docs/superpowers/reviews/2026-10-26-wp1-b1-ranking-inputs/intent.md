@@ -11,13 +11,12 @@ cut from main @d0e2c2d8.
 
 ## STATE
 
-Phase: PLANNER FIX PF-2 (2026-10-28). The first never-written gate run
-failed every call 400 "compiled grammar too large"; Cameron's compile check
-isolated it to twelve named field objects; PF-2 (bb6464df) sends fields as one
-list. Planner re-runs the five gates on the quiet tree.
-NEXT: report gates; Cameron runs gate-run-commands.md on bb6464df or later
-(compile check first, then both paid commands), signs off, merges; unregister
-compact-resume.
+Phase: READY FOR CAMERON'S GATE RUN (2026-10-28 01:30 UTC). PF-2 (fields as
+one list, bb6464df) compiles (Cameron's check); PA-S-2 parser fix f5dcca26;
+five gates exit 0 at 2901fa40. Nothing in flight.
+NEXT: Cameron runs gate-run-commands.md on f5dcca26 or later (both paid
+commands), signs off; planner reads and commits the record; Cameron merges;
+unregister compact-resume.
 Registered with compact-resume (--persist) until mission end.
 
 ## What Cameron asked for (verbatim where wording matters)

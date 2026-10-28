@@ -74,7 +74,7 @@ import { CONSENT_VERSION, WELCOME_SMS } from '../lib/smsCompliance.js';
 import { LISTING_STATUS_LABELS, isListingStatus } from '../lib/statusModel.js';
 import { resolveWithSettings } from '../messages/index.js';
 import { createRateLimit } from '../middleware/rateLimit.js';
-import { FLYER_PUBLIC_STATUSES, isDeleted } from '../repos/unitsRepo.js';
+import { FLYER_PUBLIC_STATUSES, SHAREABLE_STATUSES, isDeleted } from '../repos/unitsRepo.js';
 import { toUnitFlyer } from '../lib/unitFields.js';
 import { resolveUnitMedia } from '../lib/unitMedia.js';
 import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
@@ -218,10 +218,13 @@ function signupPinLabel(args: {
   const note = SIGNUP_OPT_OUT_NOTE[args.optOut];
   if (args.unitId === undefined) return `Signed up on the join page as ${name}${note}`;
   if (!args.viaFlyer || args.flyerUnit === undefined) return `Signed up from a flyer as ${name}${note}`;
-  // viaFlyer means a FLYER_PUBLIC status, so the raw-status fallback is never
-  // reached; the guard keeps the lookup cast-free and blind to inherited keys.
+  // No suffix while the home is Available: the one status open to apply, the
+  // one a property can be sent in (SHAREABLE). The suffix follows that set -
+  // one rule, not a second copy of the literal. viaFlyer means a FLYER_PUBLIC
+  // status, so the raw-status fallback is never reached; the guard keeps the
+  // lookup cast-free and blind to inherited keys.
   const status = args.flyerUnit.status;
-  const suffix = status === 'available' ? '' : ` (${isListingStatus(status) ? LISTING_STATUS_LABELS[status] : status})`;
+  const suffix = SHAREABLE_STATUSES.has(status) ? '' : ` (${isListingStatus(status) ? LISTING_STATUS_LABELS[status] : status})`;
   return `Signed up from the flyer for ${formatAddress(args.flyerUnit.address) || args.unitId}${suffix} as ${name}${note}`;
 }
 
@@ -880,9 +883,12 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
     const media = resolvePublicMedia(unit);
     const flyer = toUnitFlyer(unit);
     // permanent-flyer-links D3a: no outside listing link once the home is not
-    // Available - that page is likely to say the home is gone. Nulled here,
-    // beside the gate; the projection (toUnitFlyer) stays status-free.
-    const listing_link = unit.status === 'available' ? flyer.listing_link : null;
+    // Available - that page is likely to say the home is gone. Available is the
+    // one status open to apply, the one a property can be sent in (SHAREABLE),
+    // so the link follows that set - one rule, not a second copy of the literal.
+    // Nulled here, beside the gate; the projection (toUnitFlyer) stays
+    // status-free.
+    const listing_link = SHAREABLE_STATUSES.has(unit.status) ? flyer.listing_link : null;
     res.json({ flyer: { ...flyer, listing_link, media, contact_number: contactNumber } });
   });
 

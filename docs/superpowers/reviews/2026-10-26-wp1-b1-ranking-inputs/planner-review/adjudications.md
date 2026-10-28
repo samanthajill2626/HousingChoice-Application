@@ -63,3 +63,17 @@ Decision changes: none made by the planner. Two items go to Cameron: PC-1
   notes-guard-stale-reread-vs-flip-back updated. The prompt fingerprint
   changes, so the never-written gate run must be on this commit or later.
 - PA-1: Cameron: "Fields can stay outside the never written list." No change.
+
+## Re-review of PF-1 (68168b4c) - adversarial reviewer continued
+
+0 blocking, 0 high, 0 medium, 2 low.
+
+| id | sev | ruling |
+|---|---|---|
+| PA-R-1 | low | RECORD. A line-broken model line with a copied prefix on an INNER line can write an Auto line with an old date. Closed by the fix already filed in extraction-note-line-break-unprefixed-continuation (collapse line breaks before the guard and the write). |
+| PA-R-2 | low | TO CAMERON as an option, not applied (beyond his named fix). The guard matches identical text only; a re-emitted old fact differing by a trailing period, case or a doubled space is written again. Option: compare a folded form (lowercase, collapsed spaces, trailing punctuation dropped) on both sides, writing the original. |
+
+Gates re-run by the planner at a0371f40 (PF-1 + records), quiet tree,
+2026-10-28 00:07-00:28 UTC: typecheck 0; npm test 0 (app 545 / 11770 passed,
+1 skipped; dashboard 272 / 5633; 22/509, 34/275, 13/111; 0 [dynamoAdmin]);
+smoke 0; e2e 0 (383 passed, 17.6m); eslint on 87 files 0, no output.

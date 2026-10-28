@@ -64,6 +64,15 @@ B2, or recorded.
 | No infra; synthetic content; no agent touched the testing key (standing) | delivered | PR1; tests stub the driver and grader |
 | Charter decisions bind (10-26) | deviated once | retry guard (ruling 1) |
 
+## Update after Cameron's rulings (2026-10-28)
+
+- PC-1: Cameron chose the ANY-DATE retry guard over whole lines (planner fix
+  PF-1, 68168b4c; spec rev 11). PA-1: fields stay outside the list.
+- Gates re-run at a0371f40: all five exit 0 (e2e 383 passed, 17.6m; npm test
+  app 11770 passed). Re-review of PF-1: 0 blocking/high/medium, 2 low.
+- The prompt fingerprint changed: the never-written gate run must be on
+  68168b4c or later.
+
 ## Owed
 
 - Cameron: run gate-run-commands.md on the testing key (claude-sonnet-5-5,

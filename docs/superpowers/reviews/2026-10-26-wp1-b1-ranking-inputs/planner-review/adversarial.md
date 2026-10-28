@@ -277,3 +277,110 @@ closed against.**
   silent edit to staff text on every run.
 - Suggested fix: append to the stored text as is, adding one separating newline
   only when the box does not already end in one.
+
+---
+
+## Re-review of 68168b4c
+
+Scope: `git show 68168b4c`, excluding the spec file: filterNoteLines
+(app/src/services/extraction/apply.ts:318-347), its one production caller
+(:944), the probe's writtenLines (app/scripts/extraction-prompt-probe.ts:291-303)
+and the prompt change (app/src/services/extraction/prompt.ts:181-188).
+Static reading only.
+
+Counts: blocking 0, high 0, medium 0, low 2. Of the earlier findings, one is
+still open with a new angle (PA-P1) and three are unaffected (PA-P2, the
+--baseline path, and probe-certifies-the-guard).
+
+### What checks out
+
+The commit is internally consistent:
+
+- **No stale callers.** The `prefix` input is gone everywhere. The two
+  remaining callers (apply.ts:944, probe :297) pass none. No test or comment
+  outside the commit's own history still asserts the same-day behavior; the
+  "same-day" PIN at extractionNoteLines.test.ts:193 is still true under the
+  any-date guard. applyExtraction still uses its local `prefix` for the WRITE
+  only, which is correct.
+- **Fenced whole-line match.** Both sides are split on '\n', each piece is
+  trimmed, and every leading prefix is removed per physical line on BOTH sides.
+  So:
+  - A stored or candidate line with trailing spaces, or with a trailing '\r'
+    from a CRLF box, still matches.
+  - Blank stored lines are kept as empty fenced lines, so a single-line
+    candidate still matches a line that sits next to a blank one.
+  - A multi-line candidate matches only an ADJACENT run of whole lines (the
+    PIN at :201).
+  - A candidate cannot be blank as a whole, because it is filtered first.
+- **A staff line that begins "[Auto - ...]".** Its leading bracket is removed
+  before the compare, so its text counts as a stored line. That is the intended
+  "a bare staff line counts too". The only effect is a dropped model line that
+  repeats the staff text; nothing is rewritten.
+- **Cap and demotion.** Both are unchanged. The guard still runs before the
+  cap, so a dropped line never takes a slot, and demotion still withholds
+  whatever survives. The capped-retry cost in the docblock is still accurate.
+
+### PA-R-1 - LOW - CONFIRMED
+**A multi-line model line can write a forged-date Auto line, and the new
+guard's per-line prefix strip makes it match as "already written".**
+
+- The model text is stripped of LEADING prefixes only (apply.ts:332,
+  `withoutAutoPrefix(text)`). A copied prefix on an INNER physical line
+  survives into the write. On the comparison side, `present()` strips the
+  prefix from every physical line (:325).
+- Concrete input: notes hold "[Auto - Oct 3] Household of 4". The model
+  returns `{text: "Works nights\n[Auto - Oct 3] Household of 4", confidence:
+  0.9}`. present() is false, because "Works nights" is not followed by that
+  line in the notes. The write is "[Auto - Oct 27] Works nights\n[Auto - Oct 3]
+  Household of 4", which appends a duplicate fact under a FALSE date. Per-line
+  readers (lib/caseworkers.ts; B2's card, which reads the latest line per home)
+  take it as an Oct 3 Auto line. The same shape with a feedback label forges an
+  older-dated view of a home.
+- This is a sibling of the filed extraction-note-line-break-unprefixed-continuation;
+  that issue's fix (collapse CR/LF in a model line before the guard and the
+  write) closes this too.
+- Suggested fix: apply that fix in this branch, or at minimum strip a prefix at
+  the start of every physical line of a model line before the write.
+
+### PA-R-2 - LOW - CONFIRMED
+**The any-date guard catches only byte-identical re-emissions. Case, trailing
+punctuation and internal whitespace all defeat it, so the commit's stated job
+is done only for verbatim copies.**
+
+- `present()` compares trimmed physical lines exactly (apply.ts:322-326). The
+  commit's purpose is a model that re-reads 30 days of old messages and
+  re-emits an old fact on a later day.
+- Concrete input: stored "[Auto - Oct 3] Works nights downtown"; a later run
+  emits "Works nights downtown." or "works nights downtown" or "Works nights 
+  downtown" (two spaces). Each is appended again on every later run that
+  re-emits it. Nothing counts these misses, so production cannot show how often
+  the guard does its job (notes-guard-stale-reread-vs-flip-back already asks
+  for a drop count).
+- Suggested fix: compare a folded form on BOTH sides - lowercase, whitespace
+  runs collapsed, trailing . ! ; , removed - while writing the original. The
+  fold does not touch the meaning words, so a change of mind ("likes it" vs
+  "likes it again") still differs. Pair it with the issue's drop count.
+
+### Earlier findings against this commit
+
+- **PA-P1 (a run's own duplicate lines): still open, and now less consistent.**
+  present() reads only the STORED notes, never the lines this run already
+  accepted (apply.ts:327-342). So two identical lines in one model answer, or
+  a model line equal to a system line of the same run, are both written. One
+  run later the any-date guard would drop either copy. Because the commit
+  advertises "a line identical to an earlier line is never written", the same
+  run is now the only place a verbatim duplicate can still get in. Fix as
+  before: a per-run Set of accepted folded lines inside filterNoteLines.
+- **PA-P2 (the whole box trimmed on every append): unaffected.** apply.ts still
+  bases nextNotes on `contact.notes.trim()`.
+- **Cross-version --baseline path: not reopened.** runComparison loads only
+  BaseModules (no apply.ts) and scores field ops. filterNoteLines is reached
+  only through writtenLines on the never-written path (probe :927), and that
+  path always loads BranchModules from the probe's OWN checkout. The probe and
+  apply.ts therefore always agree on the new prefix-free input, and a main
+  checkout never calls it.
+- **The probe certifies nothing about the guard (observation, not a
+  finding).** No never-written case sets `profile.notes` (probe :926), so
+  writtenLines runs the guard against '' on every gate run. The guard is
+  certified only by the unit tests in extractionNoteLines.test.ts, which is
+  adequate for a deterministic pure function.

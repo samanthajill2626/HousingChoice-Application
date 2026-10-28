@@ -601,6 +601,29 @@ describe('POST /public/housing-fair — flyer attribution (optional unitId)', ()
     });
   });
 
+  // permanent-flyer-links D5: a sign-up from the flyer of a home that is no
+  // longer Available is credited to it exactly like one from an Available flyer.
+  it.each(['occupied', 'on_hold'])(
+    'stamps capture_source:flyer + unit_of_interest for a %s unit (permanent-flyer-links D5)',
+    async (status) => {
+      const { app, world } = makeWebhookHarness();
+      world.units.set('unit-flyer', { unitId: 'unit-flyer', landlordId: 'll-1', status, beds: 2 });
+
+      const res = await request(app)
+        .post(FAIR)
+        .set('x-origin-verify', SECRET)
+        .send(signupBody({ unitId: 'unit-flyer' }));
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ ok: true });
+
+      const contact = world.contacts.find((c) => c.phone === '+15550102000');
+      expect(contact).toMatchObject({
+        capture_source: 'flyer',
+        unit_of_interest: 'unit-flyer',
+      });
+    },
+  );
+
   it('falls back to housing_fair (no unit_of_interest) when the unitId is missing', async () => {
     const { app, world } = makeWebhookHarness();
     const res = await request(app)
@@ -614,19 +637,19 @@ describe('POST /public/housing-fair — flyer attribution (optional unitId)', ()
     expect(contact?.['unit_of_interest']).toBeUndefined();
   });
 
-  it('falls back to housing_fair when the unit exists but is NOT shareable', async () => {
+  it('falls back to housing_fair when the unit exists but is in Setup', async () => {
     const { app, world } = makeWebhookHarness();
-    world.units.set('unit-placed', {
-      unitId: 'unit-placed',
+    world.units.set('unit-setup', {
+      unitId: 'unit-setup',
       landlordId: 'll-1',
-      status: 'placed', // not shareable
+      status: 'setup', // not public (setup)
       beds: 2,
     });
 
     const res = await request(app)
       .post(FAIR)
       .set('x-origin-verify', SECRET)
-      .send(signupBody({ unitId: 'unit-placed' }));
+      .send(signupBody({ unitId: 'unit-setup' }));
     expect(res.status).toBe(200);
 
     const contact = world.contacts.find((c) => c.phone === '+15550102000');
@@ -634,12 +657,12 @@ describe('POST /public/housing-fair — flyer attribution (optional unitId)', ()
     expect(contact?.['unit_of_interest']).toBeUndefined();
   });
 
-  it('falls back to housing_fair when the unit is soft-deleted (even if still shareable status)', async () => {
+  it('falls back to housing_fair when the unit is soft-deleted (even if its status is still public)', async () => {
     const { app, world } = makeWebhookHarness();
     world.units.set('unit-deleted', {
       unitId: 'unit-deleted',
       landlordId: 'll-1',
-      status: 'available', // shareable status, but…
+      status: 'available', // a public status, but...
       deleted_at: '2026-06-30T00:00:00.000Z', // …soft-deleted → no attribution
       beds: 2,
     });
@@ -981,10 +1004,10 @@ describe('POST /public/housing-fair - housingAuthority shape and the flyer refus
   it('refuses unitId + housingAuthority with the generic 400 whatever the unit is, without reading the unit', async () => {
     const { app, world } = harness();
     world.units.set('unit-flyer', { unitId: 'unit-flyer', landlordId: 'll-1', status: 'available', beds: 2 });
-    world.units.set('unit-placed', { unitId: 'unit-placed', landlordId: 'll-1', status: 'placed', beds: 2 });
+    world.units.set('unit-setup', { unitId: 'unit-setup', landlordId: 'll-1', status: 'setup', beds: 2 });
     const getById = vi.spyOn(world.unitsRepo, 'getById');
     const bodies: unknown[] = [];
-    for (const unitId of ['unit-flyer', 'no-such-unit', 'unit-placed']) {
+    for (const unitId of ['unit-flyer', 'no-such-unit', 'unit-setup']) {
       const res = await request(app)
         .post(FAIR)
         .set('x-origin-verify', SECRET)
@@ -992,7 +1015,7 @@ describe('POST /public/housing-fair - housingAuthority shape and the flyer refus
       expect(res.status, unitId).toBe(400);
       bodies.push(res.body);
     }
-    // Identical for a shareable, a missing and a non-shareable unit: no oracle.
+    // Identical for a public, a missing and a setup unit: no oracle.
     expect(bodies).toEqual([
       { error: 'invalid request' },
       { error: 'invalid request' },
@@ -1225,7 +1248,7 @@ describe('POST /public/housing-fair - new contacts start Onboarding with the mar
     );
   });
 
-  it('a flyer sign-up for a shareable unit behaves as today (needs_review, flyer, no authority) plus the marker', async () => {
+  it('a flyer sign-up for a public unit behaves as today (needs_review, flyer, no authority) plus the marker', async () => {
     const { app, world } = harness();
     world.units.set('unit-flyer', { unitId: 'unit-flyer', landlordId: 'll-1', status: 'available', beds: 2 });
     const res = await request(app)
@@ -1245,9 +1268,9 @@ describe('POST /public/housing-fair - new contacts start Onboarding with the mar
     expect(world.sent).toHaveLength(1);
   });
 
-  it('a flyer sign-up for a missing or non-shareable unit keeps needs_review and housing_fair, plus the marker', async () => {
+  it('a flyer sign-up for a missing or setup unit keeps needs_review and housing_fair, plus the marker', async () => {
     const { app, world } = harness();
-    world.units.set('unit-placed', { unitId: 'unit-placed', landlordId: 'll-1', status: 'placed', beds: 2 });
+    world.units.set('unit-setup', { unitId: 'unit-setup', landlordId: 'll-1', status: 'setup', beds: 2 });
     await request(app)
       .post(FAIR)
       .set('x-origin-verify', SECRET)
@@ -1255,7 +1278,7 @@ describe('POST /public/housing-fair - new contacts start Onboarding with the mar
     await request(app)
       .post(FAIR)
       .set('x-origin-verify', SECRET)
-      .send(signupBody({ phone: '(555) 010-2001', unitId: 'unit-placed' }));
+      .send(signupBody({ phone: '(555) 010-2001', unitId: 'unit-setup' }));
     for (const phone of ['+15550102000', '+15550102001']) {
       const contact = world.contacts.find((c) => c.phone === phone);
       expect(contact, phone).toMatchObject({
@@ -1432,7 +1455,7 @@ describe('POST /public/housing-fair - audit and log (D7)', () => {
         viaFlyer: true,
         signupVersion: 2,
         housingAuthority: null,
-        // flyer-leads D6/D7: a new tenant on a shareable flyer - pin and flyer entry written.
+        // flyer-leads D6/D7: a new tenant on a public flyer - pin and flyer entry written.
         existingContact: false,
         deletedContact: false,
         recorded: true,

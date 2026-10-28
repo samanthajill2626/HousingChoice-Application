@@ -14,11 +14,13 @@
 //        -> 200 { ok: true }   (leaks NO internal IDs/PII). The phone is looked
 //          up with contacts.findByPhone - the ONE routing read (flyer-leads D4):
 //          - no holder: a NEW tenant contact is created and gets the welcome
-//            text (the only sign-up that does, D5). A present + shareable
-//            unitId stamps capture_source:'flyer' + unit_of_interest instead of
-//            'housing_fair'. A request with NO unitId starts 'onboarding' and
-//            holds the housing authority; WITH a unitId it starts
-//            'needs_review'. Every new contact carries housing_fair_signup_v2.
+//            text (the only sign-up that does, D5). A unitId of a present,
+//            public unit (FLYER_PUBLIC: every status but setup -
+//            permanent-flyer-links D5) stamps capture_source:'flyer' +
+//            unit_of_interest instead of 'housing_fair'. A request with NO
+//            unitId starts 'onboarding' and holds the housing authority; WITH
+//            a unitId it starts 'needs_review'. Every new contact carries
+//            housing_fair_signup_v2.
 //          - a live holder (any type): an EXISTING contact - never changed and
 //            never welcomed.
 //          - a soft-deleted holder: no conversation, send, pin, unread mark or
@@ -28,14 +30,14 @@
 //          'signed_up' pin in its thread and an unread mark on its 1:1
 //          conversation (touch -> incrementUnread -> ONE conversation.updated),
 //          skipped when the contact already holds a pin from the same source
-//          (a shareable flyer's unit, or the one "no property" source) from
+//          (a public flyer's unit, or the one "no property" source) from
 //          the last 24 hours. That repeat check is a read, not a claim: a
 //          sign-up that starts after another's pin was written sees it (a
 //          strongly consistent read), but two OVERLAPPING same-source requests
 //          can each pin and bump, so a burst is bounded by the per-IP /public
 //          limiter (app.ts), not by the check
 //          (docs/issues/public-signup-abuse-hardening.md). For a flyer of a
-//          shareable unit and a tenant or unknown contact the sign-up also
+//          public unit and a tenant or unknown contact the sign-up also
 //          writes a 'flyer' entry on the properties-sent ledger, unless the
 //          pair holds a current decline (D7). The deleted and the live paths
 //          both end with the housing_fair_signup audit, best-effort too
@@ -68,9 +70,10 @@ import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { KINDS_FOR_FIELD, ORG_NAME_MAX, isOnListFor } from '../lib/orgNames.js';
 import { normalizeToE164 } from '../lib/phone.js';
 import { CONSENT_VERSION, WELCOME_SMS } from '../lib/smsCompliance.js';
+import { LISTING_STATUS_LABELS, isListingStatus } from '../lib/statusModel.js';
 import { resolveWithSettings } from '../messages/index.js';
 import { createRateLimit } from '../middleware/rateLimit.js';
-import { FLYER_PUBLIC_STATUSES, SHAREABLE_STATUSES, isDeleted } from '../repos/unitsRepo.js';
+import { FLYER_PUBLIC_STATUSES, isDeleted } from '../repos/unitsRepo.js';
 import { toUnitFlyer } from '../lib/unitFields.js';
 import { resolveUnitMedia } from '../lib/unitMedia.js';
 import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
@@ -149,9 +152,11 @@ const SIGNUP_STEP_FAILED = 'housing-fair signup step failed';
 /**
  * flyer-leads D6 / AR2 / AR11: why a sign-up wrote no flyer entry (the
  * audit's sentSkipped, absent ONLY when an entry was written): a soft-deleted
- * holder (the deleted path); no unitId; a unitId that is not a shareable
- * unit; a contact type the sent list is not for; the ledger's own refusals (a
- * current decline, the order rule, token retries exhausted); or a throw.
+ * holder (the deleted path); no unitId; 'not_shareable' - the flyer's unit is
+ * missing, deleted or not public (FLYER_PUBLIC; the value keeps its name,
+ * since stored audit events carry it - permanent-flyer-links D5); a contact
+ * type the sent list is not for; the ledger's own refusals (a current decline,
+ * the order rule, token retries exhausted); or a throw.
  */
 type SignupSentSkipped =
   | 'deleted'
@@ -194,6 +199,9 @@ const SIGNUP_OPT_OUT_NOTE: Record<SignupOptOut, string> = {
  * trim and by the parser): the contact itself is never renamed, and an
  * auto-captured unknown contact has no other name. The address is
  * formatAddress, falling back to the unitId, as the tour-request label does.
+ * permanent-flyer-links D6: a flyer for a home that is not Available adds its
+ * status label in parentheses after the address (LISTING_STATUS_LABELS at
+ * sign-up time, stored in the pin like the rest of the words).
  * Each form ends with the SIGNUP_OPT_OUT_NOTE of why texts are off, if they
  * are.
  */
@@ -209,7 +217,11 @@ function signupPinLabel(args: {
   const note = SIGNUP_OPT_OUT_NOTE[args.optOut];
   if (args.unitId === undefined) return `Signed up on the join page as ${name}${note}`;
   if (!args.viaFlyer || args.flyerUnit === undefined) return `Signed up from a flyer as ${name}${note}`;
-  return `Signed up from the flyer for ${formatAddress(args.flyerUnit.address) || args.unitId} as ${name}${note}`;
+  // viaFlyer means a FLYER_PUBLIC status, so the raw-status fallback is never
+  // reached; the guard keeps the lookup cast-free and blind to inherited keys.
+  const status = args.flyerUnit.status;
+  const suffix = status === 'available' ? '' : ` (${isListingStatus(status) ? LISTING_STATUS_LABELS[status] : status})`;
+  return `Signed up from the flyer for ${formatAddress(args.flyerUnit.address) || args.unitId}${suffix} as ${name}${note}`;
 }
 
 interface HousingFairFields {
@@ -217,7 +229,7 @@ interface HousingFairFields {
   lastName: string;
   phone: string;
   voucherSize?: number;
-  /** Optional flyer unit-of-interest (validated as shareable in the handler). */
+  /** Optional flyer unit-of-interest (checked as public - FLYER_PUBLIC - in the handler). */
   unitId?: string;
   /** join-housing-authority D3: the /join form's choice; shape-checked here, list-checked in the handler. */
   housingAuthority?: string;
@@ -276,9 +288,10 @@ function parseHousingFairBody(body: unknown): HousingFairFields | { error: strin
 
   // Optional unitId: the flyer the signup came from. Absent is fine; present
   // must be a non-empty, length-capped string (a present-but-non-string is a
-  // malformed request → the same generic error). Whether the unit is actually
-  // shareable is decided in the handler (a non-shareable id just degrades to a
-  // plain housing-fair signup — never an existence oracle).
+  // malformed request -> the same generic error). Whether the unit is actually
+  // public (FLYER_PUBLIC: every status but setup) is decided in the handler (an
+  // id that is not public just degrades to a plain housing-fair signup - never
+  // an existence oracle).
   let unitId: string | undefined;
   if ('unitId' in b && b['unitId'] !== undefined && b['unitId'] !== null) {
     const u = b['unitId'];
@@ -305,7 +318,7 @@ function parseHousingFairBody(body: unknown): HousingFairFields | { error: strin
   // D4: a flyer sign-up (a present, non-null unitId) never carries a housing
   // authority - the flyer page shows no select. Refused with the generic error,
   // keyed on the PRESENCE of unitId and decided before the unit is ever read,
-  // so the refusal reveals nothing about whether the unit exists or is shareable.
+  // so the refusal reveals nothing about whether the unit exists or is public.
   if (unitId !== undefined && housingAuthority !== undefined) {
     return { error: 'invalid request' };
   }
@@ -501,21 +514,23 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
       }
     }
 
-    // Flyer attribution: when the signup carries a unitId for a SHAREABLE unit,
-    // stamp the created contact with capture_source:'flyer' + unit_of_interest so
-    // staff see which home prompted the signup. A missing/non-shareable unit
-    // (or no unitId) keeps today's plain 'housing_fair' source (no oracle — we
-    // never reveal whether the id existed). unitId is NOT PII, so logging its
+    // Flyer attribution: when the signup carries a unitId for a PUBLIC unit
+    // (FLYER_PUBLIC: every status but setup - permanent-flyer-links D5), stamp
+    // the created contact with capture_source:'flyer' + unit_of_interest so
+    // staff see which home prompted the signup - an Occupied home's flyer is
+    // credited exactly like an Available one's. A missing, deleted or setup
+    // unit (or no unitId) keeps today's plain 'housing_fair' source (no oracle -
+    // we never reveal whether the id existed). unitId is NOT PII, so logging its
     // presence as a boolean is fine.
     let viaFlyer = false;
-    // flyer-leads D6.2: the unit is kept for the sign-up pin's address label.
+    // flyer-leads D6.2: the unit is kept for the sign-up pin's address label
+    // (and, permanent-flyer-links D6, its status suffix).
     let flyerUnit: UnitItem | undefined;
     if (unitId !== undefined) {
       flyerUnit = await units.getById(unitId);
-      // A soft-deleted unit is not publicly shareable (it's hidden everywhere),
-      // so it must not earn flyer attribution either - mirror the flyer gate
-      // exactly.
-      if (flyerUnit && !isDeleted(flyerUnit) && SHAREABLE_STATUSES.has(flyerUnit.status)) {
+      // A soft-deleted unit is not public (it's hidden everywhere), so it must
+      // not earn flyer attribution either - mirror the flyer gate exactly.
+      if (flyerUnit && !isDeleted(flyerUnit) && FLYER_PUBLIC_STATUSES.has(flyerUnit.status)) {
         viaFlyer = true;
       }
     }
@@ -592,7 +607,7 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
       // is stamped, so a later placement transition can still derive the
       // lifecycle forward. A request WITH a unitId (the flyer's sign-up box)
       // keeps 'needs_review' and stores no authority, even when the unit is
-      // missing or not shareable. type 'tenant': the form is a tenant intake,
+      // missing, deleted or in setup. type 'tenant': the form is a tenant intake,
       // asserted by the form, not a guess from an unknown inbound.
       contact = await contacts.create({
         type: 'tenant',
@@ -606,9 +621,9 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
         // check accepted it. Absent when none was chosen.
         ...(unitId === undefined && housingAuthority !== undefined && { housingAuthority }),
         // Flyer signups are attributed to the originating home; a plain fair
-        // signup (no/non-shareable unit) keeps the generic source. Only stamped
-        // on CREATE (matching how capture_source is set), never on a deduped
-        // existing contact.
+        // signup (no unit, or one missing, deleted or in setup) keeps the
+        // generic source. Only stamped on CREATE (matching how capture_source
+        // is set), never on a deduped existing contact.
         capture_source: viaFlyer ? 'flyer' : 'housing_fair',
         ...(viaFlyer && unitId !== undefined && { unit_of_interest: unitId }),
         captured_at: new Date().toISOString(),
@@ -679,11 +694,12 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
     // mark's touch follows the welcome in the thread. Then the repeat check
     // (D6.1): no pin and no inbox bump when the contact already holds a pin
     // from the same SOURCE from the last 24 hours. The source is the
-    // shareable flyer's unit (the pin's unitId ref), or the ONE shared "no
-    // property" source (/join, and a flyer whose unit is missing, deleted,
-    // unavailable or made up - no ref), so made-up unitIds cannot multiply
-    // pins. The check is a read, not a claim: a sign-up that starts after
-    // another's pin was written sees it (hasEventSince reads strongly
+    // public flyer's unit (the pin's unitId ref; every status but setup -
+    // permanent-flyer-links D5), or the ONE shared "no property" source
+    // (/join, and a flyer whose unit is missing, deleted, in setup or made up
+    // - no ref), so made-up unitIds cannot multiply pins. The check is a
+    // read, not a claim: a sign-up that starts after another's pin was
+    // written sees it (hasEventSince reads strongly
     // consistent, AR12), but two OVERLAPPING same-source requests can both
     // read "no pin" and each pin and bump. A burst is bounded by the per-IP
     // /public limiter (app.ts), not by this check
@@ -749,8 +765,9 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
       await markSignupUnread(conversation, nowIso, marker);
     }
 
-    // (3c) The flyer share entry (D7): a flyer of a shareable unit puts that
-    // property on a tenant's or an unknown contact's properties-sent list -
+    // (3c) The flyer share entry (D7): a flyer of a public unit (every status
+    // but setup - permanent-flyer-links D5) puts that property on a tenant's
+    // or an unknown contact's properties-sent list -
     // new or existing, sent before or not - through the share ledger
     // (applyFlyerShareEntry: key 'flyer', counted by acceptance at the sign-up
     // instant), unless the pair holds a CURRENT decline, decided inside the
@@ -787,8 +804,9 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
     // no PII: existingContact (a live holder), deletedContact (false here - the
     // deleted path writes its own event above), recorded (the pin was written),
     // sentRecorded (the flyer entry was written), sentSkipped (why no entry was
-    // written: not_flyer, not_shareable, not_tenant, declined, refused, lost or
-    // error - and deleted on the deleted path, AR11; absent ONLY when one was)
+    // written: not_flyer, not_shareable (the unit is missing, deleted or not
+    // public), not_tenant, declined, refused, lost or error - and deleted on
+    // the deleted path, AR11; absent ONLY when one was)
     // and consentVersion (the consent disclosure version in force -
     // CONSENT_VERSION, smsCompliance.ts:91 - which ships with the form;
     // evidence only, never stamped on an existing contact). Best-effort (D6.4,

@@ -83,6 +83,8 @@ const captured = (capture: { lines: Record<string, unknown>[] }) =>
 const FLYER_LABEL = 'Signed up from the flyer for 12 Oak St, Atlanta, GA 30303 as Keisha Jones';
 const A_FLYER_LABEL = 'Signed up from a flyer as Keisha Jones';
 const JOIN_LABEL = 'Signed up on the join page as Keisha Jones';
+/** permanent-flyer-links D6: a flyer for a home that is not Available names its status after the address. */
+const OCCUPIED_FLYER_LABEL = 'Signed up from the flyer for 12 Oak St, Atlanta, GA 30303 (Occupied) as Keisha Jones';
 
 /** An earlier counted send of unit-1 to c-1. */
 const SENT_AT = '2026-10-01T10:00:00.000Z';
@@ -279,12 +281,12 @@ describe('the signed_up pin and the unread mark (D6)', () => {
   });
 
   it.each([
-    ['a placed property', 'unit-placed'],
+    ['a setup property', 'unit-setup'],
     ['a deleted property', 'unit-deleted'],
     ['a made-up unitId', 'no-such-unit'],
   ])('a flyer for %s: the "from a flyer" label and no ref', async (_what, unitId) => {
     const { app, world } = harness();
-    seedUnit(world, 'unit-placed', { status: 'placed' });
+    seedUnit(world, 'unit-setup', { status: 'setup' });
     seedUnit(world, 'unit-deleted', { deleted_at: '2026-10-01T00:00:00.000Z' });
     seedContact(world);
 
@@ -292,6 +294,58 @@ describe('the signed_up pin and the unread mark (D6)', () => {
 
     expect(pins(world)).toEqual([expect.objectContaining({ label: A_FLYER_LABEL })]);
     expect(pins(world)[0]).not.toHaveProperty('refId');
+  });
+
+  // permanent-flyer-links D5 / D6 (spec 2026-10-27): a flyer for a home that is
+  // public but not Available earns full credit - the pin's unit ref and the
+  // properties-sent flyer entry - and its pin names the status after the
+  // address. Available keeps the plain FLYER_LABEL (the first case above).
+  it.each([
+    ['occupied', OCCUPIED_FLYER_LABEL],
+    ['on_hold', 'Signed up from the flyer for 12 Oak St, Atlanta, GA 30303 (On hold) as Keisha Jones'],
+  ])('a flyer for a %s property: the status after the address, the unit ref and the flyer entry', async (status, label) => {
+    const { app, world } = harness();
+    seedUnit(world, 'unit-1', { status });
+    seedContact(world);
+
+    await post(app, signupBody({ unitId: 'unit-1' }));
+
+    expect(pins(world)).toEqual([
+      expect.objectContaining({ contactId: 'c-1', label, refType: 'unit', refId: 'unit-1', at: T0_ISO }),
+    ]);
+    const audits = signupAudits(world).map((e) => e.payload);
+    expect(audits).toEqual([expect.objectContaining({ viaFlyer: true, recorded: true, sentRecorded: true })]);
+    expect(audits[0]).not.toHaveProperty('sentSkipped');
+    expect((await ledgerRow(world, 'unit-1'))?.shares).toEqual({ flyer: flyerEntry(T0_ISO) });
+  });
+
+  it('a flyer for an on_hold property with no address: the unitId, then the status', async () => {
+    const { app, world } = harness();
+    seedUnit(world, 'unit-bare', { status: 'on_hold', address: undefined });
+    seedContact(world);
+
+    await post(app, signupBody({ unitId: 'unit-bare' }));
+
+    expect(pins(world).map((p) => [p.label, p.refType, p.refId])).toEqual([
+      ['Signed up from the flyer for unit-bare (On hold) as Keisha Jones', 'unit', 'unit-bare'],
+    ]);
+  });
+
+  // A stored status outside LISTING_STATUSES is not public (spec D1): it keeps
+  // the no-property path, so the gate is the list, not "anything but setup".
+  it('a flyer for a property whose stored status is off the list: the "from a flyer" label, no ref, sentSkipped not_shareable', async () => {
+    const { app, world } = harness();
+    seedUnit(world, 'unit-offlist', { status: 'placed' });
+    seedContact(world);
+
+    await post(app, signupBody({ unitId: 'unit-offlist' }));
+
+    expect(pins(world)).toEqual([expect.objectContaining({ label: A_FLYER_LABEL })]);
+    expect(pins(world)[0]).not.toHaveProperty('refId');
+    expect(signupAudits(world).map((e) => e.payload)).toEqual([
+      expect.objectContaining({ viaFlyer: false, recorded: true, sentRecorded: false, sentSkipped: 'not_shareable' }),
+    ]);
+    expect(world.listingSends).toHaveLength(0);
   });
 
   it('an existing landlord with no thread: a landlord_1to1 thread gets the pin and the unread mark, and no welcome', async () => {
@@ -464,18 +518,54 @@ describe('the repeat check: one pin and one bump per contact per source per 24 h
     expect(world.unreadIncrements).toEqual(['conv-1']);
   });
 
-  it('/join, then a flyer for an unavailable property within 24 hours: one pin (the shared no-property source)', async () => {
+  it('/join, then a flyer for a setup property within 24 hours: one pin (the shared no-property source)', async () => {
     const { app, world, clock } = harness();
-    seedUnit(world, 'unit-placed', { status: 'placed' });
+    seedUnit(world, 'unit-setup', { status: 'setup' });
     seedContact(world);
     seedThread(world);
 
     await post(app, signupBody());
     clock.ms = T0 + HOUR_MS;
-    await post(app, signupBody({ unitId: 'unit-placed' }));
+    await post(app, signupBody({ unitId: 'unit-setup' }));
 
     expect(pins(world).map((p) => p.label)).toEqual([JOIN_LABEL]);
     expect(world.unreadIncrements).toEqual(['conv-1']);
+  });
+
+  // permanent-flyer-links D5: a flyer for a public home that is not Available
+  // is its OWN source (the unit), no longer the shared no-property one.
+  it('a flyer for an occupied property, then /join within 24 hours: two pins (the unit is its own source)', async () => {
+    const { app, world, clock } = harness();
+    seedUnit(world, 'unit-1', { status: 'occupied' });
+    seedContact(world);
+    seedThread(world);
+
+    await post(app, signupBody({ unitId: 'unit-1' }));
+    clock.ms = T0 + HOUR_MS;
+    await post(app, signupBody());
+
+    expect(pins(world).map((p) => [p.label, p.refId])).toEqual([
+      [OCCUPIED_FLYER_LABEL, 'unit-1'],
+      [JOIN_LABEL, undefined],
+    ]);
+    expect(world.unreadIncrements).toEqual(['conv-1', 'conv-1']);
+  });
+
+  it('the SAME occupied property twice within 24 hours: one pin and one bump, the pin ref the unit', async () => {
+    const { app, world, clock } = harness();
+    seedUnit(world, 'unit-1', { status: 'occupied' });
+    seedContact(world);
+    seedThread(world);
+    const since = vi.spyOn(world.activityEventsRepo, 'hasEventSince');
+
+    await post(app, signupBody({ unitId: 'unit-1' }));
+    clock.ms = T0 + HOUR_MS;
+    await post(app, signupBody({ unitId: 'unit-1' }));
+
+    expect(pins(world).map((p) => [p.label, p.refType, p.refId])).toEqual([[OCCUPIED_FLYER_LABEL, 'unit', 'unit-1']]);
+    expect(world.unreadIncrements).toEqual(['conv-1']);
+    // The repeat read keys on the unit, not on the shared no-property source.
+    expect(since).toHaveBeenLastCalledWith('c-1', 'signed_up', new Date(T0 + HOUR_MS - 24 * HOUR_MS).toISOString(), 'unit-1');
   });
 
   it('made-up unitIds all share the no-property source: one pin, read with no ref', async () => {
@@ -722,16 +812,16 @@ describe('a flyer sign-up puts the property on the properties-sent list (D7)', (
     expect(captured(capture)).toEqual([expect.objectContaining({ sentRecorded: false, sentSkipped: 'not_tenant' })]);
   });
 
-  it('/join, an unavailable property and a made-up unitId never touch the ledger', async () => {
+  it('/join, a setup property and a made-up unitId never touch the ledger', async () => {
     const { app, world, clock } = harness();
-    seedUnit(world, 'unit-placed', { status: 'placed' });
+    seedUnit(world, 'unit-setup', { status: 'setup' });
     seedContact(world);
     const read = vi.spyOn(world.listingSendsRepo, 'getByKeyConsistent');
     const write = vi.spyOn(world.listingSendsRepo, 'putShareMemory');
 
     await post(app, signupBody());
     clock.ms = T0 + HOUR_MS;
-    await post(app, signupBody({ unitId: 'unit-placed' }));
+    await post(app, signupBody({ unitId: 'unit-setup' }));
     clock.ms = T0 + 2 * HOUR_MS;
     await post(app, signupBody({ unitId: 'no-such-unit' }));
 
@@ -855,8 +945,8 @@ describe('the housing_fair_signup audit fields (D6, plan 2.6)', () => {
       skipped: 'not_shareable',
       arrange: async (h) => {
         seedContact(h.world);
-        seedUnit(h.world, 'unit-placed', { status: 'placed' });
-        return signupBody({ unitId: 'unit-placed' });
+        seedUnit(h.world, 'unit-setup', { status: 'setup' });
+        return signupBody({ unitId: 'unit-setup' });
       },
     },
     {
@@ -1037,7 +1127,7 @@ const DNC_NOTE = ' (marked Do-Not-Contact - texts stay off unless staff choose A
 /** The three signed_up pin forms: [what, the extra body fields, the label]. */
 const PIN_FORMS: Array<[string, Record<string, unknown>, string]> = [
   ['the flyer', { unitId: 'unit-1' }, FLYER_LABEL],
-  ['a flyer whose property is not shareable', { unitId: 'unit-placed' }, A_FLYER_LABEL],
+  ['a flyer whose property is in Setup', { unitId: 'unit-setup' }, A_FLYER_LABEL],
   ['the join page', {}, JOIN_LABEL],
 ];
 
@@ -1045,7 +1135,7 @@ describe('an opted-out number: the pin tells staff (FW-P2)', () => {
   it.each(PIN_FORMS)('the CONTACT opted out (its flag only), %s: the pin label ends with the Do-Not-Contact note', async (_what, extra, label) => {
     const { app, world } = harness();
     seedUnit(world);
-    seedUnit(world, 'unit-placed', { status: 'placed' });
+    seedUnit(world, 'unit-setup', { status: 'setup' });
     seedContact(world, { sms_opt_out: true });
     seedThread(world);
 
@@ -1057,6 +1147,27 @@ describe('an opted-out number: the pin tells staff (FW-P2)', () => {
     expect(world.unreadIncrements).toEqual(['conv-1']);
     expect(world.sent).toHaveLength(0);
     expect(world.contacts.find((c) => c.contactId === 'c-1')?.sms_opt_out).toBe(true);
+  });
+
+  // permanent-flyer-links D6: the status suffix belongs to the address, so the
+  // opt-out note still ends the label.
+  it('the CONTACT opted out, a flyer for an occupied property: the status suffix, then the Do-Not-Contact note', async () => {
+    const { app, world } = harness();
+    seedUnit(world, 'unit-1', { status: 'occupied' });
+    seedContact(world, { sms_opt_out: true });
+    seedThread(world);
+
+    await post(app, signupBody({ unitId: 'unit-1' }));
+
+    expect(pins(world)).toEqual([
+      expect.objectContaining({
+        contactId: 'c-1',
+        label: `${OCCUPIED_FLYER_LABEL}${DNC_NOTE}`,
+        refType: 'unit',
+        refId: 'unit-1',
+        at: T0_ISO,
+      }),
+    ]);
   });
 
   it('the THREAD opted out (the contact carries no flag): the STOP note - and the mark, the entry, the audit and the repeat check are unchanged', async () => {
@@ -1163,7 +1274,7 @@ describe('the opted-out note by cause (FW-P3)', () => {
   it.each(PIN_FORMS)('the thread step returns a flagged thread, %s: the STOP note', async (_what, extra, label) => {
     const { app, world } = harness();
     seedUnit(world);
-    seedUnit(world, 'unit-placed', { status: 'placed' });
+    seedUnit(world, 'unit-setup', { status: 'setup' });
     seedContact(world);
     seedThread(world, { sms_opt_out: true });
 

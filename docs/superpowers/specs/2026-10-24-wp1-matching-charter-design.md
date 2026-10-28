@@ -15,6 +15,10 @@ stored reactions withdrawn for reaction lines in the Notes box, properties
 seen on the tenant card, the maybe case. AMENDED a third time 2026-10-26
 (section 20, item 7): reaction lines become free-form FEEDBACK LINES that
 name the home, and properties seen carries each home's feedback under it.
+Items 8-11 (2026-10-26 and 2026-10-27) are indexed in section 20.
+AMENDED 2026-10-28 at the B2 slice restatement (section 20, item 12):
+`AI_RANKING_ENABLED` dropped; the counterfactual fair-housing check is
+B2's merge gate, and ranking turns on in production when B2 is deployed.
 Mission: Amendment No. 1 Work Package 1 (signed; Cameron 2026-10-20, Sam
 2026-10-21). 52 contracted hours.
 Records: docs/superpowers/reviews/2026-10-24-wp1-matching-charter/
@@ -524,15 +528,20 @@ editing its text, which closes the flag; the model is never told to apply
 a requirement it judged unlawful (Cameron 2026-10-25: an unlawful
 requirement "is something for Sam").
 
-The guarantee is tested, not only stated: before `AI_RANKING_ENABLED` is
-first turned on in production (B2's own live test included), B2 runs a counterfactual check on the testing key over SYNTHETIC pairs
+The guarantee is tested, not only stated: before ranking first runs in
+production (B2's own live test included), B2 runs a counterfactual check on the testing key over SYNTHETIC pairs
 (made-up tenants and properties, never real records), swapping name,
 address, household facts and any credit or income line (an address swapped only for one equivalent
 for the tenant's stated area, so a fit change cannot pass for a proxy)
 and including an assistance-animal tenant against a No pets property; scores and the Weak cap (section 7.4) are
 compared against a tolerance B2 sets, and the result is a mission record.
-A failure blocks turning ranking on in production (`AI_RANKING_ENABLED`,
-default off) until it passes or Cameron decides (Cameron 2026-10-26).
+The check is B2's MERGE GATE: B2 is not handed back merge-ready until it
+passes, or Cameron decides. AMENDED 2026-10-28: there is no production
+switch for ranking (the `AI_RANKING_ENABLED` this paragraph named,
+default off, is dropped); ranking turns on in production when Cameron
+deploys B2 (Cameron 2026-10-28: "the switch will be when I deploy"). A
+failure therefore blocks the merge, and with it every production run,
+until it passes or Cameron decides (Cameron 2026-10-26).
 
 The rubric version is stored on every match and run. Worked examples are
 versioned separately (`examplesVersion`) and grow from synthetic to real
@@ -736,9 +745,12 @@ ranking-job record lives in the AI runs table in its own key family with
 a TTL of at least `RANKING_MAX_AGE_DAYS` (its failed-batch list must outlive
 the matches it flags), and the run listing and run-detail readers (routes/aiRuns.ts:
 139-140, 228-249) never return it.
-With `AI_RANKING_ENABLED` off, the ranking poll does not start and the
-composer shows the pool unscored, in its deterministic order, with no
-Rank button.
+AMENDED 2026-10-28: there is no switch-off state. The `AI_RANKING_ENABLED`
+switch this paragraph named (when off: no ranking poll, and a composer
+showing the pool unscored with no Rank button) is dropped; the ranking
+poll always runs, and which driver it calls is configuration, as for
+extraction (section 14). The counterfactual check is B2's merge gate
+instead (section 7.2).
 
 Background or scheduled ranking is out of WP1 (A1 excludes it); the engine
 is one function so a scheduled caller (WP3 era) would be configuration,
@@ -990,9 +1002,9 @@ reply yet / Interested / Not interested) remain where they are today.
 | Slice | Owns | Hours |
 |---|---|---|
 | B1 Ranking inputs | Tenant fields area preference, maximum tenant portion, accessibility need, preferences and constraints on the record and edit form; `priority` boolean on the unit, its edit-form control and record display; extraction schema widened (fixed fields; the noteLines instruction widened to matching facts, each line with a confidence and the floor, no lines from unknown-speaker runs, the never-written list; feedback lines, free-form Notes lines naming the home the tenant is talking about, the shared property label function, and the list of properties sent to the tenant given to extraction so it can name them; amended 2026-10-26); the never-written test covering Notes lines, feedback lines included, run as B1's merge gate (no production switch, amended 2026-10-26); the one list of tenant matching inputs and their sources (section 6.4). Ships to production first. | 8-10 |
-| B2 Ranking engine | Pool in both directions with the window and the sendability fences; cards by classification with the runtime allowlist and the landlord switch; card fingerprint helpers; completeness pass; rubric, examples, structured output; anthropic/fake/console drivers; the ranking poll loop and properties seen on the tenant card, each home's feedback lines under it, with its fingerprint rule (amended 2026-10-26); the ranking-job record (claim generation, lease, one takeover, failed batches, carried trace); persisted batches, event hint, GET and base-table re-read; matches with the out-of-date, age and version rules and the one-button whole-pool re-score; the lean seed row replaced; review records with direction and input snapshots, the in-app review list, example promotion and `examplesVersion`, the synthetic examples and evaluation set, the de-identified export, the evaluation script; the Staff notes comment corrected; the cap with its key list, accommodation flags and the property-level unlawful-flag record; the counterfactual fair-housing check on synthetic pairs; the Rank rate-limit knob and roles; `AI_RANKING_ENABLED`; run log under its own keys with cost by environment; band and priority policy on read; endpoints: rank, read ranking by anchor, review a pair; the Rankings page with "Rank this anchor". | 33-42 |
+| B2 Ranking engine | Pool in both directions with the window and the sendability fences; cards by classification with the runtime allowlist and the landlord switch; card fingerprint helpers; completeness pass; rubric, examples, structured output; anthropic/fake/console drivers; the ranking poll loop and properties seen on the tenant card, each home's feedback lines under it, with its fingerprint rule (amended 2026-10-26); the ranking-job record (claim generation, lease, one takeover, failed batches, carried trace); persisted batches, event hint, GET and base-table re-read; matches with the out-of-date, age and version rules and the one-button whole-pool re-score; the lean seed row replaced; review records with direction and input snapshots, the in-app review list, example promotion and `examplesVersion`, the synthetic examples and evaluation set, the de-identified export, the evaluation script; the Staff notes comment corrected; the cap with its key list, accommodation flags and the property-level unlawful-flag record; the counterfactual fair-housing check on synthetic pairs, run as B2's merge gate (no production switch: `AI_RANKING_ENABLED` dropped, amended 2026-10-28); the Rank rate-limit knob and roles; run log under its own keys with cost by environment; band and priority policy on read; endpoints: rank, read ranking by anchor, review a pair; the Rankings page with "Rank this anchor". | 33-42 |
 | B3 Send property from a tenant | The ranked row; the composer's tenant anchor; priority-only view; completeness banner; Rank/Update; one-step send with the outcome on the pair; agree/disagree with the disagree direction; the tenant record's Send re-pointed. | 10-12 |
-| B4 Send property from a property | The composer's property anchor; ranked tenants replacing the filter-only audience, the window toggle, rows unchecked by default and Select all, with hand-picks, the tour-hold chip and confirm, old filter drafts and the partner flow kept (section 13.1); already-sent No reply filter chip; pick one, a few or many; the switch-off composer; the unlawful-flag display on the property record with the admin Dismiss; the Matching nav entry asking which record to start from; the property page's Send re-pointed; the Similar panel relabeled "similarity". | 13-16 |
+| B4 Send property from a property | The composer's property anchor; ranked tenants replacing the filter-only audience, the window toggle, rows unchecked by default and Select all, with hand-picks, the tour-hold chip and confirm, old filter drafts and the partner flow kept (section 13.1); already-sent No reply filter chip; pick one, a few or many; (the switch-off composer is dropped, amended 2026-10-28); the unlawful-flag display on the property record with the admin Dismiss; the Matching nav entry asking which record to start from; the property page's Send re-pointed; the Similar panel relabeled "similarity". | 13-16 |
 
 RE-ESTIMATE (2026-10-25, after the eight-round review; revised
 2026-10-26 for the gate answers): 64-80 hours against the 52 contracted.
@@ -1030,7 +1042,7 @@ from synthetic to real; no identified client record committed), 13.1 (one compos
 14 (model per stage; fake driver), 15.2 (order), and the compliance
 decisions: 6.3 (no stored reactions; declines left to WP3), 6.4 (matching
 facts and feedback lines as Notes lines, the never-written list, its test as B1's merge gate), 7.2 (fair housing,
-credit and income, the counterfactual gate), 7.4 (the cap and its key
+credit and income, the counterfactual check as B2's merge gate), 7.4 (the cap and its key
 list), 10.2 (no SQS queue for ranking; one automatic takeover), 13.1
 (selection defaults). A slice that needs one changed brings it to
 Cameron.
@@ -1206,3 +1218,12 @@ date; this list is the index.
      gender identity, as HUD reads the Fair Housing Act. Cameron left the
      call to the planner: "For two, I'll leave that up to you." The B1
      never-written test plants one sexual-orientation case.
+- 2026-10-28, at the B2 slice restatement (records:
+  docs/superpowers/reviews/2026-10-28-wp1-b2-ranking-engine/intent.md):
+  12. `AI_RANKING_ENABLED` is dropped. Cameron: "you can drop the ai
+     ranking enabled switch, the switch will be when I deploy." Same
+     reasoning as item 1: the counterfactual fair-housing check becomes
+     B2's MERGE GATE (B2 is not handed back merge-ready until it passes,
+     or Cameron decides), and the switch-off behavior goes away - the
+     ranking poll always runs, and B4 builds no switch-off composer
+     (sections 7.2, 10.2, 15.1 B2 and B4, 15.4).

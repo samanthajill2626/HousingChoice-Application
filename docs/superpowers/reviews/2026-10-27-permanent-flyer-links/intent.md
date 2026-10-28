@@ -2,16 +2,18 @@
 
 ## STATE (replaced at each gate)
 
-- Phase: COMPACTION GATE B - spec rev 3 APPROVED; plan v2 final (plan
-  review closed at round 1); launch gate passed.
+- Phase: BUILD (SUPERVISE) - dispatched 2026-10-28 after compaction gate B.
 - Launch mode: AUTO. Cameron 2026-10-28, verbatim: "Go auto with 55 minute
   watchdog timers". Watchdog checkpoints every 55 minutes (3300 s).
-- In flight: nothing yet (no orchestrator, watchdog or mirror).
-- Next step: after the compaction (or a skip), dispatch
-  abt:build-orchestrator in the background with
-  `mission-block.md` verbatim as its prompt, arm the 55-minute watchdog and
-  start the transcript mirror, per the feature-mission skill's DISPATCH
-  section.
+- In flight: abt:build-orchestrator (background, mission-block.md verbatim);
+  one watchdog on `.superpowers/sdd/progress.md` (3300 s checkpoint, 25 min
+  stall); transcript mirror -> `.superpowers/sdd/live.log`. Recoveries so
+  far: 0 of budget 2.
+- Next step: on each watchdog wake, read the ledger tail, post one
+  "**Checkpoint:**" line, re-arm. On STATUS: DONE, run the handback review
+  (re-ground in the full replay, gates bare on a quiet tree, spec-conformance
+  + plan-blind adversarial opus reviewers, live QA, verdict with a merge
+  command). Unregister the compact-resume session when the mission ends.
 
 ## What Cameron asked for
 

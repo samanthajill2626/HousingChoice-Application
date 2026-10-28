@@ -12,9 +12,11 @@ cut from main @404e039d.
 
 ## STATE
 
-Phase: RESTATEMENT (2026-10-28). Charter amendment 12 committed on this
-branch. Waiting on Cameron's split call and the brainstorm questions.
-NEXT: record his answers here, then write the spec.
+Phase: SPEC (2026-10-28). Charter amendment 12 committed on this branch.
+Restatement answered: SPLIT. This branch is B2a (the engine); B2b (the
+review dataset) gets its own spec and branch after B2a merges.
+NEXT: write the B2a spec at docs/superpowers/specs/, then the adversarial
+spec review (round 1: two opus reviewers), then Cameron's spec gate.
 
 ## What Cameron asked for (verbatim where wording matters)
 
@@ -72,7 +74,54 @@ Rankings page and its "Rank this anchor" action.
 - Real-model runs use SYNTHETIC records on the testing key only; no
   identified client record is committed.
 
+## Restatement answers (2026-10-28)
+
+Cameron 2026-10-28, verbatim: "ok splitting it is fine. if you want to add
+the notes change issue to b2a that's fine. Keep the real model runs mine.
+Those will only happen at the end of each build before we merge though,
+right? i don't want them to stop you from building all the way through.
+Take the defaults you mention here for those 3 bulleted items"
+
+What that settles:
+
+- SPLIT into two branches.
+  - B2a, the engine (this branch): pool, cards, missing-info marks, rubric
+    plus about 10 synthetic worked examples, ranking schema, drivers, the
+    ranking poll loop with claim/lease/takeover, the job record, matches
+    rows and staleness, the Weak cap, fair-housing flags and the
+    unlawful-flag record, run log and cost, rate limit, rank and read
+    endpoints, and the admin Rankings page with "Rank this anchor". The
+    counterfactual fair-housing check is B2a's merge gate. B2a's spec
+    reserves the seams B2b needs: the exact model input kept on each run
+    and an examples version from day one.
+  - B2b, the review dataset (next branch): review records with input
+    snapshots, the review-a-pair endpoint, agree/disagree on the Rankings
+    page's pair view, the review list, promotion and examples-version
+    growth, the 30-pair evaluation set, the de-identified export, the
+    evaluation script.
+  - Order becomes B2a, B2b, B3, B4 (B3's agree/disagree needs B2b's
+    review endpoint).
+- contact-edit-form-notes-save-drops-auto-lines is FOLDED INTO B2a: the
+  contact edit form's Notes save gets a stale-save guard copying the Staff
+  notes guard (409 plus a reload message that keeps the typed text).
+- Real-model runs stay CAMERON'S (B1 PR1 precedent: no agent runs a real
+  model or reads the testing key). They happen at the END of each build,
+  before merge, and must NOT stop the build from running all the way
+  through. The build hands back with the real-model runs as the last
+  pre-merge step. The compile check is not a mid-build stop either: its
+  command goes to Cameron at the spec gate (where he already is) and the
+  plan does not wait on it; the build also carries an offline schema-shape
+  test so the known grammar limit is caught without a real call.
+- Defaults TAKEN (Cameron 2026-10-28):
+  1. AI Notes lines containing line breaks are collapsed into one line
+     (filterNoteLines), in B2a.
+  2. The retry guard's repeated-line drops are counted on the run record
+     (notesDuplicate), in B2a.
+  3. The any-date retry-guard ruling stands; no compare-with-latest-line
+     work (WP3 replaces it).
+
 ## Open questions / assumptions
 
-- The split (Cameron's call at the restatement).
-- Who runs the real-model commands (B1 precedent: Cameron).
+- None open with Cameron. Planner-level spec details (tolerance, anchor
+  picker UI, properties-seen bound, run-input storage) are decided in the
+  spec and surfaced at the spec gate.

@@ -16,8 +16,10 @@ Phase: BUILD (AUTO) - launched 2026-10-29. Plan v5 FINAL (d391a016; 85
 tasks, rulings PR1-PR45; review closed after 4 rounds, 81/81 accepted).
 Mission block: mission-block.md (dispatched verbatim).
 In flight: abt:build-orchestrator (background, model opus); watchdog
-(55-MINUTE checkpoints, `-ge 3300`, Cameron 2026-10-29; terminal and
-25-min stall exits as the skill); live.log mirror at
+(50-MINUTE checkpoints, `-ge 3000`: Cameron asked for 55 at launch, then
+moved the default to 50-52 the same day so a wake lands before idle
+compaction's ~54 min; skill v1.2.6; terminal and 25-min stall exits as the
+skill); live.log mirror at
 .superpowers/sdd/live.log. Agent id and task ids: see the ledger
 (.superpowers/sdd/progress.md) and the planner's latest status line.
 Gate B: replay proven 2026-10-29 13:55 (last HUMAN = the Go); context

@@ -466,3 +466,58 @@ describe('importing the CLI runs nothing (main is guarded)', () => {
     }
   });
 });
+
+describe('--timing (spec D17 item 3)', () => {
+  it('scores one 40-candidate batch three times, sequentially, and appends the timing section', async () => {
+    const h = harness();
+    expect(await main(['--model', MODEL, '--timing', '--out', OUT], h.deps)).toBe(0);
+    const driver = h.drivers[0]!;
+    expect(driver.calls).toHaveLength(3);
+    for (const call of driver.calls) {
+      expect(call.handles).toHaveLength(40);
+      expect(call.direction).toBe('tenants_for_property');
+    }
+    expect(h.printed.some((l) => /^Planned calls, timing: 3 batches of 40 candidates \(estimated \$\d+\.\d{2} on claude-sonnet-5-5\)$/.test(l))).toBe(true);
+    expect(driver.printedAtFirstCall).toBeGreaterThan(0);
+    const text = record(h);
+    expect(text).toContain('## Batch timing - 2026-10-29T10:00:00.000Z');
+    expect(text).toContain('| Run | Outcome | Latency ms | Input tokens | Output tokens | Candidates scored |');
+    expect(text).toContain('| 1 | answered | 5 | 1000 | 200 | 40 |');
+  });
+
+  it('a timing call that fails is recorded and exits 1', async () => {
+    const h = harness(() => 'fail');
+    expect(await main(['--model', MODEL, '--timing', '--out', OUT], h.deps)).toBe(1);
+    expect(record(h)).toContain('| 1 | refusal | 5 | 1000 | 200 | 0 |');
+  });
+
+  it('--timing --dry-run prints the plan and calls nothing', async () => {
+    const h = harness(STABLE, { env: {}, createDriver: () => { throw new Error('no driver in a dry run'); } });
+    expect(await main(['--model', MODEL, '--timing', '--dry-run'], h.deps)).toBe(0);
+    expect(h.printed).toContain('Dry run: no call made.');
+  });
+});
+
+describe('the --timing record (WORKLIST WL-S8-12)', () => {
+  it('an --out the record cannot be written to is refused before the first timing call (exit 2, no driver)', async () => {
+    const h = harness(STABLE, { checkRecordTarget: () => 'the --out directory W:/counterfactual-test does not exist' });
+    expect(await main(['--model', MODEL, '--timing', '--out', OUT], h.deps)).toBe(2);
+    expect(h.drivers).toHaveLength(0);
+    expect(h.records).toEqual([]);
+  });
+
+  it('a timing record append that fails prints the timing table to stdout and exits 1', async () => {
+    const h = harness(STABLE, {
+      appendRecord: () => {
+        throw new Error('ENOSPC: no space left on device');
+      },
+    });
+    expect(await main(['--model', MODEL, '--timing', '--out', OUT], h.deps)).toBe(1);
+    expect(h.drivers[0]!.calls).toHaveLength(3);
+    expect(h.printed).toContain('## Batch timing - 2026-10-29T10:00:00.000Z');
+    expect(h.printed).toContain('| 1 | answered | 5 | 1000 | 200 | 40 |');
+    expect(h.printed).toContain('| 3 | answered | 5 | 1000 | 200 | 40 |');
+    expect(h.printed.some((l) => l.startsWith('Record appended'))).toBe(false);
+    expect(h.errors.join('\n')).toMatch(/could not append the record to .*ENOSPC/);
+  });
+});

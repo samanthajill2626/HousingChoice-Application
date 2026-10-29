@@ -272,3 +272,21 @@ export function renderCheckRecord(result: CheckResult, h: RecordHeader): string 
   lines.push('', 'Cameron: (PASS, or your decision, with the date)', '');
   return lines.join('\n');
 }
+
+/** Spec D17 item 3: the batch timing record (latency and tokens per run). */
+export function renderTimingRecord(results: readonly CallResult[], h: RecordHeader, candidates: number): string {
+  const lines: string[] = [];
+  lines.push(`## Batch timing - ${h.now}`, '');
+  lines.push(`- Model: ${h.model}; key ${h.keyTail}; ${h.endpoint}`);
+  lines.push(`- Rubric ${RUBRIC_VERSION}, examples ${EXAMPLES_VERSION}, prompt fingerprint ${h.promptFingerprint}`);
+  lines.push(`- One synthetic batch of ${candidates} candidates (a property anchor), ${results.length} runs, one at a time`);
+  lines.push('', '| Run | Outcome | Latency ms | Input tokens | Output tokens | Candidates scored |', '|---|---|---|---|---|---|');
+  for (const r of results) {
+    const outcome = r.failure === undefined || r.failure === 'not_scored' ? 'answered' : r.failure;
+    lines.push(
+      `| ${r.spec.run} | ${outcome} | ${r.latencyMs} | ${r.usage?.inputTokens ?? '-'} | ${r.usage?.outputTokens ?? '-'} | ${r.candidatesScored} |`,
+    );
+  }
+  lines.push('');
+  return lines.join('\n');
+}

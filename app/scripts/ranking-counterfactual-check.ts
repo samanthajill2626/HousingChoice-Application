@@ -30,7 +30,12 @@
  * Usage (worktree root; PowerShell sets the key with $env:ANTHROPIC_API_KEY = '...'):
  *   npx tsx app/scripts/ranking-counterfactual-check.ts --model <id> --dry-run
  *   npx tsx app/scripts/ranking-counterfactual-check.ts --model <id> --out <record.md> [--concurrency 4]
+ *   npx tsx app/scripts/ranking-counterfactual-check.ts --model <id> --timing --out <record.md>
  *
+ *   --timing       instead of the check: score ONE synthetic 40-candidate
+ *                  batch (P1's property and forty tenants) three times, one
+ *                  at a time, and record latency and tokens (spec D17 item
+ *                  3). Exit 0 when all three answered, else 1.
  *   --model        REQUIRED, no fallback: claude-sonnet-5-5 or claude-opus-5-5.
  *   --out          REQUIRED unless --dry-run: APPEND this run's dated section.
  *                  Checked BEFORE the first call (WORKLIST WL-S8-12): its
@@ -61,7 +66,7 @@ import { createLogger } from '../src/lib/logger.js';
 import { priceOf } from '../src/services/ranking/cost.js';
 import type { RankingCall, RankingDriver } from '../src/services/ranking/driverTypes.js';
 import { EXAMPLES_VERSION } from '../src/services/ranking/examples.js';
-import { buildRankingSystemPrompt, rankingPromptFingerprint } from '../src/services/ranking/prompt.js';
+import { buildRankingBatch, buildRankingSystemPrompt, rankingPromptFingerprint } from '../src/services/ranking/prompt.js';
 import { RUBRIC_VERSION } from '../src/services/ranking/rubric.js';
 import { runCapped } from './rankingCounterfactual/evaluate.js';
 import {
@@ -74,7 +79,9 @@ import {
   type CallSpec,
   type CounterfactualSuite,
 } from './rankingCounterfactual/plan.js';
-import { evaluateCheck, renderCheckRecord, type RecordHeader } from './rankingCounterfactual/report.js';
+import { prepareProperty, prepareTenant } from './rankingCounterfactual/cards.js';
+import { BASE_PAIRS, timingTenants } from './rankingCounterfactual/records.js';
+import { evaluateCheck, renderCheckRecord, renderTimingRecord, type RecordHeader } from './rankingCounterfactual/report.js';
 
 export const SCRIPT_NAME = 'ranking-counterfactual-check';
 
@@ -87,8 +94,13 @@ export const COUNTERFACTUAL_REQUEST: Pick<RankingDriverSettings, 'rankingEffort'
 
 const USAGE = [
   'usage: npx tsx app/scripts/ranking-counterfactual-check.ts --model <id> --out <record.md> [--concurrency 4]',
-  '       npx tsx app/scripts/ranking-counterfactual-check.ts --model <id> --dry-run',
+  '       npx tsx app/scripts/ranking-counterfactual-check.ts --model <id> --timing --out <record.md>',
+  '       npx tsx app/scripts/ranking-counterfactual-check.ts --model <id> --dry-run [--timing]',
 ].join('\n');
+
+/** Spec D17 item 3: one batch of this many synthetic candidates, scored this many times. */
+export const TIMING_CANDIDATES = 40;
+export const TIMING_RUNS = 3;
 
 export interface CheckArgs {
   model: string;
@@ -334,6 +346,56 @@ async function runCheck(args: CheckArgs, deps: CheckCliDeps, apiKey: string): Pr
   return result.verdict === 'PASS' ? 0 : 1;
 }
 
+async function runTiming(args: CheckArgs, deps: CheckCliDeps, apiKey: string): Promise<0 | 1> {
+  const pair = BASE_PAIRS[0]!;
+  const property = prepareProperty(pair.unit);
+  const tenants = timingTenants().slice(0, TIMING_CANDIDATES).map(prepareTenant);
+  const batch = buildRankingBatch({
+    direction: 'tenants_for_property',
+    batchIndex: 0,
+    landlordCard: false,
+    anchor: { card: property.card, missing: property.missing },
+    candidates: tenants.map((t) => ({
+      candidateId: t.contactId,
+      unitId: pair.unit.unitId,
+      card: t.card,
+      missing: t.missing,
+      pairHistory: { sends: [], declined: null, tours: [], daysSinceLastSend: null },
+      propertyFacts: property.facts,
+    })),
+    homes: new Map(),
+  });
+  const specs: CallSpec[] = Array.from({ length: TIMING_RUNS }, (_unused, i) => ({
+    id: `timing/${i + 1}`,
+    group: 'timing',
+    pairId: 'timing',
+    direction: 'tenants_for_property',
+    run: i + 1,
+    batch,
+    subjectHandle: 'c1',
+    recordedRequirementKeys: property.facts.recordedRequirementKeys,
+  }));
+  deps.print(`${SCRIPT_NAME} --timing - model ${args.model}; key ${keyTail(apiKey)}; ${endpointLine(deps.env)}`);
+  deps.print(
+    `Planned calls, timing: ${TIMING_RUNS} batches of ${TIMING_CANDIDATES} candidates ` +
+      `(estimated $${estimateCostUsd(specs, args.model).toFixed(2)} on ${args.model})`,
+  );
+  if (args.dryRun) {
+    deps.print('Dry run: no call made.');
+    return 0;
+  }
+  const driver = deps.createDriver({ model: args.model, apiKey });
+  const results = await runAll(driver, specs, 1);
+  const text = renderTimingRecord(results, header(args, deps, apiKey), TIMING_CANDIDATES);
+  const appendProblem = tryAppendRecord(deps, args.out!, text);
+  for (const r of results) {
+    deps.print(`  run ${r.spec.run}: ${r.failure ?? 'answered'}, ${r.latencyMs} ms, tokens in ${r.usage?.inputTokens ?? '-'}, out ${r.usage?.outputTokens ?? '-'}`);
+  }
+  if (appendProblem !== undefined) return printUnsavedRecord(deps, args.out!, text, appendProblem);
+  deps.print(`Record appended to ${args.out}`);
+  return results.every((r) => r.failure === undefined || r.failure === 'not_scored') ? 0 : 1;
+}
+
 export async function main(argv: readonly string[], cli: Partial<CheckCliDeps> = {}): Promise<0 | 1 | 2> {
   const deps: CheckCliDeps = { ...defaultDeps(), ...cli };
   const parsed = parseCheckArgs(argv);
@@ -357,7 +419,7 @@ export async function main(argv: readonly string[], cli: Partial<CheckCliDeps> =
     }
   }
   try {
-    return await runCheck(parsed, deps, apiKey);
+    return parsed.timing ? await runTiming(parsed, deps, apiKey) : await runCheck(parsed, deps, apiKey);
   } catch (err) {
     deps.printError(`${SCRIPT_NAME} - FAILED: ${err instanceof Error ? err.message : String(err)}`);
     return 1;

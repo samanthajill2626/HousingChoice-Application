@@ -1542,13 +1542,26 @@ counts; a `--case` re-run writes a PARTIAL section that never counts); `--dry-ru
 request without a key. Run it with the TESTING key and the model production runs
 (`claude-sonnet-5-5`); agents never run it against a real model. Usage is in the script's header.
 
-**Changing a structured-output schema.** The API compiles `EXTRACTION_SCHEMA` (and the probe's
-`GRADER_SCHEMA`) into a grammar with a size limit no offline test can see: past it, EVERY call fails
-400 "The compiled grammar is too large". WP1 B1 hit it (twelve named field objects failed, eight
-compiled), which is why `fields` is one list of `{ field, op, value, reason }` entries. After any
+**Changing a structured-output schema.** The API compiles `EXTRACTION_SCHEMA`, the probe's
+`GRADER_SCHEMA` and the ranking schema (`app/src/services/ranking/schema.ts`, WP1 B2a) into a grammar
+with a size limit no offline test can see: past it, EVERY call fails 400 "The compiled grammar is too
+large". WP1 B1 hit it (twelve named field objects failed, eight compiled), which is why `fields` is one
+list of `{ field, op, value, reason }` entries. The ranking schema has five object nodes (the root, the
+candidate, the reason used for and against, the flag), and `app/test/rankingSchema.test.ts` fails offline
+if an edit adds a sixth, an optional key or a numeric or length bound. Its flag-field enum grows with
+`RANKING_LANDLORD_CARD` (18 fields off, 32 on), so the check compiles it in BOTH states. After any
 schema change, run `npx tsx app/scripts/extraction-schema-compile-check.ts --model claude-sonnet-5-5`
-with the TESTING key - three tiny calls (a control, the extraction schema, the grader schema); it
-exits 1 when one fails to compile.
+with the TESTING key - five tiny calls (a control, the extraction schema, the grader schema, the ranking
+schema with the landlord card switch off and on); it exits 1 when one fails to compile. The check sends
+through the extraction client with thinking off; the ranking request itself (adaptive thinking, effort)
+is proven by the counterfactual check, whose every call would fail on a schema that does not compile.
+A change to the ranking schema's ENUMS (a source, a requirement key - `REQUIREMENT_UNIT_KEYS` flows into
+them - or a flag field) also bumps `RUBRIC_VERSION` (`app/src/services/ranking/rubric.ts`): the
+version is what marks every stored match out of date, and the prompt fingerprint each ranking run
+records (sha256 over the system text and the schema sent) changes with it. Re-run the counterfactual
+check after such a change. The compile check CANNOT validate `claude-opus-5-5`: it compiles through
+extraction's thinking-off client and that model takes no thinking-off form (the grammar limit is per
+model), so an opus ranking model is validated only by the counterfactual check's run on it.
 
 **Housing authority: why an extracted one sometimes arrives as a suggestion.** The field holds only
 names from the organization list (Settings > Housing authorities & agencies), because a Matching

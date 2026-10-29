@@ -4,7 +4,12 @@
 // which no offline test can see. This script sends ONE tiny request per schema,
 // through the production structured-output client (same model, same thinking
 // setting, same output_config), and prints which compile. Run it after ANY
-// change to EXTRACTION_SCHEMA or GRADER_SCHEMA, before the code ships.
+// change to EXTRACTION_SCHEMA, GRADER_SCHEMA or the ranking schema
+// (services/ranking/schema.ts, both RANKING_LANDLORD_CARD states; WP1 B2a
+// spec D5), before the code ships. The ranking variants compile through this
+// thinking-off client; the real ranking request (adaptive thinking, effort)
+// is proven by the counterfactual run, whose every call would fail on a
+// grammar that does not compile.
 // It measures the API's grammar compiler, not the prompt: the system prompt and
 // the user turn are a few words.
 //
@@ -13,11 +18,12 @@
 //   npx tsx app/scripts/extraction-schema-compile-check.ts --model claude-sonnet-5-5
 //   Remove-Item Env:ANTHROPIC_API_KEY
 //
-// Cost: one call per schema (three), each a few hundred output tokens at most;
+// Cost: one call per schema (five), each a few hundred output tokens at most;
 // a variant that fails to compile is rejected before the model runs.
 import { pathToFileURL } from 'node:url';
 import { createStructuredOutputClient, type StructuredOutputCall } from '../src/adapters/extraction.js';
 import { EXTRACTABLE_FIELDS, EXTRACTION_SCHEMA } from '../src/services/extraction/schema.js';
+import { rankingSchema } from '../src/services/ranking/schema.js';
 import { GRADER_SCHEMA } from './extractionProbeNeverWritten.js';
 
 type Schema = Record<string, unknown>;
@@ -61,6 +67,8 @@ export const VARIANTS: ReadonlyArray<{ name: string; about: string; schema: Sche
   { name: 'control', about: "main's shape before B1 (should compile)", schema: mainControl() },
   { name: 'extraction', about: 'EXTRACTION_SCHEMA as shipped', schema: EXTRACTION_SCHEMA },
   { name: 'grader', about: "the never-written grader's schema", schema: GRADER_SCHEMA },
+  { name: 'ranking-off', about: 'the ranking schema, RANKING_LANDLORD_CARD off (WP1 B2a)', schema: rankingSchema({ landlordCard: false }) },
+  { name: 'ranking-on', about: 'the ranking schema, RANKING_LANDLORD_CARD on (the larger flag enum)', schema: rankingSchema({ landlordCard: true }) },
 ];
 
 function outcome(call: StructuredOutputCall): string {

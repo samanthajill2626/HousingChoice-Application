@@ -19,6 +19,7 @@ import {
   rankingSchema,
   unlawfulFieldsFor,
 } from '../src/services/ranking/schema.js';
+import { VARIANTS } from '../scripts/extraction-schema-compile-check.js';
 
 type Node = Record<string, unknown>;
 
@@ -178,5 +179,18 @@ describe('the card-field constants are the card\'s (PR33)', () => {
 
   it('the free-text list is the string-typed set plus the legacy pets (WI22)', () => {
     expect([...PROPERTY_FREE_TEXT_FIELDS].sort()).toEqual([...Object.keys(STRING_TYPED_FREE_TEXT), 'pets'].sort());
+  });
+});
+
+// Spec D5 / D17 item 1: the real compile is checked by Cameron's run of the
+// compile-check script; it must carry the ranking schema in both switch states.
+describe('extraction-schema-compile-check carries both ranking variants', () => {
+  it('lists the five variants in order, the two ranking ones last', () => {
+    expect(VARIANTS.map((v) => v.name)).toEqual(['control', 'extraction', 'grader', 'ranking-off', 'ranking-on']);
+  });
+
+  it('sends the shipped ranking schemas themselves', () => {
+    expect(VARIANTS.find((v) => v.name === 'ranking-off')!.schema).toBe(rankingSchema({ landlordCard: false }));
+    expect(VARIANTS.find((v) => v.name === 'ranking-on')!.schema).toBe(rankingSchema({ landlordCard: true }));
   });
 });

@@ -1,0 +1,54 @@
+/* RankingsSection - the admin Rankings tab (WP1 B2a spec D18). Full width at
+ * every size (Cameron's rule: no page cap); only the search field gets a
+ * sensible width. Tokens from ui/tokens.css only. The runs area is a
+ * list | detail grid that stacks at the two-pane breakpoint (860px,
+ * ui/twoPaneShell.ts). */
+.page { display: flex; flex-direction: column; gap: var(--sp-4); min-width: 0; }
+.header { display: flex; flex-direction: column; gap: var(--sp-1); }
+.heading { margin: 0; color: var(--c-text); font-size: var(--fs-lg); font-weight: var(--fw-bold); }
+.lede { margin: 0; color: var(--c-text-muted); font-size: var(--fs-sm); }
+.panel { display: flex; flex-direction: column; gap: var(--sp-3); min-width: 0; padding: var(--sp-3); border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-surface); }
+.panelHeading { margin: 0; color: var(--c-text); font-size: var(--fs-md); font-weight: var(--fw-semibold); }
+.kindOptions { display: flex; flex-wrap: wrap; gap: var(--sp-3); }
+.radioLabel, .checkLabel { display: inline-flex; align-items: center; gap: var(--sp-1); color: var(--c-text); font-size: var(--fs-sm); }
+.pickRow { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3); }
+.pickField { flex: 1 1 18rem; min-width: 0; max-width: 32rem; }
+.linkButton { padding: 0; border: none; background: none; color: var(--c-brand); font: inherit; font-size: var(--fs-sm); text-decoration: underline; cursor: pointer; }
+.linkButton:focus-visible, .runRow:focus-visible, .loadMore:focus-visible, .error button:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
+.jobStatus { margin: 0; color: var(--c-text); font-size: var(--fs-sm); font-weight: var(--fw-medium); }
+.facts { list-style: none; display: flex; flex-direction: column; gap: var(--sp-1); margin: 0; padding: 0; color: var(--c-text-muted); font-size: var(--fs-sm); }
+.note, .empty { margin: 0; color: var(--c-text-muted); font-size: var(--fs-sm); }
+.error { display: flex; flex-direction: column; align-items: flex-start; gap: var(--sp-2); margin: 0; padding: var(--sp-3); border: 1px solid var(--c-danger); border-radius: var(--radius-md); color: var(--c-danger); font-size: var(--fs-sm); }
+.error p { margin: 0; }
+.error button, .loadMore { padding: var(--sp-2) var(--sp-3); border: 1px solid var(--c-border-strong); border-radius: var(--radius-sm); background: var(--c-surface); color: var(--c-text); font: inherit; cursor: pointer; }
+.loadMore { align-self: flex-start; }
+.tableWrap { width: 100%; overflow-x: auto; }
+.table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
+.table th, .table td { padding: var(--sp-2); border-bottom: 1px solid var(--c-border); color: var(--c-text); text-align: left; vertical-align: top; }
+.table thead th { color: var(--c-text-subtle); font-size: var(--fs-xs); white-space: nowrap; }
+.reasons { margin: 0; }
+.reasonLabel { font-weight: var(--fw-semibold); }
+.runs { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); align-items: start; gap: var(--sp-3); }
+@media (max-width: 860px) { .runs { grid-template-columns: minmax(0, 1fr); } }
+.listPane, .detailPane { display: flex; flex-direction: column; gap: var(--sp-3); min-width: 0; }
+.listHeader { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+.filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--sp-2); }
+.dateLabel { display: flex; flex-direction: column; gap: var(--sp-1); color: var(--c-text-muted); font-size: var(--fs-xs); }
+.dateInput { min-height: var(--sp-6); padding: var(--sp-1) var(--sp-2); border: 1px solid var(--c-border); border-radius: var(--radius-sm); background: var(--c-surface); color: var(--c-text); font: inherit; }
+.dateInput:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
+.filterChip { display: inline-flex; align-items: center; gap: var(--sp-2); margin: 0; color: var(--c-text); font-size: var(--fs-sm); }
+.rows { list-style: none; display: flex; flex-direction: column; gap: var(--sp-2); margin: 0; padding: 0; }
+.runRow { display: grid; width: 100%; gap: var(--sp-1); padding: var(--sp-3); border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-surface); color: var(--c-text); text-align: left; font: inherit; font-size: var(--fs-sm); cursor: pointer; }
+.runRow:hover { border-color: var(--c-border-strong); background: var(--c-surface-2); }
+.runTime { font-weight: var(--fw-semibold); }
+.outcome { color: var(--c-brand); font-weight: var(--fw-medium); }
+.expired { padding: var(--sp-3); border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-surface-2); color: var(--c-text-muted); font-size: var(--fs-sm); }
+.detailHeader, .block, .raw { padding: var(--sp-3); border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-surface); }
+.detailHeader h3, .block h4 { margin: 0; color: var(--c-text); font-size: var(--fs-md); }
+.detailHeader p { margin: var(--sp-1) 0 0; color: var(--c-text-muted); font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.block { display: flex; flex-direction: column; gap: var(--sp-2); }
+.failure { display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--sp-3); border: 1px solid var(--c-danger); border-radius: var(--radius-md); background: var(--c-surface); }
+.failure h4 { margin: 0; color: var(--c-danger); font-size: var(--fs-md); }
+.failure p { margin: 0; color: var(--c-text); font-size: var(--fs-sm); }
+.raw { color: var(--c-text-muted); font-size: var(--fs-sm); }
+.raw pre { overflow-x: auto; white-space: pre-wrap; color: var(--c-text); font-family: var(--font-mono); font-size: var(--fs-xs); }

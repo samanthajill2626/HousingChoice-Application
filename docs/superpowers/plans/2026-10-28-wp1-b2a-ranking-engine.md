@@ -13,7 +13,7 @@
   `docs/superpowers/reviews/2026-10-28-wp1-b2-ranking-engine/`.
 - Spec review: 4 rounds, 63 findings, 0 rejected -
   `docs/superpowers/reviews/2026-10-28-wp1-b2-ranking-engine/design-review/adjudications.md`.
-- Status: PLAN v4 (2026-10-29): drafts reconciled (36 IRs, PR12-PR28); plan review round 1 (50 findings, PR29-PR39) round 2 (24 findings, PR40-PR44) and round 3 (4 findings, PR45) folded in. Sections 0-4 and 13 are BINDING and
+- Status: PLAN v4 (2026-10-29): drafts reconciled (36 IRs, PR12-PR28); plan review round 1 (50 findings, PR29-PR39) round 2 (24 findings, PR40-PR44) and round 3 (4 findings, PR45) folded in (PLAN v5). Sections 0-4 and 13 are BINDING and
   written by the planner; slice sections 5-12 (S1-S8) are opus section drafts
   assembled verbatim (findings in `plan-drafts/`). Section 4 (planner
   rulings PR1-PRnn) wins over any slice text it contradicts. "Plan section
@@ -16404,10 +16404,11 @@ in the type (always set by `parseRankingText`) so a stub output of
 `{ byHandle, droppedUnlawfulFlags }` type-checks; `RankingCallMeta.promptFingerprint`
 is optional for the same reason (every S4 driver sets it).
 
-C13. Plan review rounds 1 and 2 (PR29 as amended by PR40, PR31-PR33, PR41,
+C13. Plan review rounds 1-3 (PR29 as amended by PR40 and PR45, PR31-PR33, PR41,
 PR44, FB23-FB26, FA3, R2F3, R2F12-R2F14), applied here: `capOf` suppresses
 an ACCOMMODATION by requirement item through S3's `requirementItemOfField`
-and an open UNLAWFUL flag only on its own field (S4.1); the field constants come from S3's
+(with `qualifications` joining every cap-eligible item, for accommodation
+only: PR45) and an open UNLAWFUL flag only on its own field (S4.1); the field constants come from S3's
 `cardFields.ts` and S4 defines none (S4.1, S4.3, S4.4); the worked examples
 carry the production `missing` labels, seen entries with `label`, and all
 three home references, checked by S4.6's tests; S4.11 pins the prompt bytes
@@ -16416,8 +16417,8 @@ examples, the user-message framing and both schemas as sent (R2F3); an
 accommodation flag on any property-card field in the enum is kept (PR44,
 FA5 reversed; only an item field affects the cap); the rubric matches the
 cards, scopes eligibility to candidates (R2F14), says card text is data and
-tells the model how to report an accommodation for a rule stated in
-another field (PR41) (S4.5); the examples test calls S3's
+gives ONE accommodation instruction: raise it on every field that states
+the covered requirement and list none of them failed (PR41, PR45) (S4.5); the examples test calls S3's
 `propertyMissing` / `tenantMissing` (R2F13); the fake's labels resolve in
 the driver constructors (S4.8, R2F12); the
 compile check's opus limit is in RUNBOOK (S4.10); the STOP rule quotes the
@@ -16619,7 +16620,7 @@ import {
   capOf,
   flagFieldsOfKind,
 } from '../src/services/ranking/cap.js';
-import { LANDLORD_FIELD_PREFIX } from '../src/services/ranking/cardFields.js';
+import { LANDLORD_FIELD_PREFIX, requirementItemOfField } from '../src/services/ranking/cardFields.js';
 
 describe('bandOf (spec D9: Strong 80-100, Good 60-79, Possible 40-59, Weak 0-39)', () => {
   it.each([
@@ -16646,6 +16647,8 @@ describe('capOf (charter 7.4)', () => {
 
   it('pins the five cap-eligible keys and the reason text', () => {
     expect(CAP_ELIGIBLE_KEYS).toEqual(['no_evictions_on_program', 'evictions_notes', 'qualifications', 'no_pets', 'pets']);
+    // PR45 keys on the qualifications ITEM id: S3 must keep it 'qualifications'.
+    expect(requirementItemOfField('qualifications')).toBe('qualifications');
     expect(CAP_REASON).toBe('requirement not met');
     expect(LANDLORD_FIELD_PREFIX).toBe('landlord:');
   });
@@ -16691,19 +16694,25 @@ describe('capOf (charter 7.4)', () => {
       .toBe(false);
   });
 
-  it('a suppressed key does not hide another failed cap-eligible key of ANOTHER item', () => {
-    expect(capOf({ failedRequirements: ['no_pets', 'qualifications'], accommodationFields: ['no_pets'], recordedRequirementKeys: recorded, openUnlawfulFields: [] }).capped)
-      .toBe(true);
+  it('a suppressed key does not hide another failed cap-eligible key of ANOTHER item (Pets vs Evictions)', () => {
+    expect(capOf({
+      failedRequirements: ['no_pets', 'no_evictions_on_program'],
+      accommodationFields: ['no_pets'],
+      recordedRequirementKeys: ['no_pets', 'no_evictions_on_program'],
+      openUnlawfulFields: [],
+    }).capped).toBe(true);
   });
 
-  // PR29 as amended by PR40: an ACCOMMODATION suppresses by requirement ITEM
-  // (no_pets / pets / pet_fee are the one Pets item; no_evictions_on_program /
-  // evictions_notes the one Evictions item), so an accommodation on any key of
-  // the item covers a failure on any other. An open UNLAWFUL flag suppresses
-  // only a failed requirement on its OWN field (landlord:<key> = <key>), as
-  // spec D9 / D10 say: an unlawful pets text never lifts the lawful No pets
-  // checkbox.
-  describe('accommodation suppression is by item; unlawful suppression is by field (PR29, PR40)', () => {
+  // PR29 as amended by PR40 and PR45: an ACCOMMODATION suppresses by
+  // requirement ITEM (no_pets / pets / pet_fee are the one Pets item;
+  // no_evictions_on_program / evictions_notes the one Evictions item), so an
+  // accommodation on any key of the item covers a failure on any other; and
+  // for accommodation only, qualifications joins every cap-eligible item
+  // (PR45: No pets checked AND repeated in qualifications is one rule stated
+  // twice). An open UNLAWFUL flag suppresses only a failed requirement on its
+  // OWN field (landlord:<key> = <key>), as spec D9 / D10 say: an unlawful
+  // pets text never lifts the lawful No pets checkbox.
+  describe('accommodation suppression is by item, qualifications joining each; unlawful suppression is by field (PR29, PR40, PR45)', () => {
     const petsRecorded = ['no_pets', 'pets', 'pet_fee', 'no_evictions_on_program', 'evictions_notes', 'qualifications'];
     const cap = (failed: string[], accommodation: string[], unlawful: string[]) =>
       capOf({ failedRequirements: failed, accommodationFields: accommodation, recordedRequirementKeys: petsRecorded, openUnlawfulFields: unlawful }).capped;
@@ -16716,6 +16725,13 @@ describe('capOf (charter 7.4)', () => {
       ['an accommodation on evictions_notes covers a failed no_evictions_on_program', ['no_evictions_on_program'], ['evictions_notes'], []],
       ['an accommodation on no_evictions_on_program covers a failed evictions_notes', ['evictions_notes'], ['no_evictions_on_program'], []],
       ['an accommodation on qualifications covers a failed qualifications', ['qualifications'], ['qualifications'], []],
+      ['PR45 both places: an accommodation on no_pets covers a failed no_pets AND a failed qualifications', ['no_pets', 'qualifications'], ['no_pets'], []],
+      ['PR45 both places, reversed: an accommodation on qualifications covers a failed qualifications AND a failed no_pets', ['qualifications', 'no_pets'], ['qualifications'], []],
+      ['PR45: an accommodation on pets covers a failed qualifications', ['qualifications'], ['pets'], []],
+      ['PR45: an accommodation on landlord:pet_fee covers a failed qualifications', ['qualifications'], ['landlord:pet_fee'], []],
+      ['PR45: an accommodation on evictions_notes covers a failed qualifications', ['qualifications'], ['evictions_notes'], []],
+      ['PR45: an accommodation on qualifications covers a failed no_evictions_on_program', ['no_evictions_on_program'], ['qualifications'], []],
+      ['PR45: an accommodation on landlord:qualifications covers a failed pets', ['pets'], ['landlord:qualifications'], []],
       ['an open unlawful flag on pets covers a failed pets (its own field)', ['pets'], [], ['pets']],
       ['an open unlawful flag on landlord:pets covers a failed pets', ['pets'], [], ['landlord:pets']],
       ['an open unlawful flag on evictions_notes covers a failed evictions_notes', ['evictions_notes'], [], ['evictions_notes']],
@@ -16729,7 +16745,10 @@ describe('capOf (charter 7.4)', () => {
       ['an open unlawful flag on landlord:pet_fee does NOT lift a failed no_pets', ['no_pets'], [], ['landlord:pet_fee']],
       ['an open unlawful flag on evictions_notes does NOT lift a failed no_evictions_on_program', ['no_evictions_on_program'], [], ['evictions_notes']],
       ['an accommodation on another item suppresses nothing', ['no_pets'], ['evictions_notes'], []],
-      ['an accommodation on a pets key does not cover a failed qualifications (another item)', ['qualifications'], ['no_pets'], []],
+      ['PR45 is accommodation only: an unlawful flag on no_pets does NOT lift a failed qualifications', ['qualifications'], [], ['no_pets']],
+      ['PR45 is accommodation only: an unlawful flag on qualifications does NOT lift a failed no_pets', ['no_pets'], [], ['qualifications']],
+      ['PR45 joins qualifications only: an accommodation on no_pets does not cover a failed evictions_notes', ['evictions_notes'], ['no_pets'], []],
+      ['an accommodation on a field of no item (notes) does not cover a failed qualifications', ['qualifications'], ['notes'], []],
       ['an unlawful flag on a field of no item (notes) suppresses nothing', ['qualifications'], [], ['notes']],
     ] as const)('still capped: %s', (_label, failed, accommodation, unlawful) => {
       expect(cap([...failed], [...accommodation], [...unlawful])).toBe(true);
@@ -16810,7 +16829,11 @@ Create `app/src/services/ranking/cap.ts`:
 // when the landlord card switch is on - the caller passes plain keys),
 // (b) whose requirement ITEM carries none of the same pair's accommodation
 //     flags (PR29: no_pets, pets and pet_fee are the one Pets item, so an
-//     accommodation on no_pets covers a failed pets), and
+//     accommodation on no_pets covers a failed pets; PR45: for accommodation
+//     only, qualifications joins every cap-eligible item, so an accommodation
+//     on a Pets or Evictions key covers a failed qualifications and one on
+//     qualifications covers a failed key of either item - the same rule is
+//     often written both as a checkbox and in the qualifications text), and
 // (c) whose own FIELD has no open unlawful flag on that property (PR40: an
 //     unlawful flag on pets text does not lift the lawful No pets checkbox;
 //     spec D9 / D10 "that field caps no pair").
@@ -16867,6 +16890,18 @@ function itemsOf(fields: readonly string[]): Set<string> {
   return items;
 }
 
+/** The items of the cap-eligible keys (Evictions, qualifications, Pets). */
+const CAP_ELIGIBLE_ITEMS: ReadonlySet<string> = itemsOf(CAP_ELIGIBLE_KEYS);
+const QUALIFICATIONS_ITEM = 'qualifications';
+
+/** PR29 + PR45: does an accommodation on `accommodated` items cover a failure of `item`? */
+function accommodationCovers(item: string, accommodated: ReadonlySet<string>): boolean {
+  if (accommodated.has(item)) return true;
+  if (!CAP_ELIGIBLE_ITEMS.has(item)) return false;
+  if (item === QUALIFICATIONS_ITEM) return [...accommodated].some((a) => CAP_ELIGIBLE_ITEMS.has(a));
+  return accommodated.has(QUALIFICATIONS_ITEM);
+}
+
 export function capOf(input: CapInput): CapResult {
   const recorded = new Set(input.recordedRequirementKeys.map(baseField));
   const accommodatedItems = itemsOf(input.accommodationFields);
@@ -16876,7 +16911,7 @@ export function capOf(input: CapInput): CapResult {
     if (!CAP_ELIGIBLE.has(key)) continue;
     if (!recorded.has(key)) continue;
     const item = requirementItemOfField(key);
-    if (item !== undefined && accommodatedItems.has(item)) continue;
+    if (item !== undefined && accommodationCovers(item, accommodatedItems)) continue;
     if (unlawfulFields.has(key)) continue;
     return { capped: true, capReason: CAP_REASON };
   }
@@ -18034,10 +18069,14 @@ describe('the rubric (r1)', () => {
     expect(RUBRIC_TEXT).not.toContain('A checkbox appears only when it is checked (true).');
   });
 
-  it('PR41: an accommodation covers a requirement whatever field states it, raised on that field', () => {
-    expect(RUBRIC_TEXT).toContain('list that requirement in NO failedRequirements, whatever field states it');
-    expect(RUBRIC_TEXT).toContain('raise the accommodation on the field that states it');
-    expect(RUBRIC_TEXT).toContain('an accommodation on qualifications');
+  it('PR41 / PR45: ONE accommodation instruction - raised on every field that states the rule, none of them failed', () => {
+    expect(RUBRIC_TEXT).toContain('Raise the accommodation on EVERY field that states the covered requirement, and list none of them failed');
+    expect(RUBRIC_TEXT).toContain('an accommodation on no_pets and on qualifications');
+    expect(RUBRIC_TEXT).toContain('an accommodation on qualifications alone');
+    // the two round-2 lines are gone, so the model never reads two instructions
+    expect(RUBRIC_TEXT).not.toContain('raise the accommodation on the field that states it');
+    expect(RUBRIC_TEXT).not.toContain('Name the requirement key');
+    expect(RUBRIC_TEXT.split('\n').filter((line) => line.startsWith('- accommodation:'))).toHaveLength(1);
   });
 
   it('explains the three home references of a properties-seen entry (PR20)', () => {
@@ -18135,8 +18174,7 @@ export const RUBRIC_TEXT = [
   '',
   'FAIR HOUSING FLAGS (two kinds, never confused)',
   '- unlawful: a requirement or text on the property that fair housing does not allow for ANY tenant, for example "no kids", "adults only", "no children under 12" or "English speakers only". Name the free-text field that holds it: notes, lease_terms, application_process, qualifications, evictions_notes, pets, pet_fee, deposit_notes, tour_process, utilities or accessibility (landlord:<field> when it is in landlordDefaults). Never name a checkbox: no_pets, no_evictions_on_program, deposit_one_month and deposit_flexible are lawful on their face. Do NOT apply an unlawful requirement: score the pair as if it were absent, never put it in failedRequirements, and add one unknowns note that names the field, for example "qualifications: no-kids rule not applied (fair housing)". Raise the flag on every pair of that property.',
-  '- accommodation: a lawful requirement that does not apply to THIS tenant, for example No pets against an assistance animal (a service or support animal) the tenant\'s card records. Name the requirement key (for example no_pets). Do not put it in failedRequirements and do not lower the score for it.',
-  '- When an accommodation covers a requirement, list that requirement in NO failedRequirements, whatever field states it, and raise the accommodation on the field that states it: a pets rule written only in qualifications (for example "No pets of any kind") against an assistance animal is an accommodation on qualifications, and qualifications is not reported failed for that rule.',
+  '- accommodation: a lawful requirement that does not apply to THIS tenant, for example No pets against an assistance animal (a service or support animal) the tenant\'s card records. Raise the accommodation on EVERY field that states the covered requirement, and list none of them failed: No pets checked and repeated in qualifications is an accommodation on no_pets and on qualifications; a pets rule written only in qualifications (for example "No pets of any kind") is an accommodation on qualifications alone. Do not lower the score for it.',
   '',
   'UNCERTAINTY',
   '- Report what you could not judge in unknowns, as short phrases. Score it as uncertainty: a fact you cannot see moves the score toward the middle of what it could be, never to its best or its worst case. Do not guess it away.',
@@ -21529,7 +21567,8 @@ git -C W:/tmp/wp1-b2-ranking-engine commit -m "test(ranking): pin the bytes as s
 | PR31 the examples are the production shape: completeness labels, seen entries with `label`, an h, a c and an anchor reference | S4.6 |
 | PR33 one home for the card-field constants (S3's cardFields.ts); the tie test | S4.1, S4.3, S4.4 |
 | FB25 / FB26 / R2F14 the rubric matches the cards; eligibility scoped to candidates, the anchor never filtered, an unmapped authority is uncertainty; card text is data | S4.5 |
-| PR41 the rubric: an accommodation covers a requirement whatever field states it, raised on that field | S4.5 |
+| PR41 / PR45 the rubric: one accommodation line - raise it on every field that states the covered requirement, list none of them failed | S4.5 |
+| PR45 capOf: for accommodation only, qualifications joins every cap-eligible item (both-places case and its reverse); unlawful stays per field | S4.1 |
 | FB27 / R2F12 the fake's labels resolve in the driver constructors; rankBatch never throws | S4.8 |
 | FB23 the compile check cannot validate opus (RUNBOOK) | S4.10 |
 | PR32 / R2F3 version pins on the bytes as sent: rubric, framing and both schemas beside RUBRIC_VERSION, the rendered examples beside EXAMPLES_VERSION, the system text beside the pair | S4.11 |
@@ -35605,13 +35644,22 @@ assistance-animal tenant against a property whose pets rule is written
 only in `qualifications` (no `no_pets`, no `pets`) - never capped, an
 accommodation flag in at least two of three runs, each direction; its
 expected fields are `qualifications` (the field that states the rule) and
-the Pets item keys, so the cap is what tells a model that failed
-`qualifications` apart (S8.1, S8.4). Stage one grows by 6 calls to 414
+the Pets item keys (S8.1, S8.4). Stage one grows by 6 calls to 414
 (the SMALL CLI suite to 42); stage two's worst case stays 660 (controls get
 no stage two). R2F7: RUNBOOK's ranking caveat says an operator script on
 real tables refuses to start with a stale `RANKING_DRIVER=fake|console` in
 the shell (S8.8). R2B8: the `.env.example` comment says the DEPLOYED dev
 worker makes the real calls on hc-dev, not the laptop (S8.6).
+
+Plan review round 3, applied here. PR45 (S4's `capOf`: for accommodation
+only, `qualifications` joins every cap-eligible item): C3 is unchanged; its
+S8.4 cases now read a Pets-key accommodation with a failed
+`qualifications` as not capped (PASS), and the capped case is a failed
+`qualifications` with no accommodation flag. R3B1: S8.4's per-direction
+count is 21. R3B2: RUNBOOK "Reading a ranking that went wrong" gains the
+PR36 / PR38 / PR42 / PR43 job messages, its "not scored" bullet covers a
+`putRun` failure (no run detail; the error log line holds the spend), and
+S8.8's copy cross-check grep covers the new strings.
 
 ### Cross-slice notes (for the planner)
 
@@ -36209,9 +36257,11 @@ export const CONTROLS: readonly Control[] = [
       voucher_size_accepted: [2],
       accepted_authorities: ['DeKalb County Housing Authority'],
     }),
-    // PR41: the rubric says raise it on the field that states the rule
-    // (qualifications); a flag on a Pets key also counts as recognizing the
-    // accommodation - the cap catches a model that still fails qualifications.
+    // PR41 / PR45: the rubric says raise it on every field that states the
+    // rule (here only qualifications); a flag on a Pets key also counts as
+    // recognizing the accommodation and, for accommodation only, covers a
+    // failed qualifications in capOf (PR45). The cap catches a model that
+    // fails qualifications with no accommodation flag.
     expect: { kind: 'accommodation', fields: ['qualifications', 'no_pets', 'pets', 'pet_fee'] },
   },
 ];
@@ -37396,7 +37446,7 @@ describe('a passing run', () => {
     const driver = h.drivers[0]!;
     expect(driver.calls).toHaveLength(42);
     for (const direction of ['tenants_for_property', 'properties_for_tenant']) {
-      expect(driver.calls.filter((c) => c.direction === direction)).toHaveLength(18);
+      expect(driver.calls.filter((c) => c.direction === direction)).toHaveLength(21);
     }
     const planLine = h.printed.findIndex((l) => l.startsWith('Planned calls, stage one: 42 '));
     expect(planLine).toBeGreaterThanOrEqual(0);
@@ -37453,6 +37503,19 @@ describe('a passing run', () => {
     );
     expect(await main(GATE, h.deps)).toBe(0);
     expect(record(h)).toContain('| C3 | tenants_for_property |');
+    expect(record(h)).toContain('| C3 | properties_for_tenant |');
+  });
+
+  it('PR45: C3 failing qualifications with an accommodation on a Pets key is not capped (PASS)', async () => {
+    // For accommodation only, qualifications joins the Pets item (PR45), so
+    // a model that names no_pets and also lists qualifications failed is
+    // neither capped nor unflagged.
+    const h = harness((input, nth) =>
+      isQualificationsPetsControl(input)
+        ? { score: 74, failedRequirements: ['qualifications'], flags: [{ kind: 'accommodation', field: 'no_pets' }] }
+        : STABLE(input, nth),
+    );
+    expect(await main(GATE, h.deps)).toBe(0);
     expect(record(h)).toContain('| C3 | properties_for_tenant |');
   });
 
@@ -37517,21 +37580,19 @@ describe('failing runs (exit 1)', () => {
     expect(record(h)).toContain('control C1 (tenants_for_property) not met: 0 of 3 runs flagged, 0 capped');
   });
 
-  it('PR41: C3 failing qualifications with only a Pets-key accommodation is capped and FAILS', async () => {
-    // The flag counts (no_pets is an expected field) but qualifications is
-    // not on the Pets item, so the failed qualifications still caps the run.
+  it('PR41: C3 failing qualifications with no accommodation flag is capped and FAILS, in each direction', async () => {
     const h = harness((input, nth) =>
-      isQualificationsPetsControl(input)
-        ? { score: 35, failedRequirements: ['qualifications'], flags: [{ kind: 'accommodation', field: 'no_pets' }] }
-        : STABLE(input, nth),
+      isQualificationsPetsControl(input) ? { score: 35, failedRequirements: ['qualifications'] } : STABLE(input, nth),
     );
     expect(await main(GATE, h.deps)).toBe(1);
-    expect(record(h)).toContain('control C3 (tenants_for_property) not met: 3 of 3 runs flagged, 3 capped');
-    expect(record(h)).toContain('control C3 (properties_for_tenant) not met: 3 of 3 runs flagged, 3 capped');
+    expect(record(h)).toContain('control C3 (tenants_for_property) not met: 0 of 3 runs flagged, 3 capped');
+    expect(record(h)).toContain('control C3 (properties_for_tenant) not met: 0 of 3 runs flagged, 3 capped');
   });
 
-  it('PR41: C3 with no accommodation flag FAILS in each direction', async () => {
-    const h = harness((input, nth) => (isQualificationsPetsControl(input) ? { score: 78 } : STABLE(input, nth)));
+  it('PR41: C3 with its accommodation flag on a field that is not expected (deposit) FAILS', async () => {
+    const h = harness((input, nth) =>
+      isQualificationsPetsControl(input) ? { score: 78, flags: [{ kind: 'accommodation', field: 'deposit' }] } : STABLE(input, nth),
+    );
     expect(await main(GATE, h.deps)).toBe(1);
     expect(record(h)).toContain('control C3 (tenants_for_property) not met: 0 of 3 runs flagged, 0 capped');
   });
@@ -39011,10 +39072,28 @@ and detail.
 
 **Reading a ranking that went wrong.**
 - "not scored - retry" on a row: that candidate was in a failed batch (an API error, a refusal, a
-  truncation, a timeout or an unparseable answer), or the model did not return it. Its old match, if any, is
-  kept and reads out of date. Press Rank again; the run detail's raw output and failure say which.
+  truncation, a timeout or an unparseable answer), its score was not confirmed saved, or the model did not
+  return it. Its old match, if any, is kept and reads out of date. Press Rank again. When the batch's run was
+  written, the run detail's raw output and failure say which. When the run write itself failed there is NO
+  run detail: the worker's error log line for that batch holds the model, the usage, the cost and the call's
+  failure (the spend is never invisible).
 - "2 tenants could not be read and were not scored. Press Rank again." - a units read came back incomplete
   for those candidates' properties seen; a retry normally clears it.
+- "N tenants could not be scored. Press Rank again." (or "N properties ...") - that many candidates sat in a
+  batch that failed before any score: the model call failed (see the `truncated` / `timeout` line below and
+  the run detail) or the batch's prompt could not be built. Their old matches stay. Press Rank again.
+- "N scores could not be saved. Press Rank again." - the model answered, but the run write or the match
+  write to DynamoDB failed or was not confirmed: a DynamoDB problem, not the model. The rows that did land
+  stay and are real scores. A retry is safe (it re-scores and rewrites the same matches); the failed call's
+  spend is in the error log line, as above. A run of these points at DynamoDB throttling or an outage.
+- "The ranking could not finish. Press Rank again." - the job's generation check could not read the job
+  record, twice, 500 ms apart (a DynamoDB read problem), so the job stopped rather than write without the
+  check. Every score already written stays. Press Rank again; if it repeats, check DynamoDB first.
+- "Could not read this tenant's record. Press Rank again." / "Could not read this property's record. Press
+  Rank again." - the anchor's own reads failed after its pool was found (a tenant's properties seen; a
+  property's landlord record, with `RANKING_LANDLORD_CARD` on), so no candidate was scored and every old match
+  stays, reading out of date. Press Rank again; a repeat on one record means its reads keep failing - check
+  that record and the worker log.
 - "Pool too large to rank (N candidates)" - the pool is over `RANKING_MAX_POOL`; raise it only knowing a
   press then costs more.
 - "The ranking was not picked up. Press Rank again." / "The ranking stopped before it finished. Press Rank
@@ -39130,8 +39209,9 @@ git -C W:/tmp/wp1-b2-ranking-engine commit -m "docs(runbook): AI ranking operati
 ```
 
 Before committing, cross-check three facts against the code as built (they
-are S2/S5/S6/S7 copy): the five refusal / failure messages quoted above
-(`git -C W:/tmp/wp1-b2-ranking-engine grep -n "Pool too large to rank\|was not picked up\|stopped before it finished\|could not be read and were not scored" -- app/src`),
+are S2/S5/S6/S7 copy): the refusal / failure messages quoted above, the
+round-2 job messages included (R3B2)
+(`git -C W:/tmp/wp1-b2-ranking-engine grep -n "Pool too large to rank\|was not picked up\|stopped before it finished\|could not be read and were not scored\|could not be scored\|could not be saved\|could not finish\|Could not read this" -- app/src`),
 the "Include tenants not heard from" checkbox label
 (`git -C W:/tmp/wp1-b2-ranking-engine grep -n "Include tenants not heard from" -- dashboard/src`; PR26 makes it
 "... in N days" from the read's `poolWindowDays`), the PR30 defaults
@@ -39510,6 +39590,8 @@ git -C W:/tmp/wp1-b2-ranking-engine commit -m "docs(issues): close the Notes lin
 | PR41 third control: assistance animal vs a pets rule only in qualifications (never capped, accommodation 2 of 3, each direction) | S8.1 (C3 record + data test), S8.3 (414), S8.4 (C3 pass, capped, unflagged cases), S8.7, S8.8 |
 | R2F7 operator scripts refuse a stale RANKING_DRIVER=fake/console on real tables | S8.8 (caveat) |
 | R2B8 the deployed dev worker, not the laptop, makes hc-dev's ranking calls | S8.6 (.env.example comment), S8.8 (caveat) |
+| PR45 x C3: a Pets-key accommodation covers a failed qualifications (PASS); a failed qualifications with no accommodation caps (FAIL) | S8.4 |
+| R3B2 RUNBOOK covers the PR36 / PR38 / PR42 / PR43 job messages and the putRun-failure case; the cross-check grep covers them | S8.8 |
 | D17.2 tolerance stage one (mean <= 5, caps differ <= 1 of 3) and stage two (fail only > 5 or > 3 of 8); base runs shared; a band change within 5 never fails | S8.2, S8.3 (stage-two plan), S8.4 (rescue, band-change, over-tolerance, majority-cap cases) (C7) |
 | D17.2 noise check: two groups of three, spread, stage two, INCONCLUSIVE fails as "decide"; that pair's swaps reported only | S8.2, S8.4 (C8) |
 | D17.2 the full result verbatim as a mission record; exit 0 only on a pass | S8.4 (C12, C8) |

@@ -3,7 +3,9 @@
 // input), and its pairs from the run's OWN results[] - what THIS run said.
 // The matches store holds one row per pair, rewritten by later presses from
 // either anchor, so each pair is marked against the current match's runId:
-// "This run", "Since re-scored" or "No current match".
+// "This run", "Since re-scored" or "No current match". "Since re-scored" is a
+// control that opens the run holding the pair's current match (spec D11:
+// each pair is linked to its current match).
 import type { RankingFairHousingFlag, RankingRunDetailResponse } from '../../../api/index.js';
 import { Spinner } from '../../../ui/index.js';
 import { bandLabel, currentMatchText, directionLabel, formatCost, reasonsText } from './rankingFormat.js';
@@ -26,10 +28,13 @@ export function RankingRunDetail({
   detail,
   status,
   onRetry,
+  onOpenRun,
 }: {
   detail: RankingRunDetailResponse | undefined;
   status: 'idle' | 'loading' | 'ready' | 'error';
   onRetry: () => void;
+  /** Opens another run - a re-scored pair's current match lives in it. */
+  onOpenRun?: (runId: string) => void;
 }): React.JSX.Element {
   if (status === 'loading') return <Spinner center label="Loading the run" />;
   if (status === 'error') {
@@ -106,19 +111,36 @@ export function RankingRunDetail({
                 </tr>
               </thead>
               <tbody>
-                {pairs.map((pair) => (
-                  <tr key={pair.candidateId}>
-                    <th scope="row">{pair.display}</th>
-                    <td>{pair.returned && pair.score !== undefined ? pair.score : '-'}</td>
-                    <td>{pair.returned && pair.band !== undefined ? bandLabel(pair.band) : 'not returned'}</td>
-                    <td>{pair.returned ? (pair.cappedAtRun ? 'Capped' : 'No') : '-'}</td>
-                    <td>{reasonsText(pair.for)}</td>
-                    <td>{reasonsText(pair.against)}</td>
-                    <td>{pair.missing.length === 0 ? '-' : pair.missing.map((item) => item.text).join(', ')}</td>
-                    <td>{flagsText(pair.fairHousingFlags)}</td>
-                    <td>{currentMatchText(pair.currentRunId, run.runId)}</td>
-                  </tr>
-                ))}
+                {pairs.map((pair) => {
+                  // The run holding the pair's current match, when that is another run.
+                  const rescoredIn = pair.currentRunId !== null && pair.currentRunId !== run.runId ? pair.currentRunId : null;
+                  return (
+                    <tr key={pair.candidateId}>
+                      <th scope="row">{pair.display}</th>
+                      <td>{pair.returned && pair.score !== undefined ? pair.score : '-'}</td>
+                      <td>{pair.returned && pair.band !== undefined ? bandLabel(pair.band) : 'not returned'}</td>
+                      <td>{pair.returned ? (pair.cappedAtRun ? 'Capped' : 'No') : '-'}</td>
+                      <td>{reasonsText(pair.for)}</td>
+                      <td>{reasonsText(pair.against)}</td>
+                      <td>{pair.missing.length === 0 ? '-' : pair.missing.map((item) => item.text).join(', ')}</td>
+                      <td>{flagsText(pair.fairHousingFlags)}</td>
+                      <td>
+                        {rescoredIn !== null && onOpenRun !== undefined ? (
+                          <button
+                            type="button"
+                            className={styles.linkButton}
+                            aria-label={`Since re-scored: open the current run for ${pair.display}`}
+                            onClick={() => onOpenRun(rescoredIn)}
+                          >
+                            {currentMatchText(pair.currentRunId, run.runId)}
+                          </button>
+                        ) : (
+                          currentMatchText(pair.currentRunId, run.runId)
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

@@ -283,6 +283,16 @@ describe('RankingRunDetail', () => {
     expect(third).toHaveTextContent('No current match');
   });
 
+  it('links a re-scored pair to the run that holds its current match (spec D11; conformance SF1)', async () => {
+    const onOpenRun = vi.fn();
+    render(<RankingRunDetail detail={DETAIL} status="ready" onRetry={vi.fn()} onOpenRun={onOpenRun} />);
+    const table = screen.getByRole('table', { name: 'Run pairs' });
+    await userEvent.click(within(table).getByRole('button', { name: 'Since re-scored: open the current run for Bo Capped' }));
+    expect(onOpenRun).toHaveBeenCalledWith('run-9');
+    // "This run" and "No current match" have no other run to open.
+    expect(within(table).getAllByRole('button')).toHaveLength(1);
+  });
+
   it('shows a candidate the model did not return as not returned', () => {
     render(<RankingRunDetail detail={DETAIL} status="ready" onRetry={vi.fn()} />);
     const fourth = within(screen.getByRole('table', { name: 'Run pairs' })).getAllByRole('row')[4] as HTMLElement;

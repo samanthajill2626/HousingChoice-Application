@@ -2,7 +2,7 @@ import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { RankingRunListRowLive } from '../../../api/index.js';
+import type { RankingRunDetailResponse, RankingRunListRowLive } from '../../../api/index.js';
 import type { RankAnchorPanelProps } from './RankAnchorPanel.js';
 
 const useRankingRunList = vi.fn();
@@ -115,6 +115,56 @@ describe('RankingsSection', () => {
     await userEvent.click(within(screen.getByRole('list', { name: 'Ranking runs' })).getByRole('button'));
     expect(screen.getByTestId('location')).toHaveTextContent('run=run-1');
     expect(useRankingRun).toHaveBeenLastCalledWith('run-1');
+  });
+
+  it('a re-scored pair in the run detail opens the run holding its current match through the URL (spec D11; conformance SF1)', async () => {
+    const detail: RankingRunDetailResponse = {
+      run: {
+        runId: 'run-1',
+        anchorKind: 'unit',
+        anchorId: 'unit-1',
+        direction: 'tenants_for_property',
+        jobGeneration: 'gen-1',
+        batchIndex: 0,
+        candidateCount: 1,
+        driver: 'fake',
+        model: 'fake',
+        rubricVersion: 'r1',
+        examplesVersion: 'e1',
+        promptFingerprint: 'abc123',
+        costUsd: 0,
+        latencyMs: 20,
+        startedAt: '2026-07-01T10:00:00.000Z',
+        finishedAt: '2026-07-01T10:00:20.000Z',
+        outcome: 'scored',
+        environment: 'local',
+      },
+      anchorDisplay: '12 Oak St, Atlanta',
+      input: null,
+      pairs: [
+        {
+          candidateId: 'contact-1',
+          handle: 'c1',
+          display: 'Ada Ranked',
+          returned: true,
+          score: 80,
+          band: 'strong',
+          cappedAtRun: false,
+          for: [],
+          against: [],
+          missing: [],
+          failedRequirements: [],
+          fairHousingFlags: [],
+          currentRunId: 'run-2',
+        },
+      ],
+      flags: [],
+    };
+    useRankingRun.mockReturnValue({ detail, status: 'ready', retry: vi.fn() });
+    renderSection('/settings/rankings?run=run-1');
+    await userEvent.click(screen.getByRole('button', { name: 'Since re-scored: open the current run for Ada Ranked' }));
+    expect(screen.getByTestId('location')).toHaveTextContent('run=run-2');
+    expect(useRankingRun).toHaveBeenLastCalledWith('run-2');
   });
 
   it("notes the 12 weeks ending To's week when only To is set (plan review R2B6)", () => {

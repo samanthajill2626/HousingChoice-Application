@@ -91,7 +91,13 @@ export function RankingsSection(): React.JSX.Element {
             cost.retry();
           }}
         />
-        <RankingRunDetail detail={detail.detail} status={detail.status} onRetry={detail.retry} />
+        <RankingRunDetail
+          detail={detail.detail}
+          status={detail.status}
+          onRetry={detail.retry}
+          // Spec D11: a re-scored pair opens the run that holds its current match.
+          onOpenRun={(id) => setParams({ run: id })}
+        />
       </div>
     </div>
   );

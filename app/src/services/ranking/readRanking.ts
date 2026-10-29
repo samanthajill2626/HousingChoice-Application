@@ -315,3 +315,204 @@ export function anchorDisplayOf(anchor: AnchorRef, record: ContactItem | UnitIte
   if (record === undefined) return anchor.id;
   return anchor.kind === 'unit' ? propertyDisplay(record as UnitItem) : tenantDisplay(record as ContactItem);
 }
+
+// --- the read --------------------------------------------------------------
+
+export interface RankingReadDeps {
+  /** assembleRanking bound to its deps (createRankingReadDeps); a stub in tests. */
+  assemble(anchor: AnchorRef, opts: { includeOlder: boolean; now: Date }): Promise<AssembleResult>;
+  /**
+   * FB4: S3's poolTooLargeMissing bound to the same deps - the anchor's
+   * missing flags over the ceiling. A throw is the anchor's own landlord read
+   * failing (503, PR17).
+   */
+  poolTooLargeMissing(failure: PoolFailure): Promise<MissingFlag[]>;
+  jobs: Pick<RankingRunsRepo, 'getJob' | 'getOpenCandidateFlags'>;
+  matches: Pick<MatchesRepo, 'getPairs'>;
+  config: Pick<
+    AppConfig,
+    | 'rankingMaxAgeDays'
+    | 'rankingPriorityStrength'
+    | 'rankingDriver'
+    | 'aiRankingModel'
+    | 'rankingReadConcurrency'
+    | 'rankingPoolWindowDays'
+  >;
+  logger: Logger;
+}
+
+const UNAVAILABLE: RankingRead = { kind: 'unavailable', message: RANKING_UNAVAILABLE_MESSAGE };
+
+export async function readRanking(
+  anchor: AnchorRef,
+  opts: { includeOlder: boolean; now: Date },
+  deps: RankingReadDeps,
+): Promise<RankingRead> {
+  const log = deps.logger;
+  const where = { anchorKind: anchor.kind, anchorId: anchor.id };
+  const poolWindowDays = deps.config.rankingPoolWindowDays;
+
+  let result: AssembleResult;
+  try {
+    result = await deps.assemble(anchor, opts);
+  } catch (err) {
+    log.error({ ...where, err }, 'ranking read: the pool and cards could not be gathered');
+    return UNAVAILABLE;
+  }
+
+  let job: RankingJobRecord | undefined;
+  try {
+    job = await deps.jobs.getJob(anchor.kind, anchor.id, { consistent: true });
+  } catch (err) {
+    log.error({ ...where, err }, 'ranking read: job read failed');
+    return UNAVAILABLE;
+  }
+  const view = job === undefined ? null : jobView(job, opts.now.toISOString());
+
+  if (!result.ok) {
+    if (result.reason === 'anchor_not_found') return { kind: 'not_found' };
+    if (result.reason === 'pool_too_large') {
+      // PR16: the anchor block stays; no row is computed. FB4: its missing
+      // flags come from S3's poolTooLargeMissing; a throw there is the
+      // anchor's own landlord read (PR17: 503).
+      let missing: MissingFlag[];
+      try {
+        missing = await deps.poolTooLargeMissing(result);
+      } catch (err) {
+        log.error({ ...where, err }, "ranking read: the over-ceiling anchor's own read failed");
+        return UNAVAILABLE;
+      }
+      return {
+        kind: 'ok',
+        anchor: {
+          kind: anchor.kind,
+          id: anchor.id,
+          display: anchorDisplayOf(anchor, result.anchorRecord),
+          anchorNotes: result.anchorNotes ?? [],
+          missing,
+          cardChanged: false,
+        },
+        job: view,
+        rows: [],
+        flags: [],
+        poolWindowDays,
+        // BA3: the pool's own POOL_MESSAGES text, shown as is by S7.
+        poolTooLarge: { size: result.size ?? 0, message: result.message },
+      };
+    }
+    log.warn({ ...where, reason: result.reason }, 'ranking read unavailable');
+    return { kind: 'unavailable', message: result.message };
+  }
+
+  const { candidates } = result;
+  let pairs: Map<string, MatchRow>;
+  try {
+    pairs =
+      candidates.length === 0
+        ? new Map()
+        : await deps.matches.getPairs(
+            candidates.map((candidate) => ({ tenantId: candidate.tenantId, unitId: candidate.unitId })),
+            { requireComplete: true },
+          );
+  } catch (err) {
+    log.error({ ...where, err, keys: candidates.length }, 'ranking read: matches read incomplete');
+    return UNAVAILABLE;
+  }
+
+  // The open flags of the properties in view. A property anchor's own read
+  // failing is the anchor's read (503, PR17); a candidate property's failing
+  // marks only its rows unverified.
+  const openByUnit = new Map<string, UnlawfulFlagRecord[]>();
+  const unreadFlagUnits = new Set<string>();
+  if (anchor.kind === 'unit') {
+    const anchorFacts = result.anchor.propertyFacts;
+    if (anchorFacts !== null) {
+      try {
+        openByUnit.set(anchor.id, openFlags(await deps.jobs.getOpenCandidateFlags(anchor.id), anchorFacts.freeTextByField));
+      } catch (err) {
+        log.error({ ...where, err }, "ranking read: the anchor property's flag read failed");
+        return UNAVAILABLE;
+      }
+    }
+  } else {
+    const units = new Map<string, Readonly<Record<string, string>>>();
+    for (const candidate of candidates) {
+      if (candidate.propertyFacts !== null && !units.has(candidate.unitId)) {
+        units.set(candidate.unitId, candidate.propertyFacts.freeTextByField);
+      }
+    }
+    await mapWithConcurrency([...units.entries()], deps.config.rankingReadConcurrency, async ([unitId, freeText]) => {
+      try {
+        openByUnit.set(unitId, openFlags(await deps.jobs.getOpenCandidateFlags(unitId), freeText));
+      } catch (err) {
+        unreadFlagUnits.add(unitId);
+        log.warn({ ...where, unitId, err }, 'ranking read: a candidate property flag read failed - its row reads unverified');
+      }
+    });
+  }
+  const openFieldsByUnit = new Map<string, string[]>(
+    [...openByUnit.entries()].map(([unitId, records]) => [unitId, [...new Set(records.map((r) => r.field))]]),
+  );
+
+  const ctx: RowContext = {
+    now: opts.now,
+    maxAgeDays: deps.config.rankingMaxAgeDays,
+    model: currentRankingModel(deps.config),
+    job,
+    openFieldsByUnit,
+    unreadFlagUnits,
+  };
+  const entries = candidates.map((candidate) => ({
+    candidate,
+    row: buildRow(candidate, pairs.get(matchPairKey(candidate.tenantId, candidate.unitId)), ctx),
+  }));
+  // D9 cardChanged: a stored match whose anchor-side fingerprint is not the anchor's current one.
+  const cardChanged = candidates.some((candidate) => {
+    const stored = pairs.get(matchPairKey(candidate.tenantId, candidate.unitId));
+    if (stored === undefined) return false;
+    const storedAnchorSide = anchor.kind === 'unit' ? stored.fingerprints.unitCard : stored.fingerprints.tenantCard;
+    return storedAnchorSide !== result.anchor.fingerprint;
+  });
+  const flags: RankingReadFlag[] = [...openByUnit.values()].flat().map((record) => ({
+    unitId: record.unitId,
+    field: record.field,
+    reason: record.reason,
+    runId: record.runId,
+    raisedAt: record.raisedAt,
+  }));
+
+  return {
+    kind: 'ok',
+    anchor: {
+      kind: anchor.kind,
+      id: anchor.id,
+      display: result.anchor.display,
+      anchorNotes: result.anchor.anchorNotes,
+      missing: result.anchor.missing,
+      cardChanged,
+    },
+    job: view,
+    rows: sortRows(entries, anchor.kind, deps.config.rankingPriorityStrength),
+    flags,
+    poolWindowDays,
+  };
+}
+
+/** The production wiring (routes/rankings.ts default; the WI18 measurement). */
+export function createRankingReadDeps(opts: {
+  config: AppConfig;
+  logger: Logger;
+  env?: NodeJS.ProcessEnv;
+  doc?: DynamoDBDocumentClient;
+}): RankingReadDeps {
+  const repoDeps = { logger: opts.logger, env: opts.env, doc: opts.doc };
+  const assembleDeps = createAssembleDeps({ config: opts.config, logger: opts.logger, env: opts.env, doc: opts.doc });
+  return {
+    assemble: (anchor, assembleOpts) => assembleRanking(anchor, assembleOpts, assembleDeps),
+    poolTooLargeMissing: (failure) => poolTooLargeMissing(failure, assembleDeps),
+    jobs: createRankingRunsRepo(repoDeps),
+    matches: createMatchesRepo(repoDeps),
+    config: opts.config,
+    logger: opts.logger,
+  };
+}

@@ -31,7 +31,9 @@ import type {
 } from '../../repos/rankingRunsRepo.js';
 import type { AssembleResult, AssembledCandidate, VerifiedCandidate } from './assemble.js';
 import type { RankingDriver } from './driverTypes.js';
+import { mapWithConcurrency } from './pool.js';
 import type { buildRankingPrompt, RankingPrompt } from './prompt.js';
+import { emitRankingEvent, runBatch, type BatchContext, type BatchOutcome } from './runBatch.js';
 import type { AnchorKind, AnchorRef } from './types.js';
 
 export const MSG_RUNNING = 'A ranking is running for this record. Try again when it finishes.';
@@ -262,4 +264,265 @@ export function jobView(record: RankingJobRecord, nowIso: string): RankingJobVie
     notScored: record.notScored ?? [],
     ...(message !== undefined && { message }),
   };
+}
+
+// --- the run of one anchor ------------------------------------------------
+
+/** PR38: the tenant anchor's own card could not be read (the job is done, nothing scored). */
+export const MSG_TENANT_UNREADABLE = "Could not read this tenant's record. Press Rank again.";
+/** PR43: the property anchor's own reads failed after its pool (the job is done, nothing scored). */
+export const MSG_PROPERTY_UNREADABLE = "Could not read this property's record. Press Rank again.";
+/** R2B5: the pause before the guard's one retry. */
+export const GUARD_RETRY_MS = 500;
+
+const defaultSleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms).unref();
+  });
+
+const DEFAULT_TIMERS: LeaseTimers = {
+  setInterval(fn, ms) {
+    const handle = setInterval(fn, ms);
+    handle.unref();
+    return handle;
+  },
+  clearInterval(handle) {
+    clearInterval(handle as ReturnType<typeof setInterval>);
+  },
+};
+
+function chunk<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+async function finishJob(
+  job: RankingJobRecord,
+  deps: RankingJobDeps,
+  status: 'done' | 'failed',
+  message: string | undefined,
+): Promise<void> {
+  const updated = await deps.jobs.finishJob(job, {
+    status,
+    finishedAt: deps.now(),
+    ...(message !== undefined && { message }),
+  });
+  if (updated === undefined) return;
+  emitRankingEvent(deps, updated);
+  deps.logger.info(
+    { anchorKind: job.anchorKind, anchorId: job.anchorId, generation: job.generation, status },
+    `ranking job ${status}`,
+  );
+}
+
+async function runBatchSafely(
+  batch: VerifiedCandidate[],
+  index: number,
+  ctx: BatchContext,
+  deps: RankingJobDeps,
+): Promise<BatchOutcome> {
+  try {
+    return await runBatch(batch, index, ctx, deps);
+  } catch (err) {
+    const { job } = ctx;
+    deps.logger.error({ anchorKind: job.anchorKind, anchorId: job.anchorId, batchIndex: index, err }, 'ranking batch errored');
+    try {
+      if (!(await ctx.guard())) return { kind: 'stopped' };
+      const updated = await deps.jobs.updateJobProgress(job, {
+        failedBatch: { index, candidateIds: batch.map((candidate) => candidate.candidateId), failure: 'error' },
+      });
+      if (updated !== undefined) emitRankingEvent(deps, updated);
+    } catch (progressErr) {
+      deps.logger.error(
+        { anchorKind: job.anchorKind, anchorId: job.anchorId, batchIndex: index, err: progressErr },
+        'ranking batch failure could not be recorded',
+      );
+    }
+    return { kind: 'failed', failure: 'error', unscored: batch.length, omitted: 0, written: 0 };
+  }
+}
+
+async function runJob(
+  job: RankingJobRecord,
+  deps: RankingJobDeps,
+  guard: () => Promise<boolean>,
+  isStopped: () => boolean,
+): Promise<void> {
+  const where = { anchorKind: job.anchorKind, anchorId: job.anchorId, generation: job.generation };
+  const result = await deps.assemble(
+    { kind: job.anchorKind, id: job.anchorId },
+    { includeOlder: job.includeOlder, now: new Date(deps.now()) },
+  );
+  if (!result.ok) {
+    if (result.reason === 'anchor_unreadable' && result.candidateIds !== undefined) {
+      // PR38 (spec D2.3) / PR43: the anchor's own card could not be read
+      // after its pool was computed, so no candidate is scored - the job is
+      // DONE with every pool candidate listed not scored ("not scored -
+      // retry" rows on the read) and the anchor kind's message.
+      const ids = result.candidateIds;
+      deps.logger.warn({ ...where, poolSize: ids.length }, 'ranking job: the anchor could not be read');
+      if (!(await guard())) return;
+      const listed = await deps.jobs.updateJobProgress(job, {
+        poolSize: ids.length,
+        batchCount: 0,
+        ...(ids.length > 0 && {
+          notScored: ids.map((candidateId) => ({ candidateId, reason: 'unreadable' as const })),
+        }),
+      });
+      if (listed === undefined) return;
+      emitRankingEvent(deps, listed);
+      // R2B5: no guard read before the finish - S2 conditions it on the generation.
+      await finishJob(job, deps, 'done', job.anchorKind === 'tenant' ? MSG_TENANT_UNREADABLE : MSG_PROPERTY_UNREADABLE);
+      return;
+    }
+    deps.logger.warn(
+      { ...where, reason: result.reason, ...('size' in result && result.size !== undefined && { size: result.size }) },
+      'ranking job could not build its pool',
+    );
+    if (await guard()) await finishJob(job, deps, 'failed', result.message);
+    return;
+  }
+
+  // D2.3 / PR13: a candidate whose card needed an incomplete read is left out
+  // of the call and listed in notScored ("not scored - retry").
+  const unreadable = result.candidates.filter((candidate) => candidate.unverified);
+  const readable = result.candidates.filter(isVerified);
+  const batches = chunk(readable, Math.max(1, deps.config.rankingBatchSize));
+
+  if (!(await guard())) return;
+  const started = await deps.jobs.updateJobProgress(job, {
+    poolSize: result.candidates.length,
+    batchCount: batches.length,
+    ...(unreadable.length > 0 && {
+      notScored: unreadable.map((candidate) => ({ candidateId: candidate.candidateId, reason: 'unreadable' as const })),
+    }),
+  });
+  if (started === undefined) return;
+  emitRankingEvent(deps, started);
+  deps.logger.info(
+    { ...where, poolSize: result.candidates.length, batchCount: batches.length, unreadable: unreadable.length },
+    'ranking job pool built',
+  );
+
+  const ctx: BatchContext = {
+    job,
+    anchor: result.anchor,
+    direction: result.direction,
+    homes: result.homes,
+    raised: new Map(),
+    storedFlags: new Map(),
+    guard,
+  };
+  const outcomes = await mapWithConcurrency(batches, Math.max(1, deps.config.rankingBatchConcurrency), (batch, index) =>
+    runBatchSafely(batch, index, ctx, deps),
+  );
+  if (isStopped() || outcomes.some((outcome) => outcome.kind === 'stopped')) return;
+
+  // PR42: the message counts CANDIDATES (failedBatches + notScored), never batches.
+  let omitted = 0;
+  let unscored = 0;
+  let unsaved = 0;
+  for (const outcome of outcomes) {
+    if (outcome.kind === 'scored') omitted += outcome.omitted;
+    if (outcome.kind === 'failed') {
+      omitted += outcome.omitted;
+      if (outcome.failure === 'repo') unsaved += outcome.unscored;
+      else unscored += outcome.unscored;
+    }
+  }
+  const messages: string[] = [];
+  if (unreadable.length > 0) messages.push(unreadableMessage(unreadable.length, job.anchorKind));
+  if (omitted > 0) messages.push(omittedMessage(omitted, job.anchorKind));
+  if (unscored > 0) messages.push(unscoredMessage(unscored, job.anchorKind));
+  if (unsaved > 0) messages.push(unsavedMessage(unsaved));
+  // R2B5: NO guard read here. finishJob is conditioned on running AND this
+  // generation (S2), so a superseded job's finish is refused, and a guard
+  // read that fails now can never turn a fully scored job into failed.
+  await finishJob(job, deps, 'done', messages.length > 0 ? messages.join(' ') : undefined);
+}
+
+/**
+ * Run one claimed job to its end (D7). NEVER throws: a model, batch, pool or
+ * organization-list failure is recorded on the record and the job finishes.
+ * Before every model call and every write it re-reads the record
+ * (consistent) and exits quietly once the generation is not its own; a lease
+ * renewal every RANKING_LEASE_MS / 3 extends the lease on that generation, and
+ * a refused or failed renewal stops the job the same way.
+ *
+ * `rankAnchor(job, deps)` is the one entry point, so a later scheduled caller
+ * is configuration, not a redesign (charter 10.2).
+ */
+export async function rankAnchor(job: RankingJobRecord, deps: RankingJobDeps): Promise<void> {
+  const log = deps.logger;
+  const where = { anchorKind: job.anchorKind, anchorId: job.anchorId, generation: job.generation };
+  let stopped = false;
+
+  const readJob = () => deps.jobs.getJob(job.anchorKind, job.anchorId, { consistent: true });
+  const guard = async (): Promise<boolean> => {
+    if (stopped) return false;
+    let current: RankingJobRecord | undefined;
+    try {
+      current = await readJob();
+    } catch (first) {
+      // PR36 / R2B5: a transient read error (throttling, usually) is retried once, after a pause.
+      log.warn({ ...where, err: first }, 'ranking job generation check failed - retrying once');
+      try {
+        await (deps.sleep ?? defaultSleep)(GUARD_RETRY_MS);
+        current = await readJob();
+      } catch (err) {
+        if (stopped) return false;
+        stopped = true;
+        // PR36: still failing - finish the job failed by S2's generation-
+        // conditioned write (a newer generation is never touched); the slot
+        // is released by startClaimedJob's finally.
+        log.error({ ...where, err }, 'ranking job generation check failed twice - failing the job');
+        try {
+          await finishJob(job, deps, 'failed', MSG_ERROR);
+        } catch (finishErr) {
+          log.error({ ...where, err: finishErr }, 'ranking job failure could not be recorded');
+        }
+        return false;
+      }
+    }
+    if (stopped) return false;
+    if (current === undefined || current.generation !== job.generation || current.status !== 'running') {
+      stopped = true;
+      log.info(where, 'ranking job superseded - exiting quietly');
+    }
+    return !stopped;
+  };
+
+  const leaseMs = deps.config.rankingLeaseMs;
+  const renew = async (): Promise<void> => {
+    if (stopped) return;
+    try {
+      const leaseExpiresAt = new Date(Date.parse(deps.now()) + leaseMs).toISOString();
+      if (!(await deps.jobs.renewLease(job, leaseExpiresAt))) {
+        stopped = true;
+        log.warn(where, 'ranking job lease renewal refused - stopping');
+      }
+    } catch (err) {
+      stopped = true;
+      log.error({ ...where, err }, 'ranking job lease renewal failed - stopping');
+    }
+  };
+  const timers = deps.timers ?? DEFAULT_TIMERS;
+  const handle = timers.setInterval(() => {
+    void renew();
+  }, Math.max(1, Math.floor(leaseMs / 3)));
+
+  try {
+    log.info({ ...where, attempts: job.attempts }, 'ranking job started');
+    await runJob(job, deps, guard, () => stopped);
+  } catch (err) {
+    log.error({ ...where, err }, 'ranking job failed unexpectedly');
+    try {
+      if (await guard()) await finishJob(job, deps, 'failed', MSG_ERROR);
+    } catch (finishErr) {
+      log.error({ ...where, err: finishErr }, 'ranking job failure could not be recorded');
+    }
+  } finally {
+    timers.clearInterval(handle);
+  }
 }

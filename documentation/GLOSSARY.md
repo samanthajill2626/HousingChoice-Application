@@ -166,11 +166,19 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   tenant file's hand-written box, kept apart from contact `notes`. Contact
   `notes` is the "Preferences & notes" card, which the AI appends dated
   `[Auto - <date>]` lines to and reads as its profile; `staff_notes` is
-  human-only - never machine-written or machine-read (not the import, the
-  seeds, the public sign-up, the transition service, or extraction). Human
-  label: "Staff notes" (staff only; no tenant-facing surface). Companion
-  `staff_notes_updated_at` is server-stamped on every write and renders as
-  "Last edited <date>" while the box holds text.
+  human-WRITTEN only - nothing machine-writes it (not the import, the
+  seeds, the public sign-up, the transition service, or extraction), and
+  extraction never reads it. One machine READS it: since WP1 B2a the
+  ranking's tenant card carries it to the model as "Staff notes" (charter
+  6.1; B2a spec D15). Human label: "Staff notes" (staff only; no
+  tenant-facing surface). Companion `staff_notes_updated_at` is
+  server-stamped on every write and renders as "Last edited <date>" while
+  the box holds text. The Notes box has its own stamp since WP1 B2a:
+  `notes_updated_at`, set in the same write by every Notes writer (the
+  contacts PATCH, manual create, extraction and the importer), never by a
+  client. The contact edit form sends the stamp it opened with, and a save
+  over a box changed since is refused (`notes_stale`) with the current
+  notes shown below the box.
 
 - **Tenant matching inputs** (WP1 B1, 2026-10-26) - four tenant fields
   collected for Work Package 1's ranker (B2), declared ONCE in
@@ -278,8 +286,12 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   flyer. Screening, touring and qualifications are staff only (Cameron,
   2026-10-20), and so are the whole Pets item (No pets, Pets (details), Pet
   fee) and the whole Deposit item since flyer-leads (2026-10-21; Sam talks
-  them through with each tenant). Nothing filters or ranks on them yet (Work Package
-  1's AI ranking reads them); credit and income are notes only.
+  them through with each tenant). Nothing filters on them. Since WP1 B2a
+  the AI ranking reads them on the property card: a failed Evictions,
+  Qualifications or Pets requirement caps a pair at Weak, and the deposit,
+  fees and touring are reasons the model weighs, never a forced Weak.
+  Credit score and Income requirements stay notes only and never reach a
+  card.
 
 - **copy only** (property requirements, 2026-10-20) - the rule that a
   property NEVER reads its landlord's requirements to fill its own: it
@@ -854,6 +866,74 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   "Follow-ups due" before). Every section shows 5 rows, then "Show all N".
   Today has no Unreplied section: known contacts' replies are the Inbox
   badge's job.
+
+- **Ranking** (WP1 B2a, 2026-10-28) - the AI judgment of how well each
+  tenant-property pair fits, run on demand by a press of Rank (Settings >
+  Rankings until B3's composer). The nouns below are the charter's
+  (docs/superpowers/specs/2026-10-24-wp1-matching-charter-design.md
+  section 3); code says `unit`, staff copy says "property".
+- **Anchor** - the one record a ranking is for: a property (its candidates
+  are tenants) or a tenant (its candidates are properties). Any record can
+  be the anchor; its state never blocks a ranking, it only shows a note
+  ("This tenant is not searching.", "This tenant cannot be texted.", "This
+  property is not available.").
+- **Candidate** - a record of the other kind scored against the anchor.
+- **Pool** - the candidates a ranking scores, decided by eligibility only:
+  searching, textable tenants (or available properties without another
+  tenant's active placement), a matching voucher size and housing
+  authority, and for a property anchor tenants heard from within 90 days
+  (`RANKING_POOL_WINDOW_DAYS`) unless the press includes older ones. Nothing
+  about fit removes a candidate. Not a relay **pool number** (the shared
+  number relay groups multiplex onto; "Relay group number" above).
+- **Card** - what the model reads about one record, built as an ALLOWLIST
+  (`app/src/services/ranking/cardFields.ts`): a stored attribute reaches the
+  model only once it is classified include. One card definition per record,
+  whichever side of the ranking it is on. Credit, income, LIF, priority, ids
+  and other people are never on a card. Not a screen element: the
+  dashboard's cards (the Staff notes card, the "Preferences & notes" card)
+  are unrelated.
+- **Properties seen** - the part of a tenant card listing the homes the
+  tenant was sent or signed up for and the homes they toured, each with its
+  sends, a staff decline, its tours and the Notes lines that name it
+  (feedback lines); at most 8 are listed (`RANKING_SEEN_MAX`), homes with an
+  outcome first. Not extraction's **properties sent** block (WP1 B1, above),
+  which lists sends only.
+- **Match** - the stored result for one tenant-property pair: a score 0-100
+  (the charter's match percentage), up to three reasons for and three
+  against with their sources, the missing list, failed requirements and
+  fair-housing flags. One match per pair, shared by both directions: the
+  last press from either anchor rewrites it. Not **"Matching"**, the staff
+  section that sends properties (above): a match is one pair's stored
+  score.
+- **Band** - the score's group, derived on read: Strong 80-100, Good 60-79,
+  Possible 40-59, Weak 0-39. A pair that fails a recorded screening
+  (Evictions, Qualifications) or Pets requirement, with no accommodation
+  and no open unlawful flag on it, is capped at Weak and reads
+  "requirement not met".
+- **Fingerprint** - a hash of a card (and of a pair's history) stored on
+  each match; when the current card hashes differently the match reads "out
+  of date". A bare new send never changes one; a decline, a tour, a Notes
+  edit or an edit to a card field does.
+- **Matches store** - the `matches` table: one row per pair, written only by
+  the ranking job (`app/src/repos/matchesRepo.ts`). Say "matches store",
+  never "the matches table", in prose near UI text: the Matching page also
+  shows a table.
+- **Ranking job** - the one in-flight ranking of an anchor (queued, running,
+  done or failed), run by the worker's ranking poll in batches of up to 40
+  candidates (`RANKING_BATCH_SIZE`); a second press while it runs joins it,
+  or is refused when its "Include tenants not heard from" choice differs.
+- **Ranking run** - one model call (one batch) of a ranking job, with its
+  model, versions, tokens, cost, latency, raw output and its own results,
+  listed on Settings > Rankings (never in the AI run log).
+- **Unlawful flag** - the model's report that a free-text requirement on a
+  property is unacceptable for any tenant under fair housing (e.g. "no
+  kids"); stored per property and field, never applied, closed when the
+  field's text is edited. Only an unlawful flag ever asks staff to change a
+  record.
+- **Accommodation flag** - the model's report that a lawful requirement
+  does not apply to THIS tenant (e.g. No pets against an assistance
+  animal); it stays on that pair's match and lifts the Weak cap for that
+  pair only.
 
 ---
 

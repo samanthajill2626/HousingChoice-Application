@@ -1,8 +1,9 @@
 # WP1 B2a Ranking engine - design
 
-Status: DRAFT revision 3 (2026-10-28). Rev 2 folded in design review
+Status: DRAFT revision 4 (2026-10-28). Rev 2 folded in design review
 round 1 (two reviewers, 41 findings, all accepted after checking the
-code); rev 3 folds in round 2 (12 findings, all accepted).
+code); rev 3 folded in round 2 (12 findings, all accepted); rev 4 folds
+in round 3 (7 findings, all accepted).
 Adjudications: the records' design-review/adjudications.md.
 Charter: docs/superpowers/specs/2026-10-24-wp1-matching-charter-design.md,
 as amended through section 20 item 14. B2 is split (item 13): this branch
@@ -224,10 +225,13 @@ ranking code (the registry's type is keyed on the typed attributes MINUS
 Notes changes one list; B1's reader test (`tenantMatchingInputsReaders`)
 gains the ranking directory in its scan. On the card each of these
 inputs is keyed by the list entry's `label`, not its attribute name.
-Two files are exempt from the scan because naming an input is their
-point: `examples.ts` (synthetic cards, which use the labels anyway) and
-the fake driver, which reads the maximum portion and the area preference
-by key to apply its fixed rules.
+The property card, by contrast, is keyed by attribute name, because the
+schema's requirement and flag-field enums name those attributes.
+`examples.ts` is exempt from the scan (synthetic cards; they use the
+labels anyway). The fake driver lives in app/src/adapters, outside the
+scan, and still finds its two inputs through the list (by `kind`
+`dollars` for the maximum portion and by the list entry for the area
+preference), never by a spelled key.
 Derived and added: `lastHeardFrom` as a bucket (this week = under 7 days,
 this month = under 30, one to three months = under 90, older, never;
 charter 9.1) and `propertiesSeen` (D2.3).
@@ -330,8 +334,14 @@ sends fill any remaining slots, newest send first. An outcome entry past
 the bound is not listed, and its feedback lines go back into the card's
 `notes`, so no feedback is lost to the bound. Reading the seen set costs
 one `listByContact`, one `listByTenant` and one units BatchGet for the
-whole set (100 keys per call), whatever its size. Each listed entry reads
-as one unit:
+whole set (100 keys per call), whatever its size. That BatchGet is a NEW
+full-item reader, `unitsRepo.getManyByIds(ids, { requireComplete: true })`
+(the existing `getDisplaysByIds` returns only id and address and, without
+the option, drops unread keys): an unprocessed key after its retries
+THROWS. An incomplete read fails the job ("Could not read every property
+this tenant was sent. Press Rank again.") or answers the ranking read
+with 503 and a message; it is never read as "not on file", which would
+change the card and its fingerprint. Each listed entry reads as one unit:
 
 - `label` (`propertyLabel`) and a SHORT summary of that property: beds,
   baths, rent (range or final), area, subzone, voucher sizes, pets
@@ -342,7 +352,10 @@ as one unit:
   `daysSinceLastSend`.
 - `declined`: `{ by, at }` when set (the stored record, never the
   derived outcome).
-- `tours`: each tour's status, outcome and dates.
+- `tours`: each tour's `status`, `outcome` and scheduled time - the
+  TOUR PROJECTION used everywhere a tour reaches a card, a pair history
+  or a fingerprint (never roster, reminder or bookkeeping fields, which
+  change with no outcome).
 - `feedback`: the Notes lines that name this property.
 
 The attach step lives alone in `app/src/services/ranking/seenFeedback.ts`
@@ -358,8 +371,8 @@ No other polish: no abbreviation folding, no date parsing of the
 `[Auto - <date>]` prefix (it has no year; age comes from stored dates).
 
 A soft-deleted seen unit is still readable and is listed with its label
-and summary like any other. A seen unit whose record cannot be found at
-all is listed with the placeholder label "a property no longer on file"
+and summary like any other. A seen unit that a COMPLETE read shows does
+not exist is listed with the placeholder label "a property no longer on file"
 (send rows store no label), keeping its sends, decline and tours; its
 feedback lines cannot attach and stay in `notes`.
 
@@ -390,8 +403,8 @@ unclassified attribute produces a card without it.
 
 Per candidate, scoped to THIS tenant and THIS property, from stored
 facts: every counted send date with its kind (sent or signed up), the
-declined record with who and when, the tours between the two (status,
-outcome, dates), and `daysSinceLastSend`. The derived outcome is never
+declined record with who and when, the tours between the two (the tour
+projection, D2.3), and `daysSinceLastSend`. The derived outcome is never
 used.
 
 ### D3. The completeness pass (charter 7.3)
@@ -625,8 +638,10 @@ index keys below.
   busy). While queued the page shows "Waiting for a free slot". The
   poll never starts a queued record past its expiry: each tick first
   marks such records `failed` with "The ranking was not picked up. Press
-  Rank again." (a conditional update on the generation that also
-  removes the index keys), so a dead record never sits at the head of
+  Rank again." (a conditional update on `status = queued AND
+  generation = :listed AND queuedExpiresAt <= :now` that also removes
+  the index keys, so it can never fail a record another tick has just
+  claimed), so a dead record never sits at the head of
   the queue. Between the expiry and that tick the read derives
   `expired` with the same message (D9), the page stops polling, and a
   press reclaims the record.
@@ -643,8 +658,9 @@ index keys below.
   successful claim and decremented when the job finishes; a tick with no
   free slot claims nothing.
   - Claiming a queued record: conditional update `status = queued AND
-    generation = :listed` to `running`, `startedAt`, `leaseExpiresAt =
-    now + RANKING_LEASE_MS` (default 90000).
+    generation = :listed AND queuedExpiresAt > :now` to `running`,
+    `startedAt`, `leaseExpiresAt = now + RANKING_LEASE_MS` (default
+    90000).
   - Takeover: a running record past its lease with `attempts < 1` is
     re-claimed with a NEW generation, `attempts + 1`, and run again from
     the start (once: enough to cover a redeploy). A second expiry marks
@@ -899,14 +915,15 @@ serialization.
   leaves out as the charter says: a bare new send, a re-send and an
   eviction from the listed entries change nothing; a decline, a tour or
   a feedback line about ANY property, or an edit to a seen property's
-  label or summary, changes every match of that tenant. One edge is
-  accepted: the FIRST send of a property that a Notes line already names
+  label or summary, changes every match of that tenant. One edge, put to
+  Cameron as Q7 because it touches charter 10.3: the FIRST send of a
+  property that a Notes line already names
   turns that line into feedback on a seen home, so that send changes the
   fingerprint once (the card's meaning did change; it needs a line
   naming a home before the home was ever sent, toured or signed up for).
   Recency enters only as its bucket.
-- `pairHistory`: the declined record and the tours; never the send dates
-  (age covers time since the last send).
+- `pairHistory`: the declined record and the tours (the tour projection);
+  never the send dates (age covers time since the last send).
 
 ### D14. The Notes box changes (Cameron 2026-10-28)
 
@@ -1022,11 +1039,15 @@ and a `gate-run-commands.md` sheet in the records:
      is re-run five more times each (stage two) and FAILS only if, over
      all eight runs, the mean still moves by more than 5 points or the
      cap rate differs by more than 3 of 8. A band change within 5 points
-     is never a failure (a boundary is not a bias). The script also
-     measures the base-versus-base re-run spread for every base pair;
-     when that spread exceeds 5 points the pair's result is
+     is never a failure (a boundary is not a bias).
+   - Noise check, per base pair and direction, by the same two stages:
+     the base is scored as two independent groups of three runs, and the
+     SPREAD is the difference between the two group means. Over 5 points
+     after stage one, both groups get five more runs; only if the spread
+     over the two eight-run groups still exceeds 5 points is the pair
      INCONCLUSIVE, which fails the gate as "decide" rather than passing
-     it, and Cameron decides.
+     it, and Cameron decides. The swap comparisons for that pair are
+     reported but do not decide the gate.
    - Each run's cap is computed by production's cap function (D9) fed
      that run's own failed requirements and flags; the property-wide
      suppression by STORED unlawful flags (D10) is not exercised here
@@ -1170,7 +1191,9 @@ two is not WP1; the `stage` field is there).
   a legacy boolean `pets` read as No pets; the landlord switch on and off,
   property value wins; properties seen (outcome entries always listed,
   bare entries fill to the bound newest first, kinds, decline, tours,
-  soft-deleted unit listed, missing unit placeholder); the attach step
+  soft-deleted unit listed, missing unit placeholder only after a
+  complete read, an incomplete units read fails the job and the read);
+  the tour projection drops reminder and roster fields; the attach step
   over the unbounded seen set (match, multiple matches, unmatched line
   stays, staff line moves, a line naming an unlisted bare property still
   attaches and lists it); stable serialization; every seed-world
@@ -1280,11 +1303,12 @@ at plan time.
 - Q2. Properties seen carries a short summary of each home (beds, baths,
   rent, area, subzone, voucher sizes, pets policy), not its whole card,
   and lists at most 8: homes with an outcome or feedback first (newest
-  activity first), then the newest bare sends; feedback on a home past
-  the 8 stays in the card's general notes. Charter 6.2 says "that
-  property's card
-  details"; whole cards would make a 40-tenant call several times larger.
-  Recommendation: the summary.
+  activity first), then the newest bare sends. For a home past the 8,
+  its feedback lines stay in the card's general notes, but its decline
+  and tours leave this tenant's card (the pair being scored still shows
+  its own decline and tours in its pair history). Charter 6.2 says "that
+  property's card details"; whole cards would make a 40-tenant call
+  several times larger. Recommendation: the summary and the bound.
 - Q3. A pool over 300 fails the ranking with a message rather than
   scoring it (a cost bound; it removes no candidate). Recommendation:
   keep, at 300.
@@ -1299,3 +1323,12 @@ at plan time.
 - Q6. The default prices ($2 / $10 per million tokens for Sonnet 5.5, $4
   / $20 for Opus 5.5) come from the API's model table, not a bill. Every
   run's recorded cost rests on them. Confirm, or give the numbers.
+- Q7. One edge of "a new send alone never makes a match out of date"
+  (charter 10.3 and 13.5, a section no slice may reopen): when a Notes
+  line ALREADY names a home that was never sent, toured or signed up
+  for, the first send of that home turns the line into feedback on a
+  seen home, so that one send marks the tenant's matches out of date
+  once. Keeping the rule exact would mean leaving that home's label and
+  summary out of the fingerprint, so edits to a seen home would never
+  refresh the tenant's matches. Recommendation: accept the edge; it is
+  recorded as charter section 20 item 15 on your yes.

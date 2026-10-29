@@ -76,3 +76,21 @@ voucher_program) - round 3 required.
 | R2-10 results[] cannot know the match write; cap of an old run undefined | ACCEPT | D11: cappedAtRun; matchesWritten set by a second update |
 | R2-11 reader test vs examples.ts and the fake driver | ACCEPT | D2.1: card keys are the list labels; the two files exempt |
 | R2-12 voucher_program a disability proxy | ACCEPT | D2.1: excluded with agency's reason |
+
+## Round 3 (spec rev 3 at 985af124; revised to rev 4)
+
+Reviewer A continued. Report: R3-review.md (7 findings: 2 MEDIUM tagged
+DECISION, 5 LOW tagged PRECISION). Every finding ACCEPTED. Decisions
+changed: yes, two (a complete full-item units reader with failure
+semantics; the inconclusive rule's two stages) - round 4, the last
+allowed, required.
+
+| Finding | Ruling | Change in rev 4 |
+|---|---|---|
+| R3-1 fingerprint rests on a best-effort units read | ACCEPT | D2.3: new `unitsRepo.getManyByIds(ids, { requireComplete: true })`; an incomplete read fails the job or answers the read 503; the placeholder only after a complete read |
+| R3-2 inconclusive rule decides the gate on noise; spread undefined | ACCEPT | D17: spread = difference of two base groups' means, with the same two stages |
+| R3-3 expiry write can fail a just-claimed job | ACCEPT | D7: expiry write conditioned on status, generation and expiry; claim requires queuedExpiresAt > now |
+| R3-4 tour projection only on the tenant hash | ACCEPT | D2.3: one tour projection used by cards, pair history and fingerprints |
+| R3-5 mixed card keys; exemptions partly moot | ACCEPT | D2.1: property card keyed by attribute; only examples.ts exempt; the fake driver finds inputs through the list |
+| R3-6 contests R2-2: the first-send edge needs Cameron | ACCEPT (reverses my R2-2 "no amendment" ruling) | Q7 to Cameron; charter item 15 on his yes |
+| R3-7 decline and tours of an outcome home past the bound leave the card; Q2 silent | ACCEPT | Q2 restated |

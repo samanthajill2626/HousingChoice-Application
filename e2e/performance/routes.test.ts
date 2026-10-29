@@ -382,6 +382,7 @@ describe('route registry completeness', () => {
           '/voice',
           '/system',
           '/ai-runs',
+          '/rankings',
           '/numbers',
           '/organizations',
           '/organizations/:orgId?',
@@ -405,6 +406,9 @@ describe('route registry completeness', () => {
       // `organizations/:orgId?` (the optional entry id); both forms are excluded.
       '/settings/organizations',
       '/settings/organizations/:orgId?',
+      // The Rankings settings tab (WP1 B2a spec D18), not yet a profiler
+      // surface (issue perf-pages-settings-rankings-surface).
+      '/settings/rankings',
       // Contacts > Caseworkers, not yet a profiler surface
       // (issue perf-pages-contacts-caseworkers-surface).
       '/contacts/caseworkers',

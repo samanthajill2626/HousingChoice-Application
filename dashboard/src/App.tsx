@@ -38,6 +38,7 @@ import { SystemStatusSection } from './routes/settings/SystemStatusSection.js';
 import { QuietHoursSection } from './routes/settings/QuietHoursSection.js';
 import { NumbersSection } from './routes/settings/NumbersSection.js';
 import { AiRunsSection } from './routes/settings/aiRuns/AiRunsSection.js';
+import { RankingsSection } from './routes/settings/rankings/RankingsSection.js';
 import { OrgListSection } from './routes/settings/OrgListSection.js';
 import { AdminRoute } from './routes/settings/AdminRoute.js';
 import { defaultTabPath } from './routes/settings/settingsTabs.js';
@@ -224,6 +225,16 @@ function AuthedApp(): React.JSX.Element {
                 element={
                   <AdminRoute>
                     <AiRunsSection />
+                  </AdminRoute>
+                }
+              />
+              {/* Rankings (WP1 B2a spec D18): admin only, guarded like the AI
+                  run log - a VA hitting it is redirected to Templates. */}
+              <Route
+                path="rankings"
+                element={
+                  <AdminRoute>
+                    <RankingsSection />
                   </AdminRoute>
                 }
               />

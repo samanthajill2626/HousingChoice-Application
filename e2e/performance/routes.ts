@@ -690,6 +690,15 @@ export const ROUTES: readonly RouteDefinition[] = Object.freeze([
   // /api/organizations, /api/organizations/usage and
   // /api/organizations/not-on-list, all three on mount
   // (docs/issues/perf-pages-settings-organizations-surface.md).
+  // TODO(perf-pages-settings-rankings-surface): KNOWN GAP - there is NO row
+  // for /settings/rankings (Settings > Rankings, WP1 B2a spec D18; admin
+  // only), so `npm run perf:pages` never measures it. Excluded on purpose
+  // (the route pin in routes.test.ts lists it with the same issue).
+  // Registering it needs a source (the Settings tab), a terminal (the runs
+  // list or its empty line, and the cost totals) and its GETs - the runs
+  // list and the cost read, plus the Rank panel's walks of every unit
+  // (GET /api/units) and every tenant (GET /api/contacts?type=tenant), all
+  // on mount (docs/issues/perf-pages-settings-rankings-surface.md).
   // TODO(perf-pages-contacts-caseworkers-surface): KNOWN GAP - there is NO
   // row for /contacts/caseworkers (Contacts > Caseworkers, spec 2026-10-06
   // D18), so `npm run perf:pages` never measures it. Excluded on purpose (the

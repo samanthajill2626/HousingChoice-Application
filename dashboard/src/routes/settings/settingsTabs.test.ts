@@ -20,13 +20,14 @@ describe('settingsTabs', () => {
       'voice',
       'system',
       'ai-runs',
+      'rankings',
       'numbers',
       'organizations',
     ]);
     // `numbers` (Phone numbers) is NOT admin-only: OUR one business number is
     // read-only and visible to everyone; the pool inventory inside the section
     // carries its own role gate.
-    expect(SETTINGS_TABS.filter((t) => t.adminOnly).map((t) => t.id)).toEqual(['team', 'system', 'ai-runs']);
+    expect(SETTINGS_TABS.filter((t) => t.adminOnly).map((t) => t.id)).toEqual(['team', 'system', 'ai-runs', 'rankings']);
   });
 
   it('visibleTabs(true) returns all tabs (admin sees Team + System)', () => {
@@ -37,6 +38,7 @@ describe('settingsTabs', () => {
       'voice',
       'system',
       'ai-runs',
+      'rankings',
       'numbers',
       'organizations',
     ]);
@@ -61,5 +63,17 @@ describe('settingsTabs', () => {
   it('the VA default tab matches the templates path (the admin-route redirect target)', () => {
     expect(VA_DEFAULT_TAB_PATH).toBe('/settings/templates');
     expect(defaultTabPath(false)).toBe(VA_DEFAULT_TAB_PATH);
+  });
+
+  it('the Rankings tab is admin only and sits beside the AI run log (WP1 B2a D18)', () => {
+    const ids = SETTINGS_TABS.map((t) => t.id);
+    expect(ids.indexOf('rankings')).toBe(ids.indexOf('ai-runs') + 1);
+    expect(SETTINGS_TABS.find((t) => t.id === 'rankings')).toEqual({
+      id: 'rankings',
+      label: 'Rankings',
+      path: '/settings/rankings',
+      adminOnly: true,
+    });
+    expect(visibleTabs(false).map((t) => t.id)).not.toContain('rankings');
   });
 });

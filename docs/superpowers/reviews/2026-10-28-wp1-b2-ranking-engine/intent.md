@@ -18,11 +18,13 @@ review dataset) gets its own spec and branch after B2a merges.
 Spec rev 1 committed (dc8025cc):
 docs/superpowers/specs/2026-10-28-wp1-b2a-ranking-engine-design.md.
 Charter amendment 13 (the split) committed (1f128d99).
-IN FLIGHT: design review round 1, two opus reviewers writing
-design-review/R1-reviewer-A.md and R1-reviewer-B.md.
-NEXT: adjudicate into design-review/adjudications.md, revise the spec,
-continue the stronger reviewer for round 2 (cap 4), then Cameron's spec
-gate with Q1-Q5 (spec section 9) and the compile-check command.
+Round 1 done: 41 findings, all accepted; spec rev 2 + charter amendment
+14 committed (5b97ac07); adjudications in design-review/adjudications.md.
+IN FLIGHT: design review round 2, reviewer A continued (writes
+design-review/R2-review.md).
+NEXT: adjudicate round 2 (stop when a round changes no decision; cap 4),
+then Cameron's spec gate with Q1-Q6 (spec section 9). No compile-check
+run at the spec gate (dropped in rev 2: real-model runs only at the end).
 
 ## What Cameron asked for (verbatim where wording matters)
 

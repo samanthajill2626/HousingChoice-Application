@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import type { ExtractionInput, TranscriptUtterance } from '../../adapters/extraction.js';
 import { EXTRACTABLE_FIELDS, EXTRACTION_SCHEMA } from './schema.js';
 import { TENANT_MATCHING_INPUTS } from '../../lib/tenantMatchingInputs.js';
+import { toOneLine } from '../../lib/singleLine.js';
 
 /** B1 spec D3: the text-kind tenant matching inputs, which collect facts over time. */
 const MATCHING_TEXT_KEYS = TENANT_MATCHING_INPUTS
@@ -219,18 +220,16 @@ export function extractionPromptFingerprint(): string {
   return promptFingerprintCache;
 }
 
-/**
- * Collapse an utterance body to a SINGLE line: replace any run of CR/LF with
- * ' / '. Each transcript line is `<timestamp> [<speaker>/<channel>] <text>` and the lines
- * are '\n'-joined, so a raw client SMS containing a newline plus a forged
- * `<timestamp> [staff] ...` could otherwise masquerade as a genuine staff turn
- * (prompt-injection, adversarial F2). Flattening the body means an injected
- * "[staff]"/"[client]" tag can never begin a line - the model only ever sees
- * server-authored speaker tags at the start of each line.
- */
-function toSingleLine(text: string): string {
-  return text.replace(/[\r\n]+/g, ' / ');
-}
+// The utterance body is collapsed to a SINGLE line by lib/singleLine.ts
+// toOneLine: every run of CR, LF, U+2028 and U+2029 becomes ' / ' (WP1 B2a
+// spec D14.1 added the two Unicode separators; the Notes lines share the
+// rule). Each transcript line is `<timestamp> [<speaker>/<channel>] <text>`
+// and the lines are '\n'-joined, so a raw client SMS containing a newline
+// plus a forged `<timestamp> [staff] ...` could otherwise masquerade as a
+// genuine staff turn (prompt-injection, adversarial F2). Flattening the body
+// means an injected "[staff]"/"[client]" tag can never begin a line - the
+// model only ever sees server-authored speaker tags at the start of each
+// line.
 
 /**
  * Render ONE utterance to its transcript line. THE single renderer: the
@@ -243,7 +242,7 @@ function toSingleLine(text: string): string {
  * prompt's transcript-line sentence ("<timestamp> [<speaker>/<channel>] <text>").
  */
 export function renderUtteranceLine(u: TranscriptUtterance): string {
-  return `${u.at} [${u.speaker}/${u.channel}] ${toSingleLine(u.text)}`;
+  return `${u.at} [${u.speaker}/${u.channel}] ${toOneLine(u.text)}`;
 }
 
 export function buildExtractionUserContent(input: ExtractionInput): string {

@@ -178,7 +178,7 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   contacts PATCH, manual create, extraction and the importer), never by a
   client. The contact edit form sends the stamp it opened with, and a save
   over a box changed since is refused (`notes_stale`) with the current
-  notes shown below the box.
+  notes shown in a panel above the box.
 
 - **Tenant matching inputs** (WP1 B1, 2026-10-26) - four tenant fields
   collected for Work Package 1's ranker (B2), declared ONCE in
@@ -913,7 +913,12 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
 - **Fingerprint** - a hash of a card (and of a pair's history) stored on
   each match; when the current card hashes differently the match reads "out
   of date". A bare new send never changes one; a decline, a tour, a Notes
-  edit or an edit to a card field does.
+  edit or an edit to a card field does. Not the **prompt fingerprint**: the
+  hash of the ranking prompt's fixed part (the rubric, the worked examples
+  and the output schema) that every run and match records and the gate
+  sheet prints. It names the prompt a score came from and never makes a
+  match out of date (a rubric or examples change does that through their
+  versions).
 - **Matches store** - the `matches` table: one row per pair, written only by
   the ranking job (`app/src/repos/matchesRepo.ts`). Say "matches store",
   never "the matches table", in prose near UI text: the Matching page also

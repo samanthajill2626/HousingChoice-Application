@@ -1691,9 +1691,12 @@ address) being mis-written as their current address. Before trusting the address
 deployed env, run one real extraction over a live conversation that mentions a unit/property address
 and confirm it does NOT land in the Current-address row.
 
-**Owed ops on deploy (in order).** The feature ships **DORMANT** in deployed envs - `AI_EXTRACTION_ENABLED`
-defaults **off** in production, so until these steps run nothing extracts and **nothing breaks** (the
-webhook and worker simply skip the extraction path). To turn it on in an env:
+**Owed ops on deploy (in order).** Extraction ships **DORMANT** in deployed envs - `AI_EXTRACTION_ENABLED`
+defaults **off** in production, so until these steps run nothing extracts (the webhook and worker simply
+skip the extraction path). The key is NOT optional: since WP1 B2a every production app and worker REFUSES
+TO START without `ANTHROPIC_API_KEY`, whatever `AI_EXTRACTION_ENABLED` says (the ranking needs it - see
+"AI ranking (WP1 B2a)"), so on a NEW env step 3 is done before the first deploy. To turn extraction on in
+an env:
 
 1. **`npm run plan -- <env>` + `npm run apply -- <env>`** for the new `ai_extraction` table (single-key
    table + 3 sparse GSIs `byDueAt`/`byOwner`/`byPending`; registered in `app/src/lib/tables.ts`,
@@ -1701,7 +1704,8 @@ webhook and worker simply skip the extraction path). To turn it on in an env:
    Apply BEFORE deploying code that reads it (per [schema changes](#dynamodb-schema-changes-apply-before-deploying-code-that-uses-them)).
 2. **`npm install`** - new app-workspace runtime dep `@anthropic-ai/sdk` (pure JS, no arm64 binary).
    The lockfile carries it; `npm ci --workspace app --omit=dev` picks it up on the image build.
-3. **Push `ANTHROPIC_API_KEY`** via the secrets flow: add it to `.env.<env>`, `npm run secrets:push -- <env>`.
+3. **Push `ANTHROPIC_API_KEY`** via the secrets flow: add it to `.env.<env>`, `npm run secrets:push -- <env>`
+   (required for any production boot since B2a, extraction on or off; an env that already runs holds it).
 4. **Set `AI_EXTRACTION_ENABLED=true`** (and confirm `EXTRACTION_DRIVER=anthropic`, `AI_EXTRACTION_MODEL`)
    in `.env.<env>`, then `npm run secrets:push -- <env>`.
 5. **Deploy** so the app + worker roll and re-hydrate the new env keys (a re-deploy of the current
@@ -1794,6 +1798,15 @@ Production and hosted dev already hold one (extraction runs on it); the deploy c
 present in each environment before deploying B2a. **Hosted dev ranks on dev's key**: a press there is spend
 on whatever that key bills. `ANTHROPIC_API_BASE_URL` stays refused in production.
 
+**One key, one rate limit.** Ranking and extraction call the model on the SAME key, so they share its
+per-minute token and request limits (the Anthropic organization's tier). One worker runs up to
+`RANKING_MAX_CONCURRENT_JOBS` x `RANKING_BATCH_CONCURRENCY` ranking calls at once (2 x 4 = 8 by default),
+each carrying the whole rubric and worked examples plus up to `RANKING_BATCH_SIZE` full cards, so one press
+over a large pool can use up the limit for a while. A ranking call that hits it fails its batch ("N tenants
+could not be scored"); an extraction call that hits it (a 429 after the SDK's retry) spends one of its
+attempts, and a row parks after five failed attempts. Size those two variables against the key's tier, and
+lower them if extraction errors follow ranking presses.
+
 **Hermetic lanes and local dev.** `scripts/e2e-session.mjs` sets `RANKING_DRIVER=fake` and
 `RANKING_WORKER_POLL=off` for the app and the worker (and `RATE_LIMIT_RANK_PER_MIN=100000`, so specs and
 self-QA never meet the 429), so a ranking job runs only through `POST /__dev/ranking/tick` (hermetic-local
@@ -1825,7 +1838,12 @@ and detail.
   return it. Its old match, if any, is kept and reads out of date. Press Rank again. When the batch's run was
   written, the run detail's raw output and failure say which. When the run write itself failed there is NO
   run detail: the worker's error log line for that batch (`ranking run write failed - usage and cost logged
-  here`) holds the model, the usage, the cost and the call's failure (the spend is never invisible).
+  here`) holds the model, the usage, the cost and the call's failure. A call that answered after its job
+  was stopped or superseded (a takeover, a refused or failed lease renewal) writes no run either, by design
+  (the job writes nothing more): its worker WARN line (`ranking run not written - the job stopped after the
+  call; usage and cost logged here`) holds the same fields. So every paid call is a run record or one of
+  those two log lines - the spend is never invisible - but the Settings > Rankings weekly cost counts run
+  records only, and reads low by the calls those lines name.
 - "2 tenants could not be read and were not scored. Press Rank again." - a units read came back incomplete
   for those candidates' properties seen; a retry normally clears it.
 - "N tenants could not be scored. Press Rank again." (or "N properties ...") - that many candidates sat in a
@@ -1839,7 +1857,9 @@ and detail.
   says which. (a) `ranking job generation check failed twice - failing the job`: the job's generation check
   could not read the job record, twice, 500 ms apart (a DynamoDB read problem), so the job stopped rather
   than write without the check - check DynamoDB first. (b) `ranking job failed unexpectedly`: anything else
-  in the job threw (for example a pool or record read that failed outright); the line's `err` names it.
+  in the job threw (for example a pool or record read that failed outright, or the final finish write
+  failing twice - a first failure is retried after 500 ms and logged `ranking job finish write failed -
+  retrying once`); the line's `err` names it.
   Every score already written stays either way. Press Rank again; if it repeats, read that log line's `err`.
 - "N tenants were not scored by the model. Press Rank again." (or "1 tenant was ...", "N properties
   were ...") - the model answered the batch but left those candidates out of its answer. Their old matches

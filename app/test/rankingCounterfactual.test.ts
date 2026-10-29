@@ -430,6 +430,24 @@ describe('the --out record (WORKLIST WL-S8-12)', () => {
     expect(h.errors.join('\n')).toMatch(/does not exist\. No call made\./);
   });
 
+  it('a dry run never checks or touches --out, in either mode (it writes nothing)', async () => {
+    const checked: string[] = [];
+    const h = harness(STABLE, {
+      env: {},
+      createDriver: () => {
+        throw new Error('a dry run must not build a driver');
+      },
+      checkRecordTarget: (file) => {
+        checked.push(file);
+        return undefined;
+      },
+    });
+    expect(await main(['--model', MODEL, '--dry-run', '--out', OUT], h.deps)).toBe(0);
+    expect(await main(['--model', MODEL, '--timing', '--dry-run', '--out', OUT], h.deps)).toBe(0);
+    expect(checked).toEqual([]);
+    expect(h.records).toEqual([]);
+  });
+
   it('a record append that fails after the calls prints the verdict and the table to stdout, then exits 1', async () => {
     const h = harness(STABLE, {
       appendRecord: () => {

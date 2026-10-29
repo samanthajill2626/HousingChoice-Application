@@ -699,3 +699,89 @@ describe('useAnchorRanking - ordering, round 2', () => {
     expect(current().read?.rows[0]?.display).toBe('retried');
   });
 });
+
+// Code review R3 (FW3-1, FW3-2): a press's message and joined mark clear only
+// when a view that is not live replaces a job the page FOLLOWED, not while it
+// follows none (a job that ended unseen, first shown then, still reads the
+// ranking again); and a job read as expired - a queued record read past its
+// expiry - is level with queued, so when a poll tick that started before the
+// expiry claims it, the same generation's running views apply and the poll
+// resumes.
+describe('useAnchorRanking - ordering, round 3', () => {
+  it.each<[string, unknown, string]>([
+    ['refused 429', new ApiError(429, 'rate_limited', 'rate_limited', { error: 'rate_limited' }), 'Too many rankings. Wait a minute and try again.'],
+    ['lost on the network', new TypeError('Failed to fetch'), 'The ranking could not be started. Try again.'],
+  ])('a press %s before the first read keeps its message when that read lands with the last finished job (FW3-1)', async (_how, refusal, message) => {
+    const first = held<RankingReadResponse>();
+    getRanking.mockReturnValueOnce(first.promise).mockResolvedValue(readOf(null));
+    startRanking.mockRejectedValue(refusal);
+    render(<Probe anchor={ANCHOR} />);
+    await flush();
+    // Rank is enabled while the first read loads; the press is refused.
+    act(() => {
+      current().rank();
+    });
+    await flush();
+    expect(current().rankError).toBe(message);
+    // The first read answers with the anchor's previous ranking, finished long ago.
+    await act(async () => {
+      first.resolve(readOf(job({ status: 'done', batchCount: 1, batchesDone: [0] })));
+    });
+    await flush();
+    expect(current().job?.status).toBe('done');
+    expect(current().rankError).toBe(message);
+  });
+
+  it('a first job view of a ranking that ended unseen, with no batch finished, reads the ranking again and leaves a refused press its message (FW3-1)', async () => {
+    getRanking.mockResolvedValue(readOf(null));
+    startRanking.mockRejectedValue(new ApiError(429, 'rate_limited', 'rate_limited', { error: 'rate_limited' }));
+    // Another admin's press ran and ended after the first read: an empty pool, no batch.
+    getRankingJob.mockResolvedValue({ job: job({ status: 'done', startedAt: '2026-07-01T12:00:01.000Z', poolSize: 0 }) });
+    render(<Probe anchor={ANCHOR} />);
+    await flush();
+    act(() => {
+      current().rank();
+    });
+    await flush();
+    act(() => {
+      handlers.onRankingUpdated?.(rankingEvent({ status: 'done', batchesDone: 0, batchCount: 0 }));
+    });
+    await flush();
+    await flush();
+    expect(current().job?.status).toBe('done');
+    // FW2-1's wider end, kept for the full read: a generation first seen ended reads the table.
+    expect(getRanking).toHaveBeenCalledTimes(2);
+    // The page followed no job, so no followed job ended: the press's message stays.
+    expect(current().rankError).toBe('Too many rankings. Wait a minute and try again.');
+  });
+
+  it('a queued job read as expired and then claimed in the same generation is followed: its running views apply and the poll resumes (FW3-2)', async () => {
+    getRanking.mockResolvedValue(readOf(null));
+    startRanking.mockResolvedValue({ job: job(), joined: false });
+    getRankingJob
+      .mockResolvedValueOnce({ job: job({ status: 'expired' }) })
+      .mockResolvedValueOnce({ job: job({ status: 'running', startedAt: '2026-07-01T12:10:00.000Z', batchCount: 2 }) })
+      .mockResolvedValue({ job: job({ status: 'running', startedAt: '2026-07-01T12:10:00.000Z', batchCount: 2, batchesDone: [0] }) });
+    render(<Probe anchor={ANCHOR} />);
+    await flush();
+    act(() => {
+      current().rank();
+    });
+    await flush();
+    // The poll reads the queued record just past its expiry: the server derives 'expired'.
+    await flush(JOB_POLL_MS);
+    expect(current().job?.status).toBe('expired');
+    expect(getRanking).toHaveBeenCalledTimes(2);
+    // A poll tick that started before the expiry claims it: the same generation runs.
+    act(() => {
+      handlers.onRankingUpdated?.(rankingEvent({ batchesDone: 0, batchCount: 2 }));
+    });
+    await flush();
+    expect(current().job).toMatchObject({ status: 'running', generation: 'gen-1', batchCount: 2 });
+    // Live again: the poll reads it, and its first finished batch reads the ranking.
+    await flush(JOB_POLL_MS);
+    expect(getRankingJob).toHaveBeenCalledTimes(3);
+    expect(current().job?.batchesDone).toEqual([0]);
+    expect(getRanking).toHaveBeenCalledTimes(3);
+  });
+});

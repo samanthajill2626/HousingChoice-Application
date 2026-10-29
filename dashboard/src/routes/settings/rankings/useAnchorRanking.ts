@@ -10,6 +10,15 @@
 // State is keyed by the anchor and window it answers, so a new pick reads
 // "loading" without a reset inside an effect; a response for an old key is
 // dropped (its controller is aborted and the current key is checked).
+//
+// Order (code review R1 A2-1, A2-2): reads answer in any order, so every
+// request takes an issue number when it is sent. A full read's rows are
+// applied only if it is the LATEST full read issued for the key; a job view
+// (from a job read, a read that adopts its job, or a press) only if it was
+// issued after the view on screen - so an earlier read landing last never
+// puts back an older table or job, and a read issued before a press never
+// replaces the press's job. Job reads never overlap: a call while one is out
+// asks for one more read after it.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ApiError,
@@ -63,7 +72,21 @@ interface Current {
   id: string;
   includeOlder: boolean;
   controller: AbortController;
+  /** The issue number of the latest full read: only its answer is applied. */
+  latestRead: number;
+  /** The issue number of the job view on screen (0 = none yet) and its generation. */
+  jobIssued: number;
+  jobGeneration: string | null;
+  /** The job view on screen as last seen, for "the finished batches grew" and "the job ended". */
+  seenBatches: number;
+  wasLive: boolean;
+  /** The job read out now, and whether another was asked for meanwhile. */
+  jobRead: Promise<void> | null;
+  jobReadAgain: boolean;
 }
+
+/** What applying a job view changed; null when a newer view was on screen. */
+type JobChange = { grew: boolean; ended: boolean } | null;
 
 function blank(key: string): Slice {
   return {
@@ -114,37 +137,58 @@ export function useAnchorRanking(anchor: RankingAnchorRef | undefined, includeOl
   const [slice, setSlice] = useState<Slice | null>(null);
   const [poolWindowDays, setPoolWindowDays] = useState<number | null>(null);
   const currentRef = useRef<Current | null>(null);
-  // Job progress as last seen, for "the finished batches grew" and "the job ended".
-  const seenBatchesRef = useRef(0);
-  const wasLiveRef = useRef(false);
+  // One issue counter for every request - full reads, job reads, presses.
+  const issuedRef = useRef(0);
+  const issue = useCallback((): number => {
+    issuedRef.current += 1;
+    return issuedRef.current;
+  }, []);
 
   const update = useCallback((forKey: string, change: (s: Slice) => Slice): void => {
     setSlice((prev) => change(prev !== null && prev.key === forKey ? prev : blank(forKey)));
   }, []);
 
+  // A job view issued as `issued`, applied only when no later one is on screen.
+  const applyJob = useCallback(
+    (cur: Current, next: RankingJobView | null, issued: number): JobChange => {
+      if (issued <= cur.jobIssued) return null;
+      // FINISHED batches, scored or failed (spec D12; plan review BB5).
+      const finished = next === null ? 0 : finishedBatchCount(next);
+      const grew = finished > cur.seenBatches;
+      const ended = cur.wasLive && (next === null || !isJobLive(next.status));
+      cur.jobIssued = issued;
+      cur.jobGeneration = next === null ? null : next.generation;
+      cur.seenBatches = finished;
+      cur.wasLive = next !== null && isJobLive(next.status);
+      // Code review R1 A2-8: a press's error and the joined mark speak of the
+      // job the press followed; once that job ends they no longer apply.
+      update(cur.key, (s) => ({ ...s, job: next, ...(ended && { rankError: null, joined: false }) }));
+      return { grew, ended };
+    },
+    [update],
+  );
+
   const loadRead = useCallback(
     async (cur: Current, adoptJob: boolean): Promise<void> => {
+      const issued = issue();
+      cur.latestRead = issued;
       try {
         const next = await getRanking(cur.kind, cur.id, { includeOlder: cur.includeOlder }, cur.controller.signal);
         if (cur.controller.signal.aborted || currentRef.current !== cur) return;
-        if (adoptJob) {
-          seenBatchesRef.current = next.job === null ? 0 : finishedBatchCount(next.job);
-          wasLiveRef.current = next.job !== null && isJobLive(next.job.status);
-        }
+        // Its job by the job views' own rule: never over a press or a job
+        // read issued after this read (A2-2).
+        if (adoptJob) applyJob(cur, next.job, issued);
+        // Its rows only if no later full read was issued (A2-1).
+        if (issued !== cur.latestRead) return;
         setPoolWindowDays(next.poolWindowDays);
-        update(cur.key, (s) => ({
-          ...s,
-          read: next,
-          readStatus: 'ready',
-          readError: null,
-          ...(adoptJob && { job: next.job }),
-        }));
+        update(cur.key, (s) => ({ ...s, read: next, readStatus: 'ready', readError: null }));
       } catch (err) {
         if (cur.controller.signal.aborted || isAbort(err) || currentRef.current !== cur) return;
+        if (issued !== cur.latestRead) return;
         update(cur.key, (s) => ({ ...s, readStatus: 'error', readError: readErrorText(err) }));
       }
     },
-    [update],
+    [applyJob, issue, update],
   );
 
   useEffect(() => {
@@ -152,10 +196,21 @@ export function useAnchorRanking(anchor: RankingAnchorRef | undefined, includeOl
       currentRef.current = null;
       return undefined;
     }
-    const cur: Current = { key, kind, id, includeOlder, controller: new AbortController() };
+    const cur: Current = {
+      key,
+      kind,
+      id,
+      includeOlder,
+      controller: new AbortController(),
+      latestRead: 0,
+      jobIssued: 0,
+      jobGeneration: null,
+      seenBatches: 0,
+      wasLive: false,
+      jobRead: null,
+      jobReadAgain: false,
+    };
     currentRef.current = cur;
-    seenBatchesRef.current = 0;
-    wasLiveRef.current = false;
     void loadRead(cur, true);
     return () => {
       cur.controller.abort();
@@ -163,25 +218,45 @@ export function useAnchorRanking(anchor: RankingAnchorRef | undefined, includeOl
     };
   }, [id, includeOlder, key, kind, loadRead]);
 
-  const refreshJob = useCallback(async (): Promise<void> => {
+  const readJobOnce = useCallback(
+    async (cur: Current): Promise<void> => {
+      const issued = issue();
+      try {
+        const res = await getRankingJob(cur.kind, cur.id, cur.controller.signal);
+        if (cur.controller.signal.aborted || currentRef.current !== cur) return;
+        const change = applyJob(cur, res.job, issued);
+        // The full ranking: again when the finished batches grew, and once when the job ended.
+        if (change !== null && (change.grew || change.ended)) void loadRead(cur, false);
+      } catch {
+        // A failed job read is not shown: the next poll or event reads it again.
+      }
+    },
+    [applyJob, issue, loadRead],
+  );
+
+  const refreshJob = useCallback((): Promise<void> => {
     const cur = currentRef.current;
-    if (cur === null) return;
-    try {
-      const res = await getRankingJob(cur.kind, cur.id, cur.controller.signal);
-      if (cur.controller.signal.aborted || currentRef.current !== cur) return;
-      const next = res.job;
-      // FINISHED batches, scored or failed (spec D12; plan review BB5).
-      const finished = next === null ? 0 : finishedBatchCount(next);
-      const grew = finished > seenBatchesRef.current;
-      const ended = wasLiveRef.current && (next === null || !isJobLive(next.status));
-      seenBatchesRef.current = finished;
-      wasLiveRef.current = next !== null && isJobLive(next.status);
-      update(cur.key, (s) => ({ ...s, job: next }));
-      if (grew || ended) await loadRead(cur, false);
-    } catch {
-      // A failed job read is not shown: the next poll or event reads it again.
+    if (cur === null) return Promise.resolve();
+    // One job read at a time (A2-1): events, the poll and a refused press
+    // arriving while one is out ask for ONE more read after it.
+    if (cur.jobRead !== null) {
+      cur.jobReadAgain = true;
+      return cur.jobRead;
     }
-  }, [loadRead, update]);
+    const run = async (): Promise<void> => {
+      try {
+        do {
+          cur.jobReadAgain = false;
+          await readJobOnce(cur);
+        } while (cur.jobReadAgain && currentRef.current === cur && !cur.controller.signal.aborted);
+      } finally {
+        // In the same step as the last check, so no call can slip between them.
+        cur.jobRead = null;
+      }
+    };
+    cur.jobRead = run();
+    return cur.jobRead;
+  }, [readJobOnce]);
 
   const live = slice !== null && key !== undefined && slice.key === key ? slice : null;
   const jobLive = live !== null && live.job !== null && isJobLive(live.job.status);
@@ -208,17 +283,32 @@ export function useAnchorRanking(anchor: RankingAnchorRef | undefined, includeOl
       try {
         const res = await startRanking(cur.kind, cur.id, { includeOlder: cur.includeOlder });
         if (currentRef.current !== cur) return;
-        seenBatchesRef.current = finishedBatchCount(res.job);
-        wasLiveRef.current = isJobLive(res.job.status);
-        update(cur.key, (s) => ({ ...s, ranking: false, job: res.job, joined: res.joined }));
+        // The press's job is newer than every view on screen (A2-2), unless a
+        // job read already shows this generation - read after the claim, so
+        // as new or newer. Every read issued before this answer is older: its
+        // job view is dropped when it lands.
+        if (cur.jobGeneration !== res.job.generation) {
+          cur.jobIssued = issue();
+          cur.jobGeneration = res.job.generation;
+          cur.seenBatches = finishedBatchCount(res.job);
+          cur.wasLive = isJobLive(res.job.status);
+          update(cur.key, (s) => ({ ...s, ranking: false, job: res.job, joined: res.joined }));
+        } else {
+          update(cur.key, (s) => ({ ...s, ranking: false, joined: res.joined }));
+        }
       } catch (err) {
         if (currentRef.current !== cur) return;
         update(cur.key, (s) => ({ ...s, ranking: false, rankError: rankErrorText(err) }));
         // Refused for a live job: follow it, so the page shows it finishing.
-        if (err instanceof ApiError && err.code === 'ranking_running') void refreshJob();
+        // The server just said that job is live, so its end - whenever the
+        // page reads it - clears this error (A2-8) and reads the ranking again.
+        if (err instanceof ApiError && err.code === 'ranking_running') {
+          cur.wasLive = true;
+          void refreshJob();
+        }
       }
     })();
-  }, [refreshJob, update]);
+  }, [issue, refreshJob, update]);
 
   const retryRead = useCallback((): void => {
     const cur = currentRef.current;

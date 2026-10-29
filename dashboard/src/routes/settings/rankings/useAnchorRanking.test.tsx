@@ -82,6 +82,24 @@ async function flush(ms = 0): Promise<void> {
   });
 }
 
+/** A response the test answers when it chooses (reads that land out of order). */
+function held<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve: (value: T) => void = () => undefined;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+/** A read whose one row names which read it is. */
+function readWithRow(display: string, jobView: RankingJobView | null = null): RankingReadResponse {
+  return { ...readOf(jobView), rows: [{ candidateId: 'contact-1', display, notScored: false, match: null }] };
+}
+
+function rankingEvent(over: Partial<{ status: 'queued' | 'running' | 'done' | 'failed'; batchesDone: number; batchCount: number }> = {}) {
+  return { anchorKind: 'unit' as const, anchorId: 'unit-1', generation: 'gen-1', status: 'running' as const, batchesDone: 1, batchCount: 2, ...over };
+}
+
 beforeEach(() => {
   vi.useRealTimers();
   vi.useFakeTimers();
@@ -319,5 +337,167 @@ describe('useAnchorRanking', () => {
     rerender(<Probe anchor={ANCHOR} includeOlder />);
     expect(current().readStatus).toBe('loading');
     expect(current().poolWindowDays).toBe(60);
+  });
+});
+
+// Code review R1 (FW1-4, FW1-5, FW1-6): reads answer in any order, so the hook
+// applies a full read only if it is the latest one issued, a job view only if
+// it was issued after the one on screen, never runs two job reads at once,
+// and clears a press error and the joined mark when the followed job ends.
+describe('useAnchorRanking - ordering', () => {
+  it('an EARLIER full read that answers after a later one is dropped: the final rows stay under Done (A2-1)', async () => {
+    const afterBatch0 = held<RankingReadResponse>();
+    const finalRead = held<RankingReadResponse>();
+    getRanking
+      .mockResolvedValueOnce(readOf(job({ status: 'running', batchCount: 2, batchesDone: [] })))
+      .mockReturnValueOnce(afterBatch0.promise)
+      .mockReturnValueOnce(finalRead.promise);
+    getRankingJob
+      .mockResolvedValueOnce({ job: job({ status: 'running', batchCount: 2, batchesDone: [0] }) })
+      .mockResolvedValueOnce({ job: job({ status: 'done', batchCount: 2, batchesDone: [0, 1] }) });
+    render(<Probe anchor={ANCHOR} />);
+    await flush();
+    // Parallel batches: the last batch's event and the done event arrive back to back.
+    act(() => {
+      handlers.onRankingUpdated?.(rankingEvent({ batchesDone: 1 }));
+      handlers.onRankingUpdated?.(rankingEvent({ status: 'done', batchesDone: 2 }));
+    });
+    await flush();
+    await flush();
+    expect(getRanking).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      finalRead.resolve(readWithRow('final'));
+    });
+    await flush();
+    expect(current().read?.rows[0]?.display).toBe('final');
+    await act(async () => {
+      afterBatch0.resolve(readWithRow('stale after batch 0'));
+    });
+    await flush();
+    expect(current().job?.status).toBe('done');
+    expect(current().read?.rows[0]?.display).toBe('final');
+  });
+
+  it('a job read issued before a press that answers after it is dropped: the new job stays queued and polled', async () => {
+    const stale = held<{ job: RankingJobView | null }>();
+    const finished = job({ status: 'done', batchCount: 1, batchesDone: [0] });
+    getRanking.mockResolvedValue(readOf(finished));
+    getRankingJob.mockReturnValueOnce(stale.promise).mockResolvedValue({ job: job({ generation: 'gen-2' }) });
+    startRanking.mockResolvedValue({ job: job({ generation: 'gen-2' }), joined: false });
+    render(<Probe anchor={ANCHOR} />);
+    await flush();
+    // A late event for the finished job reads the job (held); the admin presses Rank.
+    act(() => {
+      handlers.onRankingUpdated?.(rankingEvent({ status: 'done', batchesDone: 1, batchCount: 1 }));
+    });
+    await flush();
+    act(() => {
+      current().rank();
+    });
+    await flush();
+    expect(current().job).toMatchObject({ status: 'queued', generation: 'gen-2' });
+    await act(async () => {
+      stale.resolve({ job: finished });
+    });
+    await flush();
+    expect(current().job).toMatchObject({ status: 'queued', generation: 'gen-2' });
+    await flush(JOB_POLL_MS);
+    expect(getRankingJob).toHaveBeenCalledTimes(2);
+  });
+
+  it('job reads never overlap: a burst of events reads the job once, then once more after it answers', async () => {
+    const first = held<{ job: RankingJobView | null }>();
+    const running = job({ status: 'running', batchCount: 3, batchesDone: [] });
+    getRanking.mockResolvedValue(readOf(running));
+    getRankingJob.mockReturnValueOnce(first.promise).mockResolvedValue({ job: running });
+    render(<Probe anchor={ANCHOR} />);
+    await flush();
+    act(() => {
+      handlers.onRankingUpdated?.(rankingEvent());
+      handlers.onRankingUpdated?.(rankingEvent());
+      handlers.onRankingUpdated?.(rankingEvent());
+    });
+    await flush();
+    expect(getRankingJob).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      first.resolve({ job: running });
+    });
+    await flush();
+    await flush();
+    // One more read covers every event that arrived while the first was out.
+    expect(getRankingJob).toHaveBeenCalledTimes(2);
+  });
+
+  it('a Rank press answered before the first read keeps its job: the read does not replace it, and the poll runs (A2-2)', async () => {
+    const first = held<RankingReadResponse>();
+    getRanking.mockReturnValueOnce(first.promise);
+    startRanking.mockResolvedValue({ job: job(), joined: false });
+    getRankingJob.mockResolvedValue({ job: job() });
+    render(<Probe anchor={ANCHOR} />);
+    await flush();
+    act(() => {
+      current().rank();
+    });
+    await flush();
+    expect(current().job?.status).toBe('queued');
+    // The read was served before the press wrote the job.
+    await act(async () => {
+      first.resolve(readOf(null));
+    });
+    await flush();
+    expect(current().readStatus).toBe('ready');
+    expect(current().job?.status).toBe('queued');
+    await flush(JOB_POLL_MS);
+    expect(getRankingJob).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears the joined mark when the followed job ends (A2-8)', async () => {
+    getRanking.mockResolvedValue(readOf(null));
+    startRanking.mockResolvedValue({ job: job({ status: 'running', batchCount: 1 }), joined: true });
+    getRankingJob.mockResolvedValue({ job: job({ status: 'done', batchCount: 1, batchesDone: [0] }) });
+    render(<Probe anchor={ANCHOR} />);
+    await flush();
+    act(() => {
+      current().rank();
+    });
+    await flush();
+    expect(current().joined).toBe(true);
+    await flush(JOB_POLL_MS);
+    expect(current().job?.status).toBe('done');
+    expect(current().joined).toBe(false);
+  });
+
+  it('clears a refused press error when the job it followed ends (A2-8)', async () => {
+    getRanking.mockResolvedValue(readOf(null));
+    startRanking.mockRejectedValue(new ApiError(409, 'ranking_running', 'ranking_running', { error: 'ranking_running' }));
+    getRankingJob
+      .mockResolvedValueOnce({ job: job({ status: 'running', includeOlder: true, batchCount: 1 }) })
+      .mockResolvedValue({ job: job({ status: 'done', includeOlder: true, batchCount: 1, batchesDone: [0] }) });
+    render(<Probe anchor={ANCHOR} />);
+    await flush();
+    act(() => {
+      current().rank();
+    });
+    await flush();
+    expect(current().rankError).toBe('A ranking is running for this record. Try again when it finishes.');
+    await flush(JOB_POLL_MS);
+    expect(current().job?.status).toBe('done');
+    expect(current().rankError).toBeNull();
+  });
+
+  it('a refused press whose job finished before the follow-up read clears the error and reads the ranking again (A2-8)', async () => {
+    getRanking.mockResolvedValue(readOf(null));
+    startRanking.mockRejectedValue(new ApiError(409, 'ranking_running', 'ranking_running', { error: 'ranking_running' }));
+    getRankingJob.mockResolvedValue({ job: job({ status: 'done', includeOlder: true, batchCount: 1, batchesDone: [0] }) });
+    render(<Probe anchor={ANCHOR} />);
+    await flush();
+    act(() => {
+      current().rank();
+    });
+    await flush();
+    await flush();
+    expect(current().job?.status).toBe('done');
+    expect(current().rankError).toBeNull();
+    expect(getRanking).toHaveBeenCalledTimes(2);
   });
 });

@@ -166,6 +166,7 @@ import { createStatusTransitionRouter } from './statusTransition.js';
 import { createSystemRouter } from './system.js';
 import { createAiRunsRouter } from './aiRuns.js';
 import { createRankingsRouter, type RankingsRouterDeps } from './rankings.js';
+import { createAdminRankingsRouter, type AdminRankingsRouterDeps } from './adminRankings.js';
 import { createTodayRouter } from './today.js';
 import { createUnitsRouter } from './units.js';
 import { createToursRouter } from './tours.js';
@@ -372,6 +373,8 @@ export interface ApiRouterDeps {
   aiRunsRepo?: AiRunsRepo;
   /** WP1 B2a rankings router seams (spec D12) - injected in tests; the real claim / read / job read otherwise. */
   rankings?: Partial<Omit<RankingsRouterDeps, 'config' | 'logger'>>;
+  /** WP1 B2a admin rankings router seams (spec D12) - injected in tests. */
+  adminRankings?: Partial<Omit<AdminRankingsRouterDeps, 'config' | 'logger'>>;
   /** Durable phase journal shared by all suggestion resolution routes. */
   suggestionResolutionRepo?: SuggestionResolutionRepo;
   /** Process-boundary fault/clock seams used by focused recovery tests. */
@@ -914,6 +917,18 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       contactsRepo: contacts,
       unitsRepo: units,
       ...deps.rankings,
+    }),
+  );
+  // The Rankings page API (spec D12, D18): ADMIN ONLY - requireRole('admin')
+  // on every route inside the router, as /ai-runs.
+  router.use(
+    '/admin/rankings',
+    createAdminRankingsRouter({
+      config,
+      logger: deps.logger,
+      contactsRepo: contacts,
+      unitsRepo: units,
+      ...deps.adminRankings,
     }),
   );
   // Contact triage + CRUD (requireAuth — VAs triage; propagates conversation

@@ -368,6 +368,31 @@ describe('AiRunsSection - Notes lines', () => {
     expect(notes).toHaveTextContent('0 appended');
     expect(notes).toHaveTextContent('0 below the confidence floor');
   });
+
+  // WP1 B2a spec D14.2: the lines the retry guard dropped, after the floor
+  // count (the guard runs after the floor).
+  it('shows the lines already in the notes, right after the confidence floor count', () => {
+    useAiRun.mockReturnValueOnce({ detail: { ...detail, run: { ...detail.run, notedLines: 1, notesBelowFloor: 0, notesDemoted: 0, notesDuplicate: 2 } }, status: 'ready', retry: vi.fn() });
+    renderSection();
+    const notes = within(screen.getByRole('region', { name: 'Notes lines' }));
+    expect(notes.getByText('2 already in the notes')).toBeInTheDocument();
+    const items = notes.getAllByRole('listitem').map((li) => li.textContent);
+    expect(items.indexOf('2 already in the notes')).toBe(items.indexOf('0 below the confidence floor') + 1);
+  });
+
+  it('a run whose only count is notesDuplicate 0 still renders the region', () => {
+    useAiRun.mockReturnValueOnce({ detail: { ...detail, run: { ...detail.run, notedLines: 0, notesDuplicate: 0 } }, status: 'ready', retry: vi.fn() });
+    renderSection();
+    const notes = screen.getByRole('region', { name: 'Notes lines' });
+    expect(notes).toHaveTextContent('0 appended');
+    expect(notes).toHaveTextContent('0 already in the notes');
+  });
+
+  it('(PIN) a run recorded before B2a shows no duplicate row', () => {
+    useAiRun.mockReturnValueOnce({ detail: { ...detail, run: { ...detail.run, notedLines: 1, notesBelowFloor: 0, notesDemoted: 0 } }, status: 'ready', retry: vi.fn() });
+    renderSection();
+    expect(screen.getByRole('region', { name: 'Notes lines' })).not.toHaveTextContent('already in the notes');
+  });
 });
 
 // Self-QA SQA-1 (WP1 B1): the Notes lines region lists the 64-character

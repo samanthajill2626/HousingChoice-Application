@@ -389,6 +389,10 @@ export interface AiRunRecordView {
   notesBelowFloor?: number;
   /** B1 spec D4: note lines a demoted (unknown-speaker) run withheld. */
   notesDemoted?: number;
+  /** WP1 B2a spec D14.2: note lines the retry guard dropped as already in the
+   *  notes. Absent on runs that never reached apply and on runs before B2a.
+   *  Mirrors AiRunRecord.notesDuplicate. */
+  notesDuplicate?: number;
   /** WP1 B1 spec D5.3: of the appended lines, those naming a property in the
    *  PROPERTIES SENT block, and those carrying a street address that names
    *  none. Absent on runs that never reached apply and on runs before B1. */

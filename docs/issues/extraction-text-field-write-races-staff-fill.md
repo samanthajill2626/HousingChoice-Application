@@ -6,7 +6,8 @@ severity: low
 status: open
 area: app/extraction
 created: 2026-10-27
-refs: app/src/jobs/extraction.ts:438, app/src/services/extraction/apply.ts:498, app/src/repos/contactsRepo.ts:743
+updated: 2026-10-29
+refs: app/src/jobs/extraction.ts:438, app/src/services/extraction/apply.ts:498, app/src/repos/contactsRepo.ts:743, app/src/services/extraction/apply.ts:995
 ---
 
 **Problem.** Extraction decides whether a profile field is empty from the
@@ -34,3 +35,30 @@ ConditionalCheckFailedException retry once without those keys and their
 test whose first update throws that exception. Small, but it touches the
 shared write path for every field: schedule it with the next extraction
 change.
+
+**Update (2026-10-29, WP1 B2a code review R1, finding A2-4).** The Notes
+box is the same race, now with a cheap guard available. Extraction reads the
+contact (jobs/extraction.ts:486) before the message, org-list and sends reads
+and the model call (:673); apply then writes `notes` as the SNAPSHOT's box
+plus the new `[Auto - ...]` lines, with no `expect`
+(services/extraction/apply.ts:995). A staff edit-form save that lands in
+between (accepted, its stamp moved) is overwritten: the page then refetches
+on `suggestion.updated` and shows the Auto line without the staff text.
+Reproduced on a stub store by the reviewer. WP1 B2a closed the OTHER
+direction only (an edit form opened before an extraction append is refused
+409 `notes_stale`); spec section 4 keeps extraction's Notes write unguarded,
+and B2a's comment there now says so. Two things changed with B2a: every
+Notes writer stamps `notes_updated_at` in the same write, so the guard is
+one `expect`; and the box is ranking evidence (the tenant card carries it,
+and the attach step files its lines under the homes they name), so a lost
+staff line changes the next ranking.
+
+Suggested fix for the Notes box: write the append with
+`{ expect: { attr: 'notes_updated_at', value: <the snapshot's stamp, or null
+for never stamped> } }`; on ConditionalCheckFailedException re-read the
+contact (consistent), re-run `filterNoteLines` against the fresh box, and
+write once more (bounded: one retry, then log it and drop the lines). Test:
+an apply
+test whose first update throws ConditionalCheckFailedException and whose
+re-read returns the staff save; the second write holds the staff line plus
+the new line.

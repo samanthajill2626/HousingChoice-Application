@@ -438,8 +438,10 @@ export function ContactEditForm({
       patch.status = status;
     }
     // WP1 B2a D14.3: the Notes box diffs against ITS baseline (re-based by a
-    // notes_stale refusal), trimmed as the server stores it (C5); every save
-    // that sends notes sends the stamp that baseline holds.
+    // notes_stale refusal). The trim only decides whether the box changed (a
+    // whitespace-only edit is no change); the PATCH sends `notes` as typed and
+    // the server stores it as sent. Every save that sends notes sends the
+    // stamp that baseline holds.
     if (notes.trim() !== notesBaseline.text.trim()) {
       patch.notes = notes;
       patch.notes_expected_updated_at = notesBaseline.stamp;

@@ -965,10 +965,11 @@ export async function applyExtraction(
   // reads the snapshot and writes what it returns.
   let notedLines = 0;
   let appendedLines: string[] = [];
-  // Read-modify-write on the ctx.contact snapshot. This can lose a concurrent
-  // human notes edit made between the snapshot read and this write; the race
-  // is ACCEPTED (single scalar attribute, low write frequency) rather than
-  // paying for an optimistic-concurrency retry loop on a low-stakes field.
+  // Read-modify-write on the ctx.contact SNAPSHOT, read before the model
+  // call: the write below REPLACES the box with that snapshot plus the new
+  // lines, so a staff save that landed while the model ran is lost. The
+  // known, accepted residual (docs/issues/extraction-text-field-write-races-
+  // staff-fill.md); WP1 B2a spec section 4 keeps this write unguarded.
   const existing = typeof contact.notes === 'string' ? contact.notes.trim() : '';
   const prefix = autoPrefix(at);
   const filtered = filterNoteLines({
@@ -987,8 +988,10 @@ export async function applyExtraction(
     try {
       // WP1 B2a spec D14.3: the box's stamp rides the SAME write, so a contact
       // edit form opened before this append is refused 409 notes_stale
-      // instead of erasing the appended lines. No guard here: extraction
-      // appends to whatever the box holds.
+      // instead of erasing the appended lines. This write itself has no guard
+      // (spec section 4): it stores the snapshot plus the new lines, not what
+      // the box holds now, so a staff save made during the model call is
+      // overwritten (the residual above).
       await deps.contacts.update(contactId, { notes: nextNotes, notes_updated_at: at });
       notedLines = filtered.append.length;
       // WP1 B1 spec D5.3 (S5 C4): every line appended, model then system,

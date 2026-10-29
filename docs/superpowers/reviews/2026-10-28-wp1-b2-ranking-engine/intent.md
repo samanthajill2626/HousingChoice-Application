@@ -12,23 +12,32 @@ cut from main @404e039d.
 
 ## STATE
 
-Phase: LAUNCH GATE (2026-10-29). Plan v5 FINAL (d391a016; ~39.7k lines,
-85 tasks, rulings PR1-PR45). Plan review CLOSED after 4 rounds: 81
-findings, all accepted (plan-review/plan-adjudications.md). Mission block:
-mission-block.md. Nothing in flight.
-For Cameron at the launch gate (departures from spec text or his rules):
-PR18 (prompt fingerprint covers the schema), PR30 (real tables outside
-production: anthropic default, fake/console refused, worker poll off),
-PR37 (partial match writes keep the rows that landed), PR39 (two env
-example lines commented), PR45 (an accommodation covers a qualifications
-failure and the reverse; errs toward not capping), plus PR28's handback
-items. Hours firmed 24-30.
-NEXT: Cameron's launch-gate pick (Go AUTO / Go MANUAL / Revise). On a Go:
-compaction gate B (refresh this STATE, prove the replay, confirm the
-registration with --show, start the watcher, offer /compact), then
-dispatch abt:build-orchestrator with mission-block.md verbatim, arm the
-watchdog (1800 s checkpoints, 55 min ceiling - Cameron's rule), start the
-live.log mirror.
+Phase: BUILD (AUTO) - launched 2026-10-29. Plan v5 FINAL (d391a016; 85
+tasks, rulings PR1-PR45; review closed after 4 rounds, 81/81 accepted).
+Mission block: mission-block.md (dispatched verbatim).
+In flight: abt:build-orchestrator (background, model opus); watchdog
+(55-MINUTE checkpoints, `-ge 3300`, Cameron 2026-10-29; terminal and
+25-min stall exits as the skill); live.log mirror at
+.superpowers/sdd/live.log. Agent id and task ids: see the ledger
+(.superpowers/sdd/progress.md) and the planner's latest status line.
+Gate B: replay proven 2026-10-29 13:55 (last HUMAN = the Go); context
+142k after the 13:54 auto compaction, so no /compact offered.
+NEXT: supervise (wake on TERMINAL / STALL / CHECKPOINT, one status line
+per wake starting "**Checkpoint:**", re-arm one watchdog). On DONE:
+re-ground in the WHOLE replay, run the five gates on a quiet tree,
+dispatch the spec-conformance and plan-blind adversarial reviewers
+(model opus), self-QA, verdict "merge-ready PENDING Cameron's real-model
+runs" with the merge command. Never merge.
+
+Launch gate (2026-10-29), Cameron verbatim: "Okay, that looks good. Let's
+go auto with 55-minute watchdog timers." He approved PR18, PR30, PR37,
+PR39 and PR45 with that Go. Before it he asked whether the prompt
+fingerprint is the extraction or the matching model's: "we don't want the
+extraction model format change to mark matches out of date." Answer: it is
+the MATCHING model's only, and no prompt fingerprint feeds the out-of-date
+test (cards, pair history, rubric/examples version, model, age do); an
+extraction change makes a match stale only when it writes different data
+onto a record. Reviewers at handback check this holds.
 
 Earlier phase: SPEC APPROVED -> COMPACTION GATE A (2026-10-28). Cameron passed the
 spec gate on rev 6 (answers: spec section 10 and below). Charter

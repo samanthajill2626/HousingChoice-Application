@@ -12,7 +12,16 @@ cut from main @404e039d.
 
 ## STATE
 
-Phase: SPEC APPROVED -> COMPACTION GATE A (2026-10-28). Cameron passed the
+Phase: PLAN DRAFTING (2026-10-28, after compaction gate A was taken). The
+plan head (sections 0-4, binding) is at
+docs/superpowers/plans/2026-10-28-wp1-b2a-ranking-engine.md; six opus
+section drafters write S1-S8 to .superpowers/sdd/plan-draft-Sn.md (findings
+to plan-drafts/Sn-findings.md). NEXT: assemble the drafts, rule on their
+findings (plan section 4 assembly rulings), firm the hours, then the plan's
+adversarial review (two opus reviewers, plan + spec, cap 4), then the
+mission block and launch gate.
+
+Earlier phase: SPEC APPROVED -> COMPACTION GATE A (2026-10-28). Cameron passed the
 spec gate on rev 6 (answers: spec section 10 and below). Charter
 amendments 12, 13, 14 and Sam question 9 committed on this branch. This
 branch is B2a (the engine); B2b (the review dataset) gets its own spec and

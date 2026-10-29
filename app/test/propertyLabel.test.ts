@@ -20,7 +20,8 @@ describe('propertyLabel', () => {
   });
 
   // PR45: spec D5.1's "toSingleLine defense" is this one-space flattening in
-  // the leaf (prompt.ts toSingleLine, which writes " / ", cannot be imported).
+  // the leaf (lib/singleLine.ts toOneLine, which writes " / ", is not used:
+  // the leaf imports nothing).
   it('is ONE line: each part trimmed, newlines, tabs and space runs become one space', () => {
     const address: Address = { line1: '  123  Main St\r\n', line2: '\tApt\n2 ', city: ' Decatur ' };
     expect(propertyLabel({ address })).toBe('123 Main St Apt 2, Decatur');

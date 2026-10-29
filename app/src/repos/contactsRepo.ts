@@ -170,10 +170,13 @@ export interface ContactItem extends TenantMatchingInputValues {
   /**
    * Staff notes (Sam's item 22, 2026-09-26): free text staff write BY HAND on
    * the tenant file - a second box kept apart from `notes`, which the AI
-   * appends its dated "[Auto - <date>]" lines to. NOTHING machine-writes or
-   * machine-reads THIS field: not the import, not the seeds, not the public
-   * sign-up, not the transition service, not extraction (toProfile names its
-   * fields and omits it). PATCH only; `''` clears. Not a provenance field.
+   * appends its dated "[Auto - <date>]" lines to. NOTHING machine-WRITES this
+   * field: not the import, not the seeds, not the public sign-up, not the
+   * transition service, not extraction. PATCH only; `''` clears. Not a
+   * provenance field. Extraction never reads it either (toProfile names its
+   * fields and omits it). One machine READS it: the WP1 ranking card
+   * (services/ranking/cards.ts; charter 6.1, WP1 B2a spec D15) carries it as
+   * matching evidence.
    */
   staff_notes?: string;
   /**

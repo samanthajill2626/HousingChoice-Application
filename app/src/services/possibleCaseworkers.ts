@@ -9,7 +9,9 @@
 //   relationship    - a tenant another listed contact links as its caseworker
 //                     (a relationship row with a contactId whose role mentions)
 //   partner_no_role - a partner with no role
-// Only `role` counts; `role_title` and `staff_notes` are never read.
+// Only `role` counts; this list never reads `role_title` or `staff_notes`.
+// (Nothing machine-writes `staff_notes`; the WP1 ranking card machine-reads
+// it - charter 6.1, WP1 B2a spec D15.)
 import {
   hasAiCaseworkerNote,
   isCaseworker,

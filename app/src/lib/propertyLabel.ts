@@ -11,8 +11,9 @@
 //   line 1 or the city is empty after trimming (a degenerate label such as
 //   ", Decatur" would match half the Notes box). Line 2 is kept: units in one
 //   building share line 1 and differ only in line 2. Every control character
-//   and whitespace run becomes ONE space - spec D5.1's "toSingleLine defense",
-//   done here because the leaf cannot import prompt.ts (plan PR45).
+//   and whitespace run becomes ONE space - spec D5.1's "toSingleLine defense"
+//   (B1 plan PR45), done here, not by lib/singleLine.ts toOneLine (WP1 B2a
+//   PR10): toOneLine writes " / ", and this leaf imports nothing.
 // - labelMatches: does a line name that label? Both sides are folded the same
 //   way (lowercase; the characters . , # removed; whitespace runs collapsed;
 //   trimmed), then the folded label must occur in the folded line at a

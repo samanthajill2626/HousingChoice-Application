@@ -2381,8 +2381,9 @@ export interface Contact extends TenantMatchingInputValues, TenantMatchingInputS
   voucherSize?: number;
   notes?: string;
   /** Staff notes (item 22): the hand-written box on the tenant file, kept apart
-   *  from `notes` (which the AI appends dated lines to). Never machine-written
-   *  or machine-read. MIRRORS ContactItem.staff_notes. */
+   *  from `notes` (which the AI appends dated lines to). Never machine-written;
+   *  the ranking card machine-reads it (WP1 B2a spec D15). MIRRORS
+   *  ContactItem.staff_notes. */
   staff_notes?: string;
   /** ISO 8601 - server-stamped on every staff_notes write (a clear included).
    *  Renders as "Last edited <date>" while the box holds text. */

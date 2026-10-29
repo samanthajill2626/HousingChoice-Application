@@ -6,7 +6,8 @@ severity: low
 status: open
 area: app/ranking
 created: 2026-10-29
-refs: app/src/services/ranking/job.ts:511, app/src/services/ranking/job.ts:333, app/src/services/ranking/runBatch.ts:99, app/src/repos/rankingRunsRepo.ts:446, app/src/lib/dynamo.ts:60, app/src/worker.ts:618
+updated: 2026-10-29
+refs: app/src/services/ranking/job.ts:511, app/src/services/ranking/job.ts:333, app/src/services/ranking/runBatch.ts:99, app/src/repos/rankingRunsRepo.ts:446, app/src/lib/dynamo.ts:60, app/src/worker.ts:618, app/src/services/ranking/job.ts:613, app/src/services/ranking/job.ts:630, app/src/repos/rankingRunsRepo.ts:330
 ---
 
 **Problem.** Four lifecycle edges of the WP1 B2a ranking job, found by the
@@ -81,3 +82,51 @@ call whose job stopped is logged with its usage and cost) and left these.
 
 Source: docs/superpowers/reviews/2026-10-28-wp1-b2-ranking-engine/code-review/
 R1-adversarial-A1.md (A1-3, A1-4, A1-6, A1-10) and R1-adjudications.md.
+
+**Update (2026-10-29, WP1 B2a code review R2, findings R2-server-2 and
+R2-server-3).** Two more edges of the ranking poll (`pollRankingJobs`), both
+reproduced by the round 2 server reviewer on the repo fakes. Like the four
+above, neither loses a stored score.
+
+5. **A takeover or claim whose write lands but whose call throws starts no
+   job** (R2-server-2). An UpdateItem can commit and still throw at the
+   caller (a timeout or a socket error after the commit - the ambiguity the
+   matches store already names for its BatchWrite, plan PR37). For
+   `takeOver` (rankingRunsRepo.ts:330-361, which sets a NEW generation and
+   attempts + 1) the stale-lease loop's catch (job.ts:630-661) logs `ranking
+   poll: stale lease step failed` and returns the slot (the round 1 fix):
+   the record is then `running` on the generation this pass proposed, with
+   attempts 1 and a fresh lease that no process runs. About 90 s later
+   (`RANKING_LEASE_MS`) the next tick lists it, sees attempts >= 1, and
+   `markLeaseFailed` fails it "The ranking stopped before it finished. Press
+   Rank again." - with no model call made. An ambiguous `claimQueued`
+   (job.ts:613-627) is the milder twin: nothing runs the claimed record until
+   its lease lapses, and the takeover then runs it, spending the job's one
+   takeover (a deploy during that run then fails it). Takeovers happen when
+   DynamoDB is unhealthy (a dead worker, a failed renewal), which is when
+   ambiguous errors cluster. Suggested: in each loop's catch, before
+   returning the slot, read the record once (consistent); if it is `running`
+   on the generation this pass proposed (takeOver), or on the listed
+   generation with `startedAt` equal to this pass's `nowIso` (claimQueued),
+   start it with the slot already held (`startClaimedJob`) instead. Test: the
+   fake's `takeOver` applies, then throws; after pass 1 the driver was called
+   and the record is `done` (today pass 1 leaves the slot free and the record
+   running on the new generation with attempts 1 and no call, and pass 2 at
+   +91 s fails it).
+
+6. **A dead job is never taken over while every pass has queued work**
+   (R2-server-3). The poll runs the queued claims first, and they take every
+   free slot (job.ts:613-628); the stale loop then skips every attempts-0
+   record when no slot is free (job.ts:645-646). So while each tick finds a
+   queued press for the free slot, an OLDER press's dead job is never taken
+   over: its anchor reads "running" with frozen progress, and new presses on
+   it join a job nothing runs, while newer presses complete. It ends when
+   the queue drains (queued presses expire after `RANKING_QUEUE_EXPIRY_MS`).
+   Suggested: run the stale loop's takeovers before the queued claims (the
+   older press first). Test: one slot, a stale attempts-0 job and a new
+   queued press on every pass; today three passes each report `claimed: 1,
+   tookOver: 0` with the stale record still on its original generation;
+   after the fix the first pass reports `tookOver: 1`.
+
+Source (items 5 and 6): docs/superpowers/reviews/2026-10-28-wp1-b2-ranking-engine/
+code-review/R2-server.md and R2-adjudications.md.

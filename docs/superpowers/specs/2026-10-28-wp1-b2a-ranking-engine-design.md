@@ -1146,7 +1146,8 @@ two is not WP1; the `stage` field is there).
   and `RANKING_WORKER_POLL=off` for both children; the dev router gains
   `POST /__dev/ranking/tick`.
 - Units, listing_sends, tours, placements, the org list: READ only.
-  `placementsRepo` gains `hasActivePlacementForOtherTenant`;
+  `placementsRepo` gains `hasActivePlacementForOtherTenant`; `unitsRepo`
+  gains `getManyByIds(ids, { requireComplete })` (full items);
   the pool calls `orgNames.checkScalarWrite` per authority name.
 - B1's `TENANT_MATCHING_INPUTS` gains `completeness`; its dashboard
   mirror and drift test follow.

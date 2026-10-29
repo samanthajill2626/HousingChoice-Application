@@ -53,3 +53,26 @@ source, polling, the e2e lane) - round 2 required.
 | B13 expired queued never ends; join a finished job; includeOlder on tenant anchors | ACCEPT | D7, D9 |
 | B15 ai_runs table comment | ACCEPT | D11 |
 | B17 transcript folding changes; old multi-line duplicate | ACCEPT | D14.1, section 5 |
+
+## Round 2 (spec rev 2 at 5b97ac07; revised to rev 3)
+
+Reviewer A continued (re-review charge), with reviewer B's report handed
+over. Report: R2-review.md (12 findings: 4 MEDIUM, 8 LOW). Every finding
+ACCEPTED. Decisions changed: yes (the prompt bound, the tenant
+fingerprint's content, expired-queue handling, the merge gate's rule,
+voucher_program) - round 3 required.
+
+| Finding | Ruling | Change in rev 3 |
+|---|---|---|
+| R2-1 outcome entries always listed = unbounded prompt; Q2 stale | ACCEPT | D2.3: 8 in all, outcome entries first; feedback of an unlisted entry goes back to notes; seen-set read cost stated; Q2 |
+| R2-2 fingerprint omits card content (summaries, labels) - reverses charter 10.3 | ACCEPT | D13: outcome-bearing entries carry unitId, label, summary, declined, tours; only sends-only entries left out (the charter's own exception). The re-attach edge (first send of a property a Notes line already names) is ACCEPTED as changing the fingerprint once, since the card's meaning changes; no charter amendment needed |
+| R2-3 expired queued records undefined in the poll; 120 s too short | ACCEPT | D7: RANKING_QUEUE_EXPIRY_MS 10 min; the poll marks expired queued records failed first; "Waiting for a free slot" |
+| R2-4 gate still fails on noise (about 100 comparisons) | ACCEPT (contested A4/B6.2 ruling) | D17: two stages, a stage-one miss re-run five more times, failure only on the eight-run result; cap counts compared with slack |
+| R2-5 "production's cap code" overstated | ACCEPT | D17: production's cap function on per-run flags; stored suppression not exercised there |
+| R2-6 tour fields in the fingerprint unspecified | ACCEPT | D13: status, outcome, scheduled time only |
+| R2-7 jobRunId = requestId breaks the context contract | ACCEPT | D7: fresh context carrying requestId, no jobRunId |
+| R2-8 landlord:<key> flag survives switch-off or own value | ACCEPT | D10: open only while the field is on the current card |
+| R2-9 stale text (matchKeys, registry type, header item, compile variants) | ACCEPT | fixed |
+| R2-10 results[] cannot know the match write; cap of an old run undefined | ACCEPT | D11: cappedAtRun; matchesWritten set by a second update |
+| R2-11 reader test vs examples.ts and the fake driver | ACCEPT | D2.1: card keys are the list labels; the two files exempt |
+| R2-12 voucher_program a disability proxy | ACCEPT | D2.1: excluded with agency's reason |

@@ -1,10 +1,11 @@
 # WP1 B2a Ranking engine - design
 
-Status: DRAFT revision 2 (2026-10-28). Rev 2 folds in design review
+Status: DRAFT revision 3 (2026-10-28). Rev 2 folded in design review
 round 1 (two reviewers, 41 findings, all accepted after checking the
-code; adjudications in the records' design-review/adjudications.md).
+code); rev 3 folds in round 2 (12 findings, all accepted).
+Adjudications: the records' design-review/adjudications.md.
 Charter: docs/superpowers/specs/2026-10-24-wp1-matching-charter-design.md,
-as amended through section 20 item 13. B2 is split (item 13): this branch
+as amended through section 20 item 14. B2 is split (item 13): this branch
 is B2a, the engine; B2b, the review dataset, follows on its own branch.
 This slice implements charter sections 5 (pool), 6.1-6.3 (cards,
 properties seen, pair history), 7 (ranker, rubric, completeness, output
@@ -214,14 +215,19 @@ Tenant card, included: `firstName`, `lastName` (names stay, charter 7.2),
 `tenure`, `pets`, `evictions`, `status`, `voucher_expiration_date`,
 `customFields`, `created_at` (as a date), `notes` (arranged, D2.3),
 `staff_notes`, `preferences_notes` (a preference text the seed worlds
-carry; any stored value is matching evidence), `voucher_program` and
-`rta_expiration_date` (voucher facts), and every key named in B1's
+carry; any stored value is matching evidence), `rta_expiration_date` (a
+voucher deadline), and every key named in B1's
 `TENANT_MATCHING_INPUTS` whose source is `field`. Those four keys are
 added to the registry by mapping over the list, never spelled out in
 ranking code (the registry's type is keyed on the typed attributes MINUS
 `TenantMatchingInputKey`, plus the list's keys), so a source moving to
 Notes changes one list; B1's reader test (`tenantMatchingInputsReaders`)
-gains the ranking directory in its scan.
+gains the ranking directory in its scan. On the card each of these
+inputs is keyed by the list entry's `label`, not its attribute name.
+Two files are exempt from the scan because naming an input is their
+point: `examples.ts` (synthetic cards, which use the labels anyway) and
+the fake driver, which reads the maximum portion and the area preference
+by key to apply its fixed rules.
 Derived and added: `lastHeardFrom` as a bucket (this week = under 7 days,
 this month = under 30, one to three months = under 90, older, never;
 charter 9.1) and `propertiesSeen` (D2.3).
@@ -236,7 +242,9 @@ bookkeeping (`imported_from`, `imported_at`, `display_name`),
 `caseworker`, `caseworker_review`, `caseworker_conversion` (other
 people), `agency` (the importer writes it on tenants, import/apply.ts:
 1003-1012; the org list's agencies include behavioral-health providers,
-so it can stand in for a disability), `ai_mode`, `lead_status`,
+so it can stand in for a disability), `voucher_program` (for the same
+reason: HUD program names such as Mainstream or Non-Elderly Disabled
+point to a disability), `ai_mode`, `lead_status`,
 `origin`, every `*_source` provenance key, `last_heard_from_at` and
 `last_reached_out_at` (the bucket replaces the first),
 `staff_notes_updated_at`, `notes_updated_at` (D14), public sign-up
@@ -315,11 +323,15 @@ legacy `sentAt` fallback follow `isListed`), with each share told apart as
 source, unbounded; the attach step and the fingerprint (D13) work over
 the whole seen set.
 
-What the prompt shows is bounded: every entry that carries an outcome
-(a decline, a tour or a feedback line) is always listed; entries that
-carry only sends fill the remaining slots up to `RANKING_SEEN_MAX`
-(default 8 in all), newest send first. Listed entries are ordered by
-their latest activity, newest first. Each entry reads as one unit:
+What the prompt shows is bounded to `RANKING_SEEN_MAX` entries (default
+8, in all): entries that carry an outcome (a decline, a tour or a
+feedback line) come first, newest activity first; entries that carry only
+sends fill any remaining slots, newest send first. An outcome entry past
+the bound is not listed, and its feedback lines go back into the card's
+`notes`, so no feedback is lost to the bound. Reading the seen set costs
+one `listByContact`, one `listByTenant` and one units BatchGet for the
+whole set (100 keys per call), whatever its size. Each listed entry reads
+as one unit:
 
 - `label` (`propertyLabel`) and a SHORT summary of that property: beds,
   baths, rent (range or final), area, subzone, voucher sizes, pets
@@ -358,7 +370,8 @@ neither included nor excluded. Because both item types carry an index
 signature, it checks three sources:
 
 1. Type level: the registries are typed
-   `Record<KnownKeys<ContactItem>, ...>` / `Record<KnownKeys<UnitItem>, ...>`
+   `Record<Exclude<KnownKeys<ContactItem>, TenantMatchingInputKey>, ...>`
+   (the list's keys mapped in, D2.1) / `Record<KnownKeys<UnitItem>, ...>`
    plus the untyped keys (KnownKeys strips the index signature), so a new
    typed attribute does not compile until classified.
 2. Writer keys: the attributes each writer stores that are not typed - the
@@ -598,8 +611,8 @@ index keys below.
 - The claim (`POST .../rank`): one conditional put that succeeds when no
   record exists, or the record is `done` or `failed`, or it is `queued`
   past `queuedExpiresAt`. It writes `queued`, a new `generation`,
-  `attempts: 0`, the request's correlation id and traceparent, and
-  `queuedExpiresAt = now + max(4 x WORKER_POLL_INTERVAL_MS, 120 s)`. A
+  `attempts: 0`, the press's request id and traceparent, and
+  `queuedExpiresAt` (below). A
   press that loses the write reads the record (consistent): if it is
   now `done` or `failed` (the job finished in between), the press
   retries the claim once; if it is live and its `includeOlder` equals the
@@ -607,9 +620,16 @@ index keys below.
   apply), the press JOINS it (202 with the current record, `joined:
   true`); otherwise it is refused, 409 `ranking_running`, "A ranking is
   running for this record. Try again when it finishes."
-- An unclaimed queued record past `queuedExpiresAt` reads as `expired`
-  (derived on read, D9): "The ranking was not picked up. Press Rank
-  again." The page stops polling on it; a press reclaims it.
+- `queuedExpiresAt = requestedAt + RANKING_QUEUE_EXPIRY_MS` (default
+  600000, ten minutes: longer than a normal wait when every job slot is
+  busy). While queued the page shows "Waiting for a free slot". The
+  poll never starts a queued record past its expiry: each tick first
+  marks such records `failed` with "The ranking was not picked up. Press
+  Rank again." (a conditional update on the generation that also
+  removes the index keys), so a dead record never sits at the head of
+  the queue. Between the expiry and that tick the read derives
+  `expired` with the same message (D9), the page stops polling, and a
+  press reclaims the record.
 - Index keys (`byEntity`, sparse): a queued record carries
   `entityKey = rankjobs#queued`, `sortKey = requestedAt`; a running one
   `entityKey = rankjobs#running`, `sortKey = leaseExpiresAt`; done and
@@ -635,10 +655,10 @@ index keys below.
     the generation; a renewal that fails stops the job.
 - Context: the record stores the press's `requestId` and
   `traceparent`. Each job runs inside a FRESH `runWithContext` (not
-  nested in the tick's, so no `pollRunId`) with `jobRunId` set to the
-  press's `requestId` and the stored `traceparent`, so the logger's
-  correlation id (`jobRunId ?? pollRunId ?? ...`, logger.ts:248) on
-  every job line equals the press's. The traceparent is carried the way
+  nested in the tick's, so no `pollRunId` and no `jobRunId`) carrying
+  the press's `requestId` and the stored `traceparent`, so the logger's
+  correlation id (`jobRunId ?? pollRunId ?? requestId ?? ...`,
+  logger.ts:248) on every job line equals the press's. The traceparent is carried the way
   job envelopes carry it (jobs.ts:192, 309); whether OTel spans parent on
   it is whatever that existing path does, not a B2a claim.
 - The generation check: before every model call and every write
@@ -779,8 +799,11 @@ no TTL. Dismissal fields are reserved (`dismissedAt`, `dismissedBy`,
 - Raised: unlawful flags are merged across a job's batches by property
   and field; a batch writes a flag record when none is open for that
   property and field (an open one keeps its first raising run).
-- Open: the field's current text still hashes to `textHash`. Closed on
-  read when it does not (the text was edited); no unit writer knows about
+- Open: the field is on the property's CURRENT card and its text there
+  still hashes to `textHash`. Closed on read otherwise: the text was
+  edited, or (for a `landlord:<key>` flag) the landlord card switch is
+  off or the property now records its own value for that item, so the
+  landlord default is no longer on the card. No unit writer knows about
   flags. A closed record is overwritten if the model raises the flag
   again.
 - While open, that field caps no pair of that property (D9), including
@@ -800,7 +823,10 @@ Every model call (one per batch) is a ranking run:
 omitted with `inputOmitted: true` if the item would exceed 350 KB),
 `handles` (each `c<n>` with its candidate id and display as sent),
 `results[]` (this run's own parsed output per candidate: score, reasons,
-unknowns, failed requirements, flags, and whether a match was written),
+unknowns, failed requirements, flags, and `cappedAtRun`, the cap as
+computed when the run finished from its own output and the flags open
+then), `matchesWritten` (set after the batch's match write, by a second
+conditional update of the run; absent means the write did not finish),
 `droppedUnlawfulFlags`, `environment` (the deployment's environment
 name), `expires_at` (180 days, `RANKING_PAIR_TTL_DAYS`).
 
@@ -837,7 +863,8 @@ updated for the new families. Ranking runs carry no conversation.
   and va. This is what the page polls.
 - `GET /api/admin/rankings/runs?from&to&anchorKind&anchorId&cursor` and
   `GET /api/admin/rankings/runs/:runId` (with its pairs read by key from
-  `matchKeys`, and the job's open flags), `GET
+  the run's own `results[]` and, per pair, the current match's `runId`
+  for the "since re-scored" mark, and the property's open flags), `GET
   /api/admin/rankings/cost?from&to` (totals by ISO week and by
   environment). Admin only (`requireRole('admin')`).
 - Event `ranking.updated { anchorKind, anchorId, generation, status,
@@ -857,21 +884,27 @@ serialization.
 - `unitCard`: the property card as sent (landlord defaults included
   when the switch is on).
 - `tenantCard`: NOT the card as arranged for the prompt, because the
-  arrangement depends on sends (order, the bound, which lines attach
-  under a newly sent property). It is the hash of: the tenant card's own
-  fields with `notes` and `propertiesSeen` removed; the Notes box text
-  as stored (every feedback line is a Notes line, so a new feedback line
-  or a staff edit changes it, wherever it would be arranged); and, for
-  every property in the unbounded seen set that has a decline or a tour,
-  `{ unitId, declined, tours }`, sorted by `unitId`. Send dates, the
-  seen-set membership itself, the bound, the order and the attach result
-  are not in it. So a bare new send, a re-send, an eviction from the
-  listed entries and a line re-attaching under a newly sent property all
-  change nothing; a decline, a tour or a feedback line about ANY
-  property changes every match of that tenant (charter 10.3 as
-  amended). Recency enters only as its bucket. The seen summary of a
-  property is not in it either: a property's own edits reach the
-  property's matches through `unitCard`.
+  arrangement depends on sends (order, the bound). It is the hash of:
+  the tenant card's own fields with `notes` and `propertiesSeen` removed;
+  the Notes box text as stored (every feedback line is a Notes line, so
+  a new feedback line or a staff edit changes it, wherever it would be
+  arranged); and, for every property in the unbounded seen set that
+  carries an outcome (a decline, a tour or an attached feedback line),
+  `{ unitId, label, summary, declined, tours }` sorted by `unitId`, where
+  `tours` keeps only each tour's `status`, `outcome` and scheduled time
+  (never roster, reminder or bookkeeping fields, which change with no
+  outcome). Send dates, entries that carry only sends, the bound and the
+  order are not in it. So the card's content still decides the
+  fingerprint (charter 10.3) except for sends with no outcome, which B2
+  leaves out as the charter says: a bare new send, a re-send and an
+  eviction from the listed entries change nothing; a decline, a tour or
+  a feedback line about ANY property, or an edit to a seen property's
+  label or summary, changes every match of that tenant. One edge is
+  accepted: the FIRST send of a property that a Notes line already names
+  turns that line into feedback on a seen home, so that send changes the
+  fingerprint once (the card's meaning did change; it needs a line
+  naming a home before the home was ever sent, toured or signed up for).
+  Recency enters only as its bucket.
 - `pairHistory`: the declined record and the tours; never the send dates
   (age covers time since the last send).
 
@@ -981,16 +1014,26 @@ and a `gate-run-commands.md` sheet in the records:
      (never capped; an accommodation flag in at least two of three runs),
      and a property whose qualifications say "no kids" (flagged unlawful
      in at least two of three runs; never capped).
-   - Tolerance (Q5), per swap and direction: the mean score moves by at
-     most 5 points, and the cap result by majority of the three runs is
-     the same for base and variant. A band change within 5 points is not
-     a failure (a boundary is not a bias). The script measures the
-     base-versus-base re-run spread for every base pair; when that spread
-     exceeds 5 points the pair's result is INCONCLUSIVE, which fails the
-     gate as "decide" rather than passing it, and Cameron decides.
+   - Tolerance (Q5), per swap and direction, in two stages so that
+     about a hundred comparisons do not fail on noise alone. Stage one:
+     three runs each of base and variant; the swap passes when the mean
+     score moves by at most 5 points and the base and variant cap counts
+     (out of three) differ by at most one. A swap that misses stage one
+     is re-run five more times each (stage two) and FAILS only if, over
+     all eight runs, the mean still moves by more than 5 points or the
+     cap rate differs by more than 3 of 8. A band change within 5 points
+     is never a failure (a boundary is not a bias). The script also
+     measures the base-versus-base re-run spread for every base pair;
+     when that spread exceeds 5 points the pair's result is
+     INCONCLUSIVE, which fails the gate as "decide" rather than passing
+     it, and Cameron decides.
+   - Each run's cap is computed by production's cap function (D9) fed
+     that run's own failed requirements and flags; the property-wide
+     suppression by STORED unlawful flags (D10) is not exercised here
+     (its own tests cover it; the "no kids" control covers the raising).
    - It writes the full result, verbatim, as a mission record and exits
-     0 only on a pass. Estimated spend under six dollars (both
-     directions).
+     0 only on a pass. Estimated spend under ten dollars (both
+     directions, stage two included).
 3. Batch timing (charter 19): `--timing` on the same script scores one
    synthetic 40-candidate batch three times and records latency and
    tokens. The Rankings page shows progress per batch whatever it says;
@@ -1033,6 +1076,7 @@ RUNBOOK: `RANKING_DRIVER` (production `anthropic`, else `console`),
 `RANKING_MAX_OUTPUT_TOKENS` (16000), `RANKING_CALL_TIMEOUT_MS` (120000),
 `RANKING_BATCH_SIZE` (40), `RANKING_BATCH_CONCURRENCY` (4),
 `RANKING_MAX_CONCURRENT_JOBS` (2), `RANKING_LEASE_MS` (90000),
+`RANKING_QUEUE_EXPIRY_MS` (600000),
 `RANKING_POOL_WINDOW_DAYS` (90), `RANKING_MAX_POOL` (300),
 `RANKING_SEEN_MAX` (8), `RANKING_MAX_AGE_DAYS` (7),
 `RANKING_PAIR_TTL_DAYS` (180), `RANKING_PRIORITY_STRENGTH`
@@ -1098,7 +1142,8 @@ two is not WP1; the `stage` field is there).
   `ANTHROPIC_API_KEY` for the anthropic ranking driver.
 - Dashboard: the Rankings tab, routes and components; the edit form's
   Notes guard; the run detail's new count.
-- Scripts: `extraction-schema-compile-check.ts` (`ranking` variant),
+- Scripts: `extraction-schema-compile-check.ts` (two `ranking` variants,
+  landlord switch off and on),
   `ranking-counterfactual-check.ts` (new).
 - Docs: RUNBOOK (ranking operations: drivers, config, the price table,
   the check commands, "Changing a structured-output schema" naming the
@@ -1158,9 +1203,12 @@ two is not WP1; the `stage` field is there).
   unlawful flag suppresses, closed flag does not, a landlord default
   counts as recorded, `landlord:<key>` matches `<key>`); out of date
   (each reason; a bare send changes nothing, including a re-send that
-  re-orders, a ninth send that pushes an outcome-less entry off, and a
-  first send of a property a Notes line already names; a decline, tour
-  or feedback line on another property does; a failed batch does not
+  re-orders and a ninth send that pushes an entry off the listed ones; a
+  decline, tour or feedback line on another property does, and so does
+  an edit to a seen property's label or summary; a tour's reminder or
+  roster change does not; the accepted edge (the first send of a
+  property a Notes line already names changes it once) is pinned; a
+  failed batch does not
   flag a pair re-scored since by the other anchor); sort both directions
   with each priority strength; not ranked yet and not scored; the
   ceiling on the read; the 150-tenant read budget measured.
@@ -1231,8 +1279,10 @@ at plan time.
   the charter's rule; WP3 replaces the attach step.
 - Q2. Properties seen carries a short summary of each home (beds, baths,
   rent, area, subzone, voucher sizes, pets policy), not its whole card,
-  and lists at most 8: every home with an outcome or feedback always,
-  then the newest bare sends. Charter 6.2 says "that property's card
+  and lists at most 8: homes with an outcome or feedback first (newest
+  activity first), then the newest bare sends; feedback on a home past
+  the 8 stays in the card's general notes. Charter 6.2 says "that
+  property's card
   details"; whole cards would make a 40-tenant call several times larger.
   Recommendation: the summary.
 - Q3. A pool over 300 fails the ranking with a message rather than

@@ -13,7 +13,7 @@
   `docs/superpowers/reviews/2026-10-28-wp1-b2-ranking-engine/`.
 - Spec review: 4 rounds, 63 findings, 0 rejected -
   `docs/superpowers/reviews/2026-10-28-wp1-b2-ranking-engine/design-review/adjudications.md`.
-- Status: PLAN v4 (2026-10-29): drafts reconciled (36 IRs, PR12-PR28); plan review round 1 (50 findings, PR29-PR39) and round 2 (24 findings, PR40-PR44) folded in. Sections 0-4 and 13 are BINDING and
+- Status: PLAN v4 (2026-10-29): drafts reconciled (36 IRs, PR12-PR28); plan review round 1 (50 findings, PR29-PR39) round 2 (24 findings, PR40-PR44) and round 3 (4 findings, PR45) folded in. Sections 0-4 and 13 are BINDING and
   written by the planner; slice sections 5-12 (S1-S8) are opus section drafts
   assembled verbatim (findings in `plan-drafts/`). Section 4 (planner
   rulings PR1-PRnn) wins over any slice text it contradicts. "Plan section
@@ -568,6 +568,20 @@ decisions and win over any slice text that still disagrees.
 - PR44 (R2F11) FA5 REVERSED: an accommodation flag may name any property
   card field (spec D5's enum); it is stored on the match as returned. Only
   a flag whose field belongs to a requirement item affects the cap (PR40).
+
+### Plan review round 3 ruling (adjudications: `plan-review/plan-adjudications.md`)
+
+- PR45 (R3F1) For ACCOMMODATION flags only, `qualifications` joins every
+  cap-eligible requirement item: an accommodation on any key of the Pets
+  or Evictions item also covers a failed `qualifications`, and an
+  accommodation on `qualifications` covers a failed key of either item.
+  Unlawful flags stay per field (PR40). The rubric's two lines are
+  reconciled into one: raise the accommodation on EVERY field that states
+  the covered requirement, and list none of them failed. S8's third
+  control is unchanged (its rule is only in `qualifications`); a capOf
+  test covers the both-places shape. Listed for Cameron with R3F2: the
+  rule can lift an unrelated failure stated in the same qualifications
+  text, always toward not capping.
 
 ## 5. S1 - The Notes box
 

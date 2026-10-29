@@ -203,3 +203,34 @@ found R2F1 = R2B1. 23 accepted, 1 contested ruling reversed (FA5).
 ## Round 2 decision count
 
 Decisions changed: PR40-PR44 (5). Round 3 follows (the cap is 4).
+
+## Round 3 (2026-10-29) - the two continued reviewers
+
+R3-back.md: 2 findings, both precision; no decision changed, no ruling
+contested. R3-front.md: 2 findings; one contests how PR41 was built.
+
+| ID | Sev | Finding (short) | Ruling | Slice |
+|---|---|---|---|---|
+| R3F1 | MED | PR41 is text-only: the cap still treats `qualifications` as its own item, and the rubric gives two instructions for the commonest shape (No pets checkbox plus qualifications text repeating it); a model that names `no_pets` and also fails `qualifications` still caps an assistance-animal tenant | ACCEPT option (a) - PR45 | S4, S8 |
+| R3F2 | LOW | an accommodation on `qualifications` also lifts an unrelated failure stated in the same text (pets and evictions in one qualifications line) | ACCEPT - no fix possible at field granularity; listed for Cameron with PR45 (the error falls on the side of not capping: the failure is still a reason against, only the forced Weak is lifted) | head |
+| R3B1 | LOW | S8.4's per-direction count line still expects 18, should be 21 | ACCEPT | S8 |
+| R3B2 | LOW | RUNBOOK "Reading a ranking that went wrong" lacks the PR36 / PR38 / PR42 / PR43 job messages; its "not scored" bullet points at a run detail a putRun failure never writes; S8.8's copy cross-check grep misses them | ACCEPT | S8 |
+
+## Round 3 decision-changing ruling (copied into plan section 4)
+
+- PR45 (R3F1) For ACCOMMODATION flags only, `qualifications` joins every
+  cap-eligible requirement item: an accommodation on any key of the Pets
+  or Evictions item also covers a failed `qualifications`, and an
+  accommodation on `qualifications` covers a failed key of either item.
+  Unlawful flags stay per field (PR40). The rubric's two lines are
+  reconciled into one: raise the accommodation on EVERY field that states
+  the covered requirement, and list none of them failed. S8's third
+  control is unchanged (its rule is only in `qualifications`); a capOf
+  test covers the both-places shape. Listed for Cameron with R3F2: the
+  rule can lift an unrelated failure stated in the same qualifications
+  text, always toward not capping.
+
+## Round 3 decision count
+
+Decisions changed: PR45 (1, narrow, in `capOf` and the rubric). Round 4
+(the cap) reviews only that change and the precision fixes.

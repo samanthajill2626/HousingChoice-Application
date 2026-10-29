@@ -43,6 +43,8 @@ describe('VAPID config', () => {
       // email-channel-v1: ses is the email default in production and requires a
       // sender identity; console neutralizes that gate (this test is about VAPID).
       EMAIL_DRIVER: 'console',
+      // WP1 B2a: production requires the key for the ranking driver.
+      ANTHROPIC_API_KEY: 'sk-test-key',
     } as NodeJS.ProcessEnv);
     expect(isPushConfigured(cfg)).toBe(false);
   });

@@ -5,7 +5,9 @@ import { loadConfig, parseExtractionFactMinConfidence } from '../src/lib/config.
 const base = { CF_ORIGIN_SECRET: 's' };
 
 // Full production wiring so loadConfig gets past the CF/job-delivery/auth
-// fail-fast gates; extraction defaults (disabled in prod) then need no key.
+// fail-fast gates. Extraction is disabled in prod by default, but the WP1 B2a
+// ranking driver requires ANTHROPIC_API_KEY in production, so the base
+// carries one; the no-key case below removes it.
 // EMAIL_DRIVER=console neutralizes the email-channel-v1 ses sender-identity
 // gate (ses is the email default in production).
 const prodBase = {
@@ -20,6 +22,7 @@ const prodBase = {
   GOOGLE_CLIENT_ID: 'gid',
   GOOGLE_CLIENT_SECRET: 'gsecret',
   OAUTH_ALLOWED_DOMAINS: 'example.org',
+  ANTHROPIC_API_KEY: 'sk-test-key',
 };
 
 describe('AI extraction config', () => {
@@ -73,7 +76,7 @@ describe('AI extraction config', () => {
   });
 
   it('throws when enabled + anthropic driver + no key in production', () => {
-    expect(() => loadConfig({ ...prodBase, AI_EXTRACTION_ENABLED: 'true' })).toThrow(
+    expect(() => loadConfig({ ...prodBase, AI_EXTRACTION_ENABLED: 'true', ANTHROPIC_API_KEY: undefined })).toThrow(
       /ANTHROPIC_API_KEY/,
     );
   });

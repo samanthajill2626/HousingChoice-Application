@@ -5,7 +5,9 @@
 // and the M1.3 auth wiring (SESSION_SECRET + GOOGLE_CLIENT_ID/SECRET +
 // OAUTH_ALLOWED_DOMAINS) are mandatory and startup throws without them; when
 // MESSAGING_DRIVER resolves to `twilio`, all TWILIO_* credentials are
-// mandatory too. Locally a dev placeholder / console driver / in-memory job
+// mandatory too. In production the ranking driver is always anthropic, so
+// ANTHROPIC_API_KEY is mandatory there as well (WP1 B2a spec D6), checked last.
+// Locally a dev placeholder / console driver / in-memory job
 // path / unconfigured OAuth is allowed so the dev loop boots with no .env
 // present.
 
@@ -380,9 +382,12 @@ export interface AppConfig extends RankingConfig {
    */
   extractionFactMinConfidence: number;
   /**
-   * Anthropic API key (operator secret) the extraction driver authenticates
-   * with. Required only when extraction is ENABLED with the anthropic driver in
-   * production (loadConfig fails fast on that combination). Never log.
+   * Anthropic API key (operator secret) the extraction and ranking drivers
+   * authenticate with. Required in production whatever AI_EXTRACTION_ENABLED
+   * says: the ranking driver is anthropic on every deployed stack (WP1 B2a
+   * spec D6; parseRankingConfig checks it last). When extraction is ENABLED
+   * with the anthropic driver in production, the extraction gate fails fast on
+   * a missing key first. Never log.
    */
   anthropicApiKey?: string;
   /**
@@ -841,6 +846,41 @@ export function parseRankingConfig(env: NodeJS.ProcessEnv, nodeEnv: string): Ran
     rankingChoice(env, 'RANKING_WORKER_POLL', ['on', 'off'] as const, onRealTablesOutsideProduction ? 'off' : 'on') ===
     'on';
 
+  // Production rules (spec D6). Both AWS stacks run NODE_ENV=production,
+  // hosted dev included. The fake and console drivers write made-up scores, and
+  // charter 7.4 says a default or guessed score is never written, so a deployed
+  // stack ranks only on the real model - which makes ANTHROPIC_API_KEY required
+  // there whatever AI_EXTRACTION_ENABLED says (both stacks already hold one).
+  if (nodeEnv === 'production' && rankingDriver !== 'anthropic') {
+    throw new Error(
+      `RANKING_DRIVER=${rankingDriver} is refused while NODE_ENV=production - refusing to start. ` +
+        'The fake and console ranking drivers write made-up scores, which a deployed matches store ' +
+        'must never hold. Use anthropic.',
+    );
+  }
+  // PR30: the same harm outside production on real tables (live local dev
+  // against hosted dev's matches store). The local-tables lanes keep both.
+  if (onRealTablesOutsideProduction && rankingDriver !== 'anthropic') {
+    throw new Error(
+      `RANKING_DRIVER=${rankingDriver} is refused on real tables (no local DYNAMODB_ENDPOINT) - ` +
+        'refusing to start. The fake and console ranking drivers write made-up scores, which a real ' +
+        'matches store must never hold. Use anthropic, or point DYNAMODB_ENDPOINT at DynamoDB Local.',
+    );
+  }
+  if (nodeEnv === 'production' && !rankingWorkerPoll) {
+    throw new Error(
+      'RANKING_WORKER_POLL=off is refused while NODE_ENV=production - refusing to start. It is a ' +
+        'hermetic-lane seam; a deployed worker always runs the ranking poll.',
+    );
+  }
+  if (nodeEnv === 'production' && (env.ANTHROPIC_API_KEY ?? '').trim().length === 0) {
+    throw new Error(
+      'ANTHROPIC_API_KEY is required when NODE_ENV=production - the ranking driver is anthropic in ' +
+        'every deployed stack, whatever AI_EXTRACTION_ENABLED says. Hydrate it from Parameter Store ' +
+        '(npm run secrets:push). Refusing to start without it.',
+    );
+  }
+
   return {
     rankingDriver,
     aiRankingModel,
@@ -1204,10 +1244,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   }
   const extractionDriver: 'anthropic' | 'console' | 'fake' = extractionDriverRaw;
 
-  // Anthropic API key (operator secret). Required only when extraction is
-  // ENABLED with the anthropic driver in production - mirror the
+  // Anthropic API key (operator secret). The extraction gate: extraction ENABLED
+  // with the anthropic driver in production - mirror the
   // MESSAGING_DRIVER=twilio required-vars block: fail fast so a deployed stack
   // never runs enabled-but-keyless (every extraction run would 401 at runtime).
+  // parseRankingConfig (WP1 B2a) requires the key in production regardless of
+  // AI_EXTRACTION_ENABLED and runs last, so with extraction enabled this
+  // extraction message is the one a missing key shows.
   const anthropicApiKey = env.ANTHROPIC_API_KEY;
   if (nodeEnv === 'production' && aiExtractionEnabled && extractionDriver === 'anthropic' && !anthropicApiKey) {
     throw new Error(

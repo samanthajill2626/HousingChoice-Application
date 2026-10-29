@@ -313,3 +313,114 @@ describe('ranking config on real tables outside production (PR30)', () => {
     expect(loadConfig({ ...live })).toMatchObject(rest);
   });
 });
+
+// --- Production (spec D6; WI6) -------------------------------------------------
+// Full production wiring so loadConfig gets past the CF / job-delivery / auth
+// gates (configAiExtraction.test.ts's prodBase), plus the key the ranking
+// driver now needs.
+const prodBase = {
+  NODE_ENV: 'production',
+  CF_ORIGIN_SECRET: 's',
+  MESSAGING_DRIVER: 'console',
+  EMAIL_DRIVER: 'console',
+  JOBS_QUEUE_URL: 'https://sqs.example/q',
+  SCHEDULER_TARGET_ARN: 'arn:aws:sqs:us-east-1:0:q',
+  SCHEDULER_ROLE_ARN: 'arn:aws:iam::0:role/r',
+  SESSION_SECRET: 'a-real-prod-session-secret',
+  GOOGLE_CLIENT_ID: 'gid',
+  GOOGLE_CLIENT_SECRET: 'gsecret',
+  OAUTH_ALLOWED_DOMAINS: 'example.org',
+  ANTHROPIC_API_KEY: 'sk-test-key',
+};
+
+describe('ranking config in production (spec D6; WI6)', () => {
+  it('boots with the key: the anthropic driver and the ranking poll on', () => {
+    expect(loadConfig({ ...prodBase })).toMatchObject({
+      rankingDriver: 'anthropic',
+      rankingWorkerPoll: true,
+      aiRankingModel: 'claude-sonnet-5-5',
+    });
+    expect(loadConfig({ ...prodBase, RANKING_DRIVER: 'anthropic', RANKING_WORKER_POLL: 'on' }).rankingDriver).toBe(
+      'anthropic',
+    );
+  });
+
+  it.each(['fake', 'console', ' FAKE '])('refuses RANKING_DRIVER=%s (made-up scores in a real matches store)', (driver) => {
+    expect(() => loadConfig({ ...prodBase, RANKING_DRIVER: driver })).toThrow(
+      /RANKING_DRIVER=(fake|console) is refused while NODE_ENV=production/,
+    );
+  });
+
+  it('refuses RANKING_WORKER_POLL=off (a hermetic-lane seam)', () => {
+    expect(() => loadConfig({ ...prodBase, RANKING_WORKER_POLL: 'off' })).toThrow(
+      /RANKING_WORKER_POLL=off is refused while NODE_ENV=production/,
+    );
+  });
+
+  it.each([
+    ['unset', undefined],
+    ['empty', ''],
+    ['blank', '   '],
+  ])('requires ANTHROPIC_API_KEY whatever AI_EXTRACTION_ENABLED says (key %s)', (_label, key) => {
+    for (const enabled of [undefined, 'false', 'no']) {
+      expect(
+        () => loadConfig({ ...prodBase, ANTHROPIC_API_KEY: key, AI_EXTRACTION_ENABLED: enabled }),
+        `AI_EXTRACTION_ENABLED=${String(enabled)}`,
+      ).toThrow(/ANTHROPIC_API_KEY is required when NODE_ENV=production - the ranking driver is anthropic/);
+    }
+  });
+
+  it('(PIN) with extraction enabled, the extraction check still names the key first', () => {
+    expect(() => loadConfig({ ...prodBase, ANTHROPIC_API_KEY: undefined, AI_EXTRACTION_ENABLED: 'true' })).toThrow(
+      /ANTHROPIC_API_KEY is required when NODE_ENV=production, AI_EXTRACTION_ENABLED=true/,
+    );
+  });
+
+  it('(PIN) ANTHROPIC_API_BASE_URL stays refused in production', () => {
+    expect(() => loadConfig({ ...prodBase, ANTHROPIC_API_BASE_URL: 'http://localhost:9999' })).toThrow(
+      /ANTHROPIC_API_BASE_URL is set while NODE_ENV=production/,
+    );
+  });
+
+  it('on LOCAL tables outside production, fake, console and off are accepted and no key is needed', () => {
+    expect(loadConfig({ ...dev, RANKING_DRIVER: 'fake', RANKING_WORKER_POLL: 'off' })).toMatchObject({
+      rankingDriver: 'fake',
+      rankingWorkerPoll: false,
+    });
+    const test = loadConfig({ NODE_ENV: 'test', ...LOCAL, RANKING_DRIVER: 'console' });
+    expect(test.rankingDriver).toBe('console');
+    expect(test.anthropicApiKey).toBeUndefined();
+    expect(loadConfig({ ...dev, DYNAMODB_ENDPOINT: 'http://127.0.0.1:8000', RANKING_DRIVER: 'fake' }).rankingDriver).toBe(
+      'fake',
+    );
+  });
+
+  it('(PIN) the earlier production gates still fire first: the ranking rules run last', () => {
+    expect(() => loadConfig({ NODE_ENV: 'production' })).toThrow(/CF_ORIGIN_SECRET/);
+    const { SESSION_SECRET: _omitted, ...noSession } = prodBase;
+    expect(() => loadConfig({ ...noSession, ANTHROPIC_API_KEY: undefined })).toThrow(/SESSION_SECRET/);
+  });
+});
+
+describe('ranking config on REAL tables outside production (PR30)', () => {
+  it.each(['fake', 'console', ' Console '])('refuses RANKING_DRIVER=%s (made-up scores in a real matches store)', (driver) => {
+    expect(() => loadConfig({ ...live, RANKING_DRIVER: driver })).toThrow(
+      /RANKING_DRIVER=(fake|console) is refused on real tables/,
+    );
+    expect(() => loadConfig({ NODE_ENV: 'test', RANKING_DRIVER: driver })).toThrow(/refused on real tables/);
+    expect(() =>
+      loadConfig({ ...live, DYNAMODB_ENDPOINT: 'https://dynamodb.us-east-1.amazonaws.com', RANKING_DRIVER: driver }),
+    ).toThrow(/refused on real tables/);
+  });
+
+  it('the anthropic driver boots there without a key (the production key rule is unchanged)', () => {
+    expect(loadConfig({ ...live, RANKING_DRIVER: 'anthropic' })).toMatchObject({
+      rankingDriver: 'anthropic',
+      rankingWorkerPoll: false,
+    });
+  });
+
+  it('RANKING_WORKER_POLL=off is not refused there (it is the default)', () => {
+    expect(loadConfig({ ...live, RANKING_WORKER_POLL: 'off' }).rankingWorkerPoll).toBe(false);
+  });
+});

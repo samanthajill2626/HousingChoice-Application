@@ -189,6 +189,8 @@ describe('config fail-fast', () => {
       CF_ORIGIN_SECRET: 's',
       MESSAGING_DRIVER: 'console',
       EMAIL_DRIVER: 'console',
+      // WP1 B2a: production requires the key for the ranking driver.
+      ANTHROPIC_API_KEY: 'sk-test-key',
     };
     const jobDelivery = {
       JOBS_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/000000000000/hc-test-jobs',

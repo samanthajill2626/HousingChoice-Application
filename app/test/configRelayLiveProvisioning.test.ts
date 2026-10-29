@@ -39,6 +39,8 @@ const prodBase = {
   // Native group texting: a production twilio stack must declare the org's other
   // numbers (or the literal `none`) or config refuses to start.
   GROUP_IDENTITY_EXCLUDED_NUMBERS: 'none',
+  // WP1 B2a: production requires the key for the ranking driver.
+  ANTHROPIC_API_KEY: 'sk-test-key',
 };
 
 describe('relayLiveProvisioning resolution', () => {

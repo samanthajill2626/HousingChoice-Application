@@ -18,6 +18,8 @@ const prodBase = {
   GOOGLE_CLIENT_ID: 'gid',
   GOOGLE_CLIENT_SECRET: 'gsecret',
   OAUTH_ALLOWED_DOMAINS: 'example.org',
+  // WP1 B2a: production requires the key for the ranking driver.
+  ANTHROPIC_API_KEY: 'sk-test-key',
 };
 // prod wiring WITH the SES sender identity present (driver 'ses' boots clean).
 const prodEmail = {

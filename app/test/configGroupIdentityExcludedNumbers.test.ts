@@ -40,6 +40,8 @@ const prodBase = {
   TWILIO_CONVERSATIONS_SERVICE_SID: 'ISxxx',
   TWILIO_EVENTS_WEBHOOK_SECRET: 'evsecret',
   BUSINESS_PHONE_NUMBER: '+15555550100',
+  // WP1 B2a: production requires the key for the ranking driver.
+  ANTHROPIC_API_KEY: 'sk-test-key',
 };
 
 describe('GROUP_IDENTITY_EXCLUDED_NUMBERS - tier 1 (shape)', () => {

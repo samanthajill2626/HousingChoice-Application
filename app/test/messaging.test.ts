@@ -64,6 +64,8 @@ const JOB_DELIVERY_ENV = {
   GOOGLE_CLIENT_SECRET: 'test-google-client-secret',
   OAUTH_ALLOWED_DOMAINS: 'housingchoice.org,abt-industries.com',
   EMAIL_DRIVER: 'console',
+  // WP1 B2a: production requires the key for the ranking driver.
+  ANTHROPIC_API_KEY: 'sk-test-key',
 };
 
 function makeFakeTwilioClient() {

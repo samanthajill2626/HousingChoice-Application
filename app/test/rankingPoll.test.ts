@@ -125,6 +125,27 @@ describe('runDueRankings', () => {
     expect(slots.inUse()).toBe(0);
   });
 
+  it('a takeOver that THROWS frees its slot, so a later pass still claims new work (code review R1 A1-1)', async () => {
+    const runs = createRankingRunsFake();
+    seed(runs, runningJob({ leaseExpiresAt: isoAt(-1) }));
+    const slots = createRankingSlots(1);
+    const { deps, driver, capture } = makeDeps(runs, { slots });
+    // Throttling or a network error that outlived the SDK's own retries.
+    runs.repo.takeOver = async () => {
+      throw new Error('ThrottlingException');
+    };
+    expect(await runDueRankings(NOW, deps)).toEqual({ expired: 0, claimed: 0, tookOver: 0, failedStale: 0 });
+    expect(capture.lines.some((l) => l['msg'] === 'ranking poll: stale lease step failed')).toBe(true);
+    expect(slots.inUse()).toBe(0);
+    // A press made after the failed takeover is still claimed and run.
+    const fresh = queuedJob({ anchorId: 'unit-other', requestedAt: isoAt(30_000) });
+    seed(runs, fresh);
+    expect((await runDueRankings(NOW, deps)).claimed).toBe(1);
+    expect(runs.jobs.get(fresh.itemId)?.status).toBe('done');
+    expect(driver.calls).toHaveLength(1);
+    expect(slots.inUse()).toBe(0);
+  });
+
   it("takes over an expired lease ONCE: new generation, attempts 1, run again from the start; the dead attempt's run ids are kept (IR23)", async () => {
     const runs = createRankingRunsFake();
     seed(runs, runningJob({ leaseExpiresAt: isoAt(-1), batchCount: 3, batchesDone: [0], runIds: ['old-run'] }));

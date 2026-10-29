@@ -616,6 +616,10 @@ export async function runDueRankings(nowIso: string, deps: RankingJobDeps): Prom
 
   const stale = await deps.jobs.listExpiredLeases(nowIso, RANKING_POLL_LIST_LIMIT);
   for (const record of stale) {
+    // Declared outside the try, as in the queued loop, so a takeOver that
+    // THROWS returns its slot in the catch: a slot lost there would stay lost
+    // for the life of the process (code review R1 A1-1).
+    let release: (() => void) | undefined;
     try {
       if (record.attempts >= 1) {
         if (await deps.jobs.markLeaseFailed(record, { nowIso, message: MSG_STOPPED })) {
@@ -624,7 +628,7 @@ export async function runDueRankings(nowIso: string, deps: RankingJobDeps): Prom
         }
         continue;
       }
-      const release = deps.slots.tryAcquire();
+      release = deps.slots.tryAcquire();
       if (release === undefined) continue;
       const taken = await deps.jobs.takeOver(record, {
         nowIso,
@@ -638,6 +642,7 @@ export async function runDueRankings(nowIso: string, deps: RankingJobDeps): Prom
       summary.tookOver += 1;
       started.push(startClaimedJob(taken, release, deps));
     } catch (err) {
+      release?.();
       log.error({ anchorKind: record.anchorKind, anchorId: record.anchorId, err }, 'ranking poll: stale lease step failed');
     }
   }

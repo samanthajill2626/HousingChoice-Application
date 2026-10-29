@@ -8,6 +8,13 @@ import type {
   AiRunDetailResponse,
   AiRunListPage,
   AiRunScope,
+  RankingAnchorKind,
+  RankingCostResponse,
+  RankingJobResponse,
+  RankingReadResponse,
+  RankingRunDetailResponse,
+  RankingRunListPage,
+  RankJobResponse,
   AudienceFilter,
   BroadcastResults,
   BroadcastsPage,
@@ -3045,6 +3052,98 @@ export function listAiRuns(
 /** GET /api/ai-runs/:runId - one run plus its rehydrated message window. */
 export function getAiRun(runId: string, signal?: AbortSignal): Promise<AiRunDetailResponse> {
   return request<AiRunDetailResponse>(`/api/ai-runs/${encodeURIComponent(runId)}`, {
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+// --- Rankings (/api/rankings, /api/admin/rankings) --------------------------
+// WP1 B2a spec D9, D11, D12, D18. The press, the read and the job read are
+// admin AND va (requireAuth); the run log and the cost totals are admin only
+// (requireRole('admin')). `kind` is 'unit' or 'tenant' and needs no encoding.
+
+/** POST /api/rankings/:anchorKind/:anchorId/rank - 202 { job, joined }; 409
+ *  ranking_running (a live job with a different window); 404 anchor not
+ *  found; 429 over RATE_LIMIT_RANK_PER_MIN. */
+export function startRanking(
+  kind: RankingAnchorKind,
+  anchorId: string,
+  body: { includeOlder: boolean },
+): Promise<RankJobResponse> {
+  return request<RankJobResponse>(`/api/rankings/${kind}/${encodeURIComponent(anchorId)}/rank`, {
+    method: 'POST',
+    body: { includeOlder: body.includeOlder },
+  });
+}
+
+/** GET /api/rankings/:anchorKind/:anchorId - the ranking read (spec D9).
+ *  `includeOlder` is sent only when on (the server ignores it for a tenant
+ *  anchor). 404 anchor not found; 503 the anchor's own card could not be read. */
+export function getRanking(
+  kind: RankingAnchorKind,
+  anchorId: string,
+  params: { includeOlder: boolean },
+  signal?: AbortSignal,
+): Promise<RankingReadResponse> {
+  return request<RankingReadResponse>(`/api/rankings/${kind}/${encodeURIComponent(anchorId)}`, {
+    query: params.includeOlder ? { includeOlder: 'true' } : {},
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** GET /api/rankings/:anchorKind/:anchorId/job - the job record only; what
+ *  the page polls every 5 s while a job is queued or running (spec D12). */
+export function getRankingJob(
+  kind: RankingAnchorKind,
+  anchorId: string,
+  signal?: AbortSignal,
+): Promise<RankingJobResponse> {
+  return request<RankingJobResponse>(`/api/rankings/${kind}/${encodeURIComponent(anchorId)}/job`, {
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** GET /api/admin/rankings/runs - one page of ranking runs, newest first. */
+export function listRankingRuns(
+  params: {
+    from?: string;
+    to?: string;
+    anchorKind?: RankingAnchorKind;
+    anchorId?: string;
+    cursor?: string;
+    limit?: number;
+  } = {},
+  signal?: AbortSignal,
+): Promise<RankingRunListPage> {
+  return request<RankingRunListPage>('/api/admin/rankings/runs', {
+    query: {
+      from: params.from,
+      to: params.to,
+      anchorKind: params.anchorKind,
+      anchorId: params.anchorId,
+      cursor: params.cursor,
+      limit: params.limit,
+    },
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** GET /api/admin/rankings/runs/:runId - the run, its decompressed input and
+ *  its OWN pairs (spec D11). */
+export function getRankingRun(runId: string, signal?: AbortSignal): Promise<RankingRunDetailResponse> {
+  return request<RankingRunDetailResponse>(`/api/admin/rankings/runs/${encodeURIComponent(runId)}`, {
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** GET /api/admin/rankings/cost - totals by ISO week and environment. With
+ *  neither bound the server totals the last 12 ISO weeks (plan PR34), so the
+ *  page sends a bound only when the staff member set one. */
+export function getRankingCost(
+  params: { from?: string; to?: string } = {},
+  signal?: AbortSignal,
+): Promise<RankingCostResponse> {
+  return request<RankingCostResponse>('/api/admin/rankings/cost', {
+    query: { from: params.from, to: params.to },
     ...(signal !== undefined && { signal }),
   });
 }

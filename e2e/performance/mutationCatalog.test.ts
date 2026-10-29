@@ -381,7 +381,8 @@ describe('dashboard mutation inventory', () => {
     // /api/units/:unitId/recipients/:contactId/outcome).
     // + applyLandlordRequirements (property requirements, spec 2026-10-20 D8:
     // POST /api/contacts/:contactId/requirements/apply).
-    expect(catalogedRaw.filter((entry) => !entry.methodClass.includes('delegated_to_typed_request_options'))).toHaveLength(122);
+    // + startRanking (WP1 B2a spec D12: POST /api/rankings/:kind/:anchorId/rank).
+    expect(catalogedRaw.filter((entry) => !entry.methodClass.includes('delegated_to_typed_request_options'))).toHaveLength(123);
     expect(new Set(discoveredFingerprints).size).toBe(discoveredFingerprints.length);
     expect(new Set(checkedInFingerprints).size).toBe(checkedInFingerprints.length);
     expect(checkedInFingerprints).toEqual(discoveredFingerprints);

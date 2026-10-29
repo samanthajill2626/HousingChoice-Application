@@ -146,6 +146,10 @@ export const DASHBOARD_MUTATION_CATALOG: readonly DashboardMutationCatalogEntry[
   // Property requirements (spec 2026-10-20 D8): workflow_only - the Apply
   // dialog's "Update N properties" click is its only caller.
   entry(ENDPOINTS, 'applyLandlordRequirements', 'request:POST', '/api/contacts/:contactId/requirements/apply'),
+  // WP1 B2a rankings (spec D12): workflow_only - the Rankings page's Rank
+  // button is its only caller. The read, the job poll, the run log and the
+  // cost totals are GETs and are never catalogued.
+  entry(ENDPOINTS, 'startRanking', 'request:POST', '/api/rankings/:kind/:anchorId/rank'),
   entry(ENDPOINTS, 'subscribePush', 'request:POST', '/api/push/subscriptions'),
   entry(ENDPOINTS, 'unsubscribePush', 'request:DELETE', '/api/push/subscriptions'),
   entry(ENDPOINTS, 'sendPushTest', 'request:POST', '/api/push/test'),

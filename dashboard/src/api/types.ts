@@ -408,6 +408,317 @@ export interface AiRunDetailResponse {
   window: { messages: AiRunWindowMessage[] };
 }
 
+// --- Rankings (/api/rankings, /api/admin/rankings) ---------------------------
+// WP1 B2a spec D7, D9, D11, D12, D18. Mirrors the S6 route responses
+// (app/src/routes/rankings.ts, app/src/routes/adminRankings.ts) and the
+// records in app/src/repos/rankingRunsRepo.ts and matchesRepo.ts. This
+// package cannot import server types, so keep this wire contract in sync by
+// hand. Code says `unit`; staff copy says "property". The band, the cap and
+// every out-of-date reason arrive derived from the server - the dashboard
+// never computes one (one band, one cap: plan PR7).
+
+export type RankingAnchorKind = 'unit' | 'tenant';
+export interface RankingAnchorRef {
+  kind: RankingAnchorKind;
+  id: string;
+}
+export type RankingDirection = 'tenants_for_property' | 'properties_for_tenant';
+export type RankingBand = 'strong' | 'good' | 'possible' | 'weak';
+/** `expired` is derived on read for an unclaimed queued record (spec D7). */
+export type RankingJobStatus = 'queued' | 'running' | 'done' | 'failed' | 'expired';
+export type RankingAnchorNote = 'not_searching' | 'not_sendable' | 'not_available';
+export type RankingOutOfDateReason = 'card' | 'pairHistory' | 'age' | 'version' | 'failedBatch' | 'unverified';
+/** The reason source enum (spec D5). */
+export type RankingReasonSource =
+  | 'voucher_size' | 'authority' | 'rent' | 'area' | 'pets' | 'evictions'
+  | 'accessibility' | 'requirements' | 'preferences' | 'notes' | 'staff_notes'
+  | 'feedback' | 'history' | 'recency' | 'property_details' | 'other';
+export type RankingDriverKind = 'anthropic' | 'console' | 'fake';
+
+export interface RankingReason {
+  text: string;
+  source: RankingReasonSource;
+}
+
+/** A completeness flag (spec D3): a stable key and its staff label. */
+export interface RankingMissingFlag {
+  key: string;
+  label: string;
+}
+
+/** One entry of a match's `missing[]` (spec D8): a code flag carries its
+ *  key; a model unknown has none. */
+export interface RankingMissingItem {
+  key?: string;
+  text: string;
+}
+
+export interface RankingFairHousingFlag {
+  kind: 'unlawful' | 'accommodation';
+  field: string;
+}
+
+export interface RankingFailedBatch {
+  index: number;
+  candidateIds: string[];
+  failure: string;
+}
+
+/** A candidate the job left without a new match OUTSIDE failedBatches: the
+ *  model did not return it, or a record could not be read (plan PR13, PR38,
+ *  PR43). */
+export interface RankingNotScored {
+  candidateId: string;
+  reason: 'omitted' | 'unreadable';
+}
+
+/** The job record as the press, the read and the job read return it. */
+export interface RankingJobView {
+  status: RankingJobStatus;
+  generation: string;
+  includeOlder: boolean;
+  requestedAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  poolSize?: number;
+  /** 0 until the pool is built (plan IR31). */
+  batchCount: number;
+  /** Indexes of the batches that scored: the call succeeded and its matches
+   *  were written, all or some. A partial match write's index is in
+   *  failedBatches too (plan PR37, PR42). */
+  batchesDone: number[];
+  /** Every batch that left candidates without a new match through a failure
+   *  - the model call, the run write or the match write - each listing
+   *  exactly those candidates and its failure kind (plan PR42). */
+  failedBatches: RankingFailedBatch[];
+  /** Candidates left without a new match outside failedBatches (plan PR13). */
+  notScored: RankingNotScored[];
+  message?: string;
+}
+
+/** POST .../rank - 202. `joined` = the press joined a live job. */
+export interface RankJobResponse {
+  job: RankingJobView;
+  joined: boolean;
+}
+
+/** GET .../job - the job record only (one key read). */
+export interface RankingJobResponse {
+  job: RankingJobView | null;
+}
+
+export interface RankingMatchView {
+  score: number;
+  band: RankingBand;
+  capped: boolean;
+  capReason: 'requirement not met' | null;
+  for: RankingReason[];
+  against: RankingReason[];
+  missing: RankingMissingItem[];
+  failedRequirements: string[];
+  fairHousingFlags: RankingFairHousingFlag[];
+  /** Empty = current. */
+  outOfDate: RankingOutOfDateReason[];
+  computedAt: string;
+  runId: string;
+  model: string;
+}
+
+/** One pool member, in the server's sort order (spec D9). */
+export interface RankingRowView {
+  /** The tenant's contactId (property anchor) or the unitId (tenant anchor). */
+  candidateId: string;
+  display: string;
+  hasConsent?: boolean;
+  priority?: boolean;
+  /** No match, and the anchor's last job listed this candidate in a failed
+   *  batch or in its notScored list ("not scored - retry", plan PR13).
+   *  `match: null` with this false reads "not ranked yet". */
+  notScored: boolean;
+  match: RankingMatchView | null;
+  /** S6 also sends these (RankingReadRow); the page does not read them. */
+  tenantId?: string;
+  unitId?: string;
+  notRankedYet?: boolean;
+}
+
+/** An OPEN unlawful flag on a property in view (spec D10). */
+export interface RankingUnlawfulFlagView {
+  unitId: string;
+  field: string;
+  reason: string;
+  raisedAt: string;
+  runId: string;
+}
+
+export interface RankingAnchorView {
+  kind: RankingAnchorKind;
+  id: string;
+  display: string;
+  anchorNotes: RankingAnchorNote[];
+  missing: RankingMissingFlag[];
+  cardChanged: boolean;
+}
+
+/** GET /api/rankings/:anchorKind/:anchorId (spec D9). The anchor block is
+ *  always present, also over the pool ceiling (plan PR16). */
+export interface RankingReadResponse {
+  anchor: RankingAnchorView;
+  job: RankingJobView | null;
+  /** The configured RANKING_POOL_WINDOW_DAYS (plan PR26). */
+  poolWindowDays: number;
+  /** Present when the pool is above RANKING_MAX_POOL; rows is then empty.
+   *  The page checks it FIRST (plan PR16) and shows `message`, the pool's
+   *  own text, which S6 sends (plan review BA3). */
+  poolTooLarge?: { size: number; message: string };
+  rows: RankingRowView[];
+  flags: RankingUnlawfulFlagView[];
+}
+
+export interface RankingRunListRowLive {
+  runId: string;
+  expired: false;
+  startedAt: string;
+  finishedAt: string;
+  anchorKind: RankingAnchorKind;
+  anchorId: string;
+  /** Name or property label, resolved by the route; always sent, falling
+   *  back to the id (plan IR21). */
+  anchorDisplay: string;
+  direction: RankingDirection;
+  /** 0-based. */
+  batchIndex: number;
+  candidateCount: number;
+  driver: RankingDriverKind;
+  model: string;
+  costUsd: number;
+  latencyMs: number;
+  outcome: 'scored' | 'failed';
+  environment: string;
+}
+
+/** A pointer whose run is gone reads as expired (the aiRunsRepo precedent). */
+export type RankingRunListRow = RankingRunListRowLive | { runId: string; expired: true };
+
+/** GET /api/admin/rankings/runs - newest first, cursor paged. `incomplete`
+ *  = a run on this page could not be read even after a retry (plan PR34);
+ *  never a silent drop. */
+export interface RankingRunListPage {
+  runs: RankingRunListRow[];
+  nextCursor?: string;
+  incomplete?: true;
+}
+
+/** The stored ranking run (spec D11) less inputGzip, handles and results. */
+export interface RankingRunView {
+  runId: string;
+  anchorKind: RankingAnchorKind;
+  anchorId: string;
+  direction: RankingDirection;
+  jobGeneration: string;
+  batchIndex: number;
+  candidateCount: number;
+  driver: RankingDriverKind;
+  model: string;
+  rubricVersion: string;
+  examplesVersion: string;
+  promptFingerprint: string;
+  /** May be absent (plan IR35); the page guards it. */
+  usage?: { inputTokens: number; outputTokens: number; cacheReadInputTokens?: number };
+  costUsd: number;
+  latencyMs: number;
+  startedAt: string;
+  finishedAt: string;
+  outcome: 'scored' | 'failed';
+  failure?: string;
+  message?: string;
+  rawText?: string;
+  inputOmitted?: boolean;
+  /** Absent = the batch's match write did not finish (plan PR15). */
+  matchesWritten?: { count: number; at: string };
+  droppedUnlawfulFlags?: number;
+  environment: string;
+}
+
+/** One of the run's OWN results[] (what THIS run said), with its handle's
+ *  display and the current match's runId for the "since re-scored" mark
+ *  (plan PR14, IR19). A candidate the model did not return has
+ *  `returned: false` and no score or band. */
+export interface RankingRunPair {
+  candidateId: string;
+  handle: string;
+  display: string;
+  returned: boolean;
+  score?: number;
+  /** bandOf on the server, the run's own cap applied (plan PR7, PR14). */
+  band?: RankingBand;
+  cappedAtRun: boolean;
+  capReason?: 'requirement not met' | null;
+  for: RankingReason[];
+  against: RankingReason[];
+  unknowns?: string[];
+  /** The stored MERGED list: code flags, then the model's unknowns (PR14). */
+  missing: RankingMissingItem[];
+  failedRequirements: string[];
+  fairHousingFlags: RankingFairHousingFlag[];
+  /** The current match's runId; null when the pair has no match row. */
+  currentRunId: string | null;
+  /** S6 also sends it; the page derives the mark from currentRunId. */
+  sinceRescored?: boolean;
+}
+
+/** GET /api/admin/rankings/runs/:runId. `input` is the user message as sent,
+ *  decompressed by the server; null when it was omitted or not recorded. */
+export interface RankingRunDetailResponse {
+  run: RankingRunView;
+  anchorDisplay: string;
+  input: string | null;
+  pairs: RankingRunPair[];
+  flags: RankingUnlawfulFlagView[];
+  /** The current-match read was incomplete: every currentRunId is null. */
+  currentUnavailable?: true;
+  /** The property's open-flag read failed: `flags` is empty for that reason. */
+  flagsUnavailable?: true;
+}
+
+export interface RankingCostWeek {
+  /** ISO week, e.g. 2026-W44. */
+  week: string;
+  environment: string;
+  runs: number;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+}
+
+/** GET /api/admin/rankings/cost - totals by ISO week and environment. With
+ *  no from / to the server totals the last 12 ISO weeks (plan PR34). */
+export interface RankingCostResponse {
+  /** This deployment's environment name. */
+  environment: string;
+  weeks: RankingCostWeek[];
+  /** S6 always sends both; the page does not show them. */
+  totalUsd: number;
+  truncated: boolean;
+  /** A run in range could not be read even after a retry (plan PR34). */
+  incomplete?: true;
+}
+
+/** GET /api/events 'ranking.updated' (spec D12). Ids, status and batch
+ *  progress only - never a score, a name or a card field (the stream reaches
+ *  every dashboard). A HINT: the Rankings page also polls the job read and
+ *  never reads the counts here. Mirrors app/src/lib/events.ts
+ *  RankingUpdatedEvent. */
+export interface RankingUpdatedEvent {
+  anchorKind: RankingAnchorKind;
+  anchorId: string;
+  generation: string;
+  status: 'queued' | 'running' | 'done' | 'failed';
+  /** The COUNT of finished batches, scored or failed (plan IR27). */
+  batchesDone: number;
+  batchCount: number;
+}
+
 /** A CloudWatch alarm's state (DescribeAlarms StateValue, mapped). */
 export type SystemAlarmState = 'OK' | 'ALARM' | 'INSUFFICIENT_DATA';
 

@@ -12,21 +12,21 @@ cut from main @404e039d.
 
 ## STATE
 
-Phase: SPEC GATE (2026-10-28). Charter amendments 12, 13 (the split) and
-14 (Notes line breaks and drop count) committed on this branch. This
-branch is B2a (the engine); B2b (the review dataset) gets its own spec
-and branch after B2a merges.
-Spec: docs/superpowers/specs/2026-10-28-wp1-b2a-ranking-engine-design.md,
-rev 5. Design review CLOSED after round 4 (63 findings, 63 accepted, 0
-rejected; design-review/adjudications.md).
-Spec gate PARTLY answered (2026-10-28): Q1, Q3, Q5, Q6, Q7 settled (see
-"Spec-gate answers" below). WAITING ON: Q2 (summary vs full card for
-homes the tenant was sent - Cameron asked why) and Q4 (what LIF is -
-Cameron's understanding differs from the code's label; he may ask Sam).
+Phase: SPEC APPROVED -> COMPACTION GATE A (2026-10-28). Cameron passed the
+spec gate on rev 6 (answers: spec section 10 and below). Charter
+amendments 12, 13, 14 and Sam question 9 committed on this branch. This
+branch is B2a (the engine); B2b (the review dataset) gets its own spec and
+branch after B2a merges.
+Spec: docs/superpowers/specs/2026-10-28-wp1-b2a-ranking-engine-design.md
+(APPROVED rev 6). Design review closed (63/63 accepted;
+design-review/adjudications.md).
 Nothing in flight.
-NEXT: record his answers here and in the spec (section 10, spec-gate
-answers), then compaction gate A (register compact-resume, prove the
-replay, offer /compact), then the plan.
+NEXT: compaction gate A (register compact-resume, prove the replay, start
+the watcher, offer /compact). Then write the implementation plan (TDD,
+zero-context builder; invariant rule: enumerate every writer and reader
+of the matches store, the AI runs families, notes / notes_updated_at and
+the fingerprints), then its adversarial review (two opus reviewers,
+plan + spec), then the mission block and launch gate.
 
 ## What Cameron asked for (verbatim where wording matters)
 
@@ -210,3 +210,11 @@ area, can the agent look up which properties are close to that area?"
   (web search, a "properties near X" lookup). Charter 7.1 and 15.4 say
   no tools in WP1; the planner answered with the trade-offs and the
   in-scope alternative, and waits on Cameron.
+
+Final 2026-10-28, Cameron verbatim: "Alright lets try that and we'll have
+to do testing to see how that all works. If it becomes a bigger issue we
+can retest that."
+- Read as: no tools for the ranker in WP1 (charter 7.1 stands); test how
+  rankings handle location; revisit if it becomes a bigger issue. Filed
+  docs/issues/ranking-location-distance-on-cards.md (deferred).
+- SPEC GATE PASSED on rev 6.

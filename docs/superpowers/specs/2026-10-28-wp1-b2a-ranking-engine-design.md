@@ -1,6 +1,7 @@
 # WP1 B2a Ranking engine - design
 
-Status: DRAFT revision 6 (2026-10-28). Design review CLOSED after round 4.
+Status: APPROVED revision 6 (Cameron passed the spec gate 2026-10-28; answers in
+section 10). Design review CLOSED after round 4.
 Rev 6 records the spec-gate answers so far (Q2 full cards, Q4 LIF off). Rev 2 folded in design review
 round 1 (two reviewers, 41 findings, all accepted after checking the
 code); rev 3 folded in round 2 (12 findings, all accepted); rev 4 folded
@@ -615,8 +616,8 @@ schema discipline. Shape:
 - Price table: `AI_PRICE_TABLE` in config, defaulting to
   `{ "claude-sonnet-5-5": { in: 2, out: 10 }, "claude-opus-5-5":
   { in: 4, out: 20 } }` dollars per million tokens (the Claude API model
-  table as of 2026-10-06; marked UNVERIFIED in the code comment and on
-  Cameron's launch-gate list, as the B1 probe's table was), overridable
+  table as of 2026-10-06; confirmed by Cameron at the spec gate,
+  2026-10-28), overridable
   by an env JSON value parsed fail-fast; a ranking model with no price
   stops startup, because every run records its cost. Cost =
   `in * inputTokens / 1e6 + out * outputTokens / 1e6`, rounded to
@@ -1305,8 +1306,6 @@ two is not WP1; the `stage` field is there).
   in each environment before deploy. Ranking on hosted dev runs on dev's
   key, so a press there is spend on whatever that key bills (Cameron's
   existing arrangement for extraction on dev).
-- The default prices are unverified until Cameron confirms them at the
-  launch gate.
 - Merge gate: the five repo gates, then Cameron's real-model runs (D17),
   the counterfactual check passing (or Cameron deciding).
 - After deploy, ranking is live at once in that environment (no switch):
@@ -1358,3 +1357,25 @@ at plan time.
   refreshes on those edits but lets one send flag the tenant's matches
   (the first send of a home a Notes line already named), a charter
   amendment. Recommendation: the spec as written, no amendment.
+
+## 10. Spec-gate answers (Cameron 2026-10-28)
+
+The spec gate PASSED on revision 6. Answers, verbatim in the records'
+intent.md:
+
+- Q1 (whole Notes lines move under a home, staff lines included): keep.
+- Q2 (homes seen): full property cards, each distinct home written once
+  per call and referenced by handle (D2.3, D4). Cameron: what a tenant
+  disliked is only useful beside that home's specific facts.
+- Q3 (pool ceiling 300): keep; "may have to change later" (config).
+- Q4 (LIF): both LIF fields stay off the cards; what LIF is goes to Sam
+  (charter section 16, question 9).
+- Q5 (counterfactual tolerance): keep the numbers.
+- Q6 (prices): confirmed - $2 / $10 per million tokens for Sonnet 5.5,
+  $4 / $20 for Opus 5.5.
+- Q7 (sends never mark matches out of date; seen homes fingerprinted only
+  with a decline or tour): agreed, no charter amendment.
+- Tools for the ranker (raised by Cameron): none in WP1, as charter 7.1
+  says; test how the rankings handle location and revisit if it becomes
+  a bigger issue. The code-computed distance alternative is filed as
+  docs/issues/ranking-location-distance-on-cards.md.

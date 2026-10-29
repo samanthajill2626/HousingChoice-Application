@@ -23,11 +23,15 @@ import {
   PROPERTY_CARD_FIELDS,
   PROPERTY_FREE_TEXT_FIELDS,
   RANKED_REQUIREMENT_KEYS,
+  TENANT_CARD_FIELDS,
   includedFields,
   landlordTwin,
 } from './cardFields.js';
+import { DAY_MS, daysSince, instantMs } from './pairHistory.js';
 import { mapAuthorities, recordedVoucherSizes, unitVoucherSizes } from './pool.js';
-import type { Card } from './types.js';
+import { attachFeedback } from './seenFeedback.js';
+import type { SeenHome } from './seenSet.js';
+import type { Card, SendFact, TourProjection } from './types.js';
 
 export interface PropertyCardCtx {
   /** The organization list read once for this ranking (spec D1). */
@@ -171,4 +175,137 @@ export function propertyFacts(unit: UnitItem, ctx: PropertyCardCtx): PropertyFac
     if (typeof value === 'string' && FREE_TEXT_FIELDS.has(key)) freeTextByField[landlordTwin(key)] = value;
   }
   return { recordedRequirementKeys, freeTextByField };
+}
+
+// --- The tenant card (spec D2.1-D2.3) ----------------------------------------
+
+export interface TenantCardCtx {
+  now: Date;
+  /** RANKING_SEEN_MAX: how many properties-seen entries the card lists, in all. */
+  seenMax: number;
+  /** The UNBOUNDED seen set (seenSet.ts buildSeenSet). */
+  seen: readonly SeenHome[];
+}
+
+/** One listed properties-seen entry (spec D2.3). */
+export interface PropertiesSeenEntry {
+  /** The home's unitId - a REFERENCE the prompt replaces with the home's handle; never sent as is. */
+  home: string;
+  label: string;
+  sends: SendFact[];
+  daysSinceLastSend: number | null;
+  declined: { by: string; at: string } | null;
+  tours: TourProjection[];
+  /** The Notes lines that name this home. */
+  feedback: string[];
+}
+
+export type RecencyBucket = 'this week' | 'this month' | 'one to three months' | 'older' | 'never';
+
+export const TENANT_NOTES_KEY = 'notes';
+export const LAST_HEARD_FROM_KEY = 'lastHeardFrom';
+export const PROPERTIES_SEEN_KEY = 'propertiesSeen';
+
+/** Charter 9.1: this week (under 7 days), this month (under 30), one to three months (under 90), older, never. */
+export function recencyBucket(lastHeardFromAt: unknown, now: Date): RecencyBucket {
+  const at = instantMs(lastHeardFromAt);
+  if (at === undefined) return 'never';
+  const days = (now.getTime() - at) / DAY_MS;
+  if (days < 7) return 'this week';
+  if (days < 30) return 'this month';
+  if (days < 90) return 'one to three months';
+  return 'older';
+}
+
+function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** Newest first; an entry with no instant last. */
+function compareNewestFirst(a: string | null, b: string | null): number {
+  const left = instantMs(a);
+  const right = instantMs(b);
+  if (left === undefined && right === undefined) return 0;
+  if (left === undefined) return 1;
+  if (right === undefined) return -1;
+  return right - left;
+}
+
+interface ArrangedSeen {
+  notes: string | undefined;
+  entries: PropertiesSeenEntry[];
+}
+
+/**
+ * Spec D2.3: the attach step over the whole seen set, then the bound. Entries
+ * carrying an outcome (a decline, a tour, a feedback line) come first, newest
+ * activity first; bare sends fill the remaining slots, newest send first. A
+ * line naming a LISTED entry leaves the notes; a line naming only unlisted
+ * entries stays, so no feedback is lost to the bound.
+ */
+function arrangePropertiesSeen(notes: unknown, ctx: TenantCardCtx): ArrangedSeen {
+  const lines = attachFeedback(
+    notes,
+    ctx.seen.map((home) => ({ unitId: home.unitId, label: home.attachLabel })),
+  );
+  const feedbackByUnit = new Map<string, string[]>();
+  for (const line of lines) {
+    for (const unitId of line.unitIds) {
+      const list = feedbackByUnit.get(unitId) ?? [];
+      list.push(line.text);
+      feedbackByUnit.set(unitId, list);
+    }
+  }
+  const rows = ctx.seen.map((home) => ({ home, feedback: feedbackByUnit.get(home.unitId) ?? [] }));
+  const hasOutcome = (row: { home: SeenHome; feedback: string[] }): boolean =>
+    row.home.declined !== null || row.home.tours.length > 0 || row.feedback.length > 0;
+  const withOutcome = rows
+    .filter(hasOutcome)
+    .sort((a, b) => compareNewestFirst(a.home.activityAt, b.home.activityAt) || compareText(a.home.unitId, b.home.unitId));
+  const bare = rows
+    .filter((row) => !hasOutcome(row))
+    .sort((a, b) => compareNewestFirst(a.home.lastSendAt, b.home.lastSendAt) || compareText(a.home.unitId, b.home.unitId));
+  const listed = [...withOutcome, ...bare].slice(0, Math.max(0, Math.floor(ctx.seenMax)));
+  const listedIds = new Set(listed.map((row) => row.home.unitId));
+  const moved = lines.some((line) => line.unitIds.some((unitId) => listedIds.has(unitId)));
+  const general = lines.filter((line) => !line.unitIds.some((unitId) => listedIds.has(unitId))).map((line) => line.text);
+  // FB21: when no line moves, the Notes text stays as stored (trimmed), its
+  // line breaks and blank lines kept; only a box that lost lines is rebuilt.
+  const stored = typeof notes === 'string' ? notes.trim() : '';
+  return {
+    notes: moved ? (general.length > 0 ? general.join('\n') : undefined) : stored.length > 0 ? stored : undefined,
+    entries: listed.map(({ home, feedback }) => ({
+      home: home.unitId,
+      label: home.label,
+      sends: home.sends.map((send) => ({ ...send })),
+      daysSinceLastSend: daysSince(home.lastSendAt, ctx.now),
+      declined: home.declined === null ? null : { ...home.declined },
+      tours: home.tours.map((tour) => ({ ...tour })),
+      feedback: [...feedback],
+    })),
+  };
+}
+
+/** Spec D2.1-D2.3: the tenant card - included attributes, the matching inputs by label, the recency bucket, properties seen. */
+export function tenantCard(contact: ContactItem, ctx: TenantCardCtx): Card {
+  const arranged = arrangePropertiesSeen(contact[TENANT_NOTES_KEY], ctx);
+  const card: Card = {};
+  for (const [key, field] of includedFields(TENANT_CARD_FIELDS)) {
+    const value = key === TENANT_NOTES_KEY ? arranged.notes : storedValue(key, contact[key]);
+    if (value !== undefined) card[field.cardKey ?? key] = value;
+  }
+  card[LAST_HEARD_FROM_KEY] = recencyBucket(contact.last_heard_from_at, ctx.now);
+  card[PROPERTIES_SEEN_KEY] = arranged.entries;
+  return card;
+}
+
+/** The unitIds of a tenant card's listed properties-seen entries, in card order. */
+export function listedHomeIds(card: Card): string[] {
+  const listed = card[PROPERTIES_SEEN_KEY];
+  if (!Array.isArray(listed)) return [];
+  return listed.flatMap((entry: unknown) =>
+    entry !== null && typeof entry === 'object' && typeof (entry as PropertiesSeenEntry).home === 'string'
+      ? [(entry as PropertiesSeenEntry).home]
+      : [],
+  );
 }

@@ -33,10 +33,6 @@ const TC0 = '2026-06-01T13:30:00.000Z';
 // conversation row (A29 again): it must never displace Tasha as the newest
 // inbox row.
 const TS0 = '2026-06-01T13:20:00.000Z';
-// matches TTL: epoch seconds for 2026-09-01T00:00:00Z (far enough out that
-// DynamoDB Local's TTL sweep never deletes it mid-demo).
-const MATCH_EXPIRES_AT = 1_787_270_400;
-
 const IDS = {
   tenant: 'contact-tenant-0001',
   landlord: 'contact-landlord-0001',
@@ -441,19 +437,6 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       type: 'sms', direction: 'outbound', author: 'teammate', body: 'Legacy fixture.',
       ts: '2026-06-01T12:54:00.000Z', created_at: '2026-06-01T12:54:00.000Z',
     }, { kind: 'legacy' }),
-  ],
-  matches: [
-    {
-      tenantId: IDS.tenant,
-      unitId: IDS.unitA, // byUnit
-      fit_score: 0.91,
-      approval_likelihood: 0.84,
-      rank: 1,
-      status: 'shared',
-      portability_required: false,
-      expires_at: MATCH_EXPIRES_AT, // TTL attribute (epoch seconds)
-      generated_at: T0,
-    },
   ],
   placements: [
     {

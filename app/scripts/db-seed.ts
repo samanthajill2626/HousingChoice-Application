@@ -2,10 +2,12 @@
 //
 // Fixed IDs + plain PutItem = safe to re-run forever (same items overwrite
 // themselves; no duplicates). Data is realistic-but-fake (+1555 phones,
-// example.com emails) and deliberately exercises EVERY GSI in lib/tables.ts,
-// including the sparse placements tour_date index, the first-class
-// placementDeadlines items (byPlacement / byDueAt), and the matches TTL
-// attribute. IDs cross-reference coherently: the placement joins the seeded
+// example.com emails) and deliberately exercises the GSIs in lib/tables.ts,
+// including the sparse placements tour_date index and the first-class
+// placementDeadlines items (byPlacement / byDueAt). It writes no `matches`
+// row (WP1 B2a spec D8: only the ranking job writes that table, so its byUnit
+// index and TTL are exercised by the ranking suites, not the seed). IDs
+// cross-reference coherently: the placement joins the seeded
 // tenant + unit, its deadlines join the placement, the invoice bills the seeded
 // landlord, etc.
 // Targets DYNAMODB_ENDPOINT (default http://localhost:8000) — never AWS.

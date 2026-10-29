@@ -72,12 +72,12 @@ Rollback: remove ONLY the 502 and 504 `custom_error_response` blocks from `infra
 chosen backend. The launcher flags are orthogonal and compose freely: `--local`
 controls DynamoDB, `--mock` controls outbound comms. Behavior:
 
-| invocation                      | DynamoDB       | SMS               | email          |
-|---------------------------------|----------------|-------------------|----------------|
-| `npm run dev`                   | real hc-dev    | twilio (REAL)     | ses (REAL)     |
-| `npm run dev -- --mock`         | real hc-dev    | twilio -> fake    | console (stub) |
-| `npm run dev -- --local`        | DynamoDB Local | console (stub)    | console (stub) |
-| `npm run dev -- --local --mock` | DynamoDB Local | twilio -> fake    | console (stub) |
+| invocation                      | DynamoDB       | SMS               | email          | ranking                           |
+|---------------------------------|----------------|-------------------|----------------|-----------------------------------|
+| `npm run dev`                   | real hc-dev    | twilio (REAL)     | ses (REAL)     | anthropic (REAL), poll OFF        |
+| `npm run dev -- --mock`         | real hc-dev    | twilio -> fake    | console (stub) | anthropic (REAL), poll OFF        |
+| `npm run dev -- --local`        | DynamoDB Local | console (stub)    | console (stub) | console (offline scores), poll on |
+| `npm run dev -- --local --mock` | DynamoDB Local | twilio -> fake    | console (stub) | console (offline scores), poll on |
 
 Live mode requires `.env.dev` (the Twilio operator creds) to boot - without it
 the `twilio` driver refuses to start; use `--mock`/`--local`, or set
@@ -99,6 +99,21 @@ worker on the shared `hc-dev` `tourReminders` / `placementNudges` ladders
 alongside the DEPLOYED dev worker. The claim is atomic, so exactly one worker
 wins each rung - but it may be YOUR box, which now sends via REAL Twilio/SES. Use
 `--mock` or `--local` to avoid emitting real comms from a laptop.
+
+**CAVEAT - ranking on hc-dev (WP1 B2a).** On real hc-dev tables (`npm run dev`, with or without `--mock`)
+the ranking driver is `anthropic` and the laptop's worker does NOT run the ranking poll: a Rank press from
+your laptop queues a job that the DEPLOYED dev worker claims, scores on dev's `ANTHROPIC_API_KEY` and writes
+into hc-dev's matches. `console` and `fake` refuse to start there (they would write made-up scores into a
+real matches store), as they do in production. `--mock` does NOT stub ranking. Use `--local` for offline
+ranking with made-up `console` scores. "Local" means a LOOPBACK `DYNAMODB_ENDPOINT` here (localhost,
+127.0.0.1 or [::1] - what `--local` and the hermetic lanes use): for the ranking defaults any other endpoint
+(a docker service name, a LAN IP) counts as REAL tables, although the launcher (`scripts/dev.mjs`) treats
+any set endpoint as local mode. Such a run gets `anthropic` with the poll off and refuses `fake` /
+`console` - it fails safe; point it at a loopback host to rank offline. Never set `RANKING_WORKER_POLL` or
+`RANKING_DRIVER` in `.env`: an explicit value beats these defaults in every mode. The same refusal stops an
+operator script that loads the app config on real tables (import-apply, import-convert-groups, rail-verify,
+retirePoolNumbers, backfill-media-content-types): if the shell still carries `RANKING_DRIVER=fake` or
+`console`, the script refuses to start - unset it first (`Remove-Item Env:RANKING_DRIVER`).
 
 **CAVEAT - SMS kill-switch.** The `twilio` driver alone does NOT produce a real
 SMS: `SMS_SENDING_ENABLED` in `.env.dev` still gates actual sends (template
@@ -1331,9 +1346,11 @@ real RCS behavior** in the fake.
 
 ### Worker poll cadence (`WORKER_POLL_INTERVAL_MS`)
 
-One interval drives **five** due-row polls in `worker.ts`: tour reminders, placement
-nudges, roster actions, conversation-fact extraction, and group guardrails. Lowered
-from 60000 to **30000** on 2026-08-16 so a scheduled run starts nearer its due time.
+One interval drives **seven** polls in `worker.ts`: tour reminders, placement
+nudges, roster actions, conversation-fact extraction, group guardrails, the journal
+sweep and the AI ranking poll (WP1 B2a; a Rank press waits for the next tick before a
+worker claims its job - see "AI ranking (WP1 B2a)"). Lowered from 60000 to **30000**
+on 2026-08-16 so a scheduled run starts nearer its due time.
 
 The **tour auto-close** poll (2026-10-01) is NOT on this interval: it runs every 15
 minutes on its own code constant (`TOUR_AUTO_CLOSE_INTERVAL_MS` in
@@ -1345,10 +1362,11 @@ dev and prod were running the in-code default. `.env.dev.example` and
 `.env.prod.example` now carry `WORKER_POLL_INTERVAL_MS=30000` - sync the real `.env`
 files before deploying, or the env keeps whatever the code default is at that commit.
 
-Why halving is safe rather than twice the work: a tick with nothing due is a single
-Query per poll against a **sparse** `byDueAt` index that returns no rows, and every
-poll claims a row before acting, so overlapping ticks cannot double-fire. The cost is
-a handful of empty Queries a minute.
+Why halving is safe rather than twice the work: a tick with nothing due is a Query or
+two per poll against a **sparse** index that returns no rows (`byDueAt`; the ranking
+poll reads its two job partitions on `byEntity`; the journal sweep makes one refused
+claim on its once-a-day marker), and every poll claims a row before acting, so
+overlapping ticks cannot double-fire. The cost is a handful of empty Queries a minute.
 
 **Floor:** do not set it below `AI_EXTRACTION_DEBOUNCE_MS` (30000). The debounce
 exists to collapse a burst of inbound texts into one extraction run; polling faster
@@ -1467,7 +1485,7 @@ write one, and adds nothing to the Notes box. The run record counts the lines it
 | `AI_EXTRACTION_MODEL` | `claude-opus-4-8` | Model id for the anthropic driver. Deployed envs currently set `claude-sonnet-5-5`. Read "Changing `AI_EXTRACTION_MODEL`" just below before swapping it - the output budget and the thinking-off form are both model-sensitive. |
 | `AI_EXTRACTION_DEBOUNCE_MS` | `30000` | Sliding debounce: each inbound text slides the due time out this far, so a burst yields one run. Unparseable/non-positive -> WARN + default. |
 | `EXTRACTION_FACT_MIN_CONFIDENCE` | `0.7` | Confidence floor for Notes lines: a model line whose confidence is below it is not appended and is counted as `notesBelowFloor` in the run record. Must be a finite number with 0 < x <= 1, or the app and worker refuse to start (fail-fast). Not required to deploy - unset or blank (`EXTRACTION_FACT_MIN_CONFIDENCE=`, as `secrets:sync` writes a key new to the real file) means 0.7. |
-| `ANTHROPIC_API_KEY` | (unset) | Anthropic REST key. Required when `AI_EXTRACTION_ENABLED` and `EXTRACTION_DRIVER=anthropic` in production, or the config fails fast at boot. |
+| `ANTHROPIC_API_KEY` | (unset) | Anthropic REST key. Required in production whatever `AI_EXTRACTION_ENABLED` says (the ranking driver needs it since WP1 B2a - see "AI ranking (WP1 B2a)"); the config fails fast at boot without it. |
 
 **What extraction reads and writes since WP1 B1 (2026-10-26).** Four more tenant fields are
 extracted - Area preference, Maximum tenant portion, Accessibility need, Preferences and
@@ -1709,6 +1727,201 @@ Auto badge - no review. Layer 3 (demote-to-suggestion) only protects UNATTRIBUTE
 doc-verified (Twilio: parent leg = channel 1), so the risk is low - but confirm it empirically here
 before relying on voice attribution. Nothing writes until `AI_EXTRACTION_ENABLED` is on, so this gate
 sits comfortably ahead of any real extraction.
+
+### AI ranking (WP1 B2a)
+
+Ranking scores how well each **candidate** fits one **anchor** (a property or a tenant): code builds the
+anchor's **pool**, a **card** per record, and asks the model (one structured-output call per batch of up to
+`RANKING_BATCH_SIZE` candidates) for an absolute score and short reasons; code applies the Weak cap and the
+fair-housing flags and stores one **match** per tenant-property pair in the `matches` table (the
+**matches store**). Until B3's composer the ONLY way to call the model is a press of **Rank** on
+Settings > Rankings > "Rank this anchor" (the tab is admin only; the rank API itself also accepts a VA);
+opening a page reads stored matches and only says which are out of date. A press queues a ranking job, and
+the worker's ranking poll claims it on its next tick (`WORKER_POLL_INTERVAL_MS`, 30 s - see "Worker poll
+cadence"). **There is no on/off switch**: deploying B2a turns ranking on in that environment (charter item
+12). Design: `docs/superpowers/specs/2026-10-28-wp1-b2a-ranking-engine-design.md`.
+
+**Drivers** (`RANKING_DRIVER`):
+
+| Driver | Where | What it does |
+|---|---|---|
+| `anthropic` | production default; the only one a deployed stack accepts | the real call: `AI_RANKING_MODEL`, adaptive thinking at `RANKING_EFFORT`, the json_schema output, one SDK retry, a per-call timeout, no refusal fallback |
+| `console` | default on DynamoDB Local (`npm run dev -- --local`) | logs counts only (candidates, characters, batch index - never a name, an address or Notes text) and scores with the fake rules, stamping model `console` |
+| `fake` | tests, e2e, the hermetic lane | deterministic scores from the cards (start at 70, minus 25 per failed check it can read, plus 10 for the area) with three seams in a card's Notes: `[fake:fail-batch]`, `[fake:omit]`, `[fake:unlawful:<field>]`; stamps model `fake` |
+
+`console` and `fake` are REFUSED under `NODE_ENV=production` (both AWS stacks, hosted dev included), AND on
+real tables outside production (no LOOPBACK `DYNAMODB_ENDPOINT` - localhost, 127.0.0.1 or [::1]: a live
+`npm run dev`): either would write made-up scores into a real matches store. Every match and run records the
+model the driver actually used, so a `fake` or `console` match reads out of date wherever a real model is
+configured.
+
+**Environment** (all in `.env.<env>`, pushed via the [Secrets](#secrets) flow; every value parses fail-fast -
+a bad one stops the app and worker at startup; none is required to deploy):
+
+| Key | Default | Purpose |
+|---|---|---|
+| `RANKING_DRIVER` | `anthropic` in production and on real tables outside it (live `npm run dev`); `console` on DynamoDB Local (a loopback `DYNAMODB_ENDPOINT`) | the driver (above). Not set in `.env.example` (it would beat the mode default) |
+| `AI_RANKING_MODEL` | `claude-sonnet-5-5` | the model; must be `claude-sonnet-5-5` or `claude-opus-5-5` (the two that run adaptive thinking with an effort) and priced in `AI_PRICE_TABLE`, or startup stops |
+| `RANKING_EFFORT` | `low` | `output_config.effort`: `low`, `medium`, `high`, `xhigh` or `max` |
+| `RANKING_MAX_OUTPUT_TOKENS` | `16000` | `max_tokens`; thinking counts against it. Raise it if runs fail `truncated` |
+| `RANKING_CALL_TIMEOUT_MS` | `120000` | the per-call timeout; with one SDK retry a call can take twice this |
+| `RANKING_BATCH_SIZE` | `40` | candidates per model call (charter 7.1) |
+| `RANKING_BATCH_CONCURRENCY` | `4` | batches of one job run in parallel |
+| `RANKING_MAX_CONCURRENT_JOBS` | `2` | ranking jobs one worker process runs at once |
+| `RANKING_LEASE_MS` | `90000` | a running job's lease; renewed every third of it; one takeover after a lapse |
+| `RANKING_QUEUE_EXPIRY_MS` | `600000` | a queued job not picked up by then fails "The ranking was not picked up. Press Rank again." |
+| `RANKING_POOL_WINDOW_DAYS` | `90` | a property's pool holds tenants heard from within this many days (lifted by the "Include tenants not heard from in N days" box, N being this value) |
+| `RANKING_MAX_POOL` | `300` | a bigger pool fails "Pool too large to rank (N candidates)" and the read shows no rows - a cost bound that removes no candidate |
+| `RANKING_SEEN_MAX` | `8` | properties-seen entries listed on a tenant card |
+| `RANKING_MAX_AGE_DAYS` | `7` | a match older than this reads out of date |
+| `RANKING_PAIR_TTL_DAYS` | `180` | TTL of matches, runs, pointers and job records; must be at least `RANKING_MAX_AGE_DAYS` |
+| `RANKING_PRIORITY_STRENGTH` | `within_band` | how far a Priority property rises for a tenant anchor: `within_band`, `one_band_up`, `always_first` |
+| `RANKING_LANDLORD_CARD` | `false` | when true the property card carries the landlord of record's requirement defaults and notes (the property's own value wins); it changes every unit card, so every match reads out of date |
+| `RANKING_READ_CONCURRENCY` | `16` | parallel per-candidate reads of the ranking read |
+| `RATE_LIMIT_RANK_PER_MIN` | `6` | Rank presses per user per minute (429 beyond) |
+| `AI_PRICE_TABLE` | `{"claude-sonnet-5-5":{"in":2,"out":10},"claude-opus-5-5":{"in":4,"out":20}}` | dollars per million input / output tokens per model, as JSON; REPLACES the built-in table whole |
+| `RANKING_WORKER_POLL` | `on` in production and on DynamoDB Local; `off` on real tables outside production | whether the worker runs the ranking poll. Off on a live `npm run dev`, so a laptop never claims a hosted-dev ranking job (the deployed dev worker runs it); `off` is otherwise for the hermetic lanes and REFUSED in production. Not set in `.env.example` or `.env.dev.example`: an explicit value beats the mode default |
+
+**The price table and cost.** Every ranking run records its cost when the call returns:
+`in * inputTokens / 1e6 + out * outputTokens / 1e6` dollars, rounded to a millionth, from `AI_PRICE_TABLE`
+(the built-in default is the Claude API model table as of 2026-10-06, confirmed by Cameron at the spec gate).
+A price change is an env change (`AI_PRICE_TABLE`, then `secrets:push` and a deploy), never a code change;
+it costs new runs only. Prompt caching is off; runs record `cache_read_input_tokens` when present.
+
+**The API key.** With `RANKING_DRIVER=anthropic`, production refuses to start without `ANTHROPIC_API_KEY`
+WHATEVER `AI_EXTRACTION_ENABLED` says (B2a made the key required at startup in both deployed stacks).
+Production and hosted dev already hold one (extraction runs on it); the deploy checklist confirms it is
+present in each environment before deploying B2a. **Hosted dev ranks on dev's key**: a press there is spend
+on whatever that key bills. `ANTHROPIC_API_BASE_URL` stays refused in production.
+
+**Hermetic lanes and local dev.** `scripts/e2e-session.mjs` sets `RANKING_DRIVER=fake` and
+`RANKING_WORKER_POLL=off` for the app and the worker (and `RATE_LIMIT_RANK_PER_MIN=100000`, so specs and
+self-QA never meet the 429), so a ranking job runs only through `POST /__dev/ranking/tick` (hermetic-local
+only, and mounted only on a loopback `DYNAMODB_ENDPOINT`; it runs one poll pass to completion and returns
+when its jobs finish). `npm run dev -- --local` uses the `console` driver with the poll on: Rank works
+offline with made-up scores stamped `console`. A live `npm run dev` (hosted dev's REAL tables) resolves
+`anthropic` with the poll OFF: the laptop makes no ranking call - a press there queues a job that the
+DEPLOYED dev worker runs and bills on dev's key; `console` and `fake` refuse to start there (see "Dev modes"
+above).
+
+**Where ranking shows.** Settings > Rankings (admin only): the runs list (anchor, direction, model,
+candidates, cost, latency, time, outcome; date and anchor filters; weekly cost with the environment name),
+a run's detail (its own results, the raw output and the input, each pair linked to its current match and
+marked "since re-scored" when a later run rewrote it), and "Rank this anchor" (job progress per batch, then
+the ranking as a plain table). Ranking runs NEVER appear in Settings > AI run log: their key families in the
+AI runs table (`rjob#`, `rrun#`, `ptr#rankings#...`, `uflag#`) are invisible to the extraction log's list
+and detail.
+
+**Reading a ranking that went wrong.**
+- "Waiting for a free slot" that does not move - the job is queued: a worker's ranking poll claims it on
+  its next tick when one of that worker's `RANKING_MAX_CONCURRENT_JOBS` slots is free. A worker whose boot
+  log says `ranking poll not started - RANKING_WORKER_POLL is off ...` never claims one. Past
+  `RANKING_QUEUE_EXPIRY_MS` the job fails "The ranking was not picked up" (below).
+- "A ranking is running for this record. Try again when it finishes." - a second press while that record's
+  job is queued or running, with a different "Include tenants not heard from" choice (the same choice joins
+  the running job). Wait for it.
+- "not scored - retry" on a row: that candidate was in a failed batch (an API error, a refusal, a
+  truncation, a timeout or an unparseable answer), its score was not confirmed saved, or the model did not
+  return it. Its old match, if any, is kept and reads out of date. Press Rank again. When the batch's run was
+  written, the run detail's raw output and failure say which. When the run write itself failed there is NO
+  run detail: the worker's error log line for that batch (`ranking run write failed - usage and cost logged
+  here`) holds the model, the usage, the cost and the call's failure (the spend is never invisible).
+- "2 tenants could not be read and were not scored. Press Rank again." - a units read came back incomplete
+  for those candidates' properties seen; a retry normally clears it.
+- "N tenants could not be scored. Press Rank again." (or "N properties ...") - that many candidates sat in a
+  batch that failed before any score: the model call failed (see the `truncated` / `timeout` line below and
+  the run detail) or the batch's prompt could not be built. Their old matches stay. Press Rank again.
+- "N scores could not be saved. Press Rank again." - the model answered, but the run write or the match
+  write to DynamoDB failed or was not confirmed: a DynamoDB problem, not the model. The rows that did land
+  stay and are real scores. A retry is safe (it re-scores and rewrites the same matches); the failed call's
+  spend is in the error log line, as above. A run of these points at DynamoDB throttling or an outage.
+- "The ranking could not finish. Press Rank again." - one of two causes; the worker log line for that job
+  says which. (a) `ranking job generation check failed twice - failing the job`: the job's generation check
+  could not read the job record, twice, 500 ms apart (a DynamoDB read problem), so the job stopped rather
+  than write without the check - check DynamoDB first. (b) `ranking job failed unexpectedly`: anything else
+  in the job threw (for example a pool or record read that failed outright); the line's `err` names it.
+  Every score already written stays either way. Press Rank again; if it repeats, read that log line's `err`.
+- "N tenants were not scored by the model. Press Rank again." (or "1 tenant was ...", "N properties
+  were ...") - the model answered the batch but left those candidates out of its answer. Their old matches
+  stay and read out of date; the run detail's raw output shows the answer. Press Rank again; a run of these
+  suggests a batch too large for the output budget (lower `RANKING_BATCH_SIZE` or raise
+  `RANKING_MAX_OUTPUT_TOKENS`).
+- "Could not read this tenant's record. Press Rank again." / "Could not read this property's record. Press
+  Rank again." - the anchor's own reads failed after its pool was found (a tenant's properties seen; a
+  property's landlord record, with `RANKING_LANDLORD_CARD` on), so no candidate was scored and every old match
+  stays, reading out of date. Press Rank again; a repeat on one record means its reads keep failing - check
+  that record and the worker log.
+- "The organization list could not be read, so the pool could not be worked out. Press Rank again." - the
+  job failed before its pool (the housing authority list is read first); nothing was called. "This record
+  was not found." - the anchor was deleted (or retyped) between the press and the job.
+- "Pool too large to rank (N candidates)" - the pool is over `RANKING_MAX_POOL`; raise it only knowing a
+  press then costs more.
+- "The ranking was not picked up. Press Rank again." / "The ranking stopped before it finished. Press Rank
+  again." - the job sat queued past `RANKING_QUEUE_EXPIRY_MS`, or its lease lapsed twice (a worker restart
+  mid-job gets one automatic takeover). Check the worker is up and its ranking poll started.
+- The page's own read fails ("The ranking could not be read. Try again.", or "This record could not be read
+  in full. Try again.") - a read the whole answer depends on failed (the anchor's own records, the
+  organization list, the matches read or the job record): an HTTP 503, nothing called and nothing changed.
+  A candidate whose own reads fail does not fail the page: its row reads out of date with "could not check
+  whether this match is current".
+- Many `truncated` failures: raise `RANKING_MAX_OUTPUT_TOKENS`. Many `timeout` failures: raise
+  `RANKING_CALL_TIMEOUT_MS` or lower `RANKING_BATCH_SIZE`.
+
+**Fair-housing flags.** An **unlawful flag** (the model judged a free-text requirement on a property
+unacceptable for any tenant, e.g. "no kids") is stored per property and field in the AI runs table; it
+closes on its own as soon as that field's text is edited, and while open that field caps no pair of the
+property. An **accommodation flag** (a lawful requirement that does not apply to this tenant, e.g. No pets
+against an assistance animal) lives on the pair's match only and lifts the cap for that pair. B4 builds the
+display and the admin Dismiss.
+
+**Changing the rubric, the worked examples, the schema or the model.** `RUBRIC_VERSION`
+(`app/src/services/ranking/rubric.ts`) and `EXAMPLES_VERSION` (`examples.ts`) are recorded on every match
+and run; ANY edit to their text is a version bump, and every match scored under another version, or on
+another model, reads out of date. A change to the ranking schema's enums bumps `RUBRIC_VERSION` too
+("Changing a structured-output schema" above). Every run records its prompt fingerprint - sha256 over the
+system text and the schema sent, so the landlord-switch states differ. Before shipping such a change,
+re-run the counterfactual check below; a schema change also needs the compile check.
+
+**The real-model checks (Cameron's, on the TESTING key; agents never run them).**
+- Compile check: `npx tsx app/scripts/extraction-schema-compile-check.ts --model claude-sonnet-5-5` - five
+  tiny calls; both `ranking` variants must compile.
+- The counterfactual fair-housing check (B2a's merge gate, charter 7.2):
+  `npx tsx app/scripts/ranking-counterfactual-check.ts --model claude-sonnet-5-5 --out <record.md>`.
+  SYNTHETIC records only, through production's cards, prompt, driver, parser and cap: six base pairs in both
+  directions, nine one-fact swaps (name, address, children, marital status, a credit and income line,
+  religion, a disability, sexual orientation or gender identity, the housing authority), and three controls
+  (an assistance animal against No pets; a "no kids" property; an assistance animal against a pets rule
+  written only in qualifications). A swap passes when its mean score moves at
+  most 5 points and its cap count differs by at most 1 of 3, with five more runs for a miss (it fails only
+  past 5 points or 3 of 8); a base pair whose own runs spread more than 5 points is INCONCLUSIVE ("decide").
+  414 small calls in stage one (about $16.80 by its own estimate; at most 660 more in stage two, only for
+  misses); `--dry-run` prints the plan and estimate without a key. Exit 0 only on PASS; 1 FAIL or DECIDE;
+  2 a usage error, no key, or an `--out` the record cannot be written to (checked before the first call).
+- Batch timing: the same script with `--timing` scores one synthetic 40-candidate batch three times and
+  records latency and tokens.
+- The exact commands, costs and how to read the record:
+  `docs/superpowers/reviews/2026-10-28-wp1-b2-ranking-engine/gate-run-commands.md`.
+
+**Deploying B2a (checklist; as `scripts/secretsSync.mjs`, `scripts/secrets.mjs` and `scripts/deploy.mjs`
+work).** (1) Confirm `ANTHROPIC_API_KEY` is set (non-empty) in `.env.dev` and `.env.prod`; without it the app
+and worker refuse to start. (2) `npm run secrets:sync -- <env>` adds each key new to `.env.<env>.example` to
+the real `.env.<env>` with an EMPTY value (`KEY=`). `secrets:push` and `secrets:check` REFUSE any empty value
+("SSM cannot store an empty parameter"), and every deploy runs `secrets:check` first - so before pushing,
+give each new key (the `RANKING_*` lines, `AI_RANKING_MODEL`, `AI_PRICE_TABLE` and
+`RATE_LIMIT_RANK_PER_MIN`) the value its example line carries (the defaults are spelled out there), or delete
+the line to use the built-in default (`secrets:push` and `secrets:check` then only WARN that the file lacks a
+key its example has). Never push a blank. `.env.dev` carries no `RANKING_WORKER_POLL` (a live laptop loads it
+too); `.env.prod` carries `on`. Keep `RANKING_DRIVER` at `anthropic`. (3) `npm run secrets:push -- <env>`,
+then `npm run secrets:check -- <env>` (exit 0), then deploy. No Terraform, no new table, no new index:
+`matches` and the AI runs table already have the keys, index and TTL ranking uses.
+
+**A deploy (or any worker restart) mid-ranking.** Worker shutdown stops only the SQS consumers - not the
+polls and not a running ranking job - so a deploy while a job runs kills it. Its lease lapses and the ONE
+takeover re-runs it from the start (every batch is called again), which spends that job's takeover: a
+second interruption fails it "The ranking stopped before it finished. Press Rank again.". Up to
+`RANKING_MAX_CONCURRENT_JOBS` x `RANKING_BATCH_CONCURRENCY` (2 x 4 = 8 by default) model calls in flight
+at the kill are billed but never logged (no run record, no usage line). The extraction poll has the same
+shape. When the spend matters, deploy while no ranking is running.
 
 ### What the health-check gate does
 

@@ -351,7 +351,7 @@ Notes box.
   " / "); `prompt.ts`'s private `toSingleLine` is replaced by it, and
   `filterNoteLines` calls it before the clamp.
 - PR11 Hours (Cameron's hands-on hours): FIRMED at 24-30 (plan v2). The
-  assembled plan is 87 tasks in eight slices, about 3.5 times B1's build;
+  assembled plan is 85 tasks in eight slices, about 3.5 times B1's build;
   Cameron's own time is the launch gate, the handback read (the rubric and
   ten examples included), the three real-model runs (about an hour with
   the counterfactual record), the dev check after deploy and the merge.

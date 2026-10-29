@@ -2033,8 +2033,10 @@ describe('ContactEditForm - one status list per type and the type-change rules (
 
   // Code review R3 FW3-1: that 409 also tells the page (onStale), which
   // re-reads the contact so the form opened next is built from the stored
-  // contact (pinned in ContactDetail.test.tsx). Only that 409: any other
-  // failure, of the status write or of the field PATCH, leaves the page alone.
+  // contact (pinned in ContactDetail.test.tsx). Besides that 409 only a
+  // notes_stale refusal tells the page (WP1 B2a, the Notes guard block
+  // below); any other failure, of the status write or of the field PATCH,
+  // leaves the page alone.
   it.each([
     [
       'the status write answers 409 contact_type_changed: onStale is called once',
@@ -2341,6 +2343,30 @@ describe('ContactEditForm - the Notes stale-save guard (WP1 B2a D14.3)', () => {
     await user.type(notesBox(), 'my notes');
     await user.click(saveButton());
     expect(await screen.findByRole('alert')).toHaveTextContent('(The notes were cleared.)');
+  });
+
+  // Code review R1 A2-5: the page under the form still shows the notes it
+  // read; the refusal tells it (onStale, the page's consistent re-read), so
+  // "Cancel to keep them" leaves the page on the current notes and the next
+  // edit opens from them - the Staff notes card hands the current contact up
+  // the same way.
+  it('a notes_stale refusal tells the page once (onStale), and Cancel then closes without a save', async () => {
+    const user = userEvent.setup();
+    const onStale = vi.fn();
+    const onClose = vi.fn();
+    const onSaved = vi.fn();
+    updateContact.mockRejectedValueOnce(staleNotes({ ...WITH_NOTES, notes: 'newer', notes_updated_at: LATER }));
+    render(<ContactEditForm contact={WITH_NOTES} onClose={onClose} onSaved={onSaved} onStale={onStale} />);
+    await user.clear(notesBox());
+    await user.type(notesBox(), 'my notes');
+    await user.click(saveButton());
+    await screen.findByRole('alert');
+    expect(onStale).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(onStale).toHaveBeenCalledTimes(1);
+    expect(updateContact).toHaveBeenCalledTimes(1);
   });
 
   it('re-based: typing the current notes back is no Notes change on the next Save', async () => {

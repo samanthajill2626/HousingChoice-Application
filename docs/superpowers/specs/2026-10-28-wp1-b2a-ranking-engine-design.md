@@ -1,6 +1,7 @@
 # WP1 B2a Ranking engine - design
 
-Status: DRAFT revision 5 (2026-10-28). Design review CLOSED after round 4. Rev 2 folded in design review
+Status: DRAFT revision 6 (2026-10-28). Design review CLOSED after round 4.
+Rev 6 records the spec-gate answers so far (Q2 full cards, Q4 LIF off). Rev 2 folded in design review
 round 1 (two reviewers, 41 findings, all accepted after checking the
 code); rev 3 folded in round 2 (12 findings, all accepted); rev 4 folded
 in round 3 (7 findings, all accepted); rev 5 folds in round 4 (3
@@ -283,9 +284,8 @@ Derived: `voucherSizes` from `acceptedVoucherSizes` with
 `{ mapped, unmapped }` (D1).
 
 Property card, excluded: `priority` (charter 9), `credit_requirements`
-and `income_requirements` (A1), `lif` (Q4: the landlord incentive fee, a
-payment to the landlord; a business term like priority, not a fact about
-fit), ids (`unitId`, `landlordId`,
+and `income_requirements` (A1), `lif` (Q4: off the cards until Sam says what LIF is;
+charter section 16 question 9), ids (`unitId`, `landlordId`,
 `propertyId`), `contacts`, `primary_contact` (other people), `media`,
 `listing_link`, `video_url`, `requirement_sources`, `status_source`,
 tombstones (`jurisdiction`, `accepted_programs`), import bookkeeping,
@@ -350,11 +350,14 @@ reason `unverified` ("could not check whether this match is current");
 an anchor whose own card cannot be read answers 503. An out-of-date list
 is still shown (charter 10.3). Each listed entry reads as one unit:
 
-- `label` (`propertyLabel`) and a SHORT summary of that property: beds,
-  baths, rent (range or final), area, subzone, voucher sizes, pets
-  policy. Not the whole property card: a property ranking carries up to
-  40 tenant cards per call and eight full property cards each would
-  multiply the input several times over (Q2).
+- `label` (`propertyLabel`) and that home's FULL property card (the same
+  `propertyCard` function and classification as any property card,
+  landlord defaults included when the switch is on), because what a
+  tenant disliked about a home is only useful beside that home's facts
+  (Cameron 2026-10-28, Q2). In the call each distinct home is written
+  ONCE (see "The call" in D4) and the entry refers to it by handle; the
+  tenant card's meaning is the same either way, so one card per record
+  holds (charter 6.2).
 - `sends`: each date with its kind (sent, signed up), and
   `daysSinceLastSend`.
 - `declined`: `{ by, at }` when set (the stored record, never the
@@ -378,7 +381,7 @@ No other polish: no abbreviation folding, no date parsing of the
 `[Auto - <date>]` prefix (it has no year; age comes from stored dates).
 
 A soft-deleted seen unit is still readable and is listed with its label
-and summary like any other. A seen unit that a COMPLETE read shows does
+and full card like any other. A seen unit that a COMPLETE read shows does
 not exist is listed with the placeholder label "a property no longer on file"
 (send rows store no label), keeping its sends, decline and tours; its
 feedback lines cannot attach and stay in `notes`.
@@ -474,9 +477,17 @@ a ranking.
   the bands. B2b's promotion grows the set; B2a only reads this file.
 - The call: system = rubric then examples (byte-stable for a given
   pair of versions); user = the anchor card (with its missing flags),
-  then each candidate as `{ handle, card, missing, pairHistory }` with
-  handles `c1..cn` in pool order. `promptFingerprint` = sha256 of the
-  system text, recorded on every run.
+  then `homesSeen`: every distinct home that any tenant card in this
+  call lists under properties seen, each written once as
+  `{ handle, label, card }` with handles `h1..hn`, then each candidate as
+  `{ handle, card, missing, pairHistory }` with handles `c1..cn` in pool
+  order. A tenant card's properties-seen entries carry `home: "h3"`
+  instead of the card. A seen home that is also a candidate in the same
+  call is written once, as the candidate, and referenced by its `c`
+  handle. The cost of a property ranking therefore grows with the number
+  of DISTINCT homes the batch's tenants were sent (mostly shared, since
+  blasts send one home to many tenants), not with tenants times homes.
+  `promptFingerprint` = sha256 of the system text, recorded on every run.
 
 ### D5. Output schema and parsing (charter 7.4)
 
@@ -748,7 +759,9 @@ position; all derived on read.
 
 Each row carries `inputSnapshot`: the exact JSON that pair was scored
 from (the anchor card and the candidate card as sent, with their missing
-flags, and the pair history), gzipped and base64-encoded, plus
+flags, the pair history, and the full card of every seen home either
+tenant card references, resolved from its handle), gzipped and
+base64-encoded, plus
 `promptFingerprint`, `rubricVersion` and `examplesVersion`. B2b copies it
 into a review record when Sam reviews the pair (charter 12), and its
 evaluation script re-scores from it. Each run also stores the whole
@@ -912,9 +925,9 @@ serialization.
   the Notes box text as stored (every feedback line is a Notes line, so
   a new feedback line or a staff edit changes it, wherever it would be
   arranged); and, for every property in the unbounded seen set that has
-  a STORED outcome (a decline or a tour), `{ unitId, label, summary,
-  declined, tours }` sorted by `unitId`, where `tours` is the tour
-  projection. Feedback lines need no entry of their own: they are
+  a STORED outcome (a decline or a tour), `{ unitId, label, unitCard
+  (that home's own card fingerprint), declined, tours }` sorted by
+  `unitId`, where `tours` is the tour projection. Feedback lines need no entry of their own: they are
   already in the Notes text. Send dates, entries without a stored
   outcome, the bound, the order and the attach result are not in it. So
   the card's content decides the fingerprint (charter 10.3) except for
@@ -922,8 +935,8 @@ serialization.
   no exception: a bare new send, a re-send, an eviction from the listed
   entries and a line re-attaching under a newly sent home change
   nothing; a decline, a tour or a feedback line about ANY property, or
-  an edit to the label or summary of a home with a decline or tour,
-  changes every match of that tenant. The cost (Q7): an edit to a home
+  an edit to any card field of a home with a decline or tour, changes
+  every match of that tenant. The cost (Q7): an edit to a home
   the tenant has only given feedback on (no decline, no tour) does not
   refresh their other matches; the 7-day age rule bounds it.
   Recency enters only as its bucket.
@@ -1240,7 +1253,7 @@ two is not WP1; the `stage` field is there).
   (each reason; a bare send changes nothing, including a re-send that
   re-orders and a ninth send that pushes an entry off the listed ones; a
   decline, tour or feedback line on another property does, and so does
-  an edit to a seen property's label or summary; a tour's reminder or
+  an edit to any card field of a seen home with a decline or tour; a tour's reminder or
   roster change does not; the first send of a property a Notes line
   already names changes nothing; an edit to a home with feedback only
   changes nothing; a failed batch does not
@@ -1312,22 +1325,22 @@ at plan time.
   included (charter 6.2 says "every Notes line"; B1 flagged that a long
   staff line would carry its other facts with it). Recommendation: keep
   the charter's rule; WP3 replaces the attach step.
-- Q2. Properties seen carries a short summary of each home (beds, baths,
-  rent, area, subzone, voucher sizes, pets policy), not its whole card,
-  and lists at most 8: homes with an outcome or feedback first (newest
-  activity first), then the newest bare sends. For a home past the 8,
-  its feedback lines stay in the card's general notes, but its decline
-  and tours leave this tenant's card (the pair being scored still shows
-  its own decline and tours in its pair history). Charter 6.2 says "that
-  property's card details"; whole cards would make a 40-tenant call
-  several times larger. Recommendation: the summary and the bound.
+- Q2. ANSWERED (Cameron 2026-10-28): properties seen carries each
+  home's FULL property card, each distinct home written once per call
+  and referenced by handle (D2.3, D4), and lists at most 8 homes:
+  homes with an outcome or feedback first (newest activity first), then
+  the newest bare sends. For a home past the 8, its feedback lines stay
+  in the card's general notes, but its decline and tours leave this
+  tenant's card (the pair being scored still shows its own decline and
+  tours in its pair history). Properties hold no square-footage field
+  today, so size complaints rest on the feedback text and notes.
 - Q3. A pool over 300 fails the ranking with a message rather than
   scoring it (a cost bound; it removes no candidate). Recommendation:
   keep, at 300.
-- Q4. The unit's `lif` attribute is the landlord incentive fee, a dollar
-  amount paid to the landlord. Left off the property card: it is a
-  business term like priority, not a fact about whether the home fits
-  the tenant. Recommendation: exclude.
+- Q4. ANSWERED (Cameron 2026-10-28): both LIF fields (the unit's `lif`,
+  labeled "Landlord incentive fee" in the code, and the tenant's
+  `lifEligible`) stay off the cards; what LIF is goes to Sam as charter
+  section 16 question 9.
 - Q5. The counterfactual tolerance: per swap and direction, the mean
   score may move by at most 5 points and the majority cap result may not
   change; a base pair whose own re-runs spread more than 5 points is
@@ -1337,7 +1350,7 @@ at plan time.
   run's recorded cost rests on them. Confirm, or give the numbers.
 - Q7. Keeping "a new send alone never makes a match out of date"
   (charter 10.3 and 13.5) exact. The spec does it by fingerprinting a
-  seen home's label and summary only when the home has a decline or a
+  seen home's label and full card only when the home has a decline or a
   tour; feedback lines count through the Notes text. The cost: when a
   home the tenant has only talked about (no decline, no tour) is edited,
   their other matches are not flagged until the 7-day age rule does it.

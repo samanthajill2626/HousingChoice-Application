@@ -191,3 +191,22 @@ whole batch match. That would remove much of the cost."
   distinct home written ONCE per call and referenced by handle, which
   keeps the cost near the summary's without reopening charter 10.3's
   whole-pool re-score.
+
+Follow-up 2026-10-28, Cameron verbatim: "I understand, and i agree, that
+the tenant card should be a single card, and that it should include all
+the properties they've seen and their details. so that when a tenant as
+the anchor needs to be matched to all the other properties, it obviously
+should include the information about how the properties that were sent
+actually matched with the tenant. if a model needs to get more information
+about a property or search the internet (like our conversations here), can
+the agent we're talking about doing the matching actually run that? For
+instance if we have a previous property that the tenant said was in the
+wrong neighborhood and they want to be near something or in a different
+area, can the agent look up which properties are close to that area?"
+
+- Q2: SETTLED - full property cards for homes seen, each distinct home
+  written once per call by handle (spec rev 6).
+- New question (understanding, not yet a decision): tools for the ranker
+  (web search, a "properties near X" lookup). Charter 7.1 and 15.4 say
+  no tools in WP1; the planner answered with the trade-offs and the
+  in-scope alternative, and waits on Cameron.

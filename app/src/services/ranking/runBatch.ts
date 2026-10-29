@@ -227,7 +227,25 @@ export async function runBatch(
     finishedAt,
     config: deps.config,
   });
-  if (!(await ctx.guard())) return STOPPED;
+  if (!(await ctx.guard())) {
+    // D7: a job that is no longer this generation (or was stopped) writes
+    // nothing more - its run included. But the call is paid for, and the
+    // cost totals read runs only, so the usage and cost go to this WARN line
+    // with the fields of the putRun-failure line below: the spend is never
+    // invisible (PR36; code review R1 A1-2).
+    log.warn(
+      {
+        ...where,
+        runId,
+        model: run.model,
+        usage: run.usage,
+        costUsd: run.costUsd,
+        ...(!call.ok && { callFailure: call.failure }),
+      },
+      'ranking run not written - the job stopped after the call; usage and cost logged here',
+    );
+    return STOPPED;
+  }
   try {
     await deps.jobs.putRun(run);
   } catch (err) {

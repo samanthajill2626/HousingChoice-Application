@@ -280,6 +280,27 @@ describe('runBatch', () => {
     expect(h.matches.puts).toEqual([]);
   });
 
+  it('FW1-2: a FAILED call whose job stopped during it is logged at WARN with its usage, cost and failure (no run is written)', async () => {
+    const h = harness({ gate: async () => { h.supersede(); }, failFor: () => 'timeout' });
+    expect(await runBatch(batch(), 2, h.ctx, h.deps)).toEqual({ kind: 'stopped' });
+    expect(h.runs.writes).toEqual([]);
+    const line = h.capture.lines.find(
+      (l) => l['msg'] === 'ranking run not written - the job stopped after the call; usage and cost logged here',
+    );
+    // The putRun-failure line's fields (PR36), at WARN: the spend is never invisible.
+    expect(line).toMatchObject({
+      level: 40,
+      batchIndex: 2,
+      candidates: 2,
+      runId: 'run-1',
+      model: 'fake',
+      usage: { inputTokens: 1000, outputTokens: 500 },
+      costUsd: 0,
+      callFailure: 'timeout',
+    });
+    expect('err' in line!).toBe(false);
+  });
+
   it('writes a newly raised unlawful flag once per property and field across batches (first raising run kept)', async () => {
     const flagged = { qualifications: 'No kids under 12.' };
     // Each pair reports qualifications failed: recorded on the property, so

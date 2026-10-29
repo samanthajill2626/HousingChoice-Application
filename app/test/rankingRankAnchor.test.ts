@@ -43,6 +43,13 @@ import { createMatchesFake, createRankingRunsFake } from './helpers/rankingRunsF
 
 const pool = (n: number) => Array.from({ length: n }, (_, i) => tenantCandidate(`t-${i + 1}`));
 
+/** A billed model and its price, so a paid call's logged cost is not zero (1000 in / 500 out = $0.007). */
+const PRICED_MODEL = 'claude-sonnet-5-5';
+const PRICE_TABLE = { [PRICED_MODEL]: { in: 2, out: 10 } };
+/** Code review R1 A1-2 (FW1-2): the line a stopped job's paid call leaves when its run is not written. */
+const PAID_CALL_MSG = 'ranking run not written - the job stopped after the call; usage and cost logged here';
+const paidCallLine = (lines: Record<string, unknown>[]) => lines.find((l) => l['msg'] === PAID_CALL_MSG);
+
 function harness(opts: {
   result?: AssembleResult | (() => Promise<AssembleResult>);
   driver?: StubDriverOptions;
@@ -340,9 +347,10 @@ describe('rankAnchor', () => {
     expect(h.record().failedBatches).toEqual([{ index: 0, candidateIds: ['t-1', 't-2'], failure: 'error' }]);
   });
 
-  it('a superseded job exits quietly: no run, no match, no finish', async () => {
+  it('a superseded job exits quietly: no run, no match, no finish - and its paid call is logged at WARN with usage and cost', async () => {
     const gate = deferred();
-    const h = harness({ batchSize: 5, driver: { gate: () => gate.promise } });
+    const h = harness({ batchSize: 5, driver: { gate: () => gate.promise, model: PRICED_MODEL } });
+    h.deps.config = { ...h.deps.config, aiPriceTable: PRICE_TABLE };
     const running = rankAnchor(h.job, h.deps);
     await flush();
     expect(h.driver.calls).toHaveLength(1);
@@ -353,6 +361,20 @@ describe('rankAnchor', () => {
     expect(h.matches.puts).toEqual([]);
     expect(h.record()).toMatchObject({ status: 'running', generation: 'gen-takeover' });
     expect(h.capture.lines.some((l) => l['msg'] === 'ranking job superseded - exiting quietly')).toBe(true);
+    // Code review R1 A1-2 (FW1-2): spec D7 leaves the run unwritten once the
+    // generation is not this job's, but the call was paid for - the spend
+    // shows in this WARN line (PR36's remedy for a lost run).
+    expect(paidCallLine(h.capture.lines)).toMatchObject({
+      level: 40,
+      anchorKind: 'unit',
+      anchorId: ANCHOR_UNIT,
+      batchIndex: 0,
+      candidates: 5,
+      runId: 'id-1',
+      model: PRICED_MODEL,
+      usage: { inputTokens: 1000, outputTokens: 500 },
+      costUsd: 0.007,
+    });
   });
 
   it('renews the lease every RANKING_LEASE_MS / 3 on its generation, and clears the timer at the end', async () => {
@@ -370,9 +392,10 @@ describe('rankAnchor', () => {
     expect(h.intervals[0]!.cleared).toBe(true);
   });
 
-  it('a renewal that fails stops the job before its next write', async () => {
+  it('a renewal that fails stops the job before its next write; the paid call is logged at WARN with usage and cost', async () => {
     const gate = deferred();
-    const h = harness({ batchSize: 5, driver: { gate: () => gate.promise } });
+    const h = harness({ batchSize: 5, driver: { gate: () => gate.promise, model: PRICED_MODEL } });
+    h.deps.config = { ...h.deps.config, aiPriceTable: PRICE_TABLE };
     h.runs.repo.renewLease = async () => false;
     const running = rankAnchor(h.job, h.deps);
     await flush();
@@ -382,6 +405,14 @@ describe('rankAnchor', () => {
     await running;
     expect(h.runs.runs.size).toBe(0);
     expect(h.record().status).toBe('running');
+    // FW1-2: no run record, so the WARN line is where the spend shows.
+    expect(paidCallLine(h.capture.lines)).toMatchObject({
+      level: 40,
+      runId: 'id-1',
+      model: PRICED_MODEL,
+      usage: { inputTokens: 1000, outputTokens: 500 },
+      costUsd: 0.007,
+    });
   });
 
   it('every ranking.updated payload is exactly the six keys (WI16), running then done', async () => {

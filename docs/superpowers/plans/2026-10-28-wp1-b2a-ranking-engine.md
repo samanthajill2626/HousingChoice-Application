@@ -13,7 +13,7 @@
   `docs/superpowers/reviews/2026-10-28-wp1-b2-ranking-engine/`.
 - Spec review: 4 rounds, 63 findings, 0 rejected -
   `docs/superpowers/reviews/2026-10-28-wp1-b2-ranking-engine/design-review/adjudications.md`.
-- Status: PLAN v2 ASSEMBLED (2026-10-28): drafts reconciled (36 IRs, rulings PR12-PR28). Sections 0-4 and 13 are BINDING and
+- Status: PLAN v3 (2026-10-28): drafts reconciled (36 IRs, PR12-PR28); plan review round 1 folded in (50 findings, all accepted, PR29-PR38). Sections 0-4 and 13 are BINDING and
   written by the planner; slice sections 5-12 (S1-S8) are opus section drafts
   assembled verbatim (findings in `plan-drafts/`). Section 4 (planner
   rulings PR1-PRnn) wins over any slice text it contradicts. "Plan section
@@ -451,6 +451,72 @@ Notes box.
   for his reading, and that extraction runs recorded before B2a whose
   window holds U+2028 / U+2029 now show hash status "mismatch" (spec
   D14.1, accepted).
+
+### Plan review round 1 rulings (adjudications: `plan-review/plan-adjudications.md`)
+
+Every round 1 finding was accepted; the precision fixes are written into the
+slice text. These change decisions; where slice text still disagrees, the
+ruling wins. PR30 and PR37 depart from spec text and are listed for Cameron.
+
+- PR29 (FB1) `capOf` matches by requirement ITEM, not by key: the keys of
+  one requirement item (from the requirements registry, e.g. `no_pets`,
+  `pets`, `pet_fee`) form one group; an accommodation flag or an open
+  unlawful flag on ANY key of the item suppresses a failed requirement on
+  any key of that item, and `landlord:<key>` maps to its item too. Tests
+  cover cross-key suppression both ways. The counterfactual
+  assistance-animal control asserts never capped whatever key the model
+  flags.
+- PR30 (FB2) Real tables outside production: when the DynamoDB target is
+  not a local endpoint (`DYNAMODB_ENDPOINT` unset or not
+  localhost / 127.0.0.1) and NODE_ENV is not production, `RANKING_DRIVER`
+  defaults to `anthropic`, `fake` and `console` are refused at startup,
+  and `RANKING_WORKER_POLL` defaults to `off`, so a laptop never claims a
+  hosted-dev ranking job (a press from live local dev queues a job the
+  deployed dev worker runs). Production rules are unchanged. RUNBOOK's dev
+  modes table gains the ranking column and a caveat. Departs from spec D6
+  / D19 defaults text: listed for Cameron.
+- PR31 (FB5, FA2) Every worked example is built and checked by the
+  production code: a test runs each example's anchor and candidate cards
+  through the same shape the prompt sends (missing labels from
+  `completeness.ts`'s labels, seen entries with `label` and `home`), and at
+  least one example uses an `h` handle, one a `c` handle, one `anchor`.
+- PR32 (FB6) Version pins: a test pins sha256 of `RUBRIC_TEXT` beside
+  `RUBRIC_VERSION`, of the serialized examples beside `EXAMPLES_VERSION`,
+  and of both schemas (landlord off / on) beside `RUBRIC_VERSION`; a
+  change without a bump fails with a message saying which version to
+  bump. Bumping is a decision for Cameron (it marks matches out of date).
+- PR33 (FB7) One home for the card-field constants: `cardFields.ts` (S3)
+  exports the free-text field list, the reportable requirement keys and
+  the landlord prefix; S4's schema, parse and cap import them; a tie test
+  asserts every free-text field is a string-typed card field (WI22).
+- PR34 (BA1, BB2) Cost and runs: the cost endpoint defaults to the last
+  12 ISO weeks when no range is given; the runs list and cost read
+  project only listing fields (never `rawText`, `inputGzip`, `results`);
+  a run the read leaves unprocessed is retried, and if still unread the
+  response says `incomplete: true` (the page shows "Some runs could not be
+  read; totals may be low") - never a silent drop.
+- PR35 (BB1) Deploy step: the RUNBOOK and gate sheet state what
+  `scripts/secrets.mjs` and `scripts/deploy.mjs` actually require, read
+  from the code: the env example files carry each new variable with its
+  default VALUE (non-empty, Cameron's rule), so a sync adds them with
+  their defaults and a push never carries a blank. No instruction ever
+  pushes an empty value.
+- PR36 (BA2, BB3) Never throws, and never loses a paid call: a guard read
+  that fails is retried once; still failing, the job is finished `failed`
+  with a message by a write conditioned on the generation, and the slot
+  is released. `putRun` failing after a model call is caught: the batch is
+  recorded failed (`repo`) on the job record, and the usage and cost are
+  logged so spend is never invisible.
+- PR37 (FA7) A partial match write: `putMatches` reports the keys it
+  could not write; rows that landed are real scores of this run and stay;
+  the batch's `failedBatches` entry lists only the unwritten candidates.
+  Listed for Cameron (spec D8 reads "its candidates get no new match").
+- PR38 (BB6) A tenant anchor whose own card cannot be read: the job
+  finishes `done` with every pool candidate in `notScored` with reason
+  `unreadable` and the message "Could not read this tenant's record. Press
+  Rank again."; the read then shows "not scored - retry" rows (the read
+  itself still answers 503 when the anchor is unreadable at read time,
+  PR17).
 
 ## 5. S1 - The Notes box
 
@@ -36468,6 +36534,16 @@ Binding; written by the planner.
   confirm the tab is absent and ranking from the API works; the contact
   edit form's Notes conflict with two pages. Screenshots under
   `.playwright-mcp/`; findings to `<records>/self-qa.md`.
+- S9.3a The build-orchestrator's own independent review (its definition:
+  spec-conformance and a plan-blind adversarial reviewer), the fix wave,
+  and then S9.2's gates RE-RUN on the fixed tree before the handback.
+- S9.3b Self-QA recipe: start `npm run e2e:session`; dev-login as an
+  admin; build fixtures through the API exactly as S7.10's
+  `e2e/fixtures/ranking.ts` does (an available property, three searching
+  tenants with a unique housing authority, one with pets text against No
+  pets, one with `[fake:fail-batch]` in a second run); press Rank; run
+  jobs with `POST /__dev/ranking/tick` on the lane's API port (no body);
+  read the page.
 - S9.4 Handback at `<records>/handback.md`: "merge-ready PENDING
   Cameron's real-model runs (gate-run-commands.md)"; every slice report
   linked; the gate exit codes; every PR28 item for Cameron; every

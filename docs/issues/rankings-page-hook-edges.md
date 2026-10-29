@@ -1,13 +1,13 @@
 ---
 id: rankings-page-hook-edges
-title: The Rankings page can leave Rank on "Starting..." after a window toggle, its press marks can disagree with the job shown, and a late read can show an older generation's end
+title: The Rankings page can leave Rank on "Starting..." after a window toggle, its press marks can disagree with the job shown, a late read can show an older generation's end, and a new generation can leave the last one's final batches unread
 type: bug
 severity: low
 status: open
 area: dashboard/rankings
 created: 2026-10-29
 updated: 2026-10-29
-refs: dashboard/src/routes/settings/rankings/useAnchorRanking.ts:382, dashboard/src/routes/settings/rankings/useAnchorRanking.ts:211, dashboard/src/routes/settings/rankings/useAnchorRanking.ts:200, dashboard/src/routes/settings/rankings/useAnchorRanking.ts:397, dashboard/src/routes/settings/rankings/useAnchorRanking.ts:406, dashboard/src/routes/settings/rankings/RankAnchorPanel.tsx:152, dashboard/src/routes/settings/rankings/RankAnchorPanel.tsx:160, dashboard/src/routes/settings/rankings/useAnchorRanking.ts:225, dashboard/src/routes/settings/rankings/useAnchorRanking.ts:262, app/src/services/ranking/readRanking.ts:357, app/src/services/ranking/readRanking.ts:365, app/src/services/ranking/job.ts:194, app/src/repos/rankingRunsRepo.ts:334
+refs: dashboard/src/routes/settings/rankings/useAnchorRanking.ts:388, dashboard/src/routes/settings/rankings/useAnchorRanking.ts:213, dashboard/src/routes/settings/rankings/useAnchorRanking.ts:202, dashboard/src/routes/settings/rankings/useAnchorRanking.ts:401, dashboard/src/routes/settings/rankings/useAnchorRanking.ts:410, dashboard/src/routes/settings/rankings/RankAnchorPanel.tsx:152, dashboard/src/routes/settings/rankings/RankAnchorPanel.tsx:160, dashboard/src/routes/settings/rankings/useAnchorRanking.ts:227, dashboard/src/routes/settings/rankings/useAnchorRanking.ts:268, app/src/services/ranking/readRanking.ts:357, app/src/services/ranking/readRanking.ts:365, app/src/services/ranking/job.ts:194, app/src/repos/rankingRunsRepo.ts:334, dashboard/src/routes/settings/rankings/useAnchorRanking.ts:239, dashboard/src/routes/settings/rankings/useAnchorRanking.ts:245, dashboard/src/routes/settings/rankings/RankAnchorPanel.tsx:184, app/src/services/ranking/job.ts:179, app/src/services/ranking/job.ts:211
 ---
 
 **Problem.** Three edges of the Settings > Rankings "Rank this anchor"
@@ -23,10 +23,10 @@ fix waves (R2-dashboard-3 behaves the same on the pre-fix hook).
    state slice gets `ranking: true`); toggle "Include tenants not heard
    from" (K2, whose read is slow); toggle back before K2's read lands. K1 is
    now a NEW request context, but the state update helper (`update`,
-   useAnchorRanking.ts:211) reuses the held slice whenever its key string
-   matches (the key is `kind:id:window`, :200), so the new context inherits
+   useAnchorRanking.ts:213) reuses the held slice whenever its key string
+   matches (the key is `kind:id:window`, :202), so the new context inherits
    `ranking: true`. The press then answers for the OLD context and is
-   dropped (`if (currentRef.current !== cur) return;`, :382), so nothing
+   dropped (`if (currentRef.current !== cur) return;`, :388), so nothing
    clears the flag: the job itself runs and is followed, but Rank stays
    disabled reading "Starting..." (RankAnchorPanel.tsx:160) until another
    anchor or window change or a reload. The window checkbox is not disabled
@@ -41,14 +41,14 @@ fix waves (R2-dashboard-3 behaves the same on the pre-fix hook).
 2. **The joined mark can outlive the job** (R2-dashboard-8 a, CONFIRMED).
    A press that joins a live job whose answer lands after the page already
    applied that SAME generation's finished view still sets `joined: true`
-   (useAnchorRanking.ts:397), so the status reads "Done ... (joined the
+   (useAnchorRanking.ts:401), so the status reads "Done ... (joined the
    ranking already running)". Needs the job to finish between the claim and
    its 202. Suggested: set `joined` from a press only while the job shown is
    live.
 
 3. **A stale job view can clear a 409 message while the new job runs**
    (R2-dashboard-8 b, CONFIRMED). A press refused 409 `ranking_running`
-   marks the followed job live (:406) and asks for a job read; when that read
+   marks the followed job live (:410) and asks for a job read; when that read
    is coalesced behind an OLDER job read (issued before the press), the older
    read's view of the PREVIOUS job's end satisfies "the job ended" and
    clears "A ranking is running for this record. Try again when it
@@ -71,9 +71,9 @@ header comment; items 1 to 3 still hold at that code.
    CONFIRMED, NOT A REGRESSION - the hook before the review's fix waves
    behaves the same). Fix wave FW2 orders the job views of ONE generation by
    progress; a view of another generation is still applied only if issued
-   after every view applied (useAnchorRanking.ts:225-226), and the first read
+   after every view applied (useAnchorRanking.ts:227-228), and the first read
    and Retry offer their job with the issue number they took when SENT
-   (:262), while the server's read gathers the pool and cards first and
+   (:268), while the server's read gathers the pool and cards first and
    reads the job last (readRanking.ts:357, then :365). Both landing orders
    lose. (a) The first read (or Retry) R is out. A job read J, issued after
    R, is served at once with the previous generation's end (gen-1 done) and
@@ -103,3 +103,74 @@ header comment; items 1 to 3 still hold at that code.
 
 Source (item 4): docs/superpowers/reviews/2026-10-28-wp1-b2-ranking-engine/
 code-review/R3-dashboard.md (R3-dashboard-3) and R3-adjudications.md.
+
+**Update (2026-10-29, WP1 B2a code review R4, findings R4-dashboard-2 and
+R4-dashboard-3).** One more edge and a second path to item 3, each
+reproduced by the round 4 dashboard reviewer with a throwaway hook test.
+Like the four above, neither changes a stored score or job. The hook's line
+numbers above were re-pointed again after fix wave FW4 (7fb7b723) grew two
+comments. Items 1 to 4 still hold at that code: FW4 changed only how a
+press's job of the generation on screen is ordered (it now goes through the
+order rules instead of a gate), so item 2's join, behind the finished view
+on screen, is dropped by the order rules and still sets the joined mark.
+
+5. **A followed job replaced on screen by a new generation that is still
+   queued or running is never counted as ended: its last batches are not
+   read, and the joined mark moves to the new job** (R4-dashboard-2,
+   CONFIRMED, NOT A REGRESSION - the hook before the review's fix waves
+   behaves the same). The page follows gen-1 (live on screen). gen-1
+   finishes its last batch or batches and ends, and before the page's next
+   job read is served another actor's press claims gen-2 (a press can claim
+   only once gen-1 has ended: job.ts:178-185, :211-223). That read shows
+   gen-2 queued. A view of another generation counts its finished batches
+   from zero (none here, so nothing grew) and counts as an end only when it
+   is not live (useAnchorRanking.ts:235-239); the press marks clear only on
+   a view that is not live (:245). So nothing reads the full ranking for
+   gen-1's tail, and a joined mark from this page's press on gen-1 (:401)
+   stays under gen-2: "Waiting for a free slot (joined the ranking already
+   running)" (RankAnchorPanel.tsx:183-184). The table catches up at gen-2's
+   first finished batch or at its end (a queued gen-2 waits while every
+   slot is busy, up to RANKING_QUEUE_EXPIRY_MS, after which its `expired`
+   view ends it and reads); the joined mark clears when gen-2 ends. A
+   worker takeover (a new generation replacing a live one) takes the same
+   path; nothing of the old generation is unread there, only the mark
+   carries. The window is the event's read latency after gen-1 ends while
+   events arrive, or one 5 s poll interval while they do not (two admins,
+   or two tabs, on one anchor). It is item 4's class (a table older than
+   the job shown) by another path. Suggested (the reviewer's fix, verified
+   on a scratch copy of the hook: its probe green and the rankings
+   directory green, alone and together with FW4-1's change): count a live
+   view on screen replaced by another generation as the followed job's end,
+   for the read and for the marks - `const leftLive = newGeneration &&
+   shown !== null && isJobLive(shown.status);`, then `ended = leftLive ||
+   (...as now...)` and `followedEnded = leftLive || (...as now...)`. Keyed
+   on the view on screen, not on `wasLive`, so a 409's forced follow keeps
+   its copy when the job the 409 named first appears (the hook test "a
+   press refused 409 ranking_running says so and follows the running job"
+   stays green). Test: a press joins gen-1 running 1 of 2 (one full read
+   for the finished batch); one event whose job read answers gen-2 queued
+   -> one more full read, and `joined` is false. Re-checked at 7fb7b723
+   with the same probe (a throwaway, deleted): the full-read count stays at
+   2 and `joined` stays true, so the edge still holds after FW4.
+
+Item 3 has a second path (R4-dashboard-3, CONFIRMED, INFO, NOT A
+REGRESSION - the hook after fix wave FW1 behaves the same). The first read
+(or Retry) R is out; the admin presses Rank (Rank is enabled while the
+first read loads) and the press is refused 409 because a live job of the
+other window exists; the 409 marks the page as following (:410). R took
+its job snapshot before that job was claimed and lands after the 409 with
+the previous generation's end. It is the first job view, so it is applied,
+and because the 409 forced the follow it counts as the followed job's end
+(:245) and clears "A ranking is running for this record. Try again when it
+finishes." The follow-up job read then shows the named job running,
+without the copy. The status line shows that job running and Rank is
+disabled, so the lost copy says nothing the page does not. Item 3's
+suggested fix covers this path too (remember the 409 press's issue number;
+only a view issued after it clears the copy), since R was issued before
+the press. Test: hold the first read and the follow-up job read; the 409;
+release R with gen-1 done, then the job read with gen-2 running -> the 409
+copy stays through both.
+
+Source (item 5 and item 3's second path): docs/superpowers/reviews/
+2026-10-28-wp1-b2-ranking-engine/code-review/R4-dashboard.md
+(R4-dashboard-2, R4-dashboard-3) and R4-adjudications.md.

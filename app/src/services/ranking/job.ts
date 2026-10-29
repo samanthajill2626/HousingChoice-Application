@@ -18,6 +18,7 @@
 // a reason or a score.
 import { randomUUID } from 'node:crypto';
 import type { AppConfig } from '../../lib/config.js';
+import { runWithContext, type CorrelationContext } from '../../lib/context.js';
 import type { EventBus } from '../../lib/events.js';
 import type { Logger } from '../../lib/logger.js';
 import { rankingExpiresAt, type MatchesRepo } from '../../repos/matchesRepo.js';
@@ -525,4 +526,125 @@ export async function rankAnchor(job: RankingJobRecord, deps: RankingJobDeps): P
   } finally {
     timers.clearInterval(handle);
   }
+}
+
+// --- the ranking poll ------------------------------------------------------
+
+/** Records read per index family per tick. */
+export const RANKING_POLL_LIST_LIMIT = 25;
+
+export interface RankingPollSummary {
+  expired: number;
+  claimed: number;
+  tookOver: number;
+  failedStale: number;
+}
+
+/**
+ * Start one claimed job in a FRESH context (D7): not nested in the tick's -
+ * runWithContext replaces the store - so the job's lines carry no pollRunId
+ * and no jobRunId, and the logger's correlation id
+ * (`jobRunId ?? pollRunId ?? requestId ?? bootId`, lib/logger.ts) is the
+ * press's requestId. The traceparent is restored the way dispatchJob restores
+ * an envelope's (jobs/jobs.ts); whether OTel spans parent on it is that path's
+ * behavior, not a B2a claim. The slot is released when the job ends.
+ */
+function startClaimedJob(record: RankingJobRecord, release: () => void, deps: RankingJobDeps): Promise<void> {
+  const ctx: CorrelationContext = {
+    requestId: record.requestId,
+    ...(record.traceparent !== undefined && { traceparent: record.traceparent }),
+  };
+  return runWithContext(ctx, () => rankAnchor(record, deps)).finally(release);
+}
+
+/**
+ * ONE ranking poll pass (worker.ts's poll every tick; POST /__dev/ranking/tick
+ * on the hermetic lane). Resolves when every job it claimed has finished.
+ *
+ * 1. Every listed queued record past its expiry is marked failed ("The
+ *    ranking was not picked up") by S2's markExpiredQueued, conditioned on
+ *    status, the listed generation and the expiry, so it can never fail a
+ *    record another tick has just claimed.
+ * 2. Queued records, oldest first, are claimed while a slot is free: the slot
+ *    is RESERVED before the conditional claim and released when the claim
+ *    loses, so overlapping ticks cannot exceed RANKING_MAX_CONCURRENT_JOBS.
+ * 3. Running records past their lease: attempts < 1 is taken over (a new
+ *    generation, attempts + 1, run from the start - enough to cover a
+ *    redeploy); otherwise S2's markLeaseFailed fails it with "The ranking
+ *    stopped before it finished". A new press clears either.
+ */
+export async function runDueRankings(nowIso: string, deps: RankingJobDeps): Promise<RankingPollSummary> {
+  const log = deps.logger;
+  const summary: RankingPollSummary = { expired: 0, claimed: 0, tookOver: 0, failedStale: 0 };
+  const nowMs = Date.parse(nowIso);
+  const leaseExpiresAt = new Date(nowMs + deps.config.rankingLeaseMs).toISOString();
+  const started: Promise<void>[] = [];
+
+  const queued = await deps.jobs.listQueued(RANKING_POLL_LIST_LIMIT);
+  const due: RankingJobRecord[] = [];
+  for (const record of queued) {
+    if (Date.parse(record.queuedExpiresAt) > nowMs) {
+      due.push(record);
+      continue;
+    }
+    try {
+      if (await deps.jobs.markExpiredQueued(record, { nowIso, message: MSG_NOT_PICKED_UP })) {
+        summary.expired += 1;
+        emitRankingEvent(deps, { ...record, status: 'failed' });
+      }
+    } catch (err) {
+      log.error({ anchorKind: record.anchorKind, anchorId: record.anchorId, err }, 'ranking poll: expiry mark failed');
+    }
+  }
+
+  for (const record of due) {
+    const release = deps.slots.tryAcquire();
+    if (release === undefined) break;
+    try {
+      const claimed = await deps.jobs.claimQueued(record, { nowIso, leaseExpiresAt });
+      if (claimed === undefined) {
+        release();
+        continue;
+      }
+      summary.claimed += 1;
+      started.push(startClaimedJob(claimed, release, deps));
+    } catch (err) {
+      release();
+      log.error({ anchorKind: record.anchorKind, anchorId: record.anchorId, err }, 'ranking poll: claim failed');
+    }
+  }
+
+  const stale = await deps.jobs.listExpiredLeases(nowIso, RANKING_POLL_LIST_LIMIT);
+  for (const record of stale) {
+    try {
+      if (record.attempts >= 1) {
+        if (await deps.jobs.markLeaseFailed(record, { nowIso, message: MSG_STOPPED })) {
+          summary.failedStale += 1;
+          emitRankingEvent(deps, { ...record, status: 'failed' });
+        }
+        continue;
+      }
+      const release = deps.slots.tryAcquire();
+      if (release === undefined) continue;
+      const taken = await deps.jobs.takeOver(record, {
+        nowIso,
+        newGeneration: (deps.newId ?? randomUUID)(),
+        leaseExpiresAt,
+      });
+      if (taken === undefined) {
+        release();
+        continue;
+      }
+      summary.tookOver += 1;
+      started.push(startClaimedJob(taken, release, deps));
+    } catch (err) {
+      log.error({ anchorKind: record.anchorKind, anchorId: record.anchorId, err }, 'ranking poll: stale lease step failed');
+    }
+  }
+
+  if (summary.expired + summary.claimed + summary.tookOver + summary.failedStale > 0) {
+    log.info({ ...summary }, 'ranking poll pass');
+  }
+  await Promise.all(started);
+  return summary;
 }

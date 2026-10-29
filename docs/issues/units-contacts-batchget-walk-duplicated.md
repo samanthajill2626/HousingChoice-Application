@@ -6,6 +6,7 @@ severity: low
 status: open
 area: app
 created: 2026-10-07
+updated: 2026-10-29
 refs: app/src/repos/unitsRepo.ts, app/src/repos/contactsRepo.ts, docs/superpowers/reviews/2026-10-06-tour-list/planner-review/adjudications.md
 ---
 
@@ -46,3 +47,28 @@ call it; their existing tests (`app/test/contactsBatchReads.test.ts`,
 `app/test/unitsRepoDisplays.test.ts` and the two repos' DynamoDB Local
 integration files) pin the behavior through the move. Land it after feat/clean-org-names merges, or rebase it
 over that branch's `contactsRepo.ts` edits.
+
+**Update (WP1 B2a, 2026-10-29): a third copy, and two more walks.**
+`unitsRepo.getManyByIds(ids, { requireComplete: true })`
+(`app/src/repos/unitsRepo.ts`) - the full-item units read the ranking's
+properties-seen cards use - carries the same walk again, this time WITH the
+`requireComplete` mode (a failed chunk rethrows; an unprocessed key after
+its retries throws `IncompleteBatchReadError`), and is marked
+`TODO(units-contacts-batchget-walk-duplicated)`. The suggested shared helper
+now has three callers. (The units walk is no longer without that mode
+either: since WP1 B1 `getDisplaysByIds` takes an optional `requireComplete`
+too.) B2a also added two by-key BatchGet walks of other tables that the
+helper should cover or explicitly leave out; neither carries the TODO
+marker:
+- `matchesRepo.getPairs(keys, { requireComplete: true })`
+  (`app/src/repos/matchesRepo.ts`) - a COMPOSITE key (`tenantId` +
+  `unitId`), a consistent read, complete-only (`IncompleteBatchReadError`
+  with table `matches`), so the helper would need a key builder, not one
+  key attribute;
+- the ranking run listing's private `batchGetRuns`
+  (`app/src/repos/rankingRunsRepo.ts`, behind `listRuns`) - a projected
+  read that REPORTS the run ids still unread after its retries (the page
+  shows them as unavailable and says `incomplete: true`) instead of
+  dropping or throwing: a third mode, copied from the extraction run log's
+  `batchGetRuns` (`app/src/repos/aiRunsRepo.ts`), which this issue did not
+  list either.

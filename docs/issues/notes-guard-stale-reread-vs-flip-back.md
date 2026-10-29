@@ -6,6 +6,7 @@ severity: low
 status: open
 area: app/extraction
 created: 2026-10-27
+updated: 2026-10-29
 refs: app/src/services/extraction/apply.ts:292, app/src/jobs/extraction.ts:80
 ---
 
@@ -44,3 +45,15 @@ dropped; different = written), which catches the commonest slip - a re-read
 of the CURRENT view - but needs the block's labels inside filterNoteLines;
 (3) or capture feedback against the send itself, as the WP3 redesign plans
 (docs/issues/wp3-property-feedback-redesign.md).
+
+**Update (WP1 B2a, 2026-10-29): part one of the suggested fix is done.**
+`filterNoteLines` returns `duplicate` - the lines the retry guard dropped,
+model and system lines together - the extraction run record carries
+`notesDuplicate`, and the AI run detail's Notes list shows "N already in the
+notes" (spec D14.2). Cameron's any-date ruling stands (restated
+2026-10-28), so this stays OPEN until production numbers show how often the
+guard drops a line; parts two and three are untouched. Note for whoever
+picks it up: B2a's tenant card does not read "the latest line for a home" -
+it attaches EVERY Notes line that names a seen home under that home's
+properties-seen entry (`app/src/services/ranking/seenFeedback.ts`), so a
+stale re-read and a flip back both reach the model, in order.

@@ -6,6 +6,7 @@ severity: med
 status: open
 area: app/import
 created: 2026-10-26
+updated: 2026-10-29
 refs: app/src/lib/import/apply.ts:1196, app/src/services/extraction/apply.ts:713
 ---
 
@@ -26,3 +27,17 @@ B1's scope.
 the workbook's notes when they are not already present verbatim, or skip
 the notes write when the box is non-empty. Decide before the next
 `import:apply` on production data.
+
+**Update (WP1 B2a, 2026-10-29): the importer now stamps `notes_updated_at`.**
+B2a's Notes guard (spec D14.3) has every Notes writer stamp
+`notes_updated_at` in the same write as the box, the importer included: its
+one upsert sets the stamp (to the run's `importedAt`) beside
+`notes = :notes` whenever the workbook row carries notes - also when the
+text is UNCHANGED (app/src/lib/import/apply.ts, `upsertContact`). So a
+contact edit form open across an import meets the "These notes were changed
+since you opened this form" conflict over identical text (the form shows
+the current notes; Save again stores the typed text). Accepted with D14.3.
+The replace itself is unchanged and this issue stays open: a
+merge-instead-of-replace fix should also skip the stamp when the text does
+not change. Since B2a the ranking's tenant card also reads the Notes box,
+so a replace now also changes what the next ranking sees.

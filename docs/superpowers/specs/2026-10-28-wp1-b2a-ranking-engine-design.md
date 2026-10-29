@@ -1,9 +1,10 @@
 # WP1 B2a Ranking engine - design
 
-Status: DRAFT revision 4 (2026-10-28). Rev 2 folded in design review
+Status: DRAFT revision 5 (2026-10-28). Design review CLOSED after round 4. Rev 2 folded in design review
 round 1 (two reviewers, 41 findings, all accepted after checking the
-code); rev 3 folded in round 2 (12 findings, all accepted); rev 4 folds
-in round 3 (7 findings, all accepted).
+code); rev 3 folded in round 2 (12 findings, all accepted); rev 4 folded
+in round 3 (7 findings, all accepted); rev 5 folds in round 4 (3
+precision findings, no decision changed: the terminal round).
 Adjudications: the records' design-review/adjudications.md.
 Charter: docs/superpowers/specs/2026-10-24-wp1-matching-charter-design.md,
 as amended through section 20 item 14. B2 is split (item 13): this branch
@@ -338,10 +339,16 @@ whole set (100 keys per call), whatever its size. That BatchGet is a NEW
 full-item reader, `unitsRepo.getManyByIds(ids, { requireComplete: true })`
 (the existing `getDisplaysByIds` returns only id and address and, without
 the option, drops unread keys): an unprocessed key after its retries
-THROWS. An incomplete read fails the job ("Could not read every property
-this tenant was sent. Press Rank again.") or answers the ranking read
-with 503 and a message; it is never read as "not on file", which would
-change the card and its fingerprint. Each listed entry reads as one unit:
+THROWS, and the failure is scoped to the one card that needed it: it is
+never read as "not on file", which would change the card and its
+fingerprint. In the job, that candidate (or, for a tenant anchor, the
+anchor and so the whole job) is left out of the call and reads "not
+scored - retry", with the count in the job's message ("2 tenants could
+not be read and were not scored. Press Rank again."). In the ranking
+read, that candidate's stored match is still shown, with out-of-date
+reason `unverified` ("could not check whether this match is current");
+an anchor whose own card cannot be read answers 503. An out-of-date list
+is still shown (charter 10.3). Each listed entry reads as one unit:
 
 - `label` (`propertyLabel`) and a SHORT summary of that property: beds,
   baths, rent (range or final), area, subzone, voucher sizes, pets
@@ -764,7 +771,7 @@ returns:
   model), and either `match: null` (`notRankedYet`, or `notScored` when
   the anchor's last job listed it in a failed batch) or the match with
   derived `band`, `capped`, `capReason`, and `outOfDate:
-  ('card' | 'pairHistory' | 'age' | 'version' | 'failedBatch')[]`.
+  ('card' | 'pairHistory' | 'age' | 'version' | 'failedBatch' | 'unverified')[]`.
 - `flags`: open unlawful flags for the properties in view (D10).
 
 Derivations, all in `app/src/services/ranking/readRanking.ts`:
@@ -904,23 +911,21 @@ serialization.
   the tenant card's own fields with `notes` and `propertiesSeen` removed;
   the Notes box text as stored (every feedback line is a Notes line, so
   a new feedback line or a staff edit changes it, wherever it would be
-  arranged); and, for every property in the unbounded seen set that
-  carries an outcome (a decline, a tour or an attached feedback line),
-  `{ unitId, label, summary, declined, tours }` sorted by `unitId`, where
-  `tours` keeps only each tour's `status`, `outcome` and scheduled time
-  (never roster, reminder or bookkeeping fields, which change with no
-  outcome). Send dates, entries that carry only sends, the bound and the
-  order are not in it. So the card's content still decides the
-  fingerprint (charter 10.3) except for sends with no outcome, which B2
-  leaves out as the charter says: a bare new send, a re-send and an
-  eviction from the listed entries change nothing; a decline, a tour or
-  a feedback line about ANY property, or an edit to a seen property's
-  label or summary, changes every match of that tenant. One edge, put to
-  Cameron as Q7 because it touches charter 10.3: the FIRST send of a
-  property that a Notes line already names
-  turns that line into feedback on a seen home, so that send changes the
-  fingerprint once (the card's meaning did change; it needs a line
-  naming a home before the home was ever sent, toured or signed up for).
+  arranged); and, for every property in the unbounded seen set that has
+  a STORED outcome (a decline or a tour), `{ unitId, label, summary,
+  declined, tours }` sorted by `unitId`, where `tours` is the tour
+  projection. Feedback lines need no entry of their own: they are
+  already in the Notes text. Send dates, entries without a stored
+  outcome, the bound, the order and the attach result are not in it. So
+  the card's content decides the fingerprint (charter 10.3) except for
+  sends with no outcome, which B2 leaves out as the charter says, with
+  no exception: a bare new send, a re-send, an eviction from the listed
+  entries and a line re-attaching under a newly sent home change
+  nothing; a decline, a tour or a feedback line about ANY property, or
+  an edit to the label or summary of a home with a decline or tour,
+  changes every match of that tenant. The cost (Q7): an edit to a home
+  the tenant has only given feedback on (no decline, no tour) does not
+  refresh their other matches; the 7-day age rule bounds it.
   Recency enters only as its bucket.
 - `pairHistory`: the declined record and the tours (the tour projection);
   never the send dates (age covers time since the last send).
@@ -1032,7 +1037,10 @@ and a `gate-run-commands.md` sheet in the records:
      and a property whose qualifications say "no kids" (flagged unlawful
      in at least two of three runs; never capped).
    - Tolerance (Q5), per swap and direction, in two stages so that
-     about a hundred comparisons do not fail on noise alone. Stage one:
+     about a hundred comparisons do not fail on noise alone. Every swap
+     of a base pair is compared against that pair's base GROUP A (below;
+     three runs in stage one, eight once stage two extends it), so base
+     runs are shared, never re-run per swap. Stage one:
      three runs each of base and variant; the swap passes when the mean
      score moves by at most 5 points and the base and variant cap counts
      (out of three) differ by at most one. A swap that misses stage one
@@ -1053,8 +1061,11 @@ and a `gate-run-commands.md` sheet in the records:
      suppression by STORED unlawful flags (D10) is not exercised here
      (its own tests cover it; the "no kids" control covers the raising).
    - It writes the full result, verbatim, as a mission record and exits
-     0 only on a pass. Estimated spend under ten dollars (both
-     directions, stage two included).
+     0 only on a pass. About 6 base pairs x 2 directions x (6 base runs +
+     9 swaps x 3 variant runs) = about 400 small calls in stage one, plus
+     stage two only for misses: estimated 10-20 dollars of testing-key
+     spend. The script prints its planned call count and cost estimate
+     before the first call.
 3. Batch timing (charter 19): `--timing` on the same script scores one
    synthetic 40-candidate batch three times and records latency and
    tokens. The Rankings page shows progress per batch whatever it says;
@@ -1193,7 +1204,7 @@ two is not WP1; the `stage` field is there).
   property value wins; properties seen (outcome entries always listed,
   bare entries fill to the bound newest first, kinds, decline, tours,
   soft-deleted unit listed, missing unit placeholder only after a
-  complete read, an incomplete units read fails the job and the read);
+  complete read, an incomplete units read leaves only that candidate unscored in the job and marks only its row `unverified` in the read, and fails the read only for the anchor's own card);
   the tour projection drops reminder and roster fields; the attach step
   over the unbounded seen set (match, multiple matches, unmatched line
   stays, staff line moves, a line naming an unlisted bare property still
@@ -1230,9 +1241,9 @@ two is not WP1; the `stage` field is there).
   re-orders and a ninth send that pushes an entry off the listed ones; a
   decline, tour or feedback line on another property does, and so does
   an edit to a seen property's label or summary; a tour's reminder or
-  roster change does not; the accepted edge (the first send of a
-  property a Notes line already names changes it once) is pinned; a
-  failed batch does not
+  roster change does not; the first send of a property a Notes line
+  already names changes nothing; an edit to a home with feedback only
+  changes nothing; a failed batch does not
   flag a pair re-scored since by the other anchor); sort both directions
   with each priority strength; not ranked yet and not scored; the
   ceiling on the read; the 150-tenant read budget measured.
@@ -1324,12 +1335,13 @@ at plan time.
 - Q6. The default prices ($2 / $10 per million tokens for Sonnet 5.5, $4
   / $20 for Opus 5.5) come from the API's model table, not a bill. Every
   run's recorded cost rests on them. Confirm, or give the numbers.
-- Q7. One edge of "a new send alone never makes a match out of date"
-  (charter 10.3 and 13.5, a section no slice may reopen): when a Notes
-  line ALREADY names a home that was never sent, toured or signed up
-  for, the first send of that home turns the line into feedback on a
-  seen home, so that one send marks the tenant's matches out of date
-  once. Keeping the rule exact would mean leaving that home's label and
-  summary out of the fingerprint, so edits to a seen home would never
-  refresh the tenant's matches. Recommendation: accept the edge; it is
-  recorded as charter section 20 item 15 on your yes.
+- Q7. Keeping "a new send alone never makes a match out of date"
+  (charter 10.3 and 13.5) exact. The spec does it by fingerprinting a
+  seen home's label and summary only when the home has a decline or a
+  tour; feedback lines count through the Notes text. The cost: when a
+  home the tenant has only talked about (no decline, no tour) is edited,
+  their other matches are not flagged until the 7-day age rule does it.
+  The alternative also fingerprints homes with feedback only, which
+  refreshes on those edits but lets one send flag the tenant's matches
+  (the first send of a home a Notes line already named), a charter
+  amendment. Recommendation: the spec as written, no amendment.

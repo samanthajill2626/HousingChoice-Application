@@ -94,3 +94,22 @@ allowed, required.
 | R3-5 mixed card keys; exemptions partly moot | ACCEPT | D2.1: property card keyed by attribute; only examples.ts exempt; the fake driver finds inputs through the list |
 | R3-6 contests R2-2: the first-send edge needs Cameron | ACCEPT (reverses my R2-2 "no amendment" ruling) | Q7 to Cameron; charter item 15 on his yes |
 | R3-7 decline and tours of an outcome home past the bound leave the card; Q2 silent | ACCEPT | Q2 restated |
+
+## Round 4 - TERMINAL (spec rev 4 at d1121031; revised to rev 5)
+
+Reviewer A continued. Report: R4-review.md (3 LOW, all PRECISION; no
+DECISION; no adjudication contested). All three ACCEPTED. No decision
+changed, so this is the terminal round and the review is CLOSED (4 of 4).
+
+| Finding | Ruling | Change in rev 5 |
+|---|---|---|
+| R4-1 Q7 offers a false choice; a third option keeps charter 10.3 exact | ACCEPT | D13: only homes with a decline or tour carry label and summary into the fingerprint (feedback counts through the Notes text), so no send ever changes it; Q7 rewritten with this as the recommendation and no amendment needed |
+| R4-2 one incomplete seen read 503s the whole ranking read | ACCEPT | D2.3: failure scoped to the one card - the candidate is left unscored in the job, marked `unverified` in the read; 503 only when the anchor's own card cannot be read |
+| R4-3 which base runs a swap is compared against; cost | ACCEPT | D17: against the pair's base group A; about 400 stage-one calls, 10-20 dollars, printed before the first call |
+
+## Totals at the spec gate
+
+4 rounds, 63 findings (round 1: 41 from two reviewers; round 2: 12;
+round 3: 7; round 4: 3). Accepted 63, rejected 0, deferred 0. One ruling
+of the planner was reversed by the reviewer (R2-2 -> R3-6 -> R4-1: the
+send/fingerprint edge, now closed without a charter amendment).

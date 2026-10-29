@@ -2,7 +2,7 @@
 
 Mission: Amendment No. 1 Work Package 1, slice B2 of 4 ("Ranking engine").
 Charter: docs/superpowers/specs/2026-10-24-wp1-matching-charter-design.md
-(section 15.1 B2 row; amended through section 20 item 12). Charter
+(section 15.1 B2 row; amended through section 20 item 14). Charter
 decisions bind (sections 0 and 15.4); a change goes to Cameron and is
 recorded in the charter (section 20).
 
@@ -12,19 +12,18 @@ cut from main @404e039d.
 
 ## STATE
 
-Phase: SPEC (2026-10-28). Charter amendment 12 committed on this branch.
-Restatement answered: SPLIT. This branch is B2a (the engine); B2b (the
-review dataset) gets its own spec and branch after B2a merges.
-Spec rev 1 committed (dc8025cc):
-docs/superpowers/specs/2026-10-28-wp1-b2a-ranking-engine-design.md.
-Charter amendment 13 (the split) committed (1f128d99).
-Round 1 done: 41 findings, all accepted; spec rev 2 + charter amendment
-14 committed (5b97ac07); adjudications in design-review/adjudications.md.
-IN FLIGHT: design review round 2, reviewer A continued (writes
-design-review/R2-review.md).
-NEXT: adjudicate round 2 (stop when a round changes no decision; cap 4),
-then Cameron's spec gate with Q1-Q6 (spec section 9). No compile-check
-run at the spec gate (dropped in rev 2: real-model runs only at the end).
+Phase: SPEC GATE (2026-10-28). Charter amendments 12, 13 (the split) and
+14 (Notes line breaks and drop count) committed on this branch. This
+branch is B2a (the engine); B2b (the review dataset) gets its own spec
+and branch after B2a merges.
+Spec: docs/superpowers/specs/2026-10-28-wp1-b2a-ranking-engine-design.md,
+rev 5. Design review CLOSED after round 4 (63 findings, 63 accepted, 0
+rejected; design-review/adjudications.md).
+WAITING ON: Cameron's spec gate - Q1-Q7 in spec section 9 (each with a
+recommendation). Nothing in flight.
+NEXT: record his answers here and in the spec (section 10, spec-gate
+answers), then compaction gate A (register compact-resume, prove the
+replay, offer /compact), then the plan.
 
 ## What Cameron asked for (verbatim where wording matters)
 

@@ -214,7 +214,7 @@ describe('applyExtraction - field writes (items 1-3)', () => {
   it('op:none does nothing', async () => {
     const { deps, records } = makeDeps();
     const outcome = await run(deps, makeContact(), { fields: { pets: { op: 'none' } } });
-    expect(outcome).toEqual({ wrote: [], suggested: [], notedLines: 0, notesBelowFloor: 0, notesDemoted: 0, appendedLines: [], displaced: [], decisions: [] });
+    expect(outcome).toEqual({ wrote: [], suggested: [], notedLines: 0, notesBelowFloor: 0, notesDemoted: 0, notesDuplicate: 0, appendedLines: [], displaced: [], decisions: [] });
     expect(records.updates).toHaveLength(0);
     expect(records.emits).toHaveLength(0);
   });
@@ -281,6 +281,7 @@ describe('applyExtraction - type gating (item 1)', () => {
       notedLines: 0,
       notesBelowFloor: 0,
       notesDemoted: 0,
+      notesDuplicate: 0,
       appendedLines: [],
       displaced: [],
       decisions: [
@@ -1889,5 +1890,27 @@ describe('applyExtraction - appendedLines (WP1 B1 spec D5.3)', () => {
     });
     expect(outcome.appendedLines).toEqual([]);
     expect(outcome.notedLines).toBe(0);
+  });
+});
+
+// WP1 B2a spec D14.1 / D14.2: applyExtraction writes the collapsed line and
+// reports the retry guard's drops as notesDuplicate.
+describe('applyExtraction - collapsed lines and the duplicate count (WP1 B2a D14.1, D14.2)', () => {
+  it('reports the lines the retry guard dropped as notesDuplicate', async () => {
+    const { deps } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant', notes: 'seed\n[Auto - Jul 10] alpha' }), {
+      fields: {}, noteLines: [note('alpha'), note('bravo')],
+    });
+    expect(outcome.notedLines).toBe(1);
+    expect(outcome.notesDuplicate).toBe(1);
+  });
+
+  it('(PIN) writes a model line holding a break as ONE prefixed line', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: {}, noteLines: [note('412 Oak Ave, Decatur: on the fence\nworried about the commute')],
+    });
+    expect(outcome.appendedLines).toEqual(['412 Oak Ave, Decatur: on the fence / worried about the commute']);
+    expect(records.updates[0]!.patch['notes']).toBe('[Auto - Jul 16] 412 Oak Ave, Decatur: on the fence / worried about the commute');
   });
 });

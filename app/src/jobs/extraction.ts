@@ -362,6 +362,9 @@ export interface RunDraft {
   notesBelowFloor?: number;
   /** B1 spec D4: note lines a demoted run withheld. Set only once apply ran. */
   notesDemoted?: number;
+  /** WP1 B2a spec D14.2: note lines the retry guard dropped as already in the
+   *  notes. Set only once apply ran. */
+  notesDuplicate?: number;
   /** WP1 B1 spec D5.3: of the appended lines, those naming a block label, and
    *  those carrying a street address that names none. Set only once apply ran. */
   feedbackLines?: number;
@@ -715,6 +718,7 @@ async function processRow(
   draft.notedLines = applyOutcome.notedLines;
   draft.notesBelowFloor = applyOutcome.notesBelowFloor;
   draft.notesDemoted = applyOutcome.notesDemoted;
+  draft.notesDuplicate = applyOutcome.notesDuplicate;
   // WP1 B1 spec D5.3: counts only - nothing is dropped or rewritten on them.
   // Best-effort like every other record piece (draftPiece).
   const feedback = draftPiece(logger, draft, () => countFeedbackLines(applyOutcome.appendedLines, sentBlock.labels));
@@ -768,6 +772,7 @@ async function recordRun(deps: ExtractionJobDeps, outcome: RunOutcome, draft: Ru
       notedLines: draft.notedLines ?? 0,
       ...(draft.notesBelowFloor !== undefined && { notesBelowFloor: draft.notesBelowFloor }),
       ...(draft.notesDemoted !== undefined && { notesDemoted: draft.notesDemoted }),
+      ...(draft.notesDuplicate !== undefined && { notesDuplicate: draft.notesDuplicate }),
       ...(draft.feedbackLines !== undefined && { feedbackLines: draft.feedbackLines }),
       ...(draft.unlabeledAddressLines !== undefined && { unlabeledAddressLines: draft.unlabeledAddressLines }),
     };

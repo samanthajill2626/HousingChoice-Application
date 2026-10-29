@@ -77,6 +77,9 @@ export interface ApplyOutcome {
   notesBelowFloor: number;
   /** Note lines a demoted run withheld (B1 spec D4); 0 when not demoted. */
   notesDemoted: number;
+  /** Note lines the retry guard dropped as already in the notes, model and
+   *  system together (WP1 B2a spec D14.2; filterNoteLines `duplicate`). */
+  notesDuplicate: number;
   /** Earlier run suggestions this apply pass replaced. */
   displaced: Array<{ target: string; runId: string; createdAt: string }>;
   /** One entry per target written, suggested, or discarded. Note lines are not targets. */
@@ -999,7 +1002,7 @@ export async function applyExtraction(
 
   return {
     wrote, suggested, notedLines, appendedLines,
-    notesBelowFloor: filtered.belowFloor, notesDemoted: filtered.demoted,
+    notesBelowFloor: filtered.belowFloor, notesDemoted: filtered.demoted, notesDuplicate: filtered.duplicate,
     displaced, decisions,
   };
 }

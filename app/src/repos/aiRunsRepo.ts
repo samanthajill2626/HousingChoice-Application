@@ -76,6 +76,11 @@ export interface AiRunRecord {
   /** B1 spec D4: note lines a demoted (unknown-speaker) run withheld. Absent
    *  as notesBelowFloor is. */
   notesDemoted?: number;
+  /** WP1 B2a spec D14.2: note lines the retry guard dropped as already in the
+   *  notes (any date), model and system together. Absent as notesBelowFloor
+   *  is, and on every run recorded before B2a. putRun spreads its input, so
+   *  no write change. Dashboard twin: AiRunRecordView. */
+  notesDuplicate?: number;
   /** WP1 B1 spec D5.3: of the appended lines, those naming a property in the
    *  PROPERTIES SENT block, and those carrying a street address that names
    *  none. Absent on runs that never reached apply and on runs recorded

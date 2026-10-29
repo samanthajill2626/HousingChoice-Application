@@ -2016,12 +2016,23 @@ describe('runDueExtractions - Notes line counts in the run record (B1 spec D4)',
     expect(notesWrites).toEqual([]);
   });
 
+  // WP1 B2a spec D14.2: the retry guard's drops ride the record beside them.
+  it('records notesDuplicate: the lines the retry guard dropped', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', TWO_LINES)],
+      contact: tenantContactWith({ notes: '[Auto - Jul 10] works nights downtown' }), conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]).toMatchObject({ notedLines: 0, notesBelowFloor: 1, notesDemoted: 0, notesDuplicate: 1 });
+  });
+
   it('(PIN) a run that never reached apply carries neither count', async () => {
     const h = makeHarness({ dueRows: [dueRow()], messages: [msg(10, 'inbound', TWO_LINES)], contact: landlordContact(), conversation: convWith('c1') });
     await runDueExtractions(NOW, h.deps);
     expect(h.runs[0]!.outcome).toBe('skipped');
     expect('notesBelowFloor' in h.runs[0]!).toBe(false);
     expect('notesDemoted' in h.runs[0]!).toBe(false);
+    expect('notesDuplicate' in h.runs[0]!).toBe(false);
   });
 });
 

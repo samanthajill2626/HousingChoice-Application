@@ -12,14 +12,14 @@ import { describe, expect, it } from 'vitest';
 import * as app from '../../../../app/src/lib/tenantMatchingInputs.js';
 import * as mirror from './tenantMatchingInputs.js';
 
-const MIRRORED = ['key', 'label', 'chipLabel', 'kind', 'control'] as const;
+const MIRRORED = ['key', 'label', 'chipLabel', 'kind', 'control', 'completeness'] as const;
 
 function mirrored(entry: Readonly<Record<string, unknown>>): Record<string, unknown> {
   return Object.fromEntries(MIRRORED.map((field) => [field, entry[field]]));
 }
 
 describe('dashboard tenant matching inputs mirror app/src/lib/tenantMatchingInputs.ts', () => {
-  it('carries the same entries - key, label, chipLabel, kind, control - in the same order', () => {
+  it('carries the same entries - key, label, chipLabel, kind, control, completeness - in the same order', () => {
     expect(mirror.TENANT_MATCHING_INPUTS.map(mirrored)).toEqual(app.TENANT_MATCHING_INPUTS.map(mirrored));
     expect(mirror.TENANT_MATCHING_INPUTS.length).toBeGreaterThan(0);
   });

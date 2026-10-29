@@ -85,6 +85,15 @@ describe('TENANT_MATCHING_INPUTS - the one list (spec D1)', () => {
     ]);
   });
 
+  it('marks area_preference and max_tenant_portion for the completeness pass, the other two not (B2a spec D3; PR6)', () => {
+    expect(TENANT_MATCHING_INPUTS.map((input) => [input.key, input.completeness])).toEqual([
+      ['area_preference', true],
+      ['max_tenant_portion', true],
+      ['accessibility_need', false],
+      ['preferences_constraints', false],
+    ]);
+  });
+
   it('every entry carries one line of ASCII prompt guidance (spec D3)', () => {
     for (const input of TENANT_MATCHING_INPUTS) {
       expect(input.promptGuidance.trim().length, input.key).toBeGreaterThan(20);

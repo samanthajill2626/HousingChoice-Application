@@ -22,24 +22,42 @@ export interface TenantMatchingInput {
   readonly chipLabel: string;
   readonly kind: TenantMatchingInputKind;
   readonly control: TenantMatchingInputControl;
+  /** WP1 B2a spec D3: the ranker's completeness pass checks this input. */
+  readonly completeness: boolean;
 }
 
 export const TENANT_MATCHING_INPUTS = [
-  { key: 'area_preference', label: 'Area preference', chipLabel: 'area preference', kind: 'text', control: 'input' },
+  {
+    key: 'area_preference',
+    label: 'Area preference',
+    chipLabel: 'area preference',
+    kind: 'text',
+    control: 'input',
+    completeness: true,
+  },
   {
     key: 'max_tenant_portion',
     label: 'Maximum tenant portion',
     chipLabel: 'maximum tenant portion',
     kind: 'dollars',
     control: 'dollars',
+    completeness: true,
   },
-  { key: 'accessibility_need', label: 'Accessibility need', chipLabel: 'accessibility need', kind: 'text', control: 'input' },
+  {
+    key: 'accessibility_need',
+    label: 'Accessibility need',
+    chipLabel: 'accessibility need',
+    kind: 'text',
+    control: 'input',
+    completeness: false,
+  },
   {
     key: 'preferences_constraints',
     label: 'Preferences and constraints',
     chipLabel: 'preferences and constraints',
     kind: 'text',
     control: 'textarea',
+    completeness: false,
   },
 ] as const satisfies readonly TenantMatchingInput[];
 

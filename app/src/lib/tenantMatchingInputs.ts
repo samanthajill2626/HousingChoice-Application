@@ -32,6 +32,9 @@ export interface TenantMatchingInput {
   readonly source: TenantMatchingInputSource;
   /** The sentence the extraction prompt uses for this field (spec D3). */
   readonly promptGuidance: string;
+  /** WP1 B2a spec D3 (charter 7.3): the ranker's completeness pass flags this
+   *  input as missing when the tenant has none recorded. */
+  readonly completeness: boolean;
 }
 
 export const TENANT_MATCHING_INPUTS = [
@@ -42,6 +45,7 @@ export const TENANT_MATCHING_INPUTS = [
     kind: 'text',
     control: 'input',
     source: 'field',
+    completeness: true,
     promptGuidance:
       'Where the tenant wants to live: neighborhoods, cities, zip codes, or "near X".',
   },
@@ -52,6 +56,7 @@ export const TENANT_MATCHING_INPUTS = [
     kind: 'dollars',
     control: 'dollars',
     source: 'field',
+    completeness: true,
     promptGuidance:
       'The most the tenant says they can pay themselves each month toward the rent of a new home, in whole dollars - not the full rent and not the voucher amount.',
   },
@@ -62,6 +67,7 @@ export const TENANT_MATCHING_INPUTS = [
     kind: 'text',
     control: 'input',
     source: 'field',
+    completeness: false,
     promptGuidance:
       'A need the HOME must meet for the tenant or a household member (no stairs, a ground floor, wheelchair access, grab bars) - the bare need, never a diagnosis.',
   },
@@ -72,6 +78,7 @@ export const TENANT_MATCHING_INPUTS = [
     kind: 'text',
     control: 'textarea',
     source: 'field',
+    completeness: false,
     promptGuidance:
       'Anything else the tenant states they want or cannot accept in a home (bedrooms beyond the voucher, a yard, a move-in date, "no apartments").',
   },

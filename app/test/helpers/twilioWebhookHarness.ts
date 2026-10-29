@@ -143,7 +143,7 @@ import {
   type RosterContactsRead,
 } from '../../src/lib/propertyContact.js';
 import { RosterPlanConflictError } from '../../src/lib/rosterResolution.js';
-import { type PlacementItem, type PlacementsRepo } from '../../src/repos/placementsRepo.js';
+import { TERMINAL_STAGES, type PlacementItem, type PlacementsRepo } from '../../src/repos/placementsRepo.js';
 import {
   deadlineIdFor,
   type PlacementDeadlineItem,
@@ -3527,6 +3527,13 @@ export function createFakeWorld(): FakeWorld {
     async listByUnit(unitId, opts = {}) {
       const all = [...placements.values()].filter((c) => c.unitId === unitId);
       return placementPage(all, opts);
+    },
+    async hasActivePlacementForOtherTenant(unitId, tenantId) {
+      // WP1 B2a spec D1: mirror the repo - active = not in TERMINAL_STAGES,
+      // and the asking tenant's own placement never counts.
+      return [...placements.values()].some(
+        (c) => c.unitId === unitId && c.tenantId !== tenantId && !TERMINAL_STAGES.has(c.stage),
+      );
     },
     async listByStage(stage, opts = {}) {
       const items = [...placements.values()].filter((c) => c.stage === stage).slice(0, opts.limit ?? 50);

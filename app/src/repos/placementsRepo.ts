@@ -214,6 +214,14 @@ export interface PlacementsRepo {
   listByTenant(tenantId: string, opts?: ListPlacementsOpts): Promise<PlacementsPage>;
   /** All placements on a unit via the byUnit GSI. */
   listByUnit(unitId: string, opts?: ListPlacementsOpts): Promise<PlacementsPage>;
+  /**
+   * WP1 B2a spec D1 (the tenant anchor's pool): true when the unit carries an
+   * ACTIVE placement - stage not in TERMINAL_STAGES (moved_in, lost) - for a
+   * tenant other than `tenantId`. The anchor tenant's own placement never
+   * counts. Pages byUnit to the end (stops at the first hit); eventually
+   * consistent, like listByUnit.
+   */
+  hasActivePlacementForOtherTenant(unitId: string, tenantId: string): Promise<boolean>;
   /** All placements in a stage via the byStage GSI (one kanban column / RTA board). */
   listByStage(stage: PlacementStage, opts?: ListPlacementsOpts): Promise<PlacementsPage>;
   /** All placements whose CURRENT tour is on a given date via the byTourDate GSI. */
@@ -360,6 +368,18 @@ export function createPlacementsRepo(deps: RepoDeps = {}): PlacementsRepo {
 
     async listByUnit(unitId, opts = {}) {
       return queryIndex('byUnit', 'unitId', unitId, opts);
+    },
+
+    async hasActivePlacementForOtherTenant(unitId, tenantId) {
+      let exclusiveStartKey: Record<string, unknown> | undefined;
+      do {
+        const page = await queryIndex('byUnit', 'unitId', unitId, {
+          ...(exclusiveStartKey !== undefined && { exclusiveStartKey }),
+        });
+        if (page.items.some((p) => p.tenantId !== tenantId && !TERMINAL_STAGES.has(p.stage))) return true;
+        exclusiveStartKey = page.lastEvaluatedKey;
+      } while (exclusiveStartKey !== undefined);
+      return false;
     },
 
     async listByStage(stage, opts = {}) {

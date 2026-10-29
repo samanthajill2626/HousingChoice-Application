@@ -12,14 +12,16 @@ cut from main @404e039d.
 
 ## STATE
 
-Phase: PLAN DRAFTING (2026-10-28, after compaction gate A was taken). The
-plan head (sections 0-4, binding) is at
-docs/superpowers/plans/2026-10-28-wp1-b2a-ranking-engine.md; six opus
-section drafters write S1-S8 to .superpowers/sdd/plan-draft-Sn.md (findings
-to plan-drafts/Sn-findings.md). NEXT: assemble the drafts, rule on their
-findings (plan section 4 assembly rulings), firm the hours, then the plan's
-adversarial review (two opus reviewers, plan + spec, cap 4), then the
-mission block and launch gate.
+Phase: PLAN REVIEW ROUND 1 (2026-10-28). Plan v2 assembled and committed
+(docs/superpowers/plans/2026-10-28-wp1-b2a-ranking-engine.md, ~36k lines,
+85 tasks, rulings PR1-PR28, hours firmed 24-30). Round 1 in flight: FOUR
+blind opus reviewers (the plan is too long for one reader): two on head +
+S1-S4 (plan-review/R1-front-A.md, R1-front-B.md), two on head + S5-S9
+(R1-back-A.md, R1-back-B.md); brief .superpowers/sdd/BRIEF-plan-reviewer.md.
+NEXT: adjudicate into plan-review/plan-adjudications.md, fix the plan
+(drafters can be continued per slice), rounds 2+ continue the best
+reviewer per half under the re-review charge (cap 4), then the mission
+block and the launch gate.
 
 Earlier phase: SPEC APPROVED -> COMPACTION GATE A (2026-10-28). Cameron passed the
 spec gate on rev 6 (answers: spec section 10 and below). Charter

@@ -176,6 +176,28 @@ describe('GET /api/events — stream mechanics', () => {
     expect(client.received()).toContain(`data: ${JSON.stringify(payload)}`);
   });
 
+  it('forwards ranking.updated frames (the Rankings page live path, WP1 B2a D12)', async () => {
+    // Registration is hand-written per event in the SSE route, so only this
+    // test catches a missing one.
+    const { app, world } = makeWebhookHarness();
+    const port = await startServer(app);
+    const client = await connectSse(port);
+    await client.waitFor(': connected');
+
+    const payload = {
+      anchorKind: 'unit' as const,
+      anchorId: 'unit-sse-1',
+      generation: 'gen-sse-1',
+      status: 'running' as const,
+      batchesDone: 1,
+      batchCount: 2,
+    };
+    world.events.emit('ranking.updated', payload);
+
+    await client.waitFor('event: ranking.updated');
+    expect(client.received()).toContain(`data: ${JSON.stringify(payload)}`);
+  });
+
   it('forwards contact.updated frames (the Today / inbox / contact page live path)', async () => {
     // unknown-inactive ruling AR3. Registration is hand-written per event in
     // the SSE route, so only this test catches a missing one.
@@ -219,6 +241,8 @@ describe('GET /api/events — stream mechanics', () => {
     // (plan PR7), so today this equals the shared baseline; it keeps its own
     // so a change to the recorder list cannot break this cleanup test.
     const contactUpdatedBaseline = world.events.listenerCount('contact.updated');
+    // ranking.updated: the harness recorder does not record it, so it starts at 0.
+    const rankingBaseline = world.events.listenerCount('ranking.updated');
 
     const client = await connectSse(port);
     await client.waitFor(': connected');
@@ -230,6 +254,7 @@ describe('GET /api/events — stream mechanics', () => {
     expect(world.events.listenerCount('placement.updated')).toBe(baseline + 1);
     expect(world.events.listenerCount('ai_run.completed')).toBe(aiRunBaseline + 1);
     expect(world.events.listenerCount('contact.updated')).toBe(contactUpdatedBaseline + 1);
+    expect(world.events.listenerCount('ranking.updated')).toBe(rankingBaseline + 1);
 
     client.abort();
     const deadline = Date.now() + 3_000;
@@ -247,6 +272,8 @@ describe('GET /api/events — stream mechanics', () => {
     expect(world.events.listenerCount('ai_run.completed')).toBe(aiRunBaseline);
     // A deleted events.off('contact.updated', ...) fails HERE.
     expect(world.events.listenerCount('contact.updated')).toBe(contactUpdatedBaseline);
+    // A deleted events.off('ranking.updated', ...) fails HERE.
+    expect(world.events.listenerCount('ranking.updated')).toBe(rankingBaseline);
   });
 });
 

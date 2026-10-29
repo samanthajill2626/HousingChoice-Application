@@ -340,6 +340,28 @@ export interface ContactUpdatedEvent {
   contactId: string;
 }
 
+/**
+ * A ranking job's progress changed (WP1 B2a spec D12). Emitted by the
+ * ranking job (services/ranking/runBatch.ts after each batch's progress
+ * write; services/ranking/job.ts when the pool is built and when the job
+ * finishes or fails) and by the ranking poll when it fails a queued record
+ * past its expiry or a second stale lease. A HINT only: the worker-to-app
+ * bridge is best-effort, so the Rankings page also polls the job read every
+ * 5 seconds and re-reads the ranking when `batchesDone` grows.
+ *
+ * NEVER a score, a name or a card field - the stream reaches every
+ * dashboard. `batchesDone` is a COUNT of finished batches (scored or
+ * failed); the record's lists are read through the job endpoint.
+ */
+export interface RankingUpdatedEvent {
+  anchorKind: 'unit' | 'tenant';
+  anchorId: string;
+  generation: string;
+  status: 'queued' | 'running' | 'done' | 'failed';
+  batchesDone: number;
+  batchCount: number;
+}
+
 export interface AppEventMap {
   'conversation.updated': ConversationUpdatedEvent;
   'message.persisted': MessagePersistedEvent;
@@ -351,6 +373,7 @@ export interface AppEventMap {
   'unmatched_email.updated': UnmatchedEmailUpdatedEvent;
   'ai_run.completed': AiRunCompletedEvent;
   'contact.updated': ContactUpdatedEvent;
+  'ranking.updated': RankingUpdatedEvent;
 }
 
 export type AppEventName = keyof AppEventMap;
@@ -373,6 +396,7 @@ const ALL_APP_EVENTS: Record<AppEventName, true> = {
   'unmatched_email.updated': true,
   'ai_run.completed': true,
   'contact.updated': true,
+  'ranking.updated': true,
 };
 export const APP_EVENT_NAMES: readonly AppEventName[] = Object.keys(
   ALL_APP_EVENTS,

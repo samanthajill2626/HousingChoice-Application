@@ -59,6 +59,7 @@ import {
   type ContactUpdatedEvent,
   type UnmatchedEmailUpdatedEvent,
   type AiRunCompletedEvent,
+  type RankingUpdatedEvent,
 } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { AuthedRequest } from '../middleware/auth.js';
@@ -2790,6 +2791,10 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     const onAiRunCompleted = (payload: AiRunCompletedEvent): void => {
       writeEvent('ai_run.completed', payload);
     };
+    // WP1 B2a D12: ranking job progress - ids, a status and two counts only.
+    const onRankingUpdated = (payload: RankingUpdatedEvent): void => {
+      writeEvent('ranking.updated', payload);
+    };
     events.on('conversation.updated', onConversationUpdated);
     events.on('message.persisted', onMessagePersisted);
     events.on('broadcast.updated', onBroadcastUpdated);
@@ -2800,6 +2805,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     events.on('contact.updated', onContactUpdated);
     events.on('unmatched_email.updated', onUnmatchedEmailUpdated);
     events.on('ai_run.completed', onAiRunCompleted);
+    events.on('ranking.updated', onRankingUpdated);
 
     // Heartbeat as a REAL named event, not an SSE comment: the browser
     // EventSource API cannot observe comment frames (': ...') by spec, so a
@@ -2834,6 +2840,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       events.off('contact.updated', onContactUpdated);
       events.off('unmatched_email.updated', onUnmatchedEmailUpdated);
       events.off('ai_run.completed', onAiRunCompleted);
+      events.off('ranking.updated', onRankingUpdated);
       runWithContext(ctx, () => {
         log.info({ sse: 'disconnected' }, 'sse client disconnected');
       });

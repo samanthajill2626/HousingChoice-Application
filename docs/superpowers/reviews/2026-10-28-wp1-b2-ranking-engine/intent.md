@@ -19,8 +19,11 @@ and branch after B2a merges.
 Spec: docs/superpowers/specs/2026-10-28-wp1-b2a-ranking-engine-design.md,
 rev 5. Design review CLOSED after round 4 (63 findings, 63 accepted, 0
 rejected; design-review/adjudications.md).
-WAITING ON: Cameron's spec gate - Q1-Q7 in spec section 9 (each with a
-recommendation). Nothing in flight.
+Spec gate PARTLY answered (2026-10-28): Q1, Q3, Q5, Q6, Q7 settled (see
+"Spec-gate answers" below). WAITING ON: Q2 (summary vs full card for
+homes the tenant was sent - Cameron asked why) and Q4 (what LIF is -
+Cameron's understanding differs from the code's label; he may ask Sam).
+Nothing in flight.
 NEXT: record his answers here and in the spec (section 10, spec-gate
 answers), then compaction gate A (register compact-resume, prove the
 replay, offer /compact), then the plan.
@@ -132,3 +135,32 @@ What that settles:
 - None open with Cameron. Planner-level spec details (tolerance, anchor
   picker UI, properties-seen bound, run-input storage) are decided in the
   spec and surfaced at the spec gate.
+
+## Spec-gate answers (2026-10-28)
+
+Cameron 2026-10-28, verbatim: "For 1, keep that recommendation. for 2, Why
+are we trying to only use a summary for each property instead of the full
+property card? I assumed we'd need all the info for each property to
+really make a good match? For 3 Pool limit at 300 is fine for now, may
+have to change later. For 4 The way LIF is used for Sam, as i understand
+it, is the tenant is eligible for the housing authority to pay their down
+payment too. Is that not right? If it isn't I'll have to ask sam about
+that one. For 5, sure, keep those numbers. For 6, confirmed. For 7, Agreed
+with your reocmmendation."
+
+- Q1 (whole Notes lines move under a home, staff lines included): KEEP.
+- Q2 (summary of homes seen vs full card): OPEN - Cameron asked why; the
+  planner answered (the home being scored always gets its full card; the
+  summary is only for OTHER homes the tenant was sent; size and cost) and
+  waits on his call.
+- Q3 (pool ceiling 300): KEEP, "may have to change later" (it is config,
+  RANKING_MAX_POOL).
+- Q4 (`lif`): OPEN - Cameron understands LIF as the tenant being eligible
+  for the housing authority to pay their deposit; the code labels the
+  unit's `lif` a "Landlord incentive fee" dollar amount. Both LIF fields
+  stay off the cards until the meaning is settled (possibly with Sam).
+- Q5 (counterfactual tolerance numbers): KEEP.
+- Q6 (prices $2/$10 Sonnet 5.5, $4/$20 Opus 5.5): CONFIRMED by Cameron;
+  no longer unverified.
+- Q7 (fingerprint seen homes only with a decline or tour; no charter
+  amendment): AGREED.

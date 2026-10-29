@@ -8,7 +8,7 @@
 // each pair is linked to its current match).
 import type { RankingFairHousingFlag, RankingRunDetailResponse } from '../../../api/index.js';
 import { Spinner } from '../../../ui/index.js';
-import { bandLabel, currentMatchText, directionLabel, formatCost, reasonsText } from './rankingFormat.js';
+import { bandLabel, candidateCountText, currentMatchText, directionLabel, formatCost, reasonsText } from './rankingFormat.js';
 import styles from './RankingsSection.module.css';
 
 function prettyInput(input: string): string {
@@ -71,7 +71,7 @@ export function RankingRunDetail({
           {new Date(run.startedAt).toLocaleString()} - {run.outcome} - {run.driver} / {run.model} - {run.latencyMs} ms
         </p>
         <p>
-          {run.candidateCount} candidates - {usageText} - {formatCost(run.costUsd)}
+          {candidateCountText(run.candidateCount)} - {usageText} - {formatCost(run.costUsd)}
         </p>
         <p>
           Rubric {run.rubricVersion} - examples {run.examplesVersion} - prompt fingerprint {run.promptFingerprint}

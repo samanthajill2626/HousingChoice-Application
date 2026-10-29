@@ -148,6 +148,13 @@ describe('RankingRunList', () => {
     expect(row).toHaveTextContent('scored');
   });
 
+  it('says 1 candidate, not 1 candidates (conformance N5)', () => {
+    render(<RankingRunList {...listProps({ rows: [{ ...ROW, candidateCount: 1 }] })} />);
+    const row = within(screen.getByRole('list', { name: 'Ranking runs' })).getByRole('button');
+    expect(row).toHaveTextContent('1 candidate');
+    expect(row).not.toHaveTextContent('1 candidates');
+  });
+
   it('opens a run', async () => {
     const onOpen = vi.fn();
     render(<RankingRunList {...listProps({ onOpen })} />);
@@ -275,6 +282,11 @@ describe('RankingRunDetail', () => {
     expect(region).toHaveTextContent('3 candidates - 1200 input tokens - 300 output tokens - 0 cache read tokens - $0.0054');
     expect(region).toHaveTextContent('Rubric r1 - examples e1 - prompt fingerprint abc123');
     expect(region).toHaveTextContent('Environment: local - 1 unlawful flag dropped - 2 matches written');
+  });
+
+  it('says 1 candidate in the run fields (conformance N5)', () => {
+    render(<RankingRunDetail detail={{ ...DETAIL, run: { ...DETAIL.run, candidateCount: 1 } }} status="ready" onRetry={vi.fn()} />);
+    expect(screen.getByRole('region', { name: 'Ranking run detail' })).toHaveTextContent('1 candidate - 1200 input tokens');
   });
 
   it('says so when the run recorded no usage (plan IR35)', () => {

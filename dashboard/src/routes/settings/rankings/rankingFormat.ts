@@ -81,8 +81,13 @@ export function notScoredCount(job: RankingJobView): number {
   return ids.size;
 }
 
+/** "1 candidate", "40 candidates" (conformance N5). */
+export function candidateCountText(n: number): string {
+  return `${n} candidate${n === 1 ? '' : 's'}`;
+}
+
 function candidatesText(n: number): string {
-  return `${n} candidate${n === 1 ? '' : 's'} not scored`;
+  return `${candidateCountText(n)} not scored`;
 }
 
 /** Distinct indexes of the batches that failed and did NOT score. A partial
@@ -106,7 +111,8 @@ export function finishedBatchCount(job: RankingJobView): number {
  *  never "a batch failed", since a batch whose match write half-landed is a
  *  failedBatches entry too. The job's own message (the PR38 / PR43 "could
  *  not read" text, or S5's count) follows; with none, a loss ends "Press
- *  Rank again.". */
+ *  Rank again.". S5's message after batches counts the loss itself, so the
+ *  page's own count is left out beside it (conformance N3). */
 export function jobStatusText(job: RankingJobView): string {
   const count = job.batchCount;
   const lost = notScoredCount(job);
@@ -119,16 +125,18 @@ export function jobStatusText(job: RankingJobView): string {
       return lost > 0 ? `${base}; ${candidatesText(lost)}` : base;
     }
     case 'done': {
-      // PR38 / PR43: an anchor whose own reads failed after the pool was
-      // computed finishes with no batch and every candidate not scored.
-      const base =
-        count === 0
-          ? lost > 0
-            ? `Done: ${candidatesText(lost)}`
-            : 'Done: no candidates to rank'
-          : `Done: ${count} batch${count === 1 ? '' : 'es'}${lost > 0 ? `; ${candidatesText(lost)}` : ''}`;
-      if (job.message !== undefined && job.message !== '') return `${base}. ${job.message}`;
-      return lost > 0 ? `${base}. Press Rank again.` : base;
+      const message = job.message !== undefined && job.message !== '' ? job.message : undefined;
+      if (count === 0) {
+        // PR38 / PR43: an anchor whose own reads failed after the pool was
+        // computed finishes with no batch and every candidate not scored; its
+        // message says why, not how many, so the count stays.
+        const base = lost > 0 ? `Done: ${candidatesText(lost)}` : 'Done: no candidates to rank';
+        if (message !== undefined) return `${base}. ${message}`;
+        return lost > 0 ? `${base}. Press Rank again.` : base;
+      }
+      const batches = `Done: ${count} batch${count === 1 ? '' : 'es'}`;
+      if (message !== undefined) return `${batches}. ${message}`;
+      return lost > 0 ? `${batches}; ${candidatesText(lost)}. Press Rank again.` : batches;
     }
     case 'failed':
       return job.message ?? 'The ranking failed. Press Rank again.';

@@ -4,7 +4,7 @@
 // reads as such, as the AI run log does.
 import type { RankingRunListRow } from '../../../api/index.js';
 import { Spinner } from '../../../ui/index.js';
-import { directionLabel, formatCost } from './rankingFormat.js';
+import { candidateCountText, directionLabel, formatCost } from './rankingFormat.js';
 import styles from './RankingsSection.module.css';
 
 export interface RankingRunListProps {
@@ -101,7 +101,7 @@ export function RankingRunList({
                       {directionLabel(row.direction)}, batch {row.batchIndex + 1}
                     </span>
                     <span>{row.model}</span>
-                    <span>{row.candidateCount} candidates</span>
+                    <span>{candidateCountText(row.candidateCount)}</span>
                     <span>{formatCost(row.costUsd)}</span>
                     <span>{row.latencyMs} ms</span>
                     <span className={styles.outcome}>{row.outcome}</span>

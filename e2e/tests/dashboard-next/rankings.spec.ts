@@ -188,8 +188,10 @@ test('a failed batch reads "not scored - retry"', async ({ page }) => {
   await pressRank(page);
   await rankingTick(api);
 
-  // Counted in CANDIDATES not scored, never "a batch failed" (plan PR42).
-  await expect(jobStatus(page)).toContainText('Done: 1 batch; 2 candidates not scored');
+  // Counted in CANDIDATES not scored, never "a batch failed" (plan PR42) -
+  // by the job's own message, which the page does not count again
+  // (code review R1, conformance N3).
+  await expect(jobStatus(page)).toContainText('Done: 1 batch. 2 tenants could not be scored. Press Rank again.');
   // Both sat in the one failed batch: neither has a match, and both say so.
   for (const tenant of [failing, beside]) {
     await expect(rankingRow(page, tenant.name)).toContainText('not scored - retry');

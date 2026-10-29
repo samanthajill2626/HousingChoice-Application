@@ -6,6 +6,7 @@ import {
   NOT_SCORED,
   anchorParam,
   bandLabel,
+  candidateCountText,
   cappedText,
   currentMatchText,
   directionLabel,
@@ -141,11 +142,24 @@ describe('rankingFormat', () => {
     expect(
       notScoredCount(job({ failedBatches: [{ index: 1, candidateIds: ['c2'], failure: 'repo' }], notScored: [{ candidateId: 'c2', reason: 'omitted' }] })),
     ).toBe(1);
-    // The job's own message (S5's copy), when it has one, replaces "Press Rank again.".
+    // The job's own message (S5's copy), when it has one, replaces "Press Rank
+    // again." - and it counts the loss itself, so the page does not count it a
+    // second time (conformance N3).
     const s5Message =
       '2 tenants could not be scored. Press Rank again. 1 tenant was not scored by the model. Press Rank again. ' +
       '1 score could not be saved. Press Rank again.';
-    expect(jobStatusText({ ...lossy, message: s5Message })).toBe(`Done: 3 batches; 4 candidates not scored. ${s5Message}`);
+    expect(jobStatusText({ ...lossy, message: s5Message })).toBe(`Done: 3 batches. ${s5Message}`);
+    // N3's own example: one batch whose call failed for both its candidates.
+    expect(
+      jobStatusText(
+        job({
+          status: 'done',
+          batchCount: 1,
+          failedBatches: [{ index: 0, candidateIds: ['c1', 'c2'], failure: 'timeout' }],
+          message: '2 tenants could not be scored. Press Rank again.',
+        }),
+      ),
+    ).toBe('Done: 1 batch. 2 tenants could not be scored. Press Rank again.');
     expect(
       jobStatusText(job({ status: 'running', batchCount: 2, batchesDone: [0], notScored: [{ candidateId: 'c4', reason: 'unreadable' }] })),
     ).toBe('Ranking: 1 of 2 batches finished; 1 candidate not scored');
@@ -190,6 +204,12 @@ describe('rankingFormat', () => {
         }),
       ),
     ).toBe(2);
+  });
+
+  it('counts candidates in the singular for one (conformance N5)', () => {
+    expect(candidateCountText(1)).toBe('1 candidate');
+    expect(candidateCountText(0)).toBe('0 candidates');
+    expect(candidateCountText(40)).toBe('40 candidates');
   });
 
   it('marks a pair this run wrote, one re-scored since, and one with no match', () => {

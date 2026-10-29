@@ -47,3 +47,13 @@ describe('lib/singleLine.ts is a leaf written in ASCII (plan PR10)', () => {
     expect([...source()].every((ch) => ch.charCodeAt(0) < 128)).toBe(true);
   });
 });
+
+describe('both callers fold with the one helper (spec D14.1, PR10)', () => {
+  it('prompt.ts and apply.ts import toOneLine, and prompt.ts keeps no private copy', () => {
+    const prompt = readFileSync(path.join(SRC, 'services', 'extraction', 'prompt.ts'), 'utf8');
+    const apply = readFileSync(path.join(SRC, 'services', 'extraction', 'apply.ts'), 'utf8');
+    expect(prompt).toContain("import { toOneLine } from '../../lib/singleLine.js';");
+    expect(apply).toContain("import { toOneLine } from '../../lib/singleLine.js';");
+    expect(prompt).not.toMatch(/toSingleLine/);
+  });
+});

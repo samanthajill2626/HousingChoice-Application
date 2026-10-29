@@ -20,6 +20,7 @@ import { SuggestionDismissedError } from '../../repos/extractionRepo.js';
 import type { createExtractionRepo, SuggestionItem } from '../../repos/extractionRepo.js';
 import type { ExtractableField, ExtractionResult } from '../../adapters/extraction.js';
 import { normalizeToE164 } from '../../lib/phone.js';
+import { toOneLine } from '../../lib/singleLine.js';
 import { EXTRACTABLE_FIELDS, normalizeSuggestionValue } from './schema.js';
 import { KINDS_FOR_FIELD, resolveOrgText, type OrgEntry } from '../../lib/orgNames.js';
 import {
@@ -262,6 +263,12 @@ export interface NoteLineFilterResult {
   belowFloor: number;
   /** Lines a demoted run withheld; 0 when not demoted. */
   demoted: number;
+  /**
+   * WP1 B2a spec D14.2: lines - model and system together - the retry guard
+   * dropped because the notes already hold them (rule 4). Counted whether or
+   * not the run is demoted; floor, blank and postal drops are never in it.
+   */
+  duplicate: number;
 }
 
 /** A model confidence clamped to 0..1; a non-number (or NaN/Infinity) reads as 0. */
@@ -277,9 +284,13 @@ function clampConfidence(raw: unknown): number {
  *
  *  1. Clamp: text trimmed, every leading `[Auto - <date>]` the model copied
  *     from the notes removed (FW3-1: this run writes its own; never a double
- *     prefix), and cut to MAX_NOTE_CHARS; confidence to 0..1 (a non-number
- *     reads as 0). An item that is not an object with string text is dropped
- *     uncounted (only the fake driver can deliver one).
+ *     prefix), every run of CR, LF, U+2028 and U+2029 collapsed to " / "
+ *     (WP1 B2a D14.1: lib/singleLine.ts toOneLine, the transcript's rule - a
+ *     break would leave its continuation unprefixed, read as staff text),
+ *     and only then cut to MAX_NOTE_CHARS; confidence to 0..1 (a non-number
+ *     reads as 0). A system line is trimmed and collapsed the same way. An
+ *     item that is not an object with string text is dropped uncounted (only
+ *     the fake driver can deliver one).
  *  2. Floor FIRST: a model item below `floor` is dropped and counted.
  *  3. Blank lines and POSTAL lines are dropped. The postal filter drops ONLY
  *     a line that starts with "Current address" and carries a digit - the
@@ -299,8 +310,11 @@ function clampConfidence(raw: unknown): number {
  *     reconcile rule re-emits an old fact - often by copying its earlier line
  *     - on a later day. Cameron's handback ruling (2026-10-27) restored the
  *     any-date guard for the second job over FW3-1's same-day form. It
- *     compares WHOLE lines, each trimmed (FW2-1); a candidate that spans
- *     lines must match a run of whole lines. A line merely CONTAINED in a
+ *     compares WHOLE lines, each trimmed (FW2-1); a candidate is ONE line
+ *     (rule 1), so it matches one whole stored line - a multi-line line
+ *     stored before WP1 B2a is not matched by its collapsed re-emission and
+ *     is appended once more (spec D14.1, accepted). Every line it drops is
+ *     counted (`duplicate`, WP1 B2a D14.2). A line merely CONTAINED in a
  *     longer one is KEPT: "12 Oak St, ..." inside "112 Oak St, ...", or a
  *     change of mind whose words an earlier line contains, is new feedback.
  *     Accepted cost: a change of mind back to the EXACT words of an earlier
@@ -317,35 +331,48 @@ function clampConfidence(raw: unknown): number {
  */
 export function filterNoteLines(input: NoteLineFilterInput): NoteLineFilterResult {
   const isPostal = (line: string): boolean => /^current address\b/i.test(line) && /\d/.test(line);
-  // Rule 4 over whole lines: every line trimmed and fenced by '\n' on both
-  // sides, so one includes() matches only a run of WHOLE lines, never part of one.
-  const physical = (text: string): string[] => text.split('\n').map((part) => part.trim());
+  // Rule 4 over whole lines: every stored line trimmed and fenced by '\n' on
+  // both sides, so one includes() matches only a WHOLE stored line, never part
+  // of one. A candidate is already one line (rule 1 collapsed its breaks).
   const fenced = (lines: readonly string[]): string => `\n${lines.join('\n')}\n`;
   // Every stored line with its prefix removed: a match under any date.
-  const unprefixedLines = fenced(physical(input.existingNotes).map(withoutAutoPrefix));
-  const present = (line: string): boolean => unprefixedLines.includes(fenced(physical(line).map(withoutAutoPrefix)));
+  const unprefixedLines = fenced(input.existingNotes.split('\n').map(withoutAutoPrefix));
+  const present = (line: string): boolean => unprefixedLines.includes(fenced([withoutAutoPrefix(line)]));
 
   let belowFloor = 0;
+  let duplicate = 0;
   const model: string[] = [];
   for (const item of input.modelLines ?? []) {
     if (typeof item !== 'object' || item === null || Array.isArray(item)) continue;
     const { text, confidence } = item as { text?: unknown; confidence?: unknown };
     if (typeof text !== 'string') continue;
-    const line = withoutAutoPrefix(text).slice(0, MAX_NOTE_CHARS).trim();
+    // Rule 1: prefix and ends first, then the collapse, then the cut (C3).
+    const line = toOneLine(withoutAutoPrefix(text)).slice(0, MAX_NOTE_CHARS).trim();
     if (clampConfidence(confidence) < input.floor) {
       belowFloor += 1;
       continue;
     }
-    if (line.length === 0 || isPostal(line) || present(line)) continue;
+    if (line.length === 0 || isPostal(line)) continue;
+    if (present(line)) {
+      duplicate += 1;
+      continue;
+    }
     model.push(line);
   }
-  const system = input.systemLines
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !isPostal(line) && !present(line));
+  const system: string[] = [];
+  for (const raw of input.systemLines) {
+    const line = toOneLine(raw.trim());
+    if (line.length === 0 || isPostal(line)) continue;
+    if (present(line)) {
+      duplicate += 1;
+      continue;
+    }
+    system.push(line);
+  }
 
   const append = [...model, ...system].slice(0, MAX_NOTE_LINES);
-  if (input.demoted) return { append: [], modelCount: 0, belowFloor, demoted: append.length };
-  return { append, modelCount: Math.min(model.length, MAX_NOTE_LINES), belowFloor, demoted: 0 };
+  if (input.demoted) return { append: [], modelCount: 0, belowFloor, demoted: append.length, duplicate };
+  return { append, modelCount: Math.min(model.length, MAX_NOTE_LINES), belowFloor, demoted: 0, duplicate };
 }
 
 export async function applyExtraction(

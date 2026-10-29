@@ -287,7 +287,7 @@ runWithContext(bootContext, () => {
 // tick (including the rejection handler) in a fresh pollRunId context - see
 // that module for why the previous bare setIntervals made every poll log line
 // an orphan. Bound once here, to the shared WORKER_POLL_INTERVAL_MS cadence, so
-// the six shared-cadence call sites stay one line each. The tour auto-close
+// the seven shared-cadence call sites stay one line each. The tour auto-close
 // poll (the last block) has its own interval and calls startPollLoop directly.
 function startPoll(pollName: string, run: (nowIso: string) => Promise<unknown>): void {
   startPollLoop(pollName, run, {
@@ -506,6 +506,36 @@ if (config.aiExtractionEnabled) {
   };
 
   startPoll('extraction', (now) => runDueExtractions(now, extractionDeps));
+}
+
+// Ranking poll (WP1 B2a spec D7; charter 10.2): its OWN poll over due
+// ranking-job records in the AI runs table - never the SQS jobs queue, whose
+// consumer awaits a whole receive batch, so a one-to-two-minute ranking there
+// would hold up group-text fan-out and sends (the extraction precedent).
+// There is no ranking feature switch (charter section 20 item 12): in
+// production the poll always runs (RANKING_WORKER_POLL=off is refused there,
+// lib/config.ts). It is OFF when RANKING_WORKER_POLL=off (the hermetic lane,
+// so jobs run only through POST /__dev/ranking/tick) and, by S2's PR30
+// default, outside production on REAL tables (no local DYNAMODB_ENDPOINT),
+// so a laptop's live-mode worker never claims hosted dev's jobs; an explicit
+// RANKING_WORKER_POLL=on is honored. worker.ts reads only the resolved flag. The deps come from the same
+// createRankingJobDeps the dev tick uses, so the two runners cannot drift;
+// `events` is this worker's bus, forwarded to the app's SSE clients by the
+// event bridge when EVENT_BRIDGE_URL is set. The job slots in those deps are
+// this process's RANKING_MAX_CONCURRENT_JOBS limit: ticks overlap (pollLoop.ts
+// never awaits), so the limit lives in-process, not per tick.
+if (config.rankingWorkerPoll) {
+  const { appEvents } = await import('./lib/events.js');
+  const { createRankingJobDeps } = await import('./services/ranking/jobWiring.js');
+  const { runDueRankings } = await import('./services/ranking/job.js');
+
+  const rankingDeps = createRankingJobDeps({ config, logger, events: appEvents });
+
+  startPoll('ranking', (now) => runDueRankings(now, rankingDeps));
+} else {
+  runWithContext(bootContext, () => {
+    logger.info('ranking poll not started - RANKING_WORKER_POLL is off (the hermetic lane, or real tables outside production)');
+  });
 }
 
 // Native group texting: the guardrail duties (T6.3). Same shared poll as the

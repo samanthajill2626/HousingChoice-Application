@@ -6,7 +6,7 @@
 import { randomUUID } from 'node:crypto';
 import { Router, json } from 'express';
 import { PutCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
-import { loadConfig, tableName, type AppConfig } from '../lib/config.js';
+import { isLocalDynamoTarget, loadConfig, tableName, type AppConfig } from '../lib/config.js';
 import { createDocumentClient } from '../lib/dynamo.js';
 import {
   clearDevLogTail,
@@ -86,6 +86,8 @@ import {
 } from '../jobs/groupGuardrails.js';
 import { runJournalSweep, type JournalSweepDeps } from '../jobs/journalSweep.js';
 import { runTourAutoClose, type TourAutoCloseDeps } from '../jobs/tourAutoClose.js';
+import { runDueRankings, type RankingJobDeps } from '../services/ranking/job.js';
+import { createRankingJobDeps } from '../services/ranking/jobWiring.js';
 import {
   createGroupSendStaleness,
   type GroupSendStalenessService,
@@ -141,6 +143,9 @@ export interface DevRouterDeps {
   /** Deps for POST /__dev/tour-auto-close/tick - injected in tests; defaults to
    *  the worker's construction (worker.ts). */
   tourAutoCloseDeps?: TourAutoCloseDeps;
+  /** Deps for POST /__dev/ranking/tick (WP1 B2a D7) - injected in tests;
+   *  defaults to createRankingJobDeps, the worker's own construction. */
+  rankingTickDeps?: RankingJobDeps;
   /** Service for POST /__dev/group-send-staleness/check (T6.4) - injected in tests. */
   groupStaleness?: GroupSendStalenessService;
   performanceReseed?: typeof resetPerformanceData;
@@ -789,6 +794,37 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     log.info({ now: nowIso, processed, failed }, 'dev extraction tick ran');
     res.status(200).json({ processed, failed });
   });
+
+  // POST /__dev/ranking/tick - the hermetic lane's ONLY ranking runner (WP1
+  // B2a spec D7). A queued ranking job is due at once, so the lane's real
+  // worker would race any seam; the lane therefore sets RANKING_WORKER_POLL=off
+  // (refused under NODE_ENV=production) and jobs run only here. One POST runs
+  // ONE runDueRankings pass on the wall clock and answers when every job it
+  // claimed has finished. Same triple-gate/hermetic-LOCAL-only construction as
+  // the ticks above. The deps - and so this process's job slots - are built
+  // once, lazily, by the same createRankingJobDeps the worker uses; `events` is
+  // the app's own bus, so ranking.updated reaches SSE clients with no bridge hop.
+  //
+  // R2F6: mounted ONLY on a LOCAL DynamoDB target (S2's isLocalDynamoTarget).
+  // The dev router's own gate (lib/devRoutes.ts) accepts any non-empty
+  // endpoint, and these lazily built deps take S2's real-table defaults (the
+  // anthropic driver) - so without this check a laptop with DEV_AUTH_ENABLED
+  // and a non-local endpoint could run the real model on real tables.
+  if (isLocalDynamoTarget(config.dynamodbEndpoint)) {
+    let rankingDeps = deps.rankingTickDeps;
+    const rankingTickDeps = (): RankingJobDeps => {
+      rankingDeps ??= createRankingJobDeps({ config, logger: log, events: appEvents });
+      return rankingDeps;
+    };
+    router.post('/__dev/ranking/tick', json(), async (_req, res) => {
+      const nowIso = new Date().toISOString();
+      const summary = await runDueRankings(nowIso, rankingTickDeps());
+      log.info({ now: nowIso, ...summary }, 'dev ranking tick ran');
+      res.status(200).json({ ok: true, ...summary });
+    });
+  } else {
+    log.info('dev ranking tick not mounted - DYNAMODB_ENDPOINT is not a local DynamoDB target');
+  }
 
   // POST /__dev/voice/transcript-fixture - hermetic e2e-only seam to plant a
   // COMPLETED call transcript directly (voice-extraction T6), bypassing the real

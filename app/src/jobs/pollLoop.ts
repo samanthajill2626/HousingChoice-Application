@@ -11,8 +11,8 @@
 // how an alarm stops being read. Worse, each loop's `.catch` arm is the only
 // place a poll's own crash is reported, so a genuine poll failure was an
 // orphan ERROR - carrying no id to pivot on during triage. Every poll added
-// since starts here as well - the journal sweep, and the tour auto-close poll
-// on its own 15-minute interval: seven loops today.
+// since starts here as well - the journal sweep, the tour auto-close poll on
+// its own 15-minute interval, and the ranking poll: eight loops today.
 //
 // Same lesson as jobs/queueWiring.ts: behavior every call site must share
 // belongs in one function they all call, not in one block per poll that

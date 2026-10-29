@@ -191,6 +191,11 @@ const childEnv = {
   RATE_LIMIT_BROADCAST_SEND_PER_MIN: process.env.RATE_LIMIT_BROADCAST_SEND_PER_MIN ?? '100000',
   RATE_LIMIT_ORIGINATE_PER_MIN: process.env.RATE_LIMIT_ORIGINATE_PER_MIN ?? '100000',
   RATE_LIMIT_VERIFY_START_MAX: process.env.RATE_LIMIT_VERIFY_START_MAX ?? '100000',
+  // WP1 B2a: the per-user ranking press limit (POST /api/rankings/.../rank,
+  // RATE_LIMIT_RANK_PER_MIN, default 6) - the same story: specs and self-QA
+  // press Rank as the one dev-login user. An externally-set value still wins;
+  // the route-level 429 test (app workspace) is what proves the limiter.
+  RATE_LIMIT_RANK_PER_MIN: process.env.RATE_LIMIT_RANK_PER_MIN ?? '100000',
   // --- fake-twilio (HTTP-seam messaging mock) ---
   // The app runs the REAL Twilio driver (MESSAGING_DRIVER=twilio) but is pointed
   // at the in-process fake host via TWILIO_API_BASE_URL, so the production
@@ -256,6 +261,15 @@ const childEnv = {
   // (playwright.config webServer.command = node scripts/e2e-session.mjs), so it
   // covers the fake driver in both e2e modes.
   EXTRACTION_DRIVER: 'fake',
+  // WP1 B2a ranking (spec D7, D16): the deterministic FAKE ranking driver (no
+  // network; 'fake' and 'console' are refused only under NODE_ENV=production),
+  // and NO worker ranking poll: a queued ranking job is due at once, so the
+  // lane's real worker would race the dev tick for it. Jobs therefore run only
+  // through POST /__dev/ranking/tick. RANKING_WORKER_POLL=off is refused under
+  // NODE_ENV=production, so it can never reach a deployed stack. This childEnv
+  // reaches BOTH the app and the worker (spawnNode), as the spec requires.
+  RANKING_DRIVER: 'fake',
+  RANKING_WORKER_POLL: 'off',
   // --- fake-SES (email-channel v1) ---
   // The app runs the REAL SES driver (EMAIL_DRIVER=ses) but is pointed at the
   // in-process fake host via SES_API_BASE_URL (= fakeUrl, exactly like

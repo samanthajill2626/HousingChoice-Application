@@ -12,21 +12,23 @@ cut from main @404e039d.
 
 ## STATE
 
-Phase: PLAN REVIEW ROUND 2 (2026-10-29). Plan v3 committed (b71f2b18,
-~38.8k lines, 85 tasks, rulings PR1-PR39). Round 1: 4 reviewers, 50
-findings, all accepted (plan-review/plan-adjudications.md). Round 2 in
-flight: the front reviewer (R1-front-B continued -> R2-front.md) and the
-back reviewer (R1-back-B continued -> R2-back.md). Fixes go to the six
-section drafters (continued agents), then
-.superpowers/sdd/reassemble.py rebuilds the plan from the drafts.
+Phase: LAUNCH GATE (2026-10-29). Plan v5 FINAL (d391a016; ~39.7k lines,
+85 tasks, rulings PR1-PR45). Plan review CLOSED after 4 rounds: 81
+findings, all accepted (plan-review/plan-adjudications.md). Mission block:
+mission-block.md. Nothing in flight.
 For Cameron at the launch gate (departures from spec text or his rules):
 PR18 (prompt fingerprint covers the schema), PR30 (real tables outside
 production: anthropic default, fake/console refused, worker poll off),
 PR37 (partial match writes keep the rows that landed), PR39 (two env
-example lines commented), plus PR28's handback items.
-NEXT: adjudicate round 2; stop when a round changes no decision (cap 4);
-then the mission block and the launch gate (AskUserQuestion: Go AUTO /
-Go MANUAL / Revise), then compaction gate B, then dispatch.
+example lines commented), PR45 (an accommodation covers a qualifications
+failure and the reverse; errs toward not capping), plus PR28's handback
+items. Hours firmed 24-30.
+NEXT: Cameron's launch-gate pick (Go AUTO / Go MANUAL / Revise). On a Go:
+compaction gate B (refresh this STATE, prove the replay, confirm the
+registration with --show, start the watcher, offer /compact), then
+dispatch abt:build-orchestrator with mission-block.md verbatim, arm the
+watchdog (1800 s checkpoints, 55 min ceiling - Cameron's rule), start the
+live.log mirror.
 
 Earlier phase: SPEC APPROVED -> COMPACTION GATE A (2026-10-28). Cameron passed the
 spec gate on rev 6 (answers: spec section 10 and below). Charter

@@ -12,6 +12,19 @@ cut from main @404e039d.
 
 ## STATE
 
+UPDATE 2026-10-29 23:40Z - Phase: HANDBACK REVIEW (planner). Orchestrator
+DONE: handback.md at ba234628, MERGE-READY @542e6874 (final gates all 0,
+e2e 391 passed) PENDING Cameron's real-model runs and his answer to Q1
+(the unlawful-flag reason source, spec D10; options 1 = fixed sentence
+RECOMMENDED, 2 = keep D10; relayed to Cameron 21:45Z, unanswered).
+Watchdog and mirror stopped. Planner review in flight: two read-only
+reviewers (spec-conformance; plan-blind adversarial), reports to
+code-review/planner-*.md. NEXT: on Q1 = 1, a micro fix wave
+(flags.ts flagReason + rankingFlags.test.ts, spec D10 text amended);
+then the five gates bare on a quiet tree; adjudicate the reviews; verdict
+"merge-ready PENDING Cameron's real-model runs" with the merge command.
+Never merge. (The BUILD entry below is history.)
+
 Phase: BUILD (AUTO) - launched 2026-10-29. Plan v5 FINAL (d391a016; 85
 tasks, rulings PR1-PR45; review closed after 4 rounds, 81/81 accepted).
 Mission block: mission-block.md (dispatched verbatim).

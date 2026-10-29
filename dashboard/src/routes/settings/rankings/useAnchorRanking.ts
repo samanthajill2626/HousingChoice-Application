@@ -12,34 +12,34 @@
 // dropped (its controller is aborted and the current key is checked).
 //
 // Order (code review R1 A2-1, A2-2, A2-8; R2 FW2-1, FW2-2, FW2-3, FW2-5; R3
-// FW3-1, FW3-2, FW3-3): reads answer in any order, so every full read and job
-// read takes an issue number when it is sent; a press takes one when its
-// answer lands, and only if its job is offered to the rules below.
+// FW3-1, FW3-2, FW3-3; R4 FW4-1, FW4-2): reads answer in any order, so every
+// full read and job read takes an issue number when it is sent, and a press
+// takes one when its job lands.
 // - A full read's rows are applied only if it was issued after the rows on
 //   screen, so an earlier read landing last never puts back an older table,
 //   and a newer one shows even while a later one is still out. A failure is
 //   shown only for the LATEST full read issued; an earlier read that answers
 //   after it leaves the failure (with its Retry) on screen.
-// - A job view from a job read or a read that adopts its job, of the
-//   generation on screen, is applied only if it is not behind the view on
+// - A job view (from a job read, a read that adopts its job, or a press) of
+//   the generation on screen is applied only if it is not behind the view on
 //   screen - status queued or expired, then running, then done or failed;
 //   then finished batches; then the pool built - and, when level with it,
 //   only if issued after every view applied so far: a read's job snapshot is
 //   taken late (after its pool), so issue order alone could step the status
 //   back. A view of another generation (or of none) is applied only if issued
 //   after every view applied so far.
-// - A press's job is offered only when it is of another generation than the
-//   one on screen (or none is shown). Its issue number is then the newest, so
-//   it is applied, and a view of another generation from a read issued
-//   before its answer is dropped when it lands. A press's job of the
-//   generation on screen is never applied, whatever its progress (see rank).
-// - A job view of a generation the page has not shown is a change: its
-//   finished batches count from zero, and its end counts even when the page
-//   never saw it live - so a job first seen part-way or finished still reads
-//   the ranking again. A press's error and joined mark clear only when a view
-//   that is not live is applied while the page FOLLOWS a job - the view on
-//   screen is live, or a 409 said a live job exists; a job that ended unseen,
-//   first shown while the page follows none, leaves them.
+// - A press's job takes the newest issue number, so it is applied unless it
+//   is of the generation on screen and behind it (see rank); once it is, a
+//   view of another generation (or of none) from a read issued before its
+//   answer is dropped when it lands.
+// - A job view of a generation other than the one on screen (or with none on
+//   screen) is a change: its finished batches count from zero, and its end
+//   counts even when the page never saw it live - so a job first seen
+//   part-way or finished still reads the ranking again. A press's error and
+//   joined mark clear only when a view that is not live is applied while the
+//   page FOLLOWS a job - the view on screen is live, or a 409 said a live job
+//   exists; a job that ended unseen, first shown while the page follows none,
+//   leaves them.
 // - Job reads never overlap: a call while one is out asks for one more read
 //   after it - unless the one out was sent JOB_READ_STALL_MS ago or more; then
 //   the call sends a new read, and the stalled one's answer, if it ever comes,
@@ -134,8 +134,10 @@ type JobChange = { grew: boolean; ended: boolean } | null;
  *  (queued or expired, then running, then done or failed), finished batches,
  *  the pool built. `expired` is a queued record read past its expiry (the
  *  server derives it on read), and a poll tick that started before the
- *  expiry can still claim it and run the same generation: it is level with
- *  queued, not an end (R3 FW3-2). */
+ *  expiry can still claim it and run the same generation: in this order it
+ *  is level with queued, not an end (R3 FW3-2). It is still not live:
+ *  applied, it ends a follow as done or failed would, and nothing polls
+ *  while it is on screen (R4 FW4-1). */
 function jobProgress(view: RankingJobView): [number, number, number] {
   const stage = view.status === 'queued' || view.status === 'expired' ? 0 : view.status === 'running' ? 1 : 2;
   return [stage, finishedBatchCount(view), view.batchCount];
@@ -226,9 +228,10 @@ export function useAnchorRanking(anchor: RankingAnchorRef | undefined, includeOl
         return null;
       }
       // FINISHED batches, scored or failed (spec D12; plan review BB5). A
-      // generation the page has not shown counts from zero, and its end
-      // counts even when the page never saw it live (R2 FW2-1) - for reading
-      // the ranking again, not for the press marks below.
+      // generation other than the one on screen (or with none on screen)
+      // counts from zero, and its end counts even when the page never saw it
+      // live (R2 FW2-1) - for reading the ranking again, not for the press
+      // marks below.
       const newGeneration = next !== null && !sameGeneration;
       const finished = next === null ? 0 : finishedBatchCount(next);
       const seen = newGeneration || shown === null ? 0 : finishedBatchCount(shown);
@@ -256,9 +259,12 @@ export function useAnchorRanking(anchor: RankingAnchorRef | undefined, includeOl
       try {
         const next = await getRanking(cur.kind, cur.id, { includeOlder: cur.includeOlder }, cur.controller.signal);
         if (cur.controller.signal.aborted || currentRef.current !== cur) return;
-        // Its job by the job views' own rules: never over a press or a job
-        // read issued after this read (A2-2), never behind the view on screen
-        // (R2 FW2-5).
+        // Its job by the job views' rules (see the header), with the number
+        // this read took when it was sent: a view of the generation on screen
+        // is applied when ahead of it, never when behind it (R2 FW2-5); any
+        // other view - level with it, of another generation, or of none - only
+        // if no view applied so far came from a press answered, or a read
+        // sent, after this read (A2-2).
         if (adoptJob) applyJob(cur, next.job, issued);
         // Its rows only if issued after the rows held (A2-1; R2 FW2-3).
         if (issued <= cur.rowsIssued) return;
@@ -380,20 +386,18 @@ export function useAnchorRanking(anchor: RankingAnchorRef | undefined, includeOl
       try {
         const res = await startRanking(cur.kind, cur.id, { includeOlder: cur.includeOlder });
         if (currentRef.current !== cur) return;
-        // A press's job of another generation than the one on screen (or
-        // with none shown) takes an issue number now, as its answer lands:
-        // the newest, so it is applied (A2-2), and every read issued before
-        // this answer is older - a view of another generation from one is
-        // dropped when it lands. A generation the page had not shown, joined
-        // part-way, reads the ranking again (R2 FW2-1). A press's job of the
-        // generation on screen is never applied, whatever its progress. For a
-        // fresh press that loses nothing: its generation is new, so the view
-        // on screen came from a read served after the claim - as new or
-        // newer. A JOIN's job can be ahead of the view on screen (queued on
-        // screen, running 2 of 4 in the answer): the page catches up with the
-        // next job read - the poll's, while the view on screen is live, or an
-        // event's (R3 FW3-3).
-        const change = cur.jobView?.generation !== res.job.generation ? applyJob(cur, res.job, issue()) : null;
+        // The press's job takes an issue number now, as its answer lands: the
+        // newest, so the order rules in the header apply it unless it is of
+        // the generation on screen and behind it (R4 FW4-1). A fresh press's
+        // claim record never steps back a newer view of its generation; a
+        // join's view ahead of the one on screen (running over queued or over
+        // expired) shows at once - over expired, where nothing polls,
+        // applying it starts the poll again. Once it is applied, a view of
+        // another generation (or of none) from a read issued before this
+        // answer is dropped when it lands (A2-2). Applied, it reads the
+        // ranking again when its finished batches grew or it ended (a
+        // generation other than the one on screen counts from zero, R2 FW2-1).
+        const change = applyJob(cur, res.job, issue());
         update(cur.key, (s) => ({ ...s, ranking: false, joined: res.joined }));
         if (change !== null && (change.grew || change.ended)) void loadRead(cur, false);
       } catch (err) {

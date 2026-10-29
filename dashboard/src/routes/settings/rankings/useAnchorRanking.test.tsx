@@ -504,11 +504,11 @@ describe('useAnchorRanking - ordering', () => {
   });
 });
 
-// Code review R2 (FW2-1, FW2-2, FW2-3, FW2-5): a job view of a generation the
-// page has not shown counts its progress from zero; one generation's views
-// never step back; a job read that never answers stops blocking after
-// JOB_READ_STALL_MS; and a full read newer than the rows on screen is shown
-// even while a later one is still out.
+// Code review R2 (FW2-1, FW2-2, FW2-3, FW2-5): a job view of a generation
+// other than the one on screen counts its progress from zero; one
+// generation's views never step back; a job read that never answers stops
+// blocking after JOB_READ_STALL_MS; and a full read newer than the rows on
+// screen is shown even while a later one is still out.
 describe('useAnchorRanking - ordering, round 2', () => {
   const genEvent = (generation: string, over: Parameters<typeof rankingEvent>[0] = {}) => ({ ...rankingEvent(over), generation });
 
@@ -834,5 +834,137 @@ describe('useAnchorRanking - ordering, round 3', () => {
     await flush();
     expect(getRankingJob).toHaveBeenCalledTimes(2);
     expect(current().job?.status).toBe('done');
+  });
+});
+
+// Code review R4 (FW4-1): a press's job goes through the same order rules as
+// every other job view. Of the generation on screen it is applied unless it
+// is behind the view on screen, so a press that joins the generation on
+// screen while it reads expired - a poll tick that started before the expiry
+// claimed it - shows the job running at once, and the poll resumes with or
+// without an event. The press gate FW4-1 drops kept a fresh press's claim
+// record from stepping back a newer view of its generation; the order rules
+// still do (the guard at the end).
+describe('useAnchorRanking - ordering, round 4', () => {
+  /** gen-1 as a poll tick that started before its expiry claimed it: running, 2 batches. */
+  const claimed = (over: Partial<RankingJobView> = {}): RankingJobView =>
+    job({ status: 'running', startedAt: '2026-07-01T12:10:00.000Z', batchCount: 2, ...over });
+
+  it('a press that joins the generation on screen while it reads expired is applied: with no event the poll resumes and follows the job to its end (FW4-1)', async () => {
+    getRanking.mockResolvedValue(readOf(null));
+    startRanking
+      .mockResolvedValueOnce({ job: job(), joined: false })
+      .mockResolvedValueOnce({ job: claimed({ batchesDone: [0] }), joined: true });
+    getRankingJob
+      .mockResolvedValueOnce({ job: job({ status: 'expired' }) })
+      .mockResolvedValue({ job: claimed({ status: 'done', batchesDone: [0, 1] }) });
+    render(<Probe anchor={ANCHOR} />);
+    await flush();
+    act(() => {
+      current().rank();
+    });
+    await flush();
+    // The poll reads the queued record just past its expiry: the server derives 'expired', and the poll stops.
+    await flush(JOB_POLL_MS);
+    expect(current().job?.status).toBe('expired');
+    expect(getRankingJob).toHaveBeenCalledTimes(1);
+    expect(getRanking).toHaveBeenCalledTimes(2);
+    // "Press Rank again": a poll tick that started before the expiry claimed it, so the press
+    // joins that generation, 1 of 2 batches finished. No ranking.updated event comes.
+    act(() => {
+      current().rank();
+    });
+    await flush();
+    expect(current().job).toMatchObject({ status: 'running', generation: 'gen-1', batchesDone: [0] });
+    expect(current().joined).toBe(true);
+    // Its finished batch reads the ranking again.
+    expect(getRanking).toHaveBeenCalledTimes(3);
+    // Live again, so the poll reads the job: it ended - the ranking is read once more, the joined mark clears.
+    await flush(JOB_POLL_MS);
+    expect(getRankingJob).toHaveBeenCalledTimes(2);
+    expect(current().job?.status).toBe('done');
+    expect(getRanking).toHaveBeenCalledTimes(4);
+    expect(current().joined).toBe(false);
+    // Not live: the poll stops.
+    await flush(JOB_POLL_MS * 3);
+    expect(getRankingJob).toHaveBeenCalledTimes(2);
+  });
+
+  it('the same join, then the next ranking.updated event: the press already shows the job running, and the event read and the poll go on from it (FW4-1)', async () => {
+    getRanking.mockResolvedValue(readOf(null));
+    startRanking
+      .mockResolvedValueOnce({ job: job(), joined: false })
+      .mockResolvedValueOnce({ job: claimed(), joined: true });
+    getRankingJob
+      .mockResolvedValueOnce({ job: job({ status: 'expired' }) })
+      .mockResolvedValueOnce({ job: claimed() })
+      .mockResolvedValue({ job: claimed({ batchesDone: [0] }) });
+    render(<Probe anchor={ANCHOR} />);
+    await flush();
+    act(() => {
+      current().rank();
+    });
+    await flush();
+    await flush(JOB_POLL_MS);
+    expect(current().job?.status).toBe('expired');
+    expect(getRanking).toHaveBeenCalledTimes(2);
+    // The press joins the claimed generation: its pool built (2 batches), none finished.
+    act(() => {
+      current().rank();
+    });
+    await flush();
+    expect(current().job).toMatchObject({ status: 'running', generation: 'gen-1', batchCount: 2 });
+    expect(current().joined).toBe(true);
+    // Nothing has finished: the ranking is not read again.
+    expect(getRanking).toHaveBeenCalledTimes(2);
+    // The pool-built event's job read answers the same view: level and issued later, so applied - nothing new to read.
+    act(() => {
+      handlers.onRankingUpdated?.(rankingEvent({ batchesDone: 0, batchCount: 2 }));
+    });
+    await flush();
+    expect(getRankingJob).toHaveBeenCalledTimes(2);
+    expect(current().job).toMatchObject({ status: 'running', batchCount: 2 });
+    expect(current().joined).toBe(true);
+    expect(getRanking).toHaveBeenCalledTimes(2);
+    // The poll runs as well: the first finished batch reads the ranking.
+    await flush(JOB_POLL_MS);
+    expect(getRankingJob).toHaveBeenCalledTimes(3);
+    expect(current().job?.batchesDone).toEqual([0]);
+    expect(getRanking).toHaveBeenCalledTimes(3);
+  });
+
+  // A guard on FW4-1, not its regression test: the press gate FW4-1 drops
+  // kept a fresh press's claim record from stepping back a newer view of its
+  // generation (A2-2); the order rules now do that.
+  it('a fresh press whose claim record answers after a running view of its generation leaves the running view on screen (FW4-1, A2-2)', async () => {
+    const press = held<{ job: RankingJobView; joined: boolean }>();
+    const running = job({ status: 'running', generation: 'gen-2', startedAt: '2026-07-01T12:00:01.000Z', batchCount: 3 });
+    getRanking.mockResolvedValue(readOf(job({ status: 'done', batchCount: 1, batchesDone: [0] })));
+    startRanking.mockReturnValueOnce(press.promise);
+    getRankingJob.mockResolvedValue({ job: running });
+    render(<Probe anchor={ANCHOR} />);
+    await flush();
+    act(() => {
+      current().rank();
+    });
+    await flush();
+    // The claim (gen-2) starts at once; its pool-built event reads the job before the press answers.
+    act(() => {
+      handlers.onRankingUpdated?.({ ...rankingEvent({ batchesDone: 0, batchCount: 3 }), generation: 'gen-2' });
+    });
+    await flush();
+    expect(current().job).toMatchObject({ status: 'running', generation: 'gen-2', batchCount: 3 });
+    // The press answers with its claim record: gen-2 queued, behind the view on screen.
+    await act(async () => {
+      press.resolve({ job: job({ generation: 'gen-2' }), joined: false });
+    });
+    await flush();
+    expect(current().ranking).toBe(false);
+    expect(current().job).toMatchObject({ status: 'running', generation: 'gen-2', batchCount: 3 });
+    expect(getRanking).toHaveBeenCalledTimes(1);
+    // Still live: the poll goes on.
+    await flush(JOB_POLL_MS);
+    expect(getRankingJob).toHaveBeenCalledTimes(2);
+    expect(current().job?.status).toBe('running');
   });
 });

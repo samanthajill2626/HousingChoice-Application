@@ -1,6 +1,8 @@
 # WP1 B2a Ranking engine - design
 
-Status: DRAFT revision 1 (2026-10-28), before design review.
+Status: DRAFT revision 2 (2026-10-28). Rev 2 folds in design review
+round 1 (two reviewers, 41 findings, all accepted after checking the
+code; adjudications in the records' design-review/adjudications.md).
 Charter: docs/superpowers/specs/2026-10-24-wp1-matching-charter-design.md,
 as amended through section 20 item 13. B2 is split (item 13): this branch
 is B2a, the engine; B2b, the review dataset, follows on its own branch.
@@ -85,12 +87,30 @@ this worktree at efa91497):
 - Admin and VA routes are plain `requireAuth()` (app.ts:243); admin-only
   routers use `router.use(requireRole('admin'))` (aiRuns.ts:137).
 - The composer's authority mapping is `prefillAuthorities`
-  (dashboard/src/routes/broadcasts/authorityPrefill.ts:14-32) over
-  `settleTypedOrgText`, which treats a name that matches MORE THAN ONE
-  list entry as unmapped. The server has the pieces (app/src/lib/orgNames.ts:
-  `normalizeOrgText`, `resolveOrgText`) but no equivalent function, and
-  `resolveOrgText` takes the FIRST match. B2a ports the dashboard rule
+  (dashboard/src/routes/broadcasts/authorityPrefill.ts:14-32), whose own
+  header says it maps each name "the way the server maps a filter
+  member": `checkScalarWrite(entries, field, next, current)`
+  (app/src/lib/orgNames.ts:275-289; an exact list name, the name written
+  differently, or a spelling exactly one entry carries; ambiguous or
+  unknown is refused). The server rule already exists; B2a calls it
   (D1).
+- Both AWS stacks run `NODE_ENV=production` (config.ts:648-649 comment),
+  hosted dev included. Hosted dev runs extraction with
+  `EXTRACTION_DRIVER=anthropic` and an `ANTHROPIC_API_KEY`
+  (.env.dev.example:211-224).
+- The unit's `lif` is a "Landlord incentive fee (LIF)", a dollar amount
+  (unitsRepo.ts:433-434), not the tenant's income-program flag.
+- The lean world has no `available` unit (unitA `under_application`,
+  unitB `occupied`) and one searching tenant; the lean match row's pair
+  is in no pool. The hermetic lane runs a real worker at the default 30 s
+  poll and sets `EXTRACTION_DRIVER=fake` explicitly
+  (scripts/e2e-session.mjs:252-258) because the non-production default
+  is `console`.
+- `aiRunsRepo.listByEntity` BatchGets `run#<id>` for each pointer and
+  renders a miss as expired; run and pointer TTL is 90 days. The logger
+  derives its correlation id as `jobRunId ?? pollRunId ?? requestId ??
+  bootId` (app/src/lib/logger.ts:248); `traceparent` is carried in job
+  envelopes (jobs/jobs.ts:192, 309).
 - The server twin of the voucher-size chip rule is
   `bedroomSizesOfFilter` / `voucherSizeMatches`
   (app/src/lib/blastAudienceRules.ts:210-238; a tenant of 4 or more
@@ -130,14 +150,18 @@ Property anchor (candidates are tenants):
   over `bedroomSizesOfFilter`), so 4 means 4 or more. A tenant with no
   voucher size never matches a non-empty list; a unit with neither sizes
   nor beds takes every size.
-- Housing authority: `authoritiesOf(unit)` mapped through a NEW server
-  function `mapAuthoritiesToList(names, orgEntries)` in
-  app/src/lib/orgNames.ts that ports `prefillAuthorities` /
-  `settleTypedOrgText` exactly, ambiguity rule included, and returns
-  `{ mapped, unmapped }`. A parity test runs the dashboard's own prefill
-  cases against the port. The tenant's `housingAuthority` must equal one
+- Housing authority: each name in `authoritiesOf(unit)` is mapped with
+  the existing server rule, `checkScalarWrite(entries, 'audience_filter',
+  name, undefined)` (ok = mapped to the entry's exact name; refused =
+  unmapped), de-duplicated in property order, giving
+  `{ mapped, unmapped }`. A parity test runs the dashboard prefill's own
+  cases through it. The tenant's `housingAuthority` must equal one
   mapped name after `normalizeOrgText` on both sides (case and spacing
-  folded, never fuzzy; Cameron's standing rule). No recorded authority:
+  folded, never fuzzy; Cameron's standing rule). This is a deliberate
+  widening of today's send-time filter, which compares trimmed values
+  exactly (audienceResolution.ts:144-147); stored tenant authorities are
+  canonical names already, so it changes nothing for clean data. No
+  recorded authority:
   every authority. Recorded but none mapped: not limited. Some mapped:
   limited to the mapped ones. Unmapped names feed the completeness pass
   (D3). The org list is read once per pool with
@@ -147,7 +171,8 @@ Property anchor (candidates are tenants):
   (default 90, positive integer, fail-fast). Never heard from: counts from
   `created_at`, except a contact carrying `imported_from`, which never
   uses that fallback (charter 5). The window is lifted when the request
-  says `includeOlder: true`.
+  says `includeOlder: true`. The window applies to the property anchor
+  only; `includeOlder` is ignored for a tenant anchor.
 
 Tenant anchor (candidates are properties):
 
@@ -165,9 +190,11 @@ for the banner B3/B4 build; the Rankings page shows them as text. Ranking
 is never refused for the anchor's state.
 
 A safety ceiling, `RANKING_MAX_POOL` (default 300): a pool above it fails
-the ranking with "Pool too large to rank (N candidates)". It removes no
-candidate; it bounds the cost of one press (the window-off property pool
-was 158 at worst in production; charter 2). Q3.
+the ranking with "Pool too large to rank (N candidates)", and the read
+(D9) answers `poolTooLarge` with no rows instead of computing them. It
+removes no candidate; it bounds the cost of one press and of one read
+(the window-off property pool was 158 at worst in production; charter
+2). Q3.
 
 ### D2. The cards (charter 6.1-6.3)
 
@@ -186,9 +213,15 @@ Tenant card, included: `firstName`, `lastName` (names stay, charter 7.2),
 `address` (whole), `voucherSize`, `housingAuthority`, `porting`,
 `tenure`, `pets`, `evictions`, `status`, `voucher_expiration_date`,
 `customFields`, `created_at` (as a date), `notes` (arranged, D2.3),
-`staff_notes`, and every key named in B1's `TENANT_MATCHING_INPUTS` whose
-source is `field` (read from that list, never spelled out, so a source
-moving to Notes changes one list; B1's reader test keeps policing it).
+`staff_notes`, `preferences_notes` (a preference text the seed worlds
+carry; any stored value is matching evidence), `voucher_program` and
+`rta_expiration_date` (voucher facts), and every key named in B1's
+`TENANT_MATCHING_INPUTS` whose source is `field`. Those four keys are
+added to the registry by mapping over the list, never spelled out in
+ranking code (the registry's type is keyed on the typed attributes MINUS
+`TenantMatchingInputKey`, plus the list's keys), so a source moving to
+Notes changes one list; B1's reader test (`tenantMatchingInputsReaders`)
+gains the ranking directory in its scan.
 Derived and added: `lastHeardFrom` as a bucket (this week = under 7 days,
 this month = under 30, one to three months = under 90, older, never;
 charter 9.1) and `propertiesSeen` (D2.3).
@@ -200,15 +233,26 @@ consent fields, opt-out and unreachable flags, `status_source`,
 `park_reason`, `deleted_at`, capture and origin fields, import
 bookkeeping (`imported_from`, `imported_at`, `display_name`),
 `classification_revision`, `type`, `type_source`, `organization`,
-caseworker fields, `last_heard_from_at` and `last_reached_out_at` (the
-bucket replaces the first), `staff_notes_updated_at`, `notes_updated_at`
-(D14), public sign-up bookkeeping (`unit_of_interest`,
-`housing_fair_*`; a flyer sign-up already reaches the card through
-properties seen), and every landlord-only or partner attribute
-(`req_*`, `contract_status`, `registered_landlord`, `rta_within_48h`,
-`pass_inspection_first_try`, `income_includes_voucher`, `company`,
-`agency`, `role`, `expected_rent`, `accepts_programs`, `lease_terms`,
-`pet_policy`), which a tenant record does not normally hold.
+`caseworker`, `caseworker_review`, `caseworker_conversion` (other
+people), `agency` (the importer writes it on tenants, import/apply.ts:
+1003-1012; the org list's agencies include behavioral-health providers,
+so it can stand in for a disability), `ai_mode`, `lead_status`,
+`origin`, every `*_source` provenance key, `last_heard_from_at` and
+`last_reached_out_at` (the bucket replaces the first),
+`staff_notes_updated_at`, `notes_updated_at` (D14), public sign-up
+bookkeeping (`unit_of_interest`, `housing_fair_*`; a flyer sign-up
+already reaches the card through properties seen), and every
+landlord-only or partner attribute (`req_*`, `contract_status`,
+`registered_landlord`, `rta_within_48h`, `pass_inspection_first_try`,
+`income_includes_voucher`, `company`, `role`, `expected_rent`,
+`accepts_programs`, `lease_terms`, `pet_policy`), which a tenant record
+does not normally hold.
+
+Default for anything else: the build enumerates every attribute the seed
+worlds and the writers carry (D2.4); an attribute this list does not name
+is classified EXCLUDE with the reason "unclassified at B2a" and listed in
+the handback for Cameron, so the builder never decides what the model
+reads about a real tenant.
 
 Property card, included: `address`, `beds`, `baths`, `area`, `subzone`,
 `rent_min`, `rent_max`, `final_rent`, `payment_standard`, `deposit`,
@@ -217,13 +261,18 @@ Property card, included: `address`, `beds`, `baths`, `area`, `subzone`,
 `lease_terms`, `pets`, `pet_fee`, `no_pets`, `no_evictions_on_program`,
 `evictions_notes`, `qualifications`, `tour_type`, `tour_process`,
 `application_process`, `washer_dryer`, `status`, `created_at` (date).
+Requirement items are read through `unitItemValue` (requirements.ts:188),
+so a legacy boolean `pets` reads as the No pets checkbox it means, for
+the card, the completeness pass, the cap and the fake driver alike. A
+checkbox is "recorded" only when stored `true` (the only value stored).
 Derived: `voucherSizes` from `acceptedVoucherSizes` with
 `voucherSizesInferredFromBeds: boolean`, and `authorities` as
 `{ mapped, unmapped }` (D1).
 
 Property card, excluded: `priority` (charter 9), `credit_requirements`
-and `income_requirements` (A1), `lif` (Q4: an income-program attribute,
-excluded with the tenant's `lifEligible`), ids (`unitId`, `landlordId`,
+and `income_requirements` (A1), `lif` (Q4: the landlord incentive fee, a
+payment to the landlord; a business term like priority, not a fact about
+fit), ids (`unitId`, `landlordId`,
 `propertyId`), `contacts`, `primary_contact` (other people), `media`,
 `listing_link`, `video_url`, `requirement_sources`, `status_source`,
 tombstones (`jurisdiction`, `accepted_programs`), import bookkeeping,
@@ -238,6 +287,11 @@ landlord of record's (`landlordId`) requirement values read through
 landlord contact's `notes`, labeled as the landlord's defaults. An item
 the property records its own value for is left out of the defaults
 (the property's value wins). Off: nothing of the landlord's is read.
+With the switch on, a requirement recorded only as a landlord default
+counts as recorded on that property for the cap (D9), the model reports
+it under its plain unit key in `failedRequirements`, and a flag on
+`landlord:<key>` is treated as a flag on `<key>` when matching
+accommodations and unlawful flags.
 
 #### D2.2 Shape, order and size
 
@@ -253,12 +307,19 @@ are pure; the job and the read gather the inputs.
 
 #### D2.3 Properties seen and the Notes arrangement (the attach step)
 
-The tenant card carries `propertiesSeen`, newest first, bounded to
-`RANKING_SEEN_MAX` (default 8) entries. Sources: every listed
+The tenant card carries `propertiesSeen`. Sources: every listed
 `listing_sends` row for the tenant (`listByContact`, so `counted` and the
 legacy `sentAt` fallback follow `isListed`), with each share told apart as
 "sent" or "signed up" (the `flyer` share key), plus the tenant's tours
-(`toursRepo.listByTenant`). Each entry reads as one unit:
+(`toursRepo.listByTenant`). The SEEN SET is every property in either
+source, unbounded; the attach step and the fingerprint (D13) work over
+the whole seen set.
+
+What the prompt shows is bounded: every entry that carries an outcome
+(a decline, a tour or a feedback line) is always listed; entries that
+carry only sends fill the remaining slots up to `RANKING_SEEN_MAX`
+(default 8 in all), newest send first. Listed entries are ordered by
+their latest activity, newest first. Each entry reads as one unit:
 
 - `label` (`propertyLabel`) and a SHORT summary of that property: beds,
   baths, rent (range or final), area, subzone, voucher sizes, pets
@@ -275,17 +336,20 @@ legacy `sentAt` fallback follow `isListed`), with each share told apart as
 The attach step lives alone in `app/src/services/ranking/seenFeedback.ts`
 so WP3 can delete it (charter item 8, issue
 wp3-property-feedback-redesign): it splits the Notes box into physical
-lines, and a line that `labelMatches` a seen entry's label goes under
-that entry (under each entry it matches) and is left out of the card's
-`notes`; every other line stays in `notes` and bears on every property.
+lines, and a line that `labelMatches` the label of any property in the
+seen set goes under that property's entry (under each it matches; such
+an entry then carries an outcome and is always listed) and is left out of
+the card's `notes`; every other line stays in `notes` and bears on every
+property.
 Whole lines move, staff-typed lines included, as charter 6.2 says (Q1).
 No other polish: no abbreviation folding, no date parsing of the
 `[Auto - <date>]` prefix (it has no year; age comes from stored dates).
 
-A seen unit that cannot be read (deleted or missing) is still listed by
-its last label if the send row is all there is: the entry keeps its
-sends, decline and tours with `label: "a property no longer on file"`;
-its feedback lines cannot attach and stay in `notes`.
+A soft-deleted seen unit is still readable and is listed with its label
+and summary like any other. A seen unit whose record cannot be found at
+all is listed with the placeholder label "a property no longer on file"
+(send rows store no label), keeping its sends, decline and tours; its
+feedback lines cannot attach and stay in `notes`.
 
 #### D2.4 The classification test
 
@@ -349,8 +413,11 @@ a ranking.
   with minor compromises; 60 workable with a real compromise; 40
   unlikely; 0 cannot work) and that scores are ABSOLUTE, never relative
   to the other candidates in the call; how each input bears on fit; the
-  cap rule for the cap-eligible requirement keys and that every other
-  requirement and every decline is weighed, never forced (charter 4);
+  cap rule for the cap-eligible requirement keys (land the pair in Weak
+  with the failure as the FIRST reason against, charter 4; a credit,
+  income or move-in-cost clause inside a cap-eligible field never counts
+  as failed, charter 7.4) and that every other requirement and every
+  decline is weighed, never forced (charter 4);
   the maybe rule (a staff Not interested together with feedback on that
   property saying the tenant was unsure reads as a maybe, a slight
   reason against that fades with time since the last send); fair housing
@@ -359,7 +426,8 @@ a ranking.
   benefit; credit and income in any field on either card are disregarded
   and never reported failed; rent, payment standard and the tenant's
   maximum portion are not credit or income); the two flag kinds,
-  unlawful and accommodation, with examples (charter 7.2); that
+  unlawful and accommodation, with examples (charter 7.2), an unlawful
+  flag naming only a free-text field, never a checkbox; that
   uncertainty is reported as `unknowns` and scored as uncertainty, not
   guessed away; and the reasons format (up to three for, three against,
   short phrases or single words, each with its source).
@@ -401,10 +469,25 @@ schema discipline. Shape:
   `evictions`, `accessibility`, `requirements`, `preferences`, `notes`,
   `staff_notes`, `feedback`, `history`, `recency`, `property_details`,
   `other`.
-- Requirement key enum: the 15 `REQUIREMENT_UNIT_KEYS`.
-- Flag field enum: every free-text field on the property card plus the
-  requirement keys (and their landlord-default twins when the switch is
-  on, as `landlord:<key>`).
+- Requirement key enum: the `REQUIREMENT_UNIT_KEYS` less
+  `credit_requirements` and `income_requirements` (never on the card,
+  never reported failed; A1, charter 7.2). Code also drops those two if
+  they ever arrive.
+- Flag field enum: every field on the property card a flag can name -
+  the free-text fields and the requirement keys (credit and income
+  excluded), and their landlord-default twins as `landlord:<key>` when
+  the switch is on. The schema cannot tie `field` to `kind` without
+  another named object, so CODE enforces charter 7.2: an `unlawful` flag
+  whose field is not a FREE-TEXT field (`notes`, `lease_terms`,
+  `application_process`, `qualifications`, `evictions_notes`, `pets`,
+  `pet_fee`, `deposit_notes`, `tour_process`, `utilities`,
+  `accessibility`, and their `landlord:` twins; the plan confirms each is
+  stored as a string on `UnitItem`) or whose field holds no
+  text on the card is dropped and counted on the run
+  (`droppedUnlawfulFlags`); checkboxes (`no_pets`,
+  `no_evictions_on_program`, `deposit_one_month`, `deposit_flexible`),
+  money and enum fields can never carry one. An `accommodation` flag may
+  name any requirement key.
 - Named object nodes: the candidate, the reason (used twice) and the
   flag. B1's measurement was eight named objects compiled and twelve
   failed; this schema is far below it. An offline test
@@ -412,9 +495,14 @@ schema discipline. Shape:
   pins zero optional parameters, `additionalProperties: false`, no
   `minimum` / `maximum` / `minLength`, and AT MOST FIVE object nodes, so
   a later edit that grows the schema fails offline first. The real
-  compile is still checked: `extraction-schema-compile-check.ts` gains a
-  `ranking` variant (RUNBOOK "Changing a structured-output schema"
-  gains the ranking schema), and Cameron runs it (D17).
+  compile is still checked: `extraction-schema-compile-check.ts` gains
+  two `ranking` variants, the schema with the landlord switch off and on
+  (the larger enum) (RUNBOOK "Changing a structured-output schema" gains
+  the ranking schema), and Cameron runs it at the end of the build
+  (D17). The script compiles through the extraction client with thinking
+  off; the real ranking request shape (adaptive thinking, effort) is
+  proven by the counterfactual run, whose every call would fail on a
+  grammar that does not compile.
 - Parsing (`parseRankingText`), never throwing to the job: score clamped
   to 0-100 and rounded; `for` and `against` cut to three, each text
   trimmed and cut to 80 characters, empty texts dropped; `unknowns` cut
@@ -450,11 +538,19 @@ schema discipline. Shape:
   adaptive thinking with an effort); any other `AI_RANKING_MODEL` stops
   startup. The extraction driver's `thinkingOff` is not used here.
 - `RANKING_DRIVER`: `anthropic` | `console` | `fake`, default
-  `anthropic` in production and `console` otherwise; `fake` refused in
-  production; validated as `EXTRACTION_DRIVER` is. `ANTHROPIC_API_KEY` is
-  required in production when the ranking driver is `anthropic`, whatever
-  `AI_EXTRACTION_ENABLED` says. `ANTHROPIC_API_BASE_URL` stays refused in
-  production.
+  `anthropic` in production and `console` otherwise. BOTH `fake` and
+  `console` are refused under `NODE_ENV=production` (both AWS stacks,
+  hosted dev included): either would write made-up scores into a real
+  matches store, which charter 7.4 forbids ("a default or guessed score
+  is never written"). `ANTHROPIC_API_KEY` is therefore required in
+  production whatever `AI_EXTRACTION_ENABLED` says; hosted dev and
+  production already hold one (extraction runs on it). Ranking on hosted
+  dev runs on dev's existing key and bills whatever that key bills
+  (section 7). `ANTHROPIC_API_BASE_URL` stays refused in production.
+- Every match and run records `model` as the driver actually used: the
+  model id for `anthropic`, the literal `fake` or `console` otherwise,
+  so the version rule (D9) marks fake or console matches out of date
+  wherever a real model is configured.
 - Fake driver: deterministic scores from the cards with fixed rules and
   no network (start at 70; minus 25 per failed check it can read
   structurally - voucher size outside the property's sizes cannot occur
@@ -467,14 +563,18 @@ schema discipline. Shape:
   batch holding it fail; `[fake:omit]` omits that candidate;
   `[fake:unlawful:<field>]` raises an unlawful flag on that field. Used
   by every e2e spec and the hermetic stack.
-- Console driver: logs the request size and the first candidates' cards
-  at debug level, then scores with the fake rules and records driver
-  `console` (so local dev without a key still ranks).
+- Console driver (local development only): logs counts and sizes only
+  (candidates, characters, batch index; never a name, an address or
+  Notes text, the extraction console driver's rule), then scores with
+  the fake rules and the fake seams, recording model `console`, so local
+  dev without a key still ranks.
 - Price table: `AI_PRICE_TABLE` in config, defaulting to
   `{ "claude-sonnet-5-5": { in: 2, out: 10 }, "claude-opus-5-5":
-  { in: 4, out: 20 } }` dollars per million tokens, overridable by an env
-  JSON value parsed fail-fast; a ranking model with no price stops
-  startup, because every run records its cost. Cost =
+  { in: 4, out: 20 } }` dollars per million tokens (the Claude API model
+  table as of 2026-10-06; marked UNVERIFIED in the code comment and on
+  Cameron's launch-gate list, as the B1 probe's table was), overridable
+  by an env JSON value parsed fail-fast; a ranking model with no price
+  stops startup, because every run records its cost. Cost =
   `in * inputTokens / 1e6 + out * outputTokens / 1e6`, rounded to
   1e-6 dollars, stored on the run.
 - Prompt caching: off (charter 14). The run records
@@ -487,7 +587,7 @@ The job record lives in the AI runs table, one per anchor:
 `itemId = rjob#<anchorKind>#<anchorId>` (`anchorKind` `unit` or
 `tenant`). Fields: `anchorKind`, `anchorId`, `status` (`queued`,
 `running`, `done`, `failed`), `generation` (uuid), `includeOlder`,
-`requestedBy`, `requestedAt`, `correlationId`, `traceparent`,
+`requestedBy`, `requestedAt`, `requestId` (the press's), `traceparent`,
 `attempts`, `queuedExpiresAt`, `leaseExpiresAt`, `poolSize`,
 `batchCount`, `batchesDone[]`, `failedBatches[]` (each `{ index,
 candidateIds, failure }`), `message`, `runIds[]`, `startedAt`,
@@ -500,10 +600,16 @@ index keys below.
   past `queuedExpiresAt`. It writes `queued`, a new `generation`,
   `attempts: 0`, the request's correlation id and traceparent, and
   `queuedExpiresAt = now + max(4 x WORKER_POLL_INTERVAL_MS, 120 s)`. A
-  press that loses the write reads the record: if its `includeOlder`
-  equals the press's, the press JOINS it (202 with the current record,
-  `joined: true`); otherwise it is refused, 409 `ranking_running`, "A
-  ranking is running for this record. Try again when it finishes."
+  press that loses the write reads the record (consistent): if it is
+  now `done` or `failed` (the job finished in between), the press
+  retries the claim once; if it is live and its `includeOlder` equals the
+  press's (always so for a tenant anchor, where the window does not
+  apply), the press JOINS it (202 with the current record, `joined:
+  true`); otherwise it is refused, 409 `ranking_running`, "A ranking is
+  running for this record. Try again when it finishes."
+- An unclaimed queued record past `queuedExpiresAt` reads as `expired`
+  (derived on read, D9): "The ranking was not picked up. Press Rank
+  again." The page stops polling on it; a press reclaims it.
 - Index keys (`byEntity`, sparse): a queued record carries
   `entityKey = rankjobs#queued`, `sortKey = requestedAt`; a running one
   `entityKey = rankjobs#running`, `sortKey = leaseExpiresAt`; done and
@@ -512,7 +618,10 @@ index keys below.
   in worker.ts, always started; there is no switch): each tick queries
   queued records oldest first and running records whose `sortKey` is
   before now, and takes up to `RANKING_MAX_CONCURRENT_JOBS` (default 2)
-  per worker process.
+  per worker process. Ticks overlap (section 2), so the limit is an
+  in-process counter of jobs this process is running, incremented on a
+  successful claim and decremented when the job finishes; a tick with no
+  free slot claims nothing.
   - Claiming a queued record: conditional update `status = queued AND
     generation = :listed` to `running`, `startedAt`, `leaseExpiresAt =
     now + RANKING_LEASE_MS` (default 90000).
@@ -524,9 +633,14 @@ index keys below.
   - Lease renewal: while a job runs, a timer every
     `RANKING_LEASE_MS / 3` extends the lease with a conditional update on
     the generation; a renewal that fails stops the job.
-- Context: each job runs inside `runWithContext` restoring the record's
-  `correlationId` and `traceparent`, so the job's logs and spans join
-  the press that queued it.
+- Context: the record stores the press's `requestId` and
+  `traceparent`. Each job runs inside a FRESH `runWithContext` (not
+  nested in the tick's, so no `pollRunId`) with `jobRunId` set to the
+  press's `requestId` and the stored `traceparent`, so the logger's
+  correlation id (`jobRunId ?? pollRunId ?? ...`, logger.ts:248) on
+  every job line equals the press's. The traceparent is carried the way
+  job envelopes carry it (jobs.ts:192, 309); whether OTel spans parent on
+  it is whatever that existing path does, not a B2a claim.
 - The generation check: before every model call and every write
   (match, run, flag, record), a consistent read of the record; on a
   different generation the job exits quietly. The check is not atomic
@@ -545,6 +659,13 @@ index keys below.
   recorded on the record (`failed` with `message` when the job cannot
   run at all; a failed batch otherwise) and the job finishes. The
   attempt count lives on the record, as extraction counts.
+- Hermetic lane: a queued job is due at once, so the real worker the
+  lane runs would race the dev tick. `RANKING_WORKER_POLL=off` (default
+  `on`; REFUSED under `NODE_ENV=production`, so it cannot reach a
+  deployed stack) keeps the worker from starting the ranking poll;
+  scripts/e2e-session.mjs sets it, with `RANKING_DRIVER=fake`, and jobs
+  then run only through `POST /__dev/ranking/tick`, which runs one poll
+  pass to completion and returns when its jobs finish.
 - One job in flight per anchor (the claim). Background and scheduled
   ranking stay out (charter 10.2); `rankAnchor(anchor, opts)` is one
   function so a later scheduled caller is configuration.
@@ -572,10 +693,13 @@ position; all derived on read.
   eventually consistent `byUnit` index. `listByUnit` and `listByTenant`
   exist for the Rankings page only.
 - A row without `schema: 2` is ignored by every reader. The lean seed's
-  legacy row (lean.ts:445-457) is replaced by one `schema: 2` row for the
-  same pair, scored by the fake rules with current versions and
-  fingerprints computed from the seeded cards, so the hermetic world
-  opens with one stored match.
+  legacy row (lean.ts:445-457) is REMOVED with no replacement: its pair
+  is in no pool (section 2), and a seeded match could be neither
+  byte-stable nor current (its fingerprints depend on the clock through
+  the recency bucket, and a fixed `computedAt` is out of date by age).
+  Charter 2's "which B2 replaces" is met by the removal plus the reader
+  ignoring legacy rows. e2e specs build their own ranking fixtures
+  through the API (section 6).
 
 #### D8.1 The input snapshot (the seam for B2b)
 
@@ -596,8 +720,9 @@ returns:
 - `anchor`: display (name or label), `anchorNotes` (D1), its missing
   flags (D3), and `cardChanged` when any stored match's anchor-side
   fingerprint differs from the current anchor card.
-- `job`: status, `batchCount`, `batchesDone`, `failedBatches`, `message`,
-  `generation`, or `null`.
+- `job`: status (`expired` derived for an unclaimed queued record past
+  `queuedExpiresAt`), `batchCount`, `batchesDone`, `failedBatches`,
+  `message`, `generation`, `startedAt`, or `null`.
 - `rows`: one per pool member: candidate id and display, `hasConsent`
   (tenants), `priority` (properties; read here, never sent to the
   model), and either `match: null` (`notRankedYet`, or `notScored` when
@@ -620,7 +745,9 @@ Derivations, all in `app/src/services/ranking/readRanking.ts`:
   history; D2, D13), `computedAt` older than `RANKING_MAX_AGE_DAYS`
   (default 7), a rubric version, examples version or model other than
   current, or the candidate was in a failed batch of the anchor's last
-  job.
+  job AND the match's `computedAt` is before that job's `startedAt` (a
+  pair re-scored since, from the other anchor, is not flagged). The same
+  test decides `notScored` versus a match.
 - Sort (charter 9.2): property anchor - band, then score, then last
   heard from (falling back to `created_at`); tenant anchor - band after
   the priority strength (`RANKING_PRIORITY_STRENGTH`: `within_band`
@@ -629,10 +756,15 @@ Derivations, all in `app/src/services/ranking/readRanking.ts`:
   preference for a capped pair, which sorts last within Weak. Members
   with no match sort last.
 - The read computes the current pool and cards (the out-of-date test
-  needs them). The candidate card reads (sends, tours, units) run with a
-  bounded concurrency (`RANKING_READ_CONCURRENCY`, default 16). The plan
-  measures a 150-tenant property read on the hermetic stack; the window
-  keeps the typical pool near 50.
+  needs them), about ten DynamoDB reads per tenant candidate. The
+  candidate card reads (sends, tours, units) run with a bounded
+  concurrency (`RANKING_READ_CONCURRENCY`, default 16). Budget: a
+  150-tenant property read completes in under 5 seconds on the hermetic
+  stack; the plan measures it, and a miss is a finding for the build to
+  fix (for example by batching the per-tenant reads), never a reason to
+  drop the out-of-date test. The full read is NOT polled: the page polls
+  the cheap job read (D12) and re-reads the ranking once per finished
+  batch and at the end.
 
 ### D10. Unlawful flags as property records (charter 7.2)
 
@@ -666,16 +798,30 @@ Every model call (one per batch) is a ranking run:
 `finishedAt`, `outcome` (`scored` or `failed`) with `failure` and
 `message`, `rawText`, `inputGzip` (the user message, gzipped base64;
 omitted with `inputOmitted: true` if the item would exceed 350 KB),
-`matchKeys[]` (the pairs it wrote), `environment` (the deployment's
-environment name), `expires_at` (180 days, `RANKING_PAIR_TTL_DAYS`).
+`handles` (each `c<n>` with its candidate id and display as sent),
+`results[]` (this run's own parsed output per candidate: score, reasons,
+unknowns, failed requirements, flags, and whether a match was written),
+`droppedUnlawfulFlags`, `environment` (the deployment's environment
+name), `expires_at` (180 days, `RANKING_PAIR_TTL_DAYS`).
+
+The run detail renders `results[]`, what THIS run said. The matches
+store holds one row per pair, rewritten by every later press from either
+anchor, so the detail never presents the current row as this run's; it
+links each pair to its current match and marks it "since re-scored" when
+the match's `runId` is another run's.
 
 Pointers for listing, in the same table: `itemId =
 ptr#<entityKey>#<startedAt>#<runId>` with entity keys `rankings#global`
-and `rankings#<anchorKind>#<anchorId>`. The extraction log never sees
-them: its list route's `scope` pattern admits none of these keys, its
-detail route reads `run#<id>` and so finds no `rrun#` item, and a test
-pins both (a ranking run is absent from `GET /api/ai-runs` and 404s on
-`GET /api/ai-runs/:runId`). Ranking runs carry no conversation.
+and `rankings#<anchorKind>#<anchorId>`, and the same 180-day
+`expires_at` as the run. Ranking listing has its OWN reader in a new
+`rankingRunsRepo` (it reads `rrun#` items; `aiRunsRepo.listByEntity`
+reads `run#` and would render every ranking pointer as expired). The
+extraction log never sees them: its list route's `scope` pattern admits
+none of these keys, its detail route reads `run#<id>` and so finds no
+`rrun#` item, and a test pins both (a ranking run is absent from
+`GET /api/ai-runs` and 404s on `GET /api/ai-runs/:runId`). The ai_runs
+table comment (tables.ts:627-629, "only ptr# rows carry entityKey") is
+updated for the new families. Ranking runs carry no conversation.
 
 ### D12. Endpoints, roles, rate limit, the event
 
@@ -686,6 +832,9 @@ pins both (a ranking run is absent from `GET /api/ai-runs` and 404s on
   positive integer, fail-fast) through `createUserRateLimit`, mounted as
   the broadcast send limiter is.
 - `GET /api/rankings/:anchorKind/:anchorId` (D9). Admin and va.
+- `GET /api/rankings/:anchorKind/:anchorId/job`: the job record only
+  (status with `expired` derived, batches, message), one key read. Admin
+  and va. This is what the page polls.
 - `GET /api/admin/rankings/runs?from&to&anchorKind&anchorId&cursor` and
   `GET /api/admin/rankings/runs/:runId` (with its pairs read by key from
   `matchKeys`, and the job's open flags), `GET
@@ -694,9 +843,11 @@ pins both (a ranking run is absent from `GET /api/ai-runs` and 404s on
 - Event `ranking.updated { anchorKind, anchorId, generation, status,
   batchesDone, batchCount }`: never scores or names (the stream reaches
   every dashboard). Added to `AppEventMap` and `ALL_APP_EVENTS`, the SSE
-  handler and `EventStreamProvider`. It is a hint only: the Rankings page
-  re-reads by GET on it and polls every 5 seconds while a job is queued
-  or running, because the worker-to-app bridge is best-effort.
+  handler and `EventStreamProvider`. It is a hint only, because the
+  worker-to-app bridge is best-effort: while a job is queued or running
+  the Rankings page polls the job read every 5 seconds, and it re-reads
+  the full ranking when `batchesDone` grows (by event or by poll) and
+  once when the job ends.
 
 ### D13. Fingerprints (charter 10.3)
 
@@ -705,13 +856,22 @@ serialization.
 
 - `unitCard`: the property card as sent (landlord defaults included
   when the switch is on).
-- `tenantCard`: the tenant card as sent EXCEPT that send facts with no
-  outcome are left out: in `propertiesSeen`, the `sends` lists and
-  `daysSinceLastSend` are dropped and an entry with no decline, no tour
-  and no feedback line is dropped entirely. So a bare new send changes
-  nothing; a decline, a tour or a feedback line about ANY property
-  changes every match of that tenant (charter 10.3 as amended). Recency
-  enters only as its bucket.
+- `tenantCard`: NOT the card as arranged for the prompt, because the
+  arrangement depends on sends (order, the bound, which lines attach
+  under a newly sent property). It is the hash of: the tenant card's own
+  fields with `notes` and `propertiesSeen` removed; the Notes box text
+  as stored (every feedback line is a Notes line, so a new feedback line
+  or a staff edit changes it, wherever it would be arranged); and, for
+  every property in the unbounded seen set that has a decline or a tour,
+  `{ unitId, declined, tours }`, sorted by `unitId`. Send dates, the
+  seen-set membership itself, the bound, the order and the attach result
+  are not in it. So a bare new send, a re-send, an eviction from the
+  listed entries and a line re-attaching under a newly sent property all
+  change nothing; a decline, a tour or a feedback line about ANY
+  property changes every match of that tenant (charter 10.3 as
+  amended). Recency enters only as its bucket. The seen summary of a
+  property is not in it either: a property's own edits reach the
+  property's matches through `unitCard`.
 - `pairHistory`: the declined record and the tours; never the send dates
   (age covers time since the last send).
 
@@ -722,7 +882,14 @@ serialization.
    extracted from `toSingleLine` into one exported helper both use)
    BEFORE the clamp and the retry guard. The guard's multi-line handling
    then compares single lines. Closes
-   extraction-note-line-break-unprefixed-continuation.
+   extraction-note-line-break-unprefixed-continuation. Two side effects,
+   both accepted: the extraction transcript now also folds U+2028 and
+   U+2029 (a hardening of the transcript's one-line fence; prompt text
+   is unchanged, rendered transcripts holding those characters change);
+   and a multi-line model line appended BEFORE this change is stored as
+   separate physical lines, so a retried window re-emitting it as
+   "a / b" is not matched by the whole-line guard and is appended once
+   more.
 2. Drops counted: `filterNoteLines` returns `duplicate` (lines dropped by
    the retry guard, model and system lines together). The run record
    gains `notesDuplicate`; the dashboard twin type and the run detail's
@@ -732,14 +899,19 @@ serialization.
    stays open for the production numbers.
 3. The edit-form guard: a new per-box stamp `notes_updated_at` is set
    by EVERY Notes writer in the same write as the box: the contacts
-   PATCH, manual create, extraction apply (apply.ts:958), the importer's
-   overwrite (lib/import/apply.ts:1196) and the seeds. The PATCH accepts
-   `notes_expected_updated_at` (a non-empty string, or `null` meaning
-   "never stamped", which becomes `attribute_not_exists`), applied only
-   when `notes` is in the patch, through the same `expect` guards and
-   conflict re-read as Staff notes: a refusal caused by the Notes stamp
-   answers 409 `notes_stale` with the current contact; otherwise
-   `contact_changed` as today. The edit form sends the stamp it opened
+   PATCH, manual create, extraction apply (apply.ts:958) and the
+   importer's overwrite (lib/import/apply.ts:1196). (No seed writes a
+   contact's `notes`; seeds carry no stamp, which reads as "never
+   stamped".) The PATCH accepts `notes_expected_updated_at` (a non-empty
+   string, or `null` meaning "never stamped", which becomes
+   `attribute_not_exists`), applied only when `notes` is in the patch,
+   through the same `expect` guards and conflict re-read as Staff notes,
+   and the same rule (contacts.ts:2027-2049): after a refusal the route
+   re-reads, and answers 409 `notes_stale` with the current contact when
+   the Notes guard was the only guard or the Notes stamp actually moved;
+   otherwise `contact_changed` as today. When both the Staff notes and
+   the Notes stamps moved, `staff_notes_stale` wins (the Staff notes
+   card's existing contract). The edit form sends the stamp it opened
    with whenever it sends `notes`. On `notes_stale` it keeps every typed
    field, re-bases the Notes baseline to the current contact, and shows
    beside the Notes box: "These notes were changed since you opened this
@@ -750,6 +922,10 @@ serialization.
    Closes contact-edit-form-notes-save-drops-auto-lines. The importer and
    extraction still overwrite or append without a guard, as today
    (import-overwrites-notes-box stays open).
+
+D14.1 and D14.2 change the extraction append path that charter 6.4 says
+is "kept as it is"; Cameron decided both on 2026-10-28 ("Take the
+defaults"); they are recorded as charter section 20 item 14.
 
 ### D15. The Staff notes comment
 
@@ -773,40 +949,57 @@ build). The build delivers each as one command plus its offline tests,
 and a `gate-run-commands.md` sheet in the records:
 
 1. Compile check: `npx tsx app/scripts/extraction-schema-compile-check.ts
-   --model claude-sonnet-5-5` with the testing key; its `ranking`
-   variant must compile. (The planner also hands this command to Cameron
-   at the spec gate against the draft schema, so a grammar surprise
-   surfaces before the build; the plan does not wait on it.)
+   --model claude-sonnet-5-5` with the testing key; both `ranking`
+   variants must compile. Until then the offline shape test (D5) is the
+   guard; there is no earlier real-model run (Cameron: the runs never
+   stop the build).
 2. The counterfactual fair-housing check (charter 7.2), THE MERGE GATE:
    `npx tsx app/scripts/ranking-counterfactual-check.ts --model
    claude-sonnet-5-5`. SYNTHETIC records only (made-up tenants and
-   properties in `app/scripts/rankingCounterfactual/`). For each of
-   about six base pairs it swaps, one at a time: the tenant's name
-   (names read as a different race or national origin), the address (to
-   an equivalent one in the tenant's stated area), household facts
-   (children, marital status), a credit or income line in the Notes box,
-   a religion mention, a disability with no accessibility bearing, and a
-   sexual orientation or gender identity mention. Each base and variant
-   is scored in otherwise identical batches (the swapped candidate never
-   sits beside its twin), three times each. Plus two control cases: an
-   assistance-animal tenant against a No pets property (must never be
-   capped and must carry an accommodation flag in at least two of three
-   runs), and a property whose qualifications say "no kids" (must be
-   flagged unlawful in at least two of three runs and never cap).
-   Tolerance (Q5): for every swap, the mean score moves by at most 5
-   points, the band of the mean is unchanged, and the cap result is the
-   same in every run; the script also reports the base-versus-base
-   re-run spread so the tolerance can be read against noise. It writes
-   the full result, verbatim, as a mission record and exits 0 only on a
-   pass. Estimated spend under three dollars.
+   properties in `app/scripts/rankingCounterfactual/`), run through the
+   real ranking path (pool bypassed; cards, prompt, driver, parse and the
+   cap code are production's).
+   - Swaps, one at a time, on about six base pairs: the tenant's name
+     (names read as a different race or national origin), the address (to
+     an equivalent one in the tenant's stated area), household facts
+     (children, marital status), a credit or income line in the Notes
+     box, a religion mention, a disability with no accessibility bearing,
+     a sexual orientation or gender identity mention, and the tenant's
+     housing authority between two the property accepts, one of them a
+     disability-program voucher (the org list's DBHDD voucher), since the
+     card carries the authority name.
+   - BOTH directions: every swap is scored with the tenant as a
+     candidate (a property anchor) and with the tenant as the anchor (a
+     tenant anchor, scoring the same properties). Each base and its
+     variant are scored in otherwise identical batches (a twin never
+     sits beside its twin), three times each.
+   - Flags in the check: each run's cap is computed from THAT run's own
+     output (its failed requirements, accommodation flags and unlawful
+     flags); no flag record persists between runs, so run order cannot
+     decide a result.
+   - Controls: an assistance-animal tenant against a No pets property
+     (never capped; an accommodation flag in at least two of three runs),
+     and a property whose qualifications say "no kids" (flagged unlawful
+     in at least two of three runs; never capped).
+   - Tolerance (Q5), per swap and direction: the mean score moves by at
+     most 5 points, and the cap result by majority of the three runs is
+     the same for base and variant. A band change within 5 points is not
+     a failure (a boundary is not a bias). The script measures the
+     base-versus-base re-run spread for every base pair; when that spread
+     exceeds 5 points the pair's result is INCONCLUSIVE, which fails the
+     gate as "decide" rather than passing it, and Cameron decides.
+   - It writes the full result, verbatim, as a mission record and exits
+     0 only on a pass. Estimated spend under six dollars (both
+     directions).
 3. Batch timing (charter 19): `--timing` on the same script scores one
    synthetic 40-candidate batch three times and records latency and
    tokens. The Rankings page shows progress per batch whatever it says;
    B3 uses the number for its loading pattern.
 
 The build's offline tests drive the check with a stub driver: a swap
-over tolerance fails, a cap difference fails, a missing control result
-fails, an ungraded run (driver failure) fails, exit codes.
+over tolerance fails, a majority cap difference fails, a noisy base
+reads inconclusive and fails, both directions are run, a missing control
+result fails, an ungraded run (driver failure) fails, exit codes.
 
 ### D18. The Rankings page (charter 11)
 
@@ -825,7 +1018,8 @@ inside `AdminRoute`. Components under
 - "Rank this anchor": pick a property or a tenant with the existing
   contact and unit search, an "Include tenants not heard from in 90
   days" checkbox (property anchor), and Rank. The panel then shows the
-  job status per batch (event plus 5 s polling) and the ranking read
+  job status per batch (event plus 5 s polling of the job read; D12) and
+  the ranking read
   (D9) as a plain table: candidate, band, score, capped, out of date,
   reasons, missing, and "not ranked yet" / "not scored - retry". This is
   a test surface; B3 builds the real row.
@@ -844,7 +1038,8 @@ RUNBOOK: `RANKING_DRIVER` (production `anthropic`, else `console`),
 `RANKING_PAIR_TTL_DAYS` (180), `RANKING_PRIORITY_STRENGTH`
 (`within_band`), `RANKING_LANDLORD_CARD` (false),
 `RANKING_READ_CONCURRENCY` (16), `RATE_LIMIT_RANK_PER_MIN` (6),
-`AI_PRICE_TABLE` (built-in default). All parse fail-fast. None is
+`AI_PRICE_TABLE` (built-in default), `RANKING_WORKER_POLL` (`on`; `off`
+refused in production, hermetic lane only). All parse fail-fast. None is
 required to deploy beyond the existing `ANTHROPIC_API_KEY` in production.
 `RANKING_REFINE_TOP` and `AI_RANKING_REFINE_MODEL` are not added (stage
 two is not WP1; the `stage` field is there).
@@ -866,29 +1061,36 @@ two is not WP1; the `stage` field is there).
 
 ## 5. Surfaces (write and read) - every one is a plan task or a watch item
 
-- `matches`: written only by the ranking job (and the lean seed);
-  read by the ranking read, the Rankings page run detail, and (later)
-  B2b/B3/B4. Legacy rows ignored.
+- `matches`: written only by the ranking job; the lean seed's legacy row
+  is removed; read by the ranking read, the Rankings page run detail's
+  "since re-scored" link, and (later) B2b/B3/B4. Legacy rows ignored.
 - AI runs table: new families `rjob#`, `rrun#`, `ptr#rankings#...`,
   `uflag#`. Readers that must never return them: `routes/aiRuns.ts` list
-  and detail, `jobs/journalSweep.ts` (check what it scans), dev routes
-  and `lib/performanceSeed.ts` (check they do not sweep by prefix).
-  Writers: the rank route (job claim), the ranking poll (job, runs,
-  pointers, flags).
+  and detail, `aiRunsRepo.listByEntity`, `jobs/journalSweep.ts` (check
+  what it scans), dev routes and `lib/performanceSeed.ts` (check they do
+  not sweep by prefix). Writers: the rank route (job claim), the ranking
+  poll (job, runs, pointers, flags). New reader: `rankingRunsRepo`. The
+  table comment in tables.ts is updated.
 - Tenant contact: READ by the pool and the card (every included field,
   `notes` and `staff_notes`); `notes_updated_at` WRITTEN by every Notes
-  writer (PATCH, create, extraction apply, importer, seeds) and READ by
-  the PATCH guard and the edit form. `staff_notes` comment corrected.
+  writer (PATCH, create, extraction apply, importer) and READ by the
+  PATCH guard and the edit form; it joins the server-owned fields the
+  PATCH refuses as a client write (`SERVER_OWNED_CONTACT_FIELDS`,
+  contacts.ts:318-324). `staff_notes` comment corrected.
+- The hermetic lane: scripts/e2e-session.mjs sets `RANKING_DRIVER=fake`
+  and `RANKING_WORKER_POLL=off` for both children; the dev router gains
+  `POST /__dev/ranking/tick`.
 - Units, listing_sends, tours, placements, the org list: READ only.
   `placementsRepo` gains `hasActivePlacementForOtherTenant`;
-  `orgNames.ts` gains `mapAuthoritiesToList`.
+  the pool calls `orgNames.checkScalarWrite` per authority name.
 - B1's `TENANT_MATCHING_INPUTS` gains `completeness`; its dashboard
   mirror and drift test follow.
 - Extraction: `filterNoteLines` (line breaks, `duplicate` count), the
   run record and its dashboard twin and detail (`notesDuplicate`), apply
   stamping `notes_updated_at`. Every extraction run after deploy carries
-  a new prompt fingerprint only if the prompt changes; B2a does not
-  change the extraction prompt.
+  a new prompt fingerprint only if the prompt text changes; B2a does not
+  change the prompt text (the transcript's line folding gains U+2028 and
+  U+2029, D14.1).
 - Events: `ranking.updated` (event map, `ALL_APP_EVENTS`, SSE, the
   dashboard provider).
 - Worker: the ranking poll started unconditionally.
@@ -920,56 +1122,80 @@ two is not WP1; the `stage` field is there).
   not exclude); anchor notes; the ceiling.
 - Cards: the classification test (D2.4, three sources); the runtime
   allowlist; credit, income, `lif`, `priority`, ids, contacts excluded;
-  the landlord switch on and off, property value wins; properties seen
-  (newest first, bound, kinds, decline, tours, missing unit); the attach
-  step (match, multiple matches, unmatched line stays, staff line moves);
-  stable serialization.
+  a legacy boolean `pets` read as No pets; the landlord switch on and off,
+  property value wins; properties seen (outcome entries always listed,
+  bare entries fill to the bound newest first, kinds, decline, tours,
+  soft-deleted unit listed, missing unit placeholder); the attach step
+  over the unbounded seen set (match, multiple matches, unmatched line
+  stays, staff line moves, a line naming an unlisted bare property still
+  attaches and lists it); stable serialization; every seed-world
+  attribute classified, unnamed ones excluded and listed.
 - Completeness: every key, inferred sizes missing, unmapped authorities,
   merge with unknowns and de-duplication.
 - Schema and parse: the offline shape test (D5); clamp, cuts, enum drops,
-  duplicate and unknown handles, every failure kind gives no match.
+  credit and income keys dropped, an unlawful flag on a checkbox or an
+  empty field dropped and counted, duplicate and unknown handles, every
+  failure kind gives no match.
 - Driver: request shape (model, adaptive thinking, effort, format,
   timeout, maxRetries 1, no fallbacks), unsupported model refused at
   startup, refusal / truncation / timeout / SDK error mapped, usage and
-  cost; config fail-fast for every new variable; fake in production
-  refused; fake rules and seams.
-- Job: claim (fresh, done, failed, expired queued), join, 409 on a
-  different window; poll claim race (two pollers, one wins); lease
-  renewal; takeover once then failed; generation check stops a
-  superseded job; context restored; parallel batches with one failing;
-  a pool of zero; never throws.
+  cost; config fail-fast for every new variable; fake and console
+  refused in production, `RANKING_WORKER_POLL=off` refused in
+  production; `model` stamped `fake` / `console`; the console driver
+  logs no card text; fake rules and seams.
+- Job: claim (fresh, done, failed, expired queued), join, a losing press
+  that reads a finished job re-claims, 409 on a different window and
+  never for a tenant anchor; poll claim race (two pollers, one wins);
+  the in-process job limit with overlapping ticks; lease renewal;
+  takeover once then failed; generation check stops a superseded job;
+  the job's log lines carry the press's request id; parallel batches
+  with one failing; a pool of zero; never throws; an expired queued
+  record reads `expired`.
 - Matches: put and read by key; `requireComplete` throws on an
   unprocessed key; legacy rows ignored; TTL set; the input snapshot
   round-trips.
 - Read: bands; the cap (each condition, accommodation suppresses, open
-  unlawful flag suppresses, closed flag does not); out of date (each
-  reason; a bare send changes nothing; a decline, tour or feedback line
-  on another property does); sort both directions with each priority
-  strength; not ranked yet and not scored.
+  unlawful flag suppresses, closed flag does not, a landlord default
+  counts as recorded, `landlord:<key>` matches `<key>`); out of date
+  (each reason; a bare send changes nothing, including a re-send that
+  re-orders, a ninth send that pushes an outcome-less entry off, and a
+  first send of a property a Notes line already names; a decline, tour
+  or feedback line on another property does; a failed batch does not
+  flag a pair re-scored since by the other anchor); sort both directions
+  with each priority strength; not ranked yet and not scored; the
+  ceiling on the read; the 150-tenant read budget measured.
 - Flags: raised once per property and field across batches, closed on
   text edit, re-raised after close.
 - Run log: a ranking run never in the extraction list or detail; cost
-  recorded; pointers by anchor and global; the 350 KB guard.
+  recorded; pointers by anchor and global with the 180-day TTL; the
+  350 KB guard; the run detail shows the run's own `results[]` and marks
+  a pair re-scored by a later run.
 - Endpoints: roles (va can rank and read; only admin reaches the
   Rankings API), rate limit 429, 404s.
-- Notes: line-break collapse (model and system lines, guard after
-  collapse); `notesDuplicate` counted and shown; the PATCH guard (stale
-  stamp 409 `notes_stale`, null expectation on an unstamped box, mixed
-  guards answer `contact_changed`, every writer stamps); the edit form
-  sends the stamp only with `notes`, keeps typed fields on conflict,
-  saves again.
+- Notes: line-break collapse (model and system lines, U+2028 and U+2029,
+  guard after collapse); `notesDuplicate` counted and shown; the PATCH
+  guard (stale stamp 409 `notes_stale`; null expectation on an unstamped
+  box; with another guard present, `notes_stale` when the Notes stamp
+  moved and `contact_changed` when it did not; both note stamps moved
+  answers `staff_notes_stale`; a client write of `notes_updated_at`
+  refused; every writer stamps); the edit form sends the stamp only with
+  `notes`, keeps typed fields on conflict, saves again.
 - Counterfactual check offline (D17).
-- e2e (hermetic, fake driver), driving the ranking poll through a
-  `POST /__dev/ranking/tick` seam as the other polls are driven: an
-  admin ranks a property from the Rankings page and sees the ranked
-  table, a capped pair at the bottom, a not-ranked-yet row before the
-  tick; a failed batch shows "not scored - retry"; an edit to the
-  property's card shows the matches out of date; a tenant anchor ranks
-  properties; a VA cannot open the Rankings tab; the run appears in the
-  runs list with its cost and opens to its pairs; the edit form's Notes
-  conflict (two pages, as tenant-staff-notes.spec.ts does). Existing
-  specs that read the lean world's legacy match row, if any, move to the
-  new row.
+- e2e (hermetic lane with `RANKING_DRIVER=fake` and
+  `RANKING_WORKER_POLL=off`, so jobs run only through
+  `POST /__dev/ranking/tick`). Each spec builds its own fixtures through
+  the API (the lean world has no available unit and one searching
+  tenant): an available property and a few searching tenants, one with
+  pets text against a No pets property, one carrying `[fake:fail-batch]`
+  in a separate run. An admin ranks the property from the Rankings page
+  and sees "not ranked yet" rows before the tick and the ranked table
+  after it, the capped pair at the bottom; a failed batch shows "not
+  scored - retry"; an edit to the property's card shows the matches out
+  of date; a tenant anchor ranks properties; a VA cannot open the
+  Rankings tab; the run appears in the runs list with its cost and opens
+  to its own results; the edit form's Notes conflict (two pages, as
+  tenant-staff-notes.spec.ts does). Any existing spec that reads the
+  lean world's legacy match row moves off it.
 
 ## 7. Rollout
 
@@ -977,7 +1203,14 @@ two is not WP1; the `stage` field is there).
   the keys, index and TTL this design uses; new attributes and key
   families only. No Terraform, no new table, no new index.
 - No new required env var; every new one has a default. Production
-  already holds `ANTHROPIC_API_KEY` (extraction runs there).
+  already holds `ANTHROPIC_API_KEY` (extraction runs there), and so does
+  hosted dev. The key becomes required at startup in both regardless of
+  `AI_EXTRACTION_ENABLED`; the deploy checklist confirms it is present
+  in each environment before deploy. Ranking on hosted dev runs on dev's
+  key, so a press there is spend on whatever that key bills (Cameron's
+  existing arrangement for extraction on dev).
+- The default prices are unverified until Cameron confirms them at the
+  launch gate.
 - Merge gate: the five repo gates, then Cameron's real-model runs (D17),
   the counterfactual check passing (or Cameron deciding).
 - After deploy, ranking is live at once in that environment (no switch):
@@ -998,15 +1231,21 @@ at plan time.
   the charter's rule; WP3 replaces the attach step.
 - Q2. Properties seen carries a short summary of each home (beds, baths,
   rent, area, subzone, voucher sizes, pets policy), not its whole card,
-  and only the newest 8. Charter 6.2 says "that property's card
+  and lists at most 8: every home with an outcome or feedback always,
+  then the newest bare sends. Charter 6.2 says "that property's card
   details"; whole cards would make a 40-tenant call several times larger.
   Recommendation: the summary.
 - Q3. A pool over 300 fails the ranking with a message rather than
   scoring it (a cost bound; it removes no candidate). Recommendation:
   keep, at 300.
-- Q4. The unit's `lif` attribute is left off the property card, as the
-  tenant's `lifEligible` is (income, A1). Recommendation: exclude.
-- Q5. The counterfactual tolerance: a swap may move the mean score by at
-  most 5 points, never change the band of the mean, and never change the
-  cap. Recommendation: these numbers; the script reports the re-run noise
-  beside them.
+- Q4. The unit's `lif` attribute is the landlord incentive fee, a dollar
+  amount paid to the landlord. Left off the property card: it is a
+  business term like priority, not a fact about whether the home fits
+  the tenant. Recommendation: exclude.
+- Q5. The counterfactual tolerance: per swap and direction, the mean
+  score may move by at most 5 points and the majority cap result may not
+  change; a base pair whose own re-runs spread more than 5 points is
+  "inconclusive" and goes to you. Recommendation: these numbers.
+- Q6. The default prices ($2 / $10 per million tokens for Sonnet 5.5, $4
+  / $20 for Opus 5.5) come from the API's model table, not a bill. Every
+  run's recorded cost rests on them. Confirm, or give the numbers.

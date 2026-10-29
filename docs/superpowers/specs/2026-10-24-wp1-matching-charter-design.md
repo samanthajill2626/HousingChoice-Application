@@ -383,7 +383,9 @@ as follows:
   ranker reads the box (section 6.1). The append path, its five-line
   cap per run and its retry guard (apply.ts:731-740, which drops a line
   already present so a re-applied window appends nothing) are kept as
-  they are.
+  they are. AMENDED 2026-10-28 (section 20, item 14): a line's line
+  breaks are collapsed before the guard and the write, and the guard's
+  drops are counted on the run record.
 - Written LIVE, as notes are today: no approval step is added where none
   exists (Cameron 2026-10-25). Each line carries a confidence; a line
   below `EXTRACTION_FACT_MIN_CONFIDENCE` (default set in B1) is not
@@ -1254,3 +1256,12 @@ date; this list is the index.
      106 files and four code-review rounds), decided by Cameron: "ok
      splitting it is fine." Every B2 decision in this charter binds
      whichever of the two branches builds it (sections 15.1, 15.2).
+  14. Two changes to the extraction Notes append path, which section 6.4
+     kept "as it is", carried by B2a: a model or system Notes line's
+     line breaks are collapsed to " / " before the retry guard and the
+     write (closing extraction-note-line-break-unprefixed-continuation),
+     and the lines the retry guard drops are counted on the AI run
+     record (`notesDuplicate`). The any-date retry guard itself stands.
+     Proposed by the planner as defaults at the B2 restatement; Cameron:
+     "Take the defaults you mention here for those 3 bulleted items"
+     (section 6.4).

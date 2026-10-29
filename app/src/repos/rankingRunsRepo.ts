@@ -16,9 +16,11 @@
 // (matchesRepo.rankingExpiresAt with RANKING_PAIR_TTL_DAYS); flags carry none.
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import {
+  BatchGetCommand,
   GetCommand,
   PutCommand,
   QueryCommand,
+  TransactWriteCommand,
   UpdateCommand,
   type DynamoDBDocumentClient,
   type UpdateCommandInput,
@@ -27,7 +29,7 @@ import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { RepoDeps } from './conversationsRepo.js';
-import type { RankingAnchorKind } from './matchesRepo.js';
+import type { MatchFairHousingFlag, MatchMissing, MatchReason, RankingAnchorKind } from './matchesRepo.js';
 
 interface FamilyCtx {
   doc: DynamoDBDocumentClient;
@@ -493,9 +495,359 @@ function createJobFamily(ctx: FamilyCtx): RankingJobFamily {
   };
 }
 
+// --- The run and pointer family (spec D11) ---------------------------------------
+
+export const rankingRunItemId = (runId: string): string => `rrun#${runId}`;
+const runIdOfRankingItemId = (itemId: string): string => itemId.slice('rrun#'.length);
+export const RANKING_RUNS_GLOBAL_ENTITY = 'rankings#global';
+/** The run listing's pointer partition: global, or one anchor's. */
+export function rankingRunEntityKey(anchor?: { kind: RankingAnchorKind; id: string }): string {
+  return anchor === undefined ? RANKING_RUNS_GLOBAL_ENTITY : `rankings#${anchor.kind}#${anchor.id}`;
+}
+export function rankingRunSortKey(startedAt: string, runId: string): string {
+  return `${startedAt}#${runId}`;
+}
+export const rankingPointerItemId = (entityKey: string, startedAt: string, runId: string): string =>
+  `ptr#${entityKey}#${rankingRunSortKey(startedAt, runId)}`;
+
+/** A run item over this size drops its inputGzip (spec D11's 350 KB guard; DynamoDB caps an item at 400 KB). */
+export const RANKING_RUN_ITEM_MAX_BYTES = 350 * 1024;
+export const RANKING_RUN_DEFAULT_PAGE_SIZE = 25;
+const RUN_BATCH_GET_MAX_KEYS = 100;
+const RUN_READ_MAX_ATTEMPTS = 4;
+const RUN_BACKOFF_MS = 25;
+/** The highest sort-key suffix: a `to` day covers every time on that day. */
+const SORT_KEY_CEILING = String.fromCharCode(0xffff);
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+export type RankingDirection = 'tenants_for_property' | 'properties_for_tenant';
+export type RankingRunFailure = 'refusal' | 'parse' | 'truncated' | 'timeout' | 'driver';
+
+export interface RankingRunUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens?: number;
+}
+
+/** A handle as sent: `c<n>` with its candidate id and display (name or label). */
+export interface RankingRunHandle {
+  handle: string;
+  candidateId: string;
+  display: string;
+}
+
+/**
+ * THIS run's own parsed output for one candidate sent (spec D11; IR3, IR19,
+ * PR14), never the current match. A candidate the model did not return is
+ * recorded with `returned: false` and NO score (charter 7.4: a default or
+ * guessed score is never written); the scored fields are present only when
+ * `returned` is true.
+ */
+export interface RankingRunResult {
+  handle: string;
+  candidateId: string;
+  /** The display (name or label) as sent. */
+  display: string;
+  returned: boolean;
+  score?: number;
+  for?: MatchReason[];
+  against?: MatchReason[];
+  unknowns?: string[];
+  /** The pair's MERGED missing list (code flags, then the model's unknowns; spec D3). */
+  missing?: MatchMissing[];
+  failedRequirements?: string[];
+  fairHousingFlags?: MatchFairHousingFlag[];
+  /** The cap as computed when the run finished, from its own output and the flags open then. */
+  cappedAtRun?: { capped: boolean; capReason: 'requirement not met' | null };
+}
+
+export interface RankingRunRecord {
+  itemId: string;
+  runId: string;
+  kind: 'ranking';
+  anchorKind: RankingAnchorKind;
+  anchorId: string;
+  direction: RankingDirection;
+  jobGeneration: string;
+  batchIndex: number;
+  candidateCount: number;
+  driver: 'anthropic' | 'console' | 'fake';
+  model: string;
+  rubricVersion: string;
+  examplesVersion: string;
+  promptFingerprint: string;
+  usage?: RankingRunUsage;
+  costUsd: number;
+  latencyMs: number;
+  startedAt: string;
+  finishedAt: string;
+  outcome: 'scored' | 'failed';
+  failure?: RankingRunFailure;
+  message?: string;
+  rawText?: string;
+  /** gzipBase64 of the batch's user message; dropped by the 350 KB guard. */
+  inputGzip?: string;
+  inputOmitted?: true;
+  handles: RankingRunHandle[];
+  results: RankingRunResult[];
+  /** Set by markMatchesWritten after the batch's match write; absent = the write did not finish. */
+  matchesWritten?: { count: number; at: string };
+  droppedUnlawfulFlags: number;
+  /** The deployment's environment name (config.appEnv). */
+  environment: string;
+  /** rankingExpiresAt(startedAt, RANKING_PAIR_TTL_DAYS). */
+  expires_at: number;
+}
+
+export type RankingRunRecordInput = Omit<RankingRunRecord, 'itemId' | 'kind' | 'inputOmitted' | 'matchesWritten'>;
+
+export interface RankingRunPointer {
+  itemId: string;
+  entityKey: string;
+  sortKey: string;
+  runId: string;
+  expires_at: number;
+}
+
+/**
+ * PR34: the ONLY attributes a listing reads (the runs list and the cost
+ * totals). Never `rawText`, `inputGzip`, `handles` or `results` - only getRun
+ * reads the whole item.
+ */
+export const RANKING_RUN_SUMMARY_FIELDS = [
+  'runId',
+  'kind',
+  'anchorKind',
+  'anchorId',
+  'direction',
+  'jobGeneration',
+  'batchIndex',
+  'candidateCount',
+  'driver',
+  'model',
+  'usage',
+  'costUsd',
+  'latencyMs',
+  'startedAt',
+  'finishedAt',
+  'outcome',
+  'failure',
+  'message',
+  'environment',
+] as const satisfies ReadonlyArray<keyof RankingRunRecord>;
+
+export type RankingRunSummary = Pick<RankingRunRecord, (typeof RANKING_RUN_SUMMARY_FIELDS)[number]>;
+
+/**
+ * A listing entry. A pointer whose run is gone (TTL lag) reads expired; one
+ * whose run could not be read after the retries reads expired with
+ * `unavailable` - and the page then says `incomplete: true` (PR34).
+ */
+export type RankingRunListEntry =
+  | { runId: string; sortKey: string; expired: false; run: RankingRunSummary }
+  | { runId: string; sortKey: string; expired: true; unavailable?: true };
+
+export interface RankingRunListPage {
+  entries: RankingRunListEntry[];
+  nextCursor?: string;
+  /** PR34: present (true) only when a run of this page stayed unread after the retries. */
+  incomplete?: true;
+}
+
+export interface ListRankingRunsOptions {
+  /** rankingRunEntityKey() or rankingRunEntityKey({ kind, id }). */
+  entityKey: string;
+  /** Inclusive day bounds, YYYY-MM-DD, compared against the sort key. */
+  from?: string;
+  to?: string;
+  /** The last sortKey already returned (exclusive). */
+  cursor?: string;
+  limit?: number;
+}
+
+export function rankingRunItemBytes(record: object): number {
+  return Buffer.byteLength(JSON.stringify(record), 'utf8');
+}
+
+/** Spec D11: an item that would exceed 350 KB keeps everything but inputGzip, marked inputOmitted. */
+export function withRankingRunSizeGuard(record: RankingRunRecord): RankingRunRecord {
+  if (record.inputGzip === undefined || rankingRunItemBytes(record) <= RANKING_RUN_ITEM_MAX_BYTES) return record;
+  const { inputGzip: _dropped, ...rest } = record;
+  return { ...rest, inputOmitted: true };
+}
+
+export interface RankingRunFamily {
+  /**
+   * The run and its two pointers (rankings#global and the anchor's) in ONE
+   * transaction; the run put is conditioned on a new id. Applies the 350 KB
+   * guard and returns the record as stored.
+   */
+  putRun(input: RankingRunRecordInput): Promise<RankingRunRecord>;
+  /** The second write of a run (spec D11), conditioned on the run existing. */
+  markMatchesWritten(runId: string, written: { count: number; at: string }): Promise<boolean>;
+  getRun(runId: string): Promise<RankingRunRecord | undefined>;
+  /**
+   * Pointers newest first, then ONE BatchGet of the rrun# items PROJECTED to
+   * RANKING_RUN_SUMMARY_FIELDS (PR34). A run still unread after 4 attempts is
+   * an `unavailable` entry and the page carries `incomplete: true` - never a
+   * silent drop. Used by the runs list and the cost totals.
+   */
+  listRuns(opts: ListRankingRunsOptions): Promise<RankingRunListPage>;
+}
+
+/** The summary projection, every name aliased (several are reserved words). */
+const SUMMARY_PROJECTION = {
+  ProjectionExpression: RANKING_RUN_SUMMARY_FIELDS.map((_field, i) => `#f${i}`).join(', '),
+  ExpressionAttributeNames: Object.fromEntries(RANKING_RUN_SUMMARY_FIELDS.map((field, i) => [`#f${i}`, field])),
+};
+
+function createRunFamily(ctx: FamilyCtx): RankingRunFamily {
+  const { doc, table, log } = ctx;
+
+  async function batchGetRuns(runIds: string[]): Promise<{ found: Map<string, RankingRunSummary>; unread: Set<string> }> {
+    const found = new Map<string, RankingRunSummary>();
+    const unread = new Set<string>();
+    const unique = [...new Set(runIds)];
+    for (let i = 0; i < unique.length; i += RUN_BATCH_GET_MAX_KEYS) {
+      let keys = unique.slice(i, i + RUN_BATCH_GET_MAX_KEYS).map((runId) => ({ itemId: rankingRunItemId(runId) }));
+      for (let attempt = 0; attempt < RUN_READ_MAX_ATTEMPTS && keys.length > 0; attempt += 1) {
+        if (attempt > 0) await sleep(RUN_BACKOFF_MS * 2 ** (attempt - 1));
+        const response = await doc.send(
+          new BatchGetCommand({ RequestItems: { [table]: { Keys: keys, ...SUMMARY_PROJECTION } } }),
+        );
+        for (const item of (response.Responses?.[table] ?? []) as RankingRunSummary[]) found.set(item.runId, item);
+        keys = (response.UnprocessedKeys?.[table]?.Keys ?? []) as Array<{ itemId: string }>;
+      }
+      for (const k of keys) unread.add(runIdOfRankingItemId(k.itemId));
+    }
+    if (unread.size > 0) {
+      log.warn({ unread: unread.size }, 'ranking runs: BatchGet left keys unprocessed after retries');
+    }
+    return { found, unread };
+  }
+
+  return {
+    async putRun(input) {
+      const record = withRankingRunSizeGuard({ ...input, itemId: rankingRunItemId(input.runId), kind: 'ranking' });
+      const sortKey = rankingRunSortKey(input.startedAt, input.runId);
+      const pointers: RankingRunPointer[] = [
+        rankingRunEntityKey(),
+        rankingRunEntityKey({ kind: input.anchorKind, id: input.anchorId }),
+      ].map((entityKey) => ({
+        itemId: rankingPointerItemId(entityKey, input.startedAt, input.runId),
+        entityKey,
+        sortKey,
+        runId: input.runId,
+        expires_at: input.expires_at,
+      }));
+      await doc.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              Put: {
+                TableName: table,
+                Item: record,
+                ConditionExpression: 'attribute_not_exists(#itemId)',
+                ExpressionAttributeNames: { '#itemId': 'itemId' },
+              },
+            },
+            ...pointers.map((Item) => ({ Put: { TableName: table, Item } })),
+          ],
+        }),
+      );
+      log.debug(
+        { runId: input.runId, outcome: input.outcome, inputOmitted: record.inputOmitted === true },
+        'ranking run recorded',
+      );
+      return record;
+    },
+
+    async markMatchesWritten(runId, written) {
+      const updated = await updateOrUndefined(ctx, {
+        Key: { itemId: rankingRunItemId(runId) },
+        UpdateExpression: 'SET #mw = :mw',
+        ConditionExpression: 'attribute_exists(#itemId)',
+        ExpressionAttributeNames: { '#mw': 'matchesWritten', '#itemId': 'itemId' },
+        ExpressionAttributeValues: { ':mw': { count: written.count, at: written.at } },
+      });
+      return updated !== undefined;
+    },
+
+    async getRun(runId) {
+      const { Item } = await doc.send(new GetCommand({ TableName: table, Key: { itemId: rankingRunItemId(runId) } }));
+      return Item as RankingRunRecord | undefined;
+    },
+
+    async listRuns(opts) {
+      const limit = opts.limit ?? RANKING_RUN_DEFAULT_PAGE_SIZE;
+      // ONE sort-key condition only (a KeyConditionExpression takes at most
+      // one): the cursor and the `to` ceiling both bound the top, so the upper
+      // bound is their lexicographic min (the aiRunsRepo.listByEntity rule).
+      const toCeiling = opts.to !== undefined ? `${opts.to}${SORT_KEY_CEILING}` : undefined;
+      const upper =
+        opts.cursor !== undefined && (toCeiling === undefined || opts.cursor <= toCeiling)
+          ? { value: opts.cursor, exclusive: true }
+          : toCeiling !== undefined
+            ? { value: toCeiling, exclusive: false }
+            : undefined;
+      // An inverted range matches nothing; DynamoDB would reject the BETWEEN.
+      if (opts.from !== undefined && upper !== undefined && opts.from > upper.value) return { entries: [] };
+      const sortCondition =
+        upper !== undefined && opts.from !== undefined
+          ? '#sk BETWEEN :lower AND :upper'
+          : upper !== undefined
+            ? upper.exclusive
+              ? '#sk < :upper'
+              : '#sk <= :upper'
+            : opts.from !== undefined
+              ? '#sk >= :lower'
+              : undefined;
+      // BETWEEN is inclusive: with an exclusive cursor as its top, over-fetch by
+      // one and drop the boundary row (sort keys are unique).
+      const trimsBoundary = sortCondition === '#sk BETWEEN :lower AND :upper' && upper !== undefined && upper.exclusive;
+      const page = await doc.send(
+        new QueryCommand({
+          TableName: table,
+          IndexName: 'byEntity',
+          KeyConditionExpression: sortCondition === undefined ? '#ek = :ek' : `#ek = :ek AND ${sortCondition}`,
+          ExpressionAttributeNames: { '#ek': 'entityKey', ...(sortCondition !== undefined && { '#sk': 'sortKey' }) },
+          ExpressionAttributeValues: {
+            ':ek': opts.entityKey,
+            ...(upper !== undefined && { ':upper': upper.value }),
+            ...(opts.from !== undefined && { ':lower': opts.from }),
+          },
+          ScanIndexForward: false,
+          Limit: trimsBoundary ? limit + 1 : limit,
+        }),
+      );
+      const items = (page.Items ?? []) as RankingRunPointer[];
+      const kept = trimsBoundary && upper !== undefined ? items.filter((p) => p.sortKey < upper.value) : items;
+      const hasMore = kept.length > limit || page.LastEvaluatedKey !== undefined;
+      const pointers = kept.slice(0, limit);
+      if (pointers.length === 0) return { entries: [] };
+      const { found, unread } = await batchGetRuns(pointers.map((p) => p.runId));
+      const entries: RankingRunListEntry[] = pointers.map((p) => {
+        const run = found.get(p.runId);
+        if (run !== undefined) return { runId: p.runId, sortKey: p.sortKey, expired: false, run };
+        return unread.has(p.runId)
+          ? { runId: p.runId, sortKey: p.sortKey, expired: true, unavailable: true }
+          : { runId: p.runId, sortKey: p.sortKey, expired: true };
+      });
+      const last = entries[entries.length - 1];
+      const nextCursor = entries.length === limit && hasMore && last !== undefined ? last.sortKey : undefined;
+      return {
+        entries,
+        ...(nextCursor !== undefined && { nextCursor }),
+        ...(unread.size > 0 && { incomplete: true as const }),
+      };
+    },
+  };
+}
+
 // --- The repository ---
 
-export type RankingRunsRepo = RankingJobFamily;
+export type RankingRunsRepo = RankingJobFamily & RankingRunFamily;
 
 export function createRankingRunsRepo(deps: RepoDeps = {}): RankingRunsRepo {
   const ctx: FamilyCtx = {
@@ -503,5 +855,5 @@ export function createRankingRunsRepo(deps: RepoDeps = {}): RankingRunsRepo {
     table: tableName('ai_runs', deps.env),
     log: deps.logger ?? defaultLogger,
   };
-  return { ...createJobFamily(ctx) };
+  return { ...createJobFamily(ctx), ...createRunFamily(ctx) };
 }

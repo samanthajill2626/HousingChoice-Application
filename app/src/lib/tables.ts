@@ -623,25 +623,42 @@ export const TABLES: readonly TableSpec[] = [
   },
   {
     // NEW in ai-run-log (README deviation): the durable record of every
-    // conversation-fact-extraction run. Two disjoint row kinds share the key:
-    //   run#<runId>                          the full run record
-    //   ptr#<entityKey>#<startedAt>#<runId>  an adjacency pointer
-    // byEntity is TRULY sparse - only ptr# rows carry entityKey/sortKey, so a
-    // run# row never appears in the index. entityKey is either a LITERAL SCOPE
-    // TOKEN ('global', 'outcome#<outcome>') or the `<table>#<id>` convention
-    // audit_events uses ('conversations#<id>', 'contacts#<id>'); both forms
-    // coexist here by design. sortKey is `<startedAt ISO>#<runId>`, so a scope
-    // reads newest-first with ScanIndexForward false and a date range is a
-    // BETWEEN. Reads are Query(byEntity) then ONE BatchGetItem - never a Scan.
+    // conversation-fact-extraction run, and (WP1 B2a, spec D7/D10/D11) of
+    // every ranking. Disjoint key families share the key:
+    //   run#<runId>                          an extraction run record
+    //   inflight#<runId>                     its finalization marker (aiRunsRepo)
+    //   ptr#<entityKey>#<startedAt>#<runId>  an extraction run pointer
+    //   rjob#<anchorKind>#<anchorId>         a ranking job (rankingRunsRepo)
+    //   rrun#<runId>                         a ranking run record
+    //   ptr#rankings#<scope>#<startedAt>#<runId>  a ranking run pointer
+    //   uflag#<unitId>#<field>               an unlawful-flag property record
+    // byEntity is TRULY sparse - only these rows carry entityKey/sortKey: ptr#
+    // rows (both kinds), a QUEUED or RUNNING rjob# row ('rankjobs#queued' by
+    // requestedAt / 'rankjobs#running' by leaseExpiresAt; done and failed jobs
+    // carry neither), and uflag# rows ('uflags#<unitId>' by field). run#,
+    // inflight# and rrun# rows never appear in the index. An extraction
+    // entityKey is a LITERAL SCOPE TOKEN ('global', 'outcome#<outcome>') or the
+    // `<table>#<id>` convention audit_events uses ('conversations#<id>',
+    // 'contacts#<id>'); a ranking pointer's is 'rankings#global' or
+    // 'rankings#<anchorKind>#<anchorId>'. No partition is shared, so the
+    // extraction readers never see a ranking row. A pointer's sortKey is
+    // `<startedAt ISO>#<runId>`, so a scope reads newest-first with
+    // ScanIndexForward false and a date range is a BETWEEN. The two run
+    // listings (extraction and ranking) are Query(byEntity) then ONE
+    // BatchGetItem of the run rows; the ranking job poll and the flag read are
+    // a plain Query(byEntity); a job or run read is a GetItem - never a Scan.
     //
     // Why a separate table (design 5.1): adding run# rows to ai_extraction
     // would force table-wide TTL onto a table holding PERMANENT dismissal
     // tombstones and extraction cursors, which survive only by lacking
     // expires_at.
     //
-    // TTL: 90 days on BOTH row kinds. DynamoDB TTL is asynchronous and may lag
-    // up to 48h, unordered, so a pointer can outlive its run# row - readers
-    // render that entry as expired rather than erroring.
+    // TTL: 90 days on the extraction rows; RANKING_PAIR_TTL_DAYS (default 180)
+    // on ranking jobs, runs and their pointers; NONE on uflag# rows (a flag is
+    // a property record until B4 dismisses it). DynamoDB TTL is asynchronous
+    // and may lag up to 48h, unordered, so a pointer can outlive its run row
+    // (run# or rrun#) - both listings render that entry as expired rather
+    // than erroring.
     baseName: 'ai_runs',
     hashKey: { name: 'itemId', type: 'S' },
     gsis: [

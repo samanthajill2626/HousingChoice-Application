@@ -1,5 +1,10 @@
-// AI run log repository. The ai_runs table stores full run rows and sparse
-// adjacency pointers; pointer rows are the only rows indexed by byEntity.
+// AI run log repository (extraction). Its rows in the ai_runs table are full
+// run rows, sparse adjacency pointers and the inflight# finalization marker;
+// of these, only the pointer rows are indexed by byEntity. The same table also
+// holds the WP1 B2a ranking families (rankingRunsRepo.ts): queued and running
+// job rows, ranking run pointers and unlawful-flag rows are indexed by
+// byEntity too, under their own partitions, which no extraction scope names
+// (see lib/tables.ts).
 import {
   BatchGetCommand,
   GetCommand,

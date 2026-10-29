@@ -1084,6 +1084,13 @@ Cameron.
 8. A landlord requirement that fair housing does not allow (for example
    "no kids") is flagged to her, not applied. Will she remove those from
    the records when flagged?
+9. (Added 2026-10-28 at the B2a spec gate.) What is LIF? The code holds
+   a tenant flag `lifEligible` (Cameron's understanding: the tenant is
+   eligible for the housing authority to pay their deposit), a placement
+   paperwork checkbox, and a property dollar amount labeled "Landlord
+   incentive fee". Is the property amount the same program, and should
+   either bear on which tenants a property suits? Both stay off the
+   ranking cards until she answers (Cameron 2026-10-28).
 
 ## 17. Where this charter departs from the signed text
 

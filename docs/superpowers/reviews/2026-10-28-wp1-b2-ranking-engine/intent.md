@@ -164,3 +164,30 @@ with your reocmmendation."
   no longer unverified.
 - Q7 (fingerprint seen homes only with a decline or tour; no charter
   amendment): AGREED.
+
+Follow-up 2026-10-28, Cameron verbatim: "For Q4, Lets just keep it off hte
+cards and make sure we ask sam about lif. For q2, I need to ask some
+questions. when you say the charter requires one card per record so full
+cards cant be used for a tenant anchor, I don't understand what that
+means. For a tenant anchor we're at least going to use the tenant card AND
+every property card from the pool we can match with. So that's obviously
+more than 1 card. So what does that mean? Secondly, the whole point of
+having knowledge that someone doesn't like a property is the specific info
+about the property. Something like oh the bedrooms are too small in that
+house. If we don't have the square footage info for that property we
+can't really figure out the average sqft per bathroom and see if that's an
+issue for any other property. Further, if we end up with 0.65 per
+property, I'm not necessarily worried if that's the case. But if it is,
+that means we need to bring back the re-run per person instead of the
+whole batch match. That would remove much of the cost."
+
+- Q4: SETTLED - both LIF fields stay off the cards; the question is added
+  to charter section 16 as item 9 for Sam.
+- Q2: still OPEN. Cameron's taste: past-home feedback is only useful with
+  the specific facts of that home; he is not worried by about 65 cents a
+  ranking, but would reopen per-person re-scoring if cost bit. Planner's
+  answer: "one card per record" means one DEFINITION per record, the same
+  card whichever side it is on; proposed full cards for past homes, each
+  distinct home written ONCE per call and referenced by handle, which
+  keeps the cost near the summary's without reopening charter 10.3's
+  whole-pool re-score.

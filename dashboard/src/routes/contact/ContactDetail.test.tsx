@@ -170,7 +170,7 @@ import {
   MARK_UNREAD_NO_THREAD,
   RUN_INDICATOR_TIMEOUT_MS,
 } from './ContactDetail.js';
-import { CONTACT_TYPE_CHANGED_SAVE_COPY } from './ContactEditForm.js';
+import { CONTACT_TYPE_CHANGED_SAVE_COPY, NOTES_STALE_COPY } from './ContactEditForm.js';
 
 function renderAt(contactId: string) {
   return render(
@@ -663,6 +663,84 @@ describe('ContactDetail', () => {
     expect(within(reopened).getByRole('button', { name: /^Save$/ })).toBeEnabled();
     expect(updateContact).toHaveBeenCalledTimes(1);
     expect(setTenantStatus).toHaveBeenCalledTimes(1);
+  });
+
+  // WP1 B2a code review R2 FW2-4 (R2-dashboard-6): the edit form's 409
+  // notes_stale hands the page the current contact the refusal carries (the
+  // Staff notes card's pattern) instead of the page re-reading it. A re-read
+  // was unordered against the user's own next save: answering after it, it
+  // put the replaced notes back on the page, and the next edit was refused
+  // again. Every later read of the contact is held here and answered with
+  // THEIR notes after the user's save - a re-read would land then.
+  it("the edit form's 409 notes_stale shows the current notes on the page at once, with no re-read; the user's next save then stays", async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    const OPENED_AT = '2026-10-28T10:00:00.000Z';
+    const THEIRS_AT = '2026-10-28T11:00:00.000Z';
+    const MINE_AT = '2026-10-28T12:00:00.000Z';
+    const opened: Contact = { ...TENANT, notes: 'zzopened notes', notes_updated_at: OPENED_AT };
+    const theirs: Contact = { ...opened, notes: 'zztheirs notes', notes_updated_at: THEIRS_AT };
+    const mine: Contact = { ...opened, notes: 'zzmine notes', notes_updated_at: MINE_AT };
+    let answerLaterRead: (contact: Contact) => void = () => undefined;
+    getContact.mockResolvedValueOnce(opened).mockImplementation(
+      () =>
+        new Promise<Contact>((resolve) => {
+          answerLaterRead = resolve;
+        }),
+    );
+    updateContact
+      .mockRejectedValueOnce(new ApiError(409, 'notes_stale', 'notes_stale', { error: 'notes_stale', contact: theirs }))
+      .mockResolvedValueOnce(mine)
+      .mockResolvedValueOnce({ ...mine, notes: 'zzmine notes again', notes_updated_at: '2026-10-28T13:00:00.000Z' });
+    renderAt('k1');
+    const notesCard = async (): Promise<HTMLElement> => {
+      const heading = await screen.findByRole('heading', { name: /^Preferences & notes/ });
+      return heading.closest('section') as HTMLElement;
+    };
+    const openEdit = async (): Promise<HTMLElement> => {
+      await user.click(screen.getByRole('button', { name: /More actions/i }));
+      await user.click(screen.getByRole('menuitem', { name: /edit contact details/i }));
+      return screen.getByRole('dialog', { name: 'Edit contact' });
+    };
+    expect(within(await notesCard()).getByText('zzopened notes')).toBeInTheDocument();
+    const readsBefore = getContact.mock.calls.length;
+
+    const dialog = await openEdit();
+    const box = within(dialog).getByLabelText('Notes', { exact: true });
+    await user.clear(box);
+    await user.type(box, 'zzmine notes');
+    await user.click(within(dialog).getByRole('button', { name: /^Save$/ }));
+
+    // Refused: the form stays open with its panel, and the page shows THEIR
+    // notes at once, with no read of its own.
+    expect(await within(dialog).findByText(NOTES_STALE_COPY)).toBeInTheDocument();
+    expect(within(await notesCard()).getByText('zztheirs notes')).toBeInTheDocument();
+    expect(getContact.mock.calls.length).toBe(readsBefore);
+
+    // The deliberate overwrite lands; the dialog closes on MY notes.
+    await user.click(within(dialog).getByRole('button', { name: /^Save$/ }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Edit contact' })).toBeNull());
+    expect(within(await notesCard()).getByText('zzmine notes')).toBeInTheDocument();
+    expect(updateContact).toHaveBeenNthCalledWith(1, 'k1', expect.objectContaining({ notes: 'zzmine notes', notes_expected_updated_at: OPENED_AT }));
+    expect(updateContact).toHaveBeenNthCalledWith(2, 'k1', expect.objectContaining({ notes: 'zzmine notes', notes_expected_updated_at: THEIRS_AT }));
+
+    // A late answer with THEIR notes changes nothing: no read is out.
+    await act(async () => {
+      answerLaterRead(theirs);
+    });
+    expect(within(await notesCard()).getByText('zzmine notes')).toBeInTheDocument();
+    expect(within(await notesCard()).queryByText('zztheirs notes')).toBeNull();
+
+    // The next edit opens from MY save: its Notes guard sends MY stamp.
+    const reopened = await openEdit();
+    await user.type(within(reopened).getByLabelText('Notes', { exact: true }), ' again');
+    await user.click(within(reopened).getByRole('button', { name: /^Save$/ }));
+    await waitFor(() => expect(updateContact).toHaveBeenCalledTimes(3));
+    expect(updateContact).toHaveBeenNthCalledWith(
+      3,
+      'k1',
+      expect.objectContaining({ notes: 'zzmine notes again', notes_expected_updated_at: MINE_AT }),
+    );
   });
 
   it('marking an unknown contact Inactive from the header retitles its card Type unknown; the Mark as actions stay (spec 2026-10-23 D8)', async () => {

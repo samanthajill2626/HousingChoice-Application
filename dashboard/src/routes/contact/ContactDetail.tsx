@@ -939,10 +939,9 @@ export function ContactDetail(): React.JSX.Element {
   // contact.updated reaches the page (setContact is bound to this contactId,
   // so a late answer after navigating away is a no-op). Consistent (planner
   // ruling PR-3, plan round 1 P2): the re-type landed a moment ago and an
-  // eventually consistent GET could miss it. The edit form's 409 notes_stale
-  // calls it too (WP1 B2a code review R1 A2-5): a notes-only save sends the
-  // page no contact.updated, so without it the page keeps the notes it read
-  // and the next edit, opened from them, is refused again.
+  // eventually consistent GET could miss it. (The edit form's 409 notes_stale
+  // does not come here: it carries the current contact, which the form hands
+  // up through onContactUpdated - WP1 B2a code review R2 FW2-4.)
   const rereadRetypedContact = (): void => {
     void getContact(contact.contactId, undefined, { consistent: true })
       .then((fresh) => setContact(fresh))
@@ -1383,10 +1382,14 @@ export function ContactDetail(): React.JSX.Element {
           }}
           // Code review R3 FW3-1: the form's 409 contact_type_changed gets the
           // header's re-read, so a reopened form is built from the stored
-          // contact even with the event stream down. So does its 409
-          // notes_stale (WP1 B2a code review R1 A2-5), so the page shows the
-          // current notes the refusal kept.
+          // contact even with the event stream down.
           onStale={rereadRetypedContact}
+          // WP1 B2a code review R1 A2-5, R2 FW2-4: its 409 notes_stale hands
+          // up the current contact the refusal carries, applied in place (the
+          // Staff notes card's pattern), so the page shows the current notes
+          // the refusal kept - a notes-only save sends no contact.updated -
+          // and no late re-read can land over the user's next save.
+          onContactUpdated={setContact}
           candidates={editCandidates}
         />
       ) : null}

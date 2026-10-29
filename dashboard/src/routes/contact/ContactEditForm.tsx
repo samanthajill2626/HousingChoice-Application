@@ -151,11 +151,16 @@ export interface ContactEditFormProps {
   contact: Contact;
   onClose: () => void;
   onSaved: (updated: Contact) => void;
-  /** Called when a save finds the contact this form was opened on is stale:
-   *  the status write answers 409 contact_type_changed (code review R3
-   *  FW3-1), or the field PATCH answers 409 notes_stale (WP1 B2a code review
-   *  R1 A2-5). The contact page re-reads it, as for its header's own 409. */
+  /** Called when the save's status write answers 409 contact_type_changed:
+   *  the contact this form was opened on is stale (code review R3 FW3-1).
+   *  The contact page re-reads it, as for its header's own 409. */
   onStale?: () => void;
+  /** Receives the current contact a 409 notes_stale carries (WP1 B2a code
+   *  review R1 A2-5, R2 FW2-4), as the Staff notes card hands its refusal's
+   *  contact up: the page applies it in place at once, so "Cancel to keep
+   *  them" leaves the page on the current notes and the next edit opens from
+   *  them. The form stays open. */
+  onContactUpdated?: (current: Contact) => void;
   candidates?: Contact[];
 }
 
@@ -168,6 +173,7 @@ export function ContactEditForm({
   onClose,
   onSaved,
   onStale,
+  onContactUpdated,
   candidates = [],
 }: ContactEditFormProps): React.JSX.Element {
   const vocab = useContactVocabulary();
@@ -711,12 +717,13 @@ export function ContactEditForm({
         });
         setNotesConflict(theirText);
         setNotesRefusals((n) => n + 1);
-        // Code review R1 A2-5: the page under the form still shows the notes
-        // it read, so tell it (its consistent re-read, as for a type change):
-        // "Cancel to keep them" then leaves it on the current notes, and the
-        // next edit opens from them. The Staff notes card's pattern hands the
-        // current contact up the same way.
-        onStale?.();
+        // Code review R1 A2-5, R2 FW2-4: the page under the form still shows
+        // the notes it read, so hand it the current contact this 409 carries
+        // (the Staff notes card's pattern): "Cancel to keep them" then leaves
+        // it on the current notes, and the next edit opens from them. Handed
+        // up at once, not re-read, so no late answer can land over the user's
+        // own next save.
+        onContactUpdated?.(currentNotes);
       } else if (err instanceof ApiError && err.status === 409 && err.code === 'caseworker_use_conversion') {
         // A save never makes a contact a caseworker (spec D16) - say where to go.
         setError(CASEWORKER_USE_CONVERSION);

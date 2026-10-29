@@ -2033,10 +2033,10 @@ describe('ContactEditForm - one status list per type and the type-change rules (
 
   // Code review R3 FW3-1: that 409 also tells the page (onStale), which
   // re-reads the contact so the form opened next is built from the stored
-  // contact (pinned in ContactDetail.test.tsx). Besides that 409 only a
-  // notes_stale refusal tells the page (WP1 B2a, the Notes guard block
-  // below); any other failure, of the status write or of the field PATCH,
-  // leaves the page alone.
+  // contact (pinned in ContactDetail.test.tsx). Only that 409 calls onStale:
+  // a notes_stale refusal hands its current contact up instead (WP1 B2a, the
+  // Notes guard block below), and any other failure, of the status write or
+  // of the field PATCH, leaves the page alone.
   it.each([
     [
       'the status write answers 409 contact_type_changed: onStale is called once',
@@ -2345,27 +2345,44 @@ describe('ContactEditForm - the Notes stale-save guard (WP1 B2a D14.3)', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('(The notes were cleared.)');
   });
 
-  // Code review R1 A2-5: the page under the form still shows the notes it
-  // read; the refusal tells it (onStale, the page's consistent re-read), so
-  // "Cancel to keep them" leaves the page on the current notes and the next
-  // edit opens from them - the Staff notes card hands the current contact up
-  // the same way.
-  it('a notes_stale refusal tells the page once (onStale), and Cancel then closes without a save', async () => {
+  // Code review R1 A2-5, R2 FW2-4: the page under the form still shows the
+  // notes it read, so the refusal hands it the current contact the 409
+  // carries (onContactUpdated - the Staff notes card's pattern), at once:
+  // "Cancel to keep them" then leaves the page on the current notes and the
+  // next edit opens from them. No re-read, so nothing can land after the
+  // user's own next save; the form stays open. onStale stays the
+  // contact_type_changed signal.
+  it('a notes_stale refusal hands the current contact up once (onContactUpdated), never calls onStale, and keeps the form open; Cancel then closes without a save', async () => {
     const user = userEvent.setup();
+    const onContactUpdated = vi.fn();
     const onStale = vi.fn();
     const onClose = vi.fn();
     const onSaved = vi.fn();
-    updateContact.mockRejectedValueOnce(staleNotes({ ...WITH_NOTES, notes: 'newer', notes_updated_at: LATER }));
-    render(<ContactEditForm contact={WITH_NOTES} onClose={onClose} onSaved={onSaved} onStale={onStale} />);
+    const theirs: Contact = { ...WITH_NOTES, notes: 'newer', notes_updated_at: LATER };
+    updateContact.mockRejectedValueOnce(staleNotes(theirs));
+    render(
+      <ContactEditForm
+        contact={WITH_NOTES}
+        onClose={onClose}
+        onSaved={onSaved}
+        onStale={onStale}
+        onContactUpdated={onContactUpdated}
+      />,
+    );
     await user.clear(notesBox());
     await user.type(notesBox(), 'my notes');
     await user.click(saveButton());
     await screen.findByRole('alert');
-    expect(onStale).toHaveBeenCalledTimes(1);
+    expect(onContactUpdated).toHaveBeenCalledTimes(1);
+    expect(onContactUpdated).toHaveBeenCalledWith(theirs);
+    expect(onStale).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(notesBox()).toHaveValue('my notes');
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(onSaved).not.toHaveBeenCalled();
-    expect(onStale).toHaveBeenCalledTimes(1);
+    expect(onContactUpdated).toHaveBeenCalledTimes(1);
+    expect(onStale).not.toHaveBeenCalled();
     expect(updateContact).toHaveBeenCalledTimes(1);
   });
 

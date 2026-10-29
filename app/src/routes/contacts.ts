@@ -568,6 +568,13 @@ interface TriagePatch {
    * means "no guard" (last-write-wins, every other caller). Never stored.
    */
   staffNotesExpected?: string | null;
+  /**
+   * The Notes stale-save guard (WP1 B2a spec D14.3): the `notes_updated_at`
+   * the caller's edit form opened with (null = the box was never stamped).
+   * Present ONLY when the body carried `notes_expected_updated_at`; the same
+   * rules as staffNotesExpected. Never stored.
+   */
+  notesExpected?: string | null;
 }
 
 /**
@@ -672,6 +679,19 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
       return { error: 'staff_notes_expected_updated_at must be a non-empty string or null' };
     }
     staffNotesExpected = v;
+  }
+  // WP1 B2a spec D14.3: the Notes box's guard expectation, the Staff notes
+  // rule applied to `notes` - the stamp the edit form opened with, or null
+  // for a never-stamped box. A guard, never a field: not copied into `patch`
+  // and not a change on its own.
+  let notesExpected: string | null | undefined;
+  if ('notes_expected_updated_at' in b) {
+    const v = b['notes_expected_updated_at'];
+    // '' can never equal a real stamp, so it would 409 every time: refuse it.
+    if (v !== null && (typeof v !== 'string' || v.length === 0)) {
+      return { error: 'notes_expected_updated_at must be a non-empty string or null' };
+    }
+    notesExpected = v;
   }
   // Landlord park reason (edit form). Free text captured when a landlord lead is
   // moved to `parked`. Normally written by the /tenant-status route on the parked
@@ -855,6 +875,7 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     changedFields,
     ...(consent.hasConsent && { consentCaptured: true }),
     ...(staffNotesExpected !== undefined && { staffNotesExpected }),
+    ...(notesExpected !== undefined && { notesExpected }),
   };
 }
 
@@ -2024,12 +2045,20 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       'staff_notes' in parsed.patch && parsed.staffNotesExpected !== undefined
         ? { attr: 'staff_notes_updated_at', value: parsed.staffNotesExpected }
         : undefined;
+    // The Notes stale-save guard (WP1 B2a spec D14.3), the same rule for the
+    // Notes box: only when this PATCH writes notes AND the caller sent the
+    // stamp its edit form opened with.
+    const notesGuard =
+      'notes' in parsed.patch && parsed.notesExpected !== undefined
+        ? { attr: 'notes_updated_at', value: parsed.notesExpected }
+        : undefined;
     const guards = [
       ...(classificationGuard !== undefined ? [classificationGuard] : []),
       ...requirementGuards,
       ...statusTypeGuards,
       ...keptStatusGuards,
       ...(staffNotesGuard !== undefined ? [staffNotesGuard] : []),
+      ...(notesGuard !== undefined ? [notesGuard] : []),
     ];
 
     let updated;
@@ -2051,11 +2080,19 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
         if (guards.length > 0) {
           const current = await contacts.getById(contactId, { consistentRead: true });
           if (current) {
-            const notesStale = staffNotesGuard !== undefined && (
+            // Each box's rule (spec 3.9; WP1 B2a spec D14.3): stale when its
+            // guard was the ONLY guard, or its stamp actually moved. When
+            // both boxes are stale, staff_notes_stale wins (the Staff notes
+            // card's existing contract).
+            const staffNotesStale = staffNotesGuard !== undefined && (
               guards.length === 1
               || (current.staff_notes_updated_at ?? null) !== staffNotesGuard.value
             );
-            const error = notesStale ? 'staff_notes_stale' : 'contact_changed';
+            const notesStale = notesGuard !== undefined && (
+              guards.length === 1
+              || (current.notes_updated_at ?? null) !== notesGuard.value
+            );
+            const error = staffNotesStale ? 'staff_notes_stale' : notesStale ? 'notes_stale' : 'contact_changed';
             log.info({ contactId, error }, 'contact patch refused: a guarded value changed');
             res.status(409).json({ error, contact: current });
             return;

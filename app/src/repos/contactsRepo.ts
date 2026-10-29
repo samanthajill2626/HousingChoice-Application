@@ -757,7 +757,9 @@ export interface ExpectClause {
  * ConditionalCheckFailedException exactly like an unknown contact does - the
  * caller re-reads to tell "gone" from "stale". A no-op update evaluates every
  * guard on a consistent read. Users: the Staff notes stale-save guard (PATCH
- * staff_notes_expected_updated_at, spec 3.9 - one clause), the caseworker
+ * staff_notes_expected_updated_at, spec 3.9 - one clause), the Notes
+ * stale-save guard (PATCH notes_expected_updated_at, WP1 B2a spec D14.3 -
+ * one clause, the same rule), the caseworker
  * conversion's commit (spec 2026-10-06 D19/D22 - the raw
  * classification_revision, housingAuthority, agency and organization as read,
  * plus notDeleted) and the landlord requirements PATCH (property-requirements

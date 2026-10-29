@@ -687,6 +687,18 @@ export interface UnitsRepo {
    */
   getDisplaysByIds(unitIds: string[], opts?: { requireComplete?: boolean }): Promise<Map<string, UnitDisplayItem>>;
   /**
+   * Batch-read FULL unit items by primary key (WP1 B2a spec D2.3; plan PR5):
+   * the ranking seen set's one read for a tenant's whole seen set. COMPLETE OR
+   * NOTHING, so the option is required and only `true` is legal: 100-key
+   * chunks, repeated ids removed, UnprocessedKeys retried (4 attempts, 25 ms
+   * doubling); a chunk whose request fails rethrows that error, and keys still
+   * unprocessed after the retries throw IncompleteBatchReadError (table
+   * `units`). A key the table answered with no row is a complete read of an
+   * absent unit and is simply absent from the map. Soft-deleted units answer.
+   * Eventually consistent, like getById.
+   */
+  getManyByIds(unitIds: string[], opts: { requireComplete: true }): Promise<Map<string, UnitItem>>;
+  /**
    * SET-merge update: only the supplied fields are written; omitted fields are
    * LEFT as stored (never blanked) — the same no-overwrite contract as
    * contactsRepo.update. Returns the post-update item (ALL_NEW). Throws
@@ -1334,6 +1346,34 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
           throw new IncompleteBatchReadError(unprocessed, uniqueIds.length, 'units');
         }
         log.warn({ unprocessed, requested: uniqueIds.length }, 'units: BatchGet left keys unprocessed after retries');
+      }
+      return found;
+    },
+
+    // TODO(units-contacts-batchget-walk-duplicated): a third copy of the walk - full items, complete-only.
+    async getManyByIds(unitIds, opts) {
+      if (opts.requireComplete !== true) {
+        throw new Error('unitsRepo.getManyByIds is a complete read only: pass { requireComplete: true }');
+      }
+      const found = new Map<string, UnitItem>();
+      // BatchGetItem REJECTS duplicate keys; callers may repeat an id.
+      const uniqueIds = [...new Set(unitIds)];
+      for (let i = 0; i < uniqueIds.length; i += 100) {
+        let keys = uniqueIds.slice(i, i + 100).map((unitId) => ({ unitId }));
+        for (let attempt = 0; attempt < 4 && keys.length > 0; attempt += 1) {
+          if (attempt > 0) {
+            await new Promise((resolve) => setTimeout(resolve, 25 * 2 ** (attempt - 1)));
+          }
+          // A request that throws is an unread chunk: it propagates (complete-only).
+          const response = await doc.send(new BatchGetCommand({ RequestItems: { [table]: { Keys: keys } } }));
+          for (const item of (response.Responses?.[table] ?? []) as UnitItem[]) {
+            found.set(item.unitId, item);
+          }
+          keys = (response.UnprocessedKeys?.[table]?.Keys ?? []) as Array<{ unitId: string }>;
+        }
+        if (keys.length > 0) {
+          throw new IncompleteBatchReadError(keys.length, uniqueIds.length, 'units');
+        }
       }
       return found;
     },

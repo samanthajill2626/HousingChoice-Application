@@ -3000,6 +3000,18 @@ export function createFakeWorld(): FakeWorld {
       }
       return found;
     },
+    async getManyByIds(unitIds) {
+      // WP1 B2a: full items, a complete read. The real repo throws only on an
+      // UNREAD key, which an in-memory map never has; an unknown id is absent
+      // and a soft-deleted unit still answers. Copies, so a caller cannot
+      // mutate the store.
+      const found = new Map<string, UnitItem>();
+      for (const unitId of unitIds) {
+        const unit = units.get(unitId);
+        if (unit !== undefined) found.set(unitId, { ...unit });
+      }
+      return found;
+    },
     async update(unitId, patch) {
       const unit = units.get(unitId);
       if (!unit) throw conditionalCheckFailed(`update: no unit ${unitId}`);

@@ -226,11 +226,31 @@ contested. R3-front.md: 2 findings; one contests how PR41 was built.
   reconciled into one: raise the accommodation on EVERY field that states
   the covered requirement, and list none of them failed. S8's third
   control is unchanged (its rule is only in `qualifications`); a capOf
-  test covers the both-places shape. Listed for Cameron with R3F2: the
-  rule can lift an unrelated failure stated in the same qualifications
-  text, always toward not capping.
+  test covers the both-places shape. Listed for Cameron with R3F2 and
+  R4 item 1: the rule can lift an unrelated failure stated in the same
+  qualifications text, and in reverse an accommodation raised on
+  `qualifications` lifts a failed Pets or Evictions key stated on another
+  field (for example the No evictions checkbox when the pets rule is only
+  in qualifications) - always toward not capping; the failure is still a
+  reason against, only the forced Weak is lifted. Dropping the reverse
+  would cap an assistance-animal tenant again, so it stays.
 
 ## Round 3 decision count
 
 Decisions changed: PR45 (1, narrow, in `capOf` and the rubric). Round 4
 (the cap) reviews only that change and the precision fixes.
+
+## Round 4 (2026-10-29) - the cap; the front reviewer, narrow
+
+R4.md: 3 findings, all LOW, all PRECISION, all accepted (R4-1 rewords the
+PR45 note above for Cameron; R4-2 and R4-3 complete the RUNBOOK job
+messages and S8.8's grep). No decision changed: THE PLAN REVIEW IS CLOSED
+after 4 rounds.
+
+## Totals
+
+Round 1: 50 findings (4 reviewers). Round 2: 24. Round 3: 4. Round 4: 3.
+81 findings; 81 accepted, 0 rejected (one of my round-1 rulings, FA5, was
+reversed on contest in round 2; PR29's unlawful half was narrowed by
+PR40 in round 2 after both reviewers found it over-reached).
+Decision-changing rulings: PR29-PR45 (17).

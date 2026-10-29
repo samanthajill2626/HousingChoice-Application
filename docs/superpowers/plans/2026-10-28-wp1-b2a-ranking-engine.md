@@ -579,9 +579,14 @@ decisions and win over any slice text that still disagrees.
   reconciled into one: raise the accommodation on EVERY field that states
   the covered requirement, and list none of them failed. S8's third
   control is unchanged (its rule is only in `qualifications`); a capOf
-  test covers the both-places shape. Listed for Cameron with R3F2: the
-  rule can lift an unrelated failure stated in the same qualifications
-  text, always toward not capping.
+  test covers the both-places shape. Listed for Cameron with R3F2 and
+  R4 item 1: the rule can lift an unrelated failure stated in the same
+  qualifications text, and in reverse an accommodation raised on
+  `qualifications` lifts a failed Pets or Evictions key stated on another
+  field (for example the No evictions checkbox when the pets rule is only
+  in qualifications) - always toward not capping; the failure is still a
+  reason against, only the forced Weak is lifted. Dropping the reverse
+  would cap an assistance-animal tenant again, so it stays.
 
 ## 5. S1 - The Notes box
 
@@ -39086,9 +39091,17 @@ and detail.
   write to DynamoDB failed or was not confirmed: a DynamoDB problem, not the model. The rows that did land
   stay and are real scores. A retry is safe (it re-scores and rewrites the same matches); the failed call's
   spend is in the error log line, as above. A run of these points at DynamoDB throttling or an outage.
-- "The ranking could not finish. Press Rank again." - the job's generation check could not read the job
-  record, twice, 500 ms apart (a DynamoDB read problem), so the job stopped rather than write without the
-  check. Every score already written stays. Press Rank again; if it repeats, check DynamoDB first.
+- "The ranking could not finish. Press Rank again." - one of two causes; the worker log line for that job
+  says which. (a) `ranking job generation check failed twice - failing the job`: the job's generation check
+  could not read the job record, twice, 500 ms apart (a DynamoDB read problem), so the job stopped rather
+  than write without the check - check DynamoDB first. (b) `ranking job failed unexpectedly`: anything else
+  in the job threw (for example a pool or record read that failed outright); the line's `err` names it.
+  Every score already written stays either way. Press Rank again; if it repeats, read that log line's `err`.
+- "N tenants were not scored by the model. Press Rank again." (or "1 tenant was ...", "N properties
+  were ...") - the model answered the batch but left those candidates out of its answer. Their old matches
+  stay and read out of date; the run detail's raw output shows the answer. Press Rank again; a run of these
+  suggests a batch too large for the output budget (lower `RANKING_BATCH_SIZE` or raise
+  `RANKING_MAX_OUTPUT_TOKENS`).
 - "Could not read this tenant's record. Press Rank again." / "Could not read this property's record. Press
   Rank again." - the anchor's own reads failed after its pool was found (a tenant's properties seen; a
   property's landlord record, with `RANKING_LANDLORD_CARD` on), so no candidate was scored and every old match
@@ -39211,7 +39224,7 @@ git -C W:/tmp/wp1-b2-ranking-engine commit -m "docs(runbook): AI ranking operati
 Before committing, cross-check three facts against the code as built (they
 are S2/S5/S6/S7 copy): the refusal / failure messages quoted above, the
 round-2 job messages included (R3B2)
-(`git -C W:/tmp/wp1-b2-ranking-engine grep -n "Pool too large to rank\|was not picked up\|stopped before it finished\|could not be read and were not scored\|could not be scored\|could not be saved\|could not finish\|Could not read this" -- app/src`),
+(`git -C W:/tmp/wp1-b2-ranking-engine grep -n "Pool too large to rank\|was not picked up\|stopped before it finished\|could not be read and were not scored\|could not be scored\|could not be saved\|could not finish\|Could not read this\|not scored by the model" -- app/src`),
 the "Include tenants not heard from" checkbox label
 (`git -C W:/tmp/wp1-b2-ranking-engine grep -n "Include tenants not heard from" -- dashboard/src`; PR26 makes it
 "... in N days" from the read's `poolWindowDays`), the PR30 defaults

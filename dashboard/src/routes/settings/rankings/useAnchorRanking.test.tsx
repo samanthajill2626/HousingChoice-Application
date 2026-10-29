@@ -700,13 +700,14 @@ describe('useAnchorRanking - ordering, round 2', () => {
   });
 });
 
-// Code review R3 (FW3-1, FW3-2): a press's message and joined mark clear only
-// when a view that is not live replaces a job the page FOLLOWED, not while it
-// follows none (a job that ended unseen, first shown then, still reads the
-// ranking again); and a job read as expired - a queued record read past its
-// expiry - is level with queued, so when a poll tick that started before the
-// expiry claims it, the same generation's running views apply and the poll
-// resumes.
+// Code review R3 (FW3-1, FW3-2, FW3-4): a press's message and joined mark
+// clear only when a view that is not live replaces a job the page FOLLOWED,
+// not while it follows none (a job that ended unseen, first shown then, still
+// reads the ranking again); a job read as expired - a queued record read past
+// its expiry - is level with queued, so when a poll tick that started before
+// the expiry claims it, the same generation's running views apply and the
+// poll resumes; and two FW2 details are pinned: the pool-built tier of one
+// generation's order, and a job read out when the clock goes back.
 describe('useAnchorRanking - ordering, round 3', () => {
   it.each<[string, unknown, string]>([
     ['refused 429', new ApiError(429, 'rate_limited', 'rate_limited', { error: 'rate_limited' }), 'Too many rankings. Wait a minute and try again.'],
@@ -783,5 +784,55 @@ describe('useAnchorRanking - ordering, round 3', () => {
     expect(getRankingJob).toHaveBeenCalledTimes(3);
     expect(current().job?.batchesDone).toEqual([0]);
     expect(getRanking).toHaveBeenCalledTimes(3);
+  });
+
+  // FW3-4: two FW2 details that no test pinned.
+  it('within one generation a view whose pool is not built is behind one whose pool is, even when issued later: "Ranking..." never replaces "0 of 3" (FW3-4, FW2-5)', async () => {
+    const firstRead = held<RankingReadResponse>();
+    const early = held<{ job: RankingJobView | null }>();
+    getRanking.mockReturnValueOnce(firstRead.promise).mockResolvedValue(readOf(null));
+    getRankingJob.mockReturnValueOnce(early.promise);
+    render(<Probe anchor={ANCHOR} />);
+    await flush();
+    // The job's start event reads the job - issued after the first read, served before the pool was built.
+    act(() => {
+      handlers.onRankingUpdated?.(rankingEvent({ batchesDone: 0, batchCount: 0 }));
+    });
+    await flush();
+    // The first read took its job snapshot after the pool (3 batches) and lands first.
+    await act(async () => {
+      firstRead.resolve(readOf(job({ status: 'running', startedAt: '2026-07-01T12:00:01.000Z', batchCount: 3 })));
+    });
+    await flush();
+    expect(current().job).toMatchObject({ status: 'running', batchCount: 3 });
+    // The job read lands last, from before the pool: level in status and finished batches, behind in the pool.
+    await act(async () => {
+      early.resolve({ job: job({ status: 'running', startedAt: '2026-07-01T12:00:01.000Z' }) });
+    });
+    await flush();
+    expect(current().job).toMatchObject({ status: 'running', batchCount: 3 });
+  });
+
+  it('a job read out when the clock goes back no longer holds the next one: a negative age counts as stalled (FW3-4, FW2-2)', async () => {
+    getRanking.mockResolvedValue(readOf(job({ status: 'running', batchCount: 1 })));
+    getRankingJob
+      .mockReturnValueOnce(new Promise(() => undefined))
+      .mockResolvedValue({ job: job({ status: 'done', batchCount: 1, batchesDone: [0] }) });
+    render(<Probe anchor={ANCHOR} />);
+    await flush();
+    // An event reads the job; that read never answers.
+    act(() => {
+      handlers.onRankingUpdated?.(rankingEvent({ batchesDone: 0, batchCount: 1 }));
+    });
+    await flush();
+    expect(getRankingJob).toHaveBeenCalledTimes(1);
+    // The system clock is set back an hour, no time passes: the read out seems sent in the future.
+    vi.setSystemTime(Date.now() - 60 * 60 * 1000);
+    act(() => {
+      handlers.onRankingUpdated?.(rankingEvent({ status: 'done', batchesDone: 1, batchCount: 1 }));
+    });
+    await flush();
+    expect(getRankingJob).toHaveBeenCalledTimes(2);
+    expect(current().job?.status).toBe('done');
   });
 });

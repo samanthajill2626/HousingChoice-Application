@@ -12,16 +12,21 @@ cut from main @404e039d.
 
 ## STATE
 
-Phase: PLAN REVIEW ROUND 1 (2026-10-28). Plan v2 assembled and committed
-(docs/superpowers/plans/2026-10-28-wp1-b2a-ranking-engine.md, ~36k lines,
-85 tasks, rulings PR1-PR28, hours firmed 24-30). Round 1 in flight: FOUR
-blind opus reviewers (the plan is too long for one reader): two on head +
-S1-S4 (plan-review/R1-front-A.md, R1-front-B.md), two on head + S5-S9
-(R1-back-A.md, R1-back-B.md); brief .superpowers/sdd/BRIEF-plan-reviewer.md.
-NEXT: adjudicate into plan-review/plan-adjudications.md, fix the plan
-(drafters can be continued per slice), rounds 2+ continue the best
-reviewer per half under the re-review charge (cap 4), then the mission
-block and the launch gate.
+Phase: PLAN REVIEW ROUND 2 (2026-10-29). Plan v3 committed (b71f2b18,
+~38.8k lines, 85 tasks, rulings PR1-PR39). Round 1: 4 reviewers, 50
+findings, all accepted (plan-review/plan-adjudications.md). Round 2 in
+flight: the front reviewer (R1-front-B continued -> R2-front.md) and the
+back reviewer (R1-back-B continued -> R2-back.md). Fixes go to the six
+section drafters (continued agents), then
+.superpowers/sdd/reassemble.py rebuilds the plan from the drafts.
+For Cameron at the launch gate (departures from spec text or his rules):
+PR18 (prompt fingerprint covers the schema), PR30 (real tables outside
+production: anthropic default, fake/console refused, worker poll off),
+PR37 (partial match writes keep the rows that landed), PR39 (two env
+example lines commented), plus PR28's handback items.
+NEXT: adjudicate round 2; stop when a round changes no decision (cap 4);
+then the mission block and the launch gate (AskUserQuestion: Go AUTO /
+Go MANUAL / Revise), then compaction gate B, then dispatch.
 
 Earlier phase: SPEC APPROVED -> COMPACTION GATE A (2026-10-28). Cameron passed the
 spec gate on rev 6 (answers: spec section 10 and below). Charter

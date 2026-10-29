@@ -11,14 +11,31 @@
 // "loading" without a reset inside an effect; a response for an old key is
 // dropped (its controller is aborted and the current key is checked).
 //
-// Order (code review R1 A2-1, A2-2): reads answer in any order, so every
-// request takes an issue number when it is sent. A full read's rows are
-// applied only if it is the LATEST full read issued for the key; a job view
-// (from a job read, a read that adopts its job, or a press) only if it was
-// issued after the view on screen - so an earlier read landing last never
-// puts back an older table or job, and a read issued before a press never
-// replaces the press's job. Job reads never overlap: a call while one is out
-// asks for one more read after it.
+// Order (code review R1 A2-1, A2-2; R2 FW2-1, FW2-2, FW2-3, FW2-5): reads
+// answer in any order, so every request takes an issue number when it is
+// sent.
+// - A full read's rows are applied only if it was issued after the rows on
+//   screen, so an earlier read landing last never puts back an older table,
+//   and a newer one shows even while a later one is still out. A failure is
+//   shown only for the LATEST full read issued; an earlier read that answers
+//   after it leaves the failure (with its Retry) on screen.
+// - A job view (from a job read, a read that adopts its job, or a press) of
+//   the generation on screen is applied only if it is not behind the view on
+//   screen - status queued, then running, then ended; then finished batches;
+//   then the pool built - and, when level with it, only if issued after every
+//   view applied so far: a read's job snapshot is taken late (after its
+//   pool), so issue order alone could step the status back. A view of another
+//   generation (or of none) is applied only if issued after every view
+//   applied so far, so a read issued before a press never replaces the
+//   press's job.
+// - A job view of a generation the page has not shown is a change: its
+//   finished batches count from zero, and its end counts even when the page
+//   never saw it live - so a job first seen part-way or finished still reads
+//   the ranking again.
+// - Job reads never overlap: a call while one is out asks for one more read
+//   after it - unless the one out was sent JOB_READ_STALL_MS ago or more; then
+//   the call sends a new read, and the stalled one's answer, if it ever comes,
+//   is ordered by the rules above.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ApiError,
@@ -35,6 +52,9 @@ import { finishedBatchCount, isJobLive } from './rankingFormat.js';
 
 /** The job read's poll interval while a job is queued or running (spec D12). */
 export const JOB_POLL_MS = 5_000;
+
+/** A job read out longer than this no longer holds back the next one (code review R2 FW2-2). */
+export const JOB_READ_STALL_MS = 2 * JOB_POLL_MS;
 
 export type RankingReadStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -66,27 +86,57 @@ interface Slice {
   rankError: string | null;
 }
 
+/** The job read out now (code review R2 FW2-2). */
+interface JobFlight {
+  /** When the read out now was sent (Date.now()). */
+  since: number;
+  /** Another read was asked for while it was out. */
+  again: boolean;
+}
+
 interface Current {
   key: string;
   kind: RankingAnchorKind;
   id: string;
   includeOlder: boolean;
   controller: AbortController;
-  /** The issue number of the latest full read: only its answer is applied. */
+  /** The issue number of the latest full read: only its failure is shown. */
   latestRead: number;
-  /** The issue number of the job view on screen (0 = none yet) and its generation. */
+  /** The issue numbers of the full read whose rows are held and of the failure on screen (0 = none). */
+  rowsIssued: number;
+  failedIssued: number;
+  /** The job view on screen (null = none, or no job) - for the order rules,
+   *  "the finished batches grew" and "a new generation" - and the highest
+   *  issue number of a view applied (0 = none yet). */
+  jobView: RankingJobView | null;
   jobIssued: number;
-  jobGeneration: string | null;
-  /** The job view on screen as last seen, for "the finished batches grew" and "the job ended". */
-  seenBatches: number;
+  /** The job on screen is live, or a 409 just said a live job exists: its
+   *  end, whenever a view shows it, is "the job ended". */
   wasLive: boolean;
-  /** The job read out now, and whether another was asked for meanwhile. */
-  jobRead: Promise<void> | null;
-  jobReadAgain: boolean;
+  /** The job read out now (null = none). */
+  jobFlight: JobFlight | null;
 }
 
-/** What applying a job view changed; null when a newer view was on screen. */
+/** What applying a job view changed; null when it was not applied. */
 type JobChange = { grew: boolean; ended: boolean } | null;
+
+/** How far one generation's job has got (code review R2 FW2-5): status
+ *  (queued, running, then any end), finished batches, the pool built. */
+function jobProgress(view: RankingJobView): [number, number, number] {
+  const stage = view.status === 'queued' ? 0 : view.status === 'running' ? 1 : 2;
+  return [stage, finishedBatchCount(view), view.batchCount];
+}
+
+/** Negative when `a` is behind `b`, 0 when level, positive when ahead. */
+function compareProgress(a: RankingJobView, b: RankingJobView): number {
+  const left = jobProgress(a);
+  const right = jobProgress(b);
+  for (let i = 0; i < left.length; i += 1) {
+    const diff = (left[i] ?? 0) - (right[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
 
 function blank(key: string): Slice {
   return {
@@ -148,17 +198,29 @@ export function useAnchorRanking(anchor: RankingAnchorRef | undefined, includeOl
     setSlice((prev) => change(prev !== null && prev.key === forKey ? prev : blank(forKey)));
   }, []);
 
-  // A job view issued as `issued`, applied only when no later one is on screen.
+  // A job view issued as `issued`, applied by the order rules in the header.
   const applyJob = useCallback(
     (cur: Current, next: RankingJobView | null, issued: number): JobChange => {
-      if (issued <= cur.jobIssued) return null;
-      // FINISHED batches, scored or failed (spec D12; plan review BB5).
+      const shown = cur.jobView;
+      const sameGeneration = next !== null && shown !== null && next.generation === shown.generation;
+      if (sameGeneration) {
+        // One generation (code review R2 FW2-5): never a view behind the one
+        // on screen; a level one only if issued after every view applied.
+        const order = compareProgress(next, shown);
+        if (order < 0 || (order === 0 && issued <= cur.jobIssued)) return null;
+      } else if (issued <= cur.jobIssued) {
+        return null;
+      }
+      // FINISHED batches, scored or failed (spec D12; plan review BB5). A
+      // generation the page has not shown counts from zero, and its end
+      // counts even when the page never saw it live (R2 FW2-1).
+      const newGeneration = next !== null && !sameGeneration;
       const finished = next === null ? 0 : finishedBatchCount(next);
-      const grew = finished > cur.seenBatches;
-      const ended = cur.wasLive && (next === null || !isJobLive(next.status));
-      cur.jobIssued = issued;
-      cur.jobGeneration = next === null ? null : next.generation;
-      cur.seenBatches = finished;
+      const seen = newGeneration || shown === null ? 0 : finishedBatchCount(shown);
+      const grew = finished > seen;
+      const ended = (cur.wasLive || newGeneration) && (next === null || !isJobLive(next.status));
+      cur.jobView = next;
+      cur.jobIssued = Math.max(cur.jobIssued, issued);
       cur.wasLive = next !== null && isJobLive(next.status);
       // Code review R1 A2-8: a press's error and the joined mark speak of the
       // job the press followed; once that job ends they no longer apply.
@@ -175,16 +237,24 @@ export function useAnchorRanking(anchor: RankingAnchorRef | undefined, includeOl
       try {
         const next = await getRanking(cur.kind, cur.id, { includeOlder: cur.includeOlder }, cur.controller.signal);
         if (cur.controller.signal.aborted || currentRef.current !== cur) return;
-        // Its job by the job views' own rule: never over a press or a job
-        // read issued after this read (A2-2).
+        // Its job by the job views' own rules: never over a press or a job
+        // read issued after this read (A2-2), never behind the view on screen
+        // (R2 FW2-5).
         if (adoptJob) applyJob(cur, next.job, issued);
-        // Its rows only if no later full read was issued (A2-1).
-        if (issued !== cur.latestRead) return;
+        // Its rows only if issued after the rows held (A2-1; R2 FW2-3).
+        if (issued <= cur.rowsIssued) return;
+        cur.rowsIssued = issued;
         setPoolWindowDays(next.poolWindowDays);
-        update(cur.key, (s) => ({ ...s, read: next, readStatus: 'ready', readError: null }));
+        // A failure of a read issued after this one stays on screen, with its Retry.
+        const afterFailure = issued > cur.failedIssued;
+        update(cur.key, (s) =>
+          afterFailure ? { ...s, read: next, readStatus: 'ready', readError: null } : { ...s, read: next },
+        );
       } catch (err) {
         if (cur.controller.signal.aborted || isAbort(err) || currentRef.current !== cur) return;
+        // Only the latest full read's failure is shown: a later read is still out.
         if (issued !== cur.latestRead) return;
+        cur.failedIssued = issued;
         update(cur.key, (s) => ({ ...s, readStatus: 'error', readError: readErrorText(err) }));
       }
     },
@@ -203,12 +273,12 @@ export function useAnchorRanking(anchor: RankingAnchorRef | undefined, includeOl
       includeOlder,
       controller: new AbortController(),
       latestRead: 0,
+      rowsIssued: 0,
+      failedIssued: 0,
+      jobView: null,
       jobIssued: 0,
-      jobGeneration: null,
-      seenBatches: 0,
       wasLive: false,
-      jobRead: null,
-      jobReadAgain: false,
+      jobFlight: null,
     };
     currentRef.current = cur;
     void loadRead(cur, true);
@@ -234,28 +304,36 @@ export function useAnchorRanking(anchor: RankingAnchorRef | undefined, includeOl
     [applyJob, issue, loadRead],
   );
 
-  const refreshJob = useCallback((): Promise<void> => {
+  const refreshJob = useCallback((): void => {
     const cur = currentRef.current;
-    if (cur === null) return Promise.resolve();
-    // One job read at a time (A2-1): events, the poll and a refused press
-    // arriving while one is out ask for ONE more read after it.
-    if (cur.jobRead !== null) {
-      cur.jobReadAgain = true;
-      return cur.jobRead;
+    if (cur === null) return;
+    const out = cur.jobFlight;
+    if (out !== null) {
+      // One job read at a time (A2-1): events, the poll and a refused press
+      // arriving while one is out ask for ONE more read after it - unless it
+      // was sent JOB_READ_STALL_MS ago or more (or the clock went back): then
+      // it no longer holds the flight (R2 FW2-2).
+      const age = Date.now() - out.since;
+      if (age >= 0 && age < JOB_READ_STALL_MS) {
+        out.again = true;
+        return;
+      }
     }
-    const run = async (): Promise<void> => {
+    const flight: JobFlight = { since: Date.now(), again: false };
+    cur.jobFlight = flight;
+    void (async () => {
       try {
         do {
-          cur.jobReadAgain = false;
+          flight.again = false;
+          flight.since = Date.now();
           await readJobOnce(cur);
-        } while (cur.jobReadAgain && currentRef.current === cur && !cur.controller.signal.aborted);
+        } while (flight.again && cur.jobFlight === flight && currentRef.current === cur && !cur.controller.signal.aborted);
       } finally {
-        // In the same step as the last check, so no call can slip between them.
-        cur.jobRead = null;
+        // In the same step as the last check, so no call can slip between
+        // them; a stalled flight that a newer one replaced leaves it alone.
+        if (cur.jobFlight === flight) cur.jobFlight = null;
       }
-    };
-    cur.jobRead = run();
-    return cur.jobRead;
+    })();
   }, [readJobOnce]);
 
   const live = slice !== null && key !== undefined && slice.key === key ? slice : null;
@@ -264,14 +342,14 @@ export function useAnchorRanking(anchor: RankingAnchorRef | undefined, includeOl
   useEffect(() => {
     if (!jobLive) return undefined;
     const timer = setInterval(() => {
-      void refreshJob();
+      refreshJob();
     }, JOB_POLL_MS);
     return () => clearInterval(timer);
   }, [jobLive, key, refreshJob]);
 
   useEventStream({
     onRankingUpdated: (event) => {
-      if (event.anchorKind === kind && event.anchorId === id) void refreshJob();
+      if (event.anchorKind === kind && event.anchorId === id) refreshJob();
     },
   });
 
@@ -285,17 +363,13 @@ export function useAnchorRanking(anchor: RankingAnchorRef | undefined, includeOl
         if (currentRef.current !== cur) return;
         // The press's job is newer than every view on screen (A2-2), unless a
         // job read already shows this generation - read after the claim, so
-        // as new or newer. Every read issued before this answer is older: its
-        // job view is dropped when it lands.
-        if (cur.jobGeneration !== res.job.generation) {
-          cur.jobIssued = issue();
-          cur.jobGeneration = res.job.generation;
-          cur.seenBatches = finishedBatchCount(res.job);
-          cur.wasLive = isJobLive(res.job.status);
-          update(cur.key, (s) => ({ ...s, ranking: false, job: res.job, joined: res.joined }));
-        } else {
-          update(cur.key, (s) => ({ ...s, ranking: false, joined: res.joined }));
-        }
+        // as new or newer. It takes a fresh issue number, so every read issued
+        // before this answer is older: a view of another generation from one
+        // is dropped when it lands. A generation the page had not shown, joined
+        // part-way, reads the ranking again (R2 FW2-1).
+        const change = cur.jobView?.generation !== res.job.generation ? applyJob(cur, res.job, issue()) : null;
+        update(cur.key, (s) => ({ ...s, ranking: false, joined: res.joined }));
+        if (change !== null && (change.grew || change.ended)) void loadRead(cur, false);
       } catch (err) {
         if (currentRef.current !== cur) return;
         update(cur.key, (s) => ({ ...s, ranking: false, rankError: rankErrorText(err) }));
@@ -304,11 +378,11 @@ export function useAnchorRanking(anchor: RankingAnchorRef | undefined, includeOl
         // page reads it - clears this error (A2-8) and reads the ranking again.
         if (err instanceof ApiError && err.code === 'ranking_running') {
           cur.wasLive = true;
-          void refreshJob();
+          refreshJob();
         }
       }
     })();
-  }, [issue, refreshJob, update]);
+  }, [applyJob, issue, loadRead, refreshJob, update]);
 
   const retryRead = useCallback((): void => {
     const cur = currentRef.current;

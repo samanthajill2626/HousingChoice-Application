@@ -28,7 +28,7 @@ vi.mock('../../../api/index.js', async () => {
   };
 });
 
-import { JOB_POLL_MS, useAnchorRanking, type AnchorRankingState } from './useAnchorRanking.js';
+import { JOB_POLL_MS, JOB_READ_STALL_MS, useAnchorRanking, type AnchorRankingState } from './useAnchorRanking.js';
 
 const ANCHOR: RankingAnchorRef = { kind: 'unit', id: 'unit-1' };
 
@@ -83,12 +83,14 @@ async function flush(ms = 0): Promise<void> {
 }
 
 /** A response the test answers when it chooses (reads that land out of order). */
-function held<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+function held<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (err: unknown) => void } {
   let resolve: (value: T) => void = () => undefined;
-  const promise = new Promise<T>((r) => {
-    resolve = r;
+  let reject: (err: unknown) => void = () => undefined;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 /** A read whose one row names which read it is. */
@@ -499,5 +501,201 @@ describe('useAnchorRanking - ordering', () => {
     expect(current().job?.status).toBe('done');
     expect(current().rankError).toBeNull();
     expect(getRanking).toHaveBeenCalledTimes(2);
+  });
+});
+
+// Code review R2 (FW2-1, FW2-2, FW2-3, FW2-5): a job view of a generation the
+// page has not shown counts its progress from zero; one generation's views
+// never step back; a job read that never answers stops blocking after
+// JOB_READ_STALL_MS; and a full read newer than the rows on screen is shown
+// even while a later one is still out.
+describe('useAnchorRanking - ordering, round 2', () => {
+  const genEvent = (generation: string, over: Parameters<typeof rankingEvent>[0] = {}) => ({ ...rankingEvent(over), generation });
+
+  it('a NEW generation first seen finished, with no more finished batches than the last one, reads the ranking again (FW2-1)', async () => {
+    getRanking.mockResolvedValue(readOf(job({ status: 'done', batchCount: 1, batchesDone: [0] })));
+    getRankingJob.mockResolvedValue({ job: job({ status: 'done', generation: 'gen-2', batchCount: 1, batchesDone: [0] }) });
+    render(<Probe anchor={ANCHOR} />);
+    await flush();
+    expect(getRanking).toHaveBeenCalledTimes(1);
+    // Another admin ranked it again; the page's first look at gen-2 finds it done.
+    act(() => {
+      handlers.onRankingUpdated?.(genEvent('gen-2', { status: 'done', batchesDone: 1, batchCount: 1 }));
+    });
+    await flush();
+    await flush(JOB_POLL_MS * 3);
+    expect(current().job).toMatchObject({ status: 'done', generation: 'gen-2' });
+    expect(getRanking).toHaveBeenCalledTimes(2);
+  });
+
+  it('a press that joins a generation the page never showed, with batches already finished, reads the ranking again (FW2-1)', async () => {
+    // gen-2's 2 finished batches are fewer than gen-1's 4: they count from zero.
+    const joinedJob = job({ status: 'running', generation: 'gen-2', batchCount: 4, batchesDone: [0, 1] });
+    getRanking.mockResolvedValue(readOf(job({ status: 'done', batchCount: 4, batchesDone: [0, 1, 2, 3] })));
+    startRanking.mockResolvedValue({ job: joinedJob, joined: true });
+    getRankingJob.mockResolvedValue({ job: joinedJob });
+    render(<Probe anchor={ANCHOR} />);
+    await flush();
+    act(() => {
+      current().rank();
+    });
+    await flush();
+    expect(current().joined).toBe(true);
+    expect(current().job).toMatchObject({ status: 'running', generation: 'gen-2' });
+    expect(getRanking).toHaveBeenCalledTimes(2);
+  });
+
+  it('within one generation a job view behind the one on screen is dropped, even when issued later: the status never steps back (FW2-5)', async () => {
+    const firstRead = held<RankingReadResponse>();
+    const early = held<{ job: RankingJobView | null }>();
+    getRanking.mockReturnValueOnce(firstRead.promise).mockResolvedValue(readOf(null));
+    getRankingJob
+      .mockReturnValueOnce(early.promise)
+      .mockResolvedValue({ job: job({ status: 'running', batchCount: 3, batchesDone: [0, 1] }) });
+    render(<Probe anchor={ANCHOR} />);
+    await flush();
+    // An event reads the job - issued after the first read, served at once: 1 of 3.
+    act(() => {
+      handlers.onRankingUpdated?.(rankingEvent({ batchesDone: 1, batchCount: 3 }));
+    });
+    await flush();
+    // The first read took its job snapshot later, after building the pool (2 of 3), and lands first.
+    await act(async () => {
+      firstRead.resolve(readOf(job({ status: 'running', batchCount: 3, batchesDone: [0, 1] })));
+    });
+    await flush();
+    expect(current().job?.batchesDone).toEqual([0, 1]);
+    await act(async () => {
+      early.resolve({ job: job({ status: 'running', batchCount: 3, batchesDone: [0] }) });
+    });
+    await flush();
+    expect(current().job?.batchesDone).toEqual([0, 1]);
+    // The next poll's 2 of 3 has not grown: no extra full read.
+    await flush(JOB_POLL_MS);
+    expect(getRankingJob).toHaveBeenCalledTimes(2);
+    expect(getRanking).toHaveBeenCalledTimes(1);
+  });
+
+  it('a job read that never answers stops blocking after JOB_READ_STALL_MS: the next poll reads the job again (FW2-2)', async () => {
+    getRanking.mockResolvedValue(readOf(job({ status: 'running', batchCount: 1 })));
+    getRankingJob
+      .mockReturnValueOnce(new Promise(() => undefined))
+      .mockResolvedValue({ job: job({ status: 'done', batchCount: 1, batchesDone: [0] }) });
+    render(<Probe anchor={ANCHOR} />);
+    await flush();
+    await flush(JOB_POLL_MS);
+    expect(getRankingJob).toHaveBeenCalledTimes(1);
+    // Polls inside the deadline wait for the read that is out...
+    await flush(JOB_READ_STALL_MS - JOB_POLL_MS);
+    expect(getRankingJob).toHaveBeenCalledTimes(1);
+    // ...the first one past it reads again, and that answer is applied.
+    await flush(JOB_POLL_MS);
+    expect(getRankingJob).toHaveBeenCalledTimes(2);
+    expect(current().job?.status).toBe('done');
+    expect(getRanking).toHaveBeenCalledTimes(2);
+  });
+
+  it('a stalled job read that answers after its successor is ordered like any other: its older view is dropped (FW2-2)', async () => {
+    const stalled = held<{ job: RankingJobView | null }>();
+    getRanking.mockResolvedValue(readOf(job({ status: 'running', batchCount: 2 })));
+    getRankingJob
+      .mockReturnValueOnce(stalled.promise)
+      .mockResolvedValue({ job: job({ status: 'running', batchCount: 2, batchesDone: [0] }) });
+    render(<Probe anchor={ANCHOR} />);
+    await flush();
+    await flush(JOB_POLL_MS);
+    await flush(JOB_READ_STALL_MS);
+    expect(getRankingJob).toHaveBeenCalledTimes(2);
+    expect(current().job?.batchesDone).toEqual([0]);
+    expect(getRanking).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      stalled.resolve({ job: job({ status: 'running', batchCount: 2 }) });
+    });
+    await flush();
+    expect(current().job?.batchesDone).toEqual([0]);
+    expect(getRanking).toHaveBeenCalledTimes(2);
+  });
+
+  it('three overlapping full reads answering 2, 1, 3 show the rows of 2, then 3 - never 1 (FW2-3)', async () => {
+    const one = held<RankingReadResponse>();
+    const two = held<RankingReadResponse>();
+    const three = held<RankingReadResponse>();
+    getRanking
+      .mockResolvedValueOnce(readWithRow('initial', job({ status: 'running', batchCount: 4 })))
+      .mockReturnValueOnce(one.promise)
+      .mockReturnValueOnce(two.promise)
+      .mockReturnValueOnce(three.promise);
+    getRankingJob
+      .mockResolvedValueOnce({ job: job({ status: 'running', batchCount: 4, batchesDone: [0] }) })
+      .mockResolvedValueOnce({ job: job({ status: 'running', batchCount: 4, batchesDone: [0, 1] }) })
+      .mockResolvedValueOnce({ job: job({ status: 'running', batchCount: 4, batchesDone: [0, 1, 2] }) });
+    render(<Probe anchor={ANCHOR} />);
+    await flush();
+    // Three batches finish one after another; each grown job view issues a full read.
+    for (const finished of [1, 2, 3]) {
+      act(() => {
+        handlers.onRankingUpdated?.(rankingEvent({ batchesDone: finished, batchCount: 4 }));
+      });
+      await flush();
+    }
+    expect(getRanking).toHaveBeenCalledTimes(4);
+    await act(async () => {
+      two.resolve(readWithRow('two'));
+    });
+    await flush();
+    expect(current().read?.rows[0]?.display).toBe('two');
+    await act(async () => {
+      one.resolve(readWithRow('one'));
+    });
+    await flush();
+    expect(current().read?.rows[0]?.display).toBe('two');
+    await act(async () => {
+      three.resolve(readWithRow('three'));
+    });
+    await flush();
+    expect(current().read?.rows[0]?.display).toBe('three');
+    expect(current().readStatus).toBe('ready');
+  });
+
+  // A guard on FW2-3, not its regression test: an earlier read that answers
+  // after the LATEST read failed must not hide that failure (and its Retry)
+  // behind its own, older table.
+  it('a failure of the latest full read stays, with its Retry, when an earlier read answers after it (FW2-3)', async () => {
+    const earlier = held<RankingReadResponse>();
+    const latest = held<RankingReadResponse>();
+    getRanking
+      .mockResolvedValueOnce(readWithRow('initial', job({ status: 'running', batchCount: 2 })))
+      .mockReturnValueOnce(earlier.promise)
+      .mockReturnValueOnce(latest.promise)
+      .mockResolvedValueOnce(readWithRow('retried'));
+    getRankingJob
+      .mockResolvedValueOnce({ job: job({ status: 'running', batchCount: 2, batchesDone: [0] }) })
+      .mockResolvedValueOnce({ job: job({ status: 'done', batchCount: 2, batchesDone: [0, 1] }) });
+    render(<Probe anchor={ANCHOR} />);
+    await flush();
+    for (const event of [rankingEvent({ batchesDone: 1 }), rankingEvent({ status: 'done', batchesDone: 2 })]) {
+      act(() => {
+        handlers.onRankingUpdated?.(event);
+      });
+      await flush();
+    }
+    expect(getRanking).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      latest.reject(new ApiError(503, 'ranking_unavailable', 'ranking_unavailable', { error: 'ranking_unavailable' }));
+    });
+    await flush();
+    expect(current().readStatus).toBe('error');
+    await act(async () => {
+      earlier.resolve(readWithRow('after batch 0'));
+    });
+    await flush();
+    expect(current().readStatus).toBe('error');
+    expect(current().readError).toBe('This record could not be read. Try again.');
+    act(() => {
+      current().retryRead();
+    });
+    await flush();
+    expect(current().readStatus).toBe('ready');
+    expect(current().read?.rows[0]?.display).toBe('retried');
   });
 });

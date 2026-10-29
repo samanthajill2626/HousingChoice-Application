@@ -1194,8 +1194,12 @@ async function upsertContact(
     values[':beds'] = resolved.voucherBeds;
   }
   if (resolved.notes) {
-    sets.push('notes = :notes');
+    // WP1 B2a spec D14.3: the Notes box's stamp rides the same write, with
+    // the run's instant (as imported_at). The overwrite itself stays
+    // unguarded (docs/issues/import-overwrites-notes-box.md).
+    sets.push('notes = :notes', 'notes_updated_at = :notesUpdatedAt');
     values[':notes'] = resolved.notes;
+    values[':notesUpdatedAt'] = importedAt;
   }
   // Contact-side housing authority (the byHousingAuthority GSI hash key; the GSI
   // is kept, but blast audiences match the housing authority in memory since

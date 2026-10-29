@@ -1914,3 +1914,28 @@ describe('applyExtraction - collapsed lines and the duplicate count (WP1 B2a D14
     expect(records.updates[0]!.patch['notes']).toBe('[Auto - Jul 16] 412 Oak Ave, Decatur: on the fence / worried about the commute');
   });
 });
+
+// WP1 B2a spec D14.3: the extraction append stamps notes_updated_at with the
+// run's instant in the SAME update as the notes. No guard: it appends.
+describe('applyExtraction - the Notes stamp (WP1 B2a D14.3)', () => {
+  it('stamps notes_updated_at with the run instant in the same write as the appended notes', async () => {
+    const { deps, records } = makeDeps();
+    await run(deps, makeContact({ type: 'tenant', notes: 'existing note' }), { fields: {}, noteLines: [note('new fact')] });
+    expect(records.updates).toEqual([
+      { id: 'c1', patch: { notes: 'existing note\n[Auto - Jul 16] new fact', notes_updated_at: NOW } },
+    ]);
+  });
+
+  it('(PIN) a run that appends nothing writes no stamp', async () => {
+    const { deps, records } = makeDeps();
+    await run(deps, makeContact({ type: 'tenant', notes: 'seed\n[Auto - Jul 10] alpha' }), { fields: {}, noteLines: [note('alpha')] });
+    expect(records.updates).toEqual([]);
+  });
+
+  it('(PIN) a field write never carries the Notes stamp', async () => {
+    const { deps, records } = makeDeps();
+    await run(deps, makeContact({ type: 'tenant' }), { fields: { firstName: { op: 'write', value: 'Dana' } } });
+    expect(records.updates).toHaveLength(1);
+    expect('notes_updated_at' in records.updates[0]!.patch).toBe(false);
+  });
+});

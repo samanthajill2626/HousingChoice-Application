@@ -2278,6 +2278,8 @@ describe('runDueExtractions - feedback counts (WP1 B1 spec D5.3)', () => {
     expect(h.contactsUpdate).toHaveBeenCalledWith('c1', {
       notes: [feedback, 'Asked whether 77 Pine Rd takes pets', 'Works nights downtown']
         .map((line) => `[Auto - Jul 17] ${line}`).join('\n'),
+      // WP1 B2a spec D14.3: the stamp rides the same write (applyDeps.now).
+      notes_updated_at: NOW,
     });
     expect(h.runs[0]).toMatchObject({ outcome: 'applied', notedLines: 3, feedbackLines: 1, unlabeledAddressLines: 1 });
   });

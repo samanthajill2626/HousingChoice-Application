@@ -985,7 +985,11 @@ export async function applyExtraction(
     const joined = filtered.append.map((line) => `${prefix} ${line}`).join('\n');
     const nextNotes = existing.length > 0 ? `${existing}\n${joined}` : joined;
     try {
-      await deps.contacts.update(contactId, { notes: nextNotes });
+      // WP1 B2a spec D14.3: the box's stamp rides the SAME write, so a contact
+      // edit form opened before this append is refused 409 notes_stale
+      // instead of erasing the appended lines. No guard here: extraction
+      // appends to whatever the box holds.
+      await deps.contacts.update(contactId, { notes: nextNotes, notes_updated_at: at });
       notedLines = filtered.append.length;
       // WP1 B1 spec D5.3 (S5 C4): every line appended, model then system,
       // exactly as joined into nextNotes - the job counts feedback lines over it.

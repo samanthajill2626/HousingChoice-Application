@@ -510,6 +510,28 @@ describe.skipIf(!reachable)('import:apply', () => {
     });
   });
 
+  // WP1 B2a spec D14.3: the importer's Notes overwrite stamps
+  // notes_updated_at with the run's importedAt in the SAME UpdateCommand; a
+  // row with no notes writes neither (import-overwrites-notes-box stays
+  // open: still no guard).
+  it('stamps notes_updated_at beside a notes write, and only then', async () => {
+    const review = cleanReview();
+    const row = [...review.contacts.values()].find((r) => r.phone === PHONES.noTraffic)!;
+    row.notes = 'Prefers the east side';
+
+    await runApply({ doc, plan, review, importedAt, env: testEnv });
+
+    const withNotes = await doc.send(
+      new GetCommand({ TableName: table('contacts'), Key: { contactId: contactIdForPhone(PHONES.noTraffic) } }),
+    );
+    expect(withNotes.Item).toMatchObject({ notes: 'Prefers the east side', notes_updated_at: importedAt });
+    const without = await doc.send(
+      new GetCommand({ TableName: table('contacts'), Key: { contactId: contactIdForPhone(PHONES.landlord) } }),
+    );
+    expect(without.Item!['notes']).toBeUndefined();
+    expect(without.Item!['notes_updated_at']).toBeUndefined();
+  });
+
   it('a RETYPED row never stores the old type vocabulary - it lands needs_review', async () => {
     // REGRESSION. The per-type status guard checked the workbook column but
     // trusted `suggestedStatus` blindly - and the suggestion was derived from

@@ -165,6 +165,7 @@ import { createOrganizationsRouter } from './organizations.js';
 import { createStatusTransitionRouter } from './statusTransition.js';
 import { createSystemRouter } from './system.js';
 import { createAiRunsRouter } from './aiRuns.js';
+import { createRankingsRouter, type RankingsRouterDeps } from './rankings.js';
 import { createTodayRouter } from './today.js';
 import { createUnitsRouter } from './units.js';
 import { createToursRouter } from './tours.js';
@@ -369,6 +370,8 @@ export interface ApiRouterDeps {
   contactsRepo?: ContactsRepo;
   /** AI run-log repo shared by suggestion resolution surfaces. */
   aiRunsRepo?: AiRunsRepo;
+  /** WP1 B2a rankings router seams (spec D12) - injected in tests; the real claim / read / job read otherwise. */
+  rankings?: Partial<Omit<RankingsRouterDeps, 'config' | 'logger'>>;
   /** Durable phase journal shared by all suggestion resolution routes. */
   suggestionResolutionRepo?: SuggestionResolutionRepo;
   /** Process-boundary fault/clock seams used by focused recovery tests. */
@@ -896,6 +899,21 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       messagesRepo: messages,
       aiRunsRepo: aiRuns,
       contactsRepo: contacts,
+    }),
+  );
+  // WP1 B2a rankings (spec D12): rank, read and the job poll for admin AND va
+  // (requireAuth via this mount only, as the composer). The rank POST is rate
+  // limited per user INSIDE the router, the way the broadcast send limiter is.
+  // Route stage of the locked chain: nothing here precedes the origin-secret
+  // validator or the body parsers (app.ts).
+  router.use(
+    '/rankings',
+    createRankingsRouter({
+      config,
+      logger: deps.logger,
+      contactsRepo: contacts,
+      unitsRepo: units,
+      ...deps.rankings,
     }),
   );
   // Contact triage + CRUD (requireAuth — VAs triage; propagates conversation

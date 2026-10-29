@@ -913,11 +913,19 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
 - **Fingerprint** - a hash of a card (and of a pair's history) stored on
   each match; when the current card hashes differently the match reads "out
   of date". A bare new send never changes one; a decline, a tour, a Notes
-  edit or an edit to a card field does. Not the **prompt fingerprint**: the
-  hash of the ranking prompt's fixed part (the rubric, the worked examples
-  and the output schema) that every run and match records and the gate
-  sheet prints. It names the prompt a score came from and never makes a
-  match out of date (a rubric or examples change does that through their
+  edit or an edit to a card field does. Two changes that edit neither the
+  tenant's nor the property's record do too: time - a tenant card carries
+  how recently the tenant was last heard from as a bucket (this week, this
+  month, one to three months, older, never), so every match of a tenant
+  goes out of date when that bucket moves, as 7, 30 and 90 days of silence
+  pass or when the tenant is heard from again after one of them; and an
+  organization-list edit that changes how a property's housing authority
+  names map to the list (a property card carries them as mapped), for every
+  match of that property. Not the **prompt fingerprint**: the hash of the
+  ranking prompt's fixed part (the rubric, the worked examples and the
+  output schema) that every run and match records and the gate sheet
+  prints. It names the prompt a score came from and never makes a match
+  out of date (a rubric or examples change does that through their
   versions).
 - **Matches store** - the `matches` table: one row per pair, written only by
   the ranking job (`app/src/repos/matchesRepo.ts`). Say "matches store",

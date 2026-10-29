@@ -1841,9 +1841,14 @@ and detail.
   here`) holds the model, the usage, the cost and the call's failure. A call that answered after its job
   was stopped or superseded (a takeover, a refused or failed lease renewal) writes no run either, by design
   (the job writes nothing more): its worker WARN line (`ranking run not written - the job stopped after the
-  call; usage and cost logged here`) holds the same fields. So every paid call is a run record or one of
-  those two log lines - the spend is never invisible - but the Settings > Rankings weekly cost counts run
-  records only, and reads low by the calls those lines name.
+  call; usage and cost logged here`) holds the same fields. So every paid call that returns to a live
+  worker is a run record or one of those two log lines. Two kinds leave neither: calls in flight when the
+  worker is killed (a deploy or a crash mid-call - see "A deploy (or any worker restart) mid-ranking"
+  below, and item 4 of `docs/issues/ranking-job-lifecycle-robustness.md`), and an attempt the client
+  timed out or lost the connection on, which the SDK retries once inside the call - the API may still have
+  processed and billed it, but no usage comes back for it (a call whose two attempts both timed out records
+  a cost of 0). The Settings > Rankings weekly cost counts run records only, so it reads low by the calls
+  those lines name and by those two kinds.
 - "2 tenants could not be read and were not scored. Press Rank again." - a units read came back incomplete
   for those candidates' properties seen; a retry normally clears it.
 - "N tenants could not be scored. Press Rank again." (or "N properties ...") - that many candidates sat in a

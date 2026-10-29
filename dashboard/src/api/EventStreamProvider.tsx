@@ -33,6 +33,7 @@ import type {
   ContactUpdatedEvent,
   AiRunCompletedEvent,
   UnmatchedEmailUpdatedEvent,
+  RankingUpdatedEvent,
 } from './types.js';
 
 export interface EventStreamHandlers {
@@ -61,6 +62,9 @@ export interface EventStreamHandlers {
   /** An unmatched-email row was created or transitioned (email-channel-v1 B6) -
    *  the Email nav badge + the /email triage page refetch. */
   onUnmatchedEmailUpdated?: (event: UnmatchedEmailUpdatedEvent) => void;
+  /** A ranking job moved (WP1 B2a spec D12) - the Rankings page reads the
+   *  job for its anchor. A hint only: the page also polls the job read. */
+  onRankingUpdated?: (event: RankingUpdatedEvent) => void;
   /** Called when the stream opens (after connect/reconnect). */
   onOpen?: () => void;
   /** Called when the stream errors (before a reconnect is scheduled). */
@@ -235,6 +239,12 @@ export function EventStreamProvider({ children }: { children: ReactNode }): Reac
         markActivity();
         const data = parse<UnmatchedEmailUpdatedEvent>((ev as MessageEvent).data);
         if (data) dispatch((h) => h.onUnmatchedEmailUpdated, data);
+      });
+
+      source.addEventListener('ranking.updated', (ev) => {
+        markActivity();
+        const data = parse<RankingUpdatedEvent>((ev as MessageEvent).data);
+        if (data) dispatch((h) => h.onRankingUpdated, data);
       });
 
       source.addEventListener('error', () => {

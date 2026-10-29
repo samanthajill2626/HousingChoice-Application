@@ -3,7 +3,12 @@ import { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventStreamProvider } from './EventStreamProvider.js';
 import { useEventStream, type EventStreamHandlers } from './useEventStream.js';
-import type { PlacementUpdatedEvent, ConversationUpdatedEvent, ContactUpdatedEvent } from './types.js';
+import type {
+  PlacementUpdatedEvent,
+  ConversationUpdatedEvent,
+  ContactUpdatedEvent,
+  RankingUpdatedEvent,
+} from './types.js';
 
 // A minimal in-memory EventSource double: records the URL it was opened with,
 // lets a test dispatch named events, and tracks close(). One live instance at a
@@ -162,6 +167,29 @@ describe('EventStreamProvider + useEventStream', () => {
     expect(onContactUpdated).toHaveBeenCalledWith(event);
     // Its own channel: never delivered as a suggestion event.
     expect(onSuggestionUpdated).not.toHaveBeenCalled();
+  });
+
+  it('dispatches ranking.updated to onRankingUpdated, on its own channel (WP1 B2a D12)', () => {
+    const onRankingUpdated = vi.fn();
+    const onAiRunCompleted = vi.fn();
+    render(
+      <EventStreamProvider>
+        <Sub onRankingUpdated={onRankingUpdated} onAiRunCompleted={onAiRunCompleted} />
+      </EventStreamProvider>,
+    );
+    const event: RankingUpdatedEvent = {
+      anchorKind: 'unit',
+      anchorId: 'unit-1',
+      generation: 'gen-1',
+      status: 'running',
+      batchesDone: 1,
+      batchCount: 2,
+    };
+    act(() => {
+      FakeEventSource.instances[0]?.emit('ranking.updated', event);
+    });
+    expect(onRankingUpdated).toHaveBeenCalledWith(event);
+    expect(onAiRunCompleted).not.toHaveBeenCalled();
   });
 
   it('skips a subscriber opted out with enabled:false', () => {

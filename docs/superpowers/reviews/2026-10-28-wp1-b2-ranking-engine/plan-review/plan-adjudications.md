@@ -136,3 +136,70 @@ section 4); the rest are precision edits.
 ## Round 1 decision count
 
 Decisions changed: PR29-PR39 (11; PR39 raised while the fixes were applied). Round 2 follows (the cap is 4).
+
+## Round 2 (2026-10-29) - two continued reviewers
+
+R2-front.md (16 findings; the front reviewer withdrew its own round-1
+advice on PR29's unlawful half) and R2-back.md (8). Both independently
+found R2F1 = R2B1. 23 accepted, 1 contested ruling reversed (FA5).
+
+| ID | Sev | Finding (short) | Ruling | Slice |
+|---|---|---|---|---|
+| R2F1 = R2B1 | MED | PR29 groups UNLAWFUL flags by item: one open flag on pets text lifts the lawful No pets checkbox cap for every pair (spec D10: "that field caps no pair") | ACCEPT - PR40 | S4, S8 |
+| R2F2 | MED | an accommodation on Pets does not cover a pets rule the model reports under `qualifications` | ACCEPT - PR41 | S4, S8 |
+| R2F3 | MED | PR32 pins hash sorted JSON, not the bytes sent; framing text unpinned | ACCEPT - pin sha256 of the RENDERED system text and of the user-message framing constants, as sent | S4 |
+| R2F4 | LOW | `failedBatches` documented as "failed calls only" though PR36/PR37 write partial `repo` entries; messages mislabel | ACCEPT - PR42 | head, S2, S5, S7 |
+| R2F5 | LOW | a BatchWrite that threw may have applied: "not confirmed written" | ACCEPT - wording; on Cameron's PR37 line | S2, S5 |
+| R2F6 | LOW | the dev tick could run the real model on real tables from a laptop | ACCEPT - `POST /__dev/ranking/tick` also requires `isLocalDynamoTarget` | S5 |
+| R2F7 | LOW | operator scripts refuse to start with a stale RANKING_DRIVER=fake in the shell | ACCEPT - RUNBOOK sentence | S8 |
+| R2F8 | LOW | PR30 makes `npm test`'s default anthropic + poll off; safe only through incidental guards | ACCEPT - C10 names the guards as load-bearing for WI7 | S2 |
+| R2F9 | LOW | PR38's property-anchor twin (landlord read fails with the switch on) shows "not ranked yet" | ACCEPT - PR43 | S3, S5, S6 |
+| R2F10 | LOW | `tenantMissing` still reads inputs whose source is not `field` | ACCEPT | S3 |
+| R2F11 | LOW | contest of FA5: an accommodation flag on a non-requirement field is a signal spec D5 permits | ACCEPT the contest - PR44 (FA5 reversed) | S4 |
+| R2F12 | LOW | FB27's module-load resolution could crash the production worker at import | ACCEPT - resolve in the fake and console driver constructors | S4 |
+| R2F13 | LOW | PR31's test hand-copies the completeness rules | ACCEPT - call `propertyMissing` / `tenantMissing` | S4 |
+| R2F14 | LOW | rubric eligibility sentence overstates | ACCEPT | S4 |
+| R2F15 | LOW | S5 note still names poolRecencyAt | ACCEPT | S5 |
+| R2F16 | LOW | db-seed.ts:5-8 matches-TTL comment goes stale; S2.11 expects S1 subjects to name S1 | ACCEPT | S2 |
+| R2B2 | LOW | PR5 still says putMatches returns void; listRuns predates PR34 | ACCEPT - PR5 text updated | head |
+| R2B3 | LOW | S5 note says S3 lacks candidateIds (it ships it) | ACCEPT | S5 |
+| R2B4 | LOW | a partially written batch drops its omitted count from the message; copy says "failed" when most rows landed | ACCEPT - with PR42 | S5 |
+| R2B5 | LOW | guard retry has no pause; a double failure at the last check marks a fully scored job failed | ACCEPT - retry after 500 ms; the finish write is itself generation-conditioned, so a guard-read failure before it never turns a scored job into failed | S5 |
+| R2B6 | LOW | the 12-week default applies only when both bounds are missing | ACCEPT - a missing `from` is `to` minus 12 ISO weeks; a missing `to` is now | S6, S7 |
+| R2B7 | LOW | putRun failing after a FAILED call records `repo`, hiding the call's failure | ACCEPT - the batch records the call's own failure kind; `repo` only when the call succeeded | S5 |
+| R2B8 | LOW | .env.example comment says the laptop makes the real calls | ACCEPT - the deployed dev worker makes them | S8 |
+
+## Round 2 decision-changing rulings (copied into plan section 4)
+
+- PR40 (R2F1, R2B1) AMENDS PR29: item grouping applies to ACCOMMODATION
+  flags only. An open UNLAWFUL flag suppresses only a failed requirement
+  on its own field (with `landlord:<key>` mapped to `<key>`), as spec
+  D9 / D10 say. Tests: an unlawful flag on `pets` text does not lift a
+  failed `no_pets`; an accommodation on any Pets key does.
+- PR41 (R2F2) Requirements stated in `qualifications`: the rubric tells
+  the model that when an accommodation covers a requirement it lists that
+  requirement in no `failedRequirements`, whatever field states it, and
+  raises the accommodation on the field that states it. The counterfactual
+  check gains a third control: an assistance-animal tenant against a
+  property whose pets rule is written only in `qualifications` (never
+  capped; an accommodation flag in at least two of three runs, each
+  direction).
+- PR42 (R2F4, R2B4) `failedBatches` holds every batch that left
+  candidates without a new match through a failure - the model call, the
+  run write or the match write - each entry listing exactly the
+  candidates that got no match and its failure kind. The job message
+  counts CANDIDATES not scored (from `failedBatches` and `notScored`),
+  never "batches failed" for a batch whose rows mostly landed. The page's
+  status line follows.
+- PR43 (R2F9) PR38 applies to a property anchor too: when its own reads
+  fail after the pool was computed (for example the landlord read with
+  the switch on), the job finishes `done` with every candidate in
+  `notScored` as `unreadable` and the message "Could not read this
+  property's record. Press Rank again."
+- PR44 (R2F11) FA5 REVERSED: an accommodation flag may name any property
+  card field (spec D5's enum); it is stored on the match as returned. Only
+  a flag whose field belongs to a requirement item affects the cap (PR40).
+
+## Round 2 decision count
+
+Decisions changed: PR40-PR44 (5). Round 3 follows (the cap is 4).

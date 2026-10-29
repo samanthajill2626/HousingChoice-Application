@@ -13,7 +13,7 @@
   `docs/superpowers/reviews/2026-10-28-wp1-b2-ranking-engine/`.
 - Spec review: 4 rounds, 63 findings, 0 rejected -
   `docs/superpowers/reviews/2026-10-28-wp1-b2-ranking-engine/design-review/adjudications.md`.
-- Status: PLAN v3 (2026-10-28): drafts reconciled (36 IRs, PR12-PR28); plan review round 1 folded in (50 findings, all accepted, PR29-PR38). Sections 0-4 and 13 are BINDING and
+- Status: PLAN v4 (2026-10-29): drafts reconciled (36 IRs, PR12-PR28); plan review round 1 (50 findings, PR29-PR39) and round 2 (24 findings, PR40-PR44) folded in. Sections 0-4 and 13 are BINDING and
   written by the planner; slice sections 5-12 (S1-S8) are opus section drafts
   assembled verbatim (findings in `plan-drafts/`). Section 4 (planner
   rulings PR1-PRnn) wins over any slice text it contradicts. "Plan section
@@ -312,8 +312,11 @@ Notes box.
   (`Record<string, { in: number; out: number }>`), `rankingWorkerPoll`
   (boolean). Env names are spec D19's.
 - PR5 Repository APIs other slices rely on:
-  - `matchesRepo`: `putMatches(rows: MatchRow[]): Promise<void>` (BatchWrite,
-    unprocessed retried, throws when still unprocessed),
+  - `matchesRepo`: `putMatches(rows: MatchRow[]): Promise<{ written: number;
+    unwritten: MatchPairKey[] }>` (BatchWrite, unprocessed retried; keys
+    still unprocessed, or in a chunk whose request threw, are returned as
+    unwritten - "not confirmed written"; throws only on a non-schema-2 row;
+    PR37),
     `getPairs(keys: { tenantId; unitId }[], { requireComplete: true }):
     Promise<Map<string, MatchRow>>` (key `${tenantId}#${unitId}`;
     consistent base-table read; legacy rows without `schema: 2` absent from
@@ -324,7 +327,9 @@ Notes box.
     `listExpiredLeases(nowIso, limit)`, `claimQueued`, `takeOver`,
     `renewLease`, `markExpiredQueued`, `updateJobProgress`, `finishJob`;
     run - `putRun(record)` + pointers in one call, `markMatchesWritten`,
-    `getRun(runId)`, `listRuns({ entityKey, from, to, cursor, limit })`;
+    `getRun(runId)` (full item), `listRuns({ entityKey, from, to, cursor, limit })`
+    returning `{ entries (summary fields only), nextCursor?, incomplete?: true }`
+    (PR34);
     flag - `getOpenCandidateFlags(unitId)` (all records for the unit),
     `putFlagIfAbsentOrClosed(...)`. Key builders `rankingJobItemId`,
     `rankingRunItemId`, `rankingPointerItemId`, `unlawfulFlagItemId` are
@@ -366,8 +371,8 @@ Notes box.
 - PR13 (S5-F1, IR22) Not-scored candidates outside a failed call: the job
   record gains `notScored: { candidateId: string; reason: 'omitted' |
   'unreadable' }[]` (S2 types it; a takeover resets it with the other
-  progress fields). `failedBatches` holds failed CALLS only (no `index:
-  -1`, no "omitted" entries). The read: a candidate in the anchor's last
+  progress fields). `failedBatches` holds no `index: -1` and no
+  "omitted" entries (what it holds is PR42). The read: a candidate in the anchor's last
   job's `failedBatches` or `notScored` reads `notScored` when it has no
   match, and carries out-of-date reason `failedBatch` when its match's
   `computedAt` is before that job's `startedAt` (spec D9's rule, applied
@@ -458,7 +463,7 @@ Every round 1 finding was accepted; the precision fixes are written into the
 slice text. These change decisions; where slice text still disagrees, the
 ruling wins. PR30 and PR37 depart from spec text and are listed for Cameron.
 
-- PR29 (FB1) `capOf` matches by requirement ITEM, not by key: the keys of
+- PR29 (FB1; its unlawful half AMENDED by PR40) `capOf` matches by requirement ITEM, not by key: the keys of
   one requirement item (from the requirements registry, e.g. `no_pets`,
   `pets`, `pet_fee`) form one group; an accommodation flag or an open
   unlawful flag on ANY key of the item suppresses a failed requirement on
@@ -529,6 +534,40 @@ ruling wins. PR30 and PR37 depart from spec text and are listed for Cameron.
   (or delete the line), push, check" - never push a blank. Departs from
   Cameron's "every var uncommented with its default" rule: listed for
   Cameron.
+
+### Plan review round 2 rulings (adjudications: `plan-review/plan-adjudications.md`)
+
+Round 2 precision fixes are written into the slice text. These change
+decisions and win over any slice text that still disagrees.
+
+- PR40 (R2F1, R2B1) AMENDS PR29: item grouping applies to ACCOMMODATION
+  flags only. An open UNLAWFUL flag suppresses only a failed requirement
+  on its own field (with `landlord:<key>` mapped to `<key>`), as spec
+  D9 / D10 say. Tests: an unlawful flag on `pets` text does not lift a
+  failed `no_pets`; an accommodation on any Pets key does.
+- PR41 (R2F2) Requirements stated in `qualifications`: the rubric tells
+  the model that when an accommodation covers a requirement it lists that
+  requirement in no `failedRequirements`, whatever field states it, and
+  raises the accommodation on the field that states it. The counterfactual
+  check gains a third control: an assistance-animal tenant against a
+  property whose pets rule is written only in `qualifications` (never
+  capped; an accommodation flag in at least two of three runs, each
+  direction).
+- PR42 (R2F4, R2B4) `failedBatches` holds every batch that left
+  candidates without a new match through a failure - the model call, the
+  run write or the match write - each entry listing exactly the
+  candidates that got no match and its failure kind. The job message
+  counts CANDIDATES not scored (from `failedBatches` and `notScored`),
+  never "batches failed" for a batch whose rows mostly landed. The page's
+  status line follows.
+- PR43 (R2F9) PR38 applies to a property anchor too: when its own reads
+  fail after the pool was computed (for example the landlord read with
+  the switch on), the job finishes `done` with every candidate in
+  `notScored` as `unreadable` and the message "Could not read this
+  property's record. Press Rank again."
+- PR44 (R2F11) FA5 REVERSED: an accommodation flag may name any property
+  card field (spec D5's enum); it is stored on the match as returned. Only
+  a flag whose field belongs to a requirement item affects the cap (PR40).
 
 ## 5. S1 - The Notes box
 

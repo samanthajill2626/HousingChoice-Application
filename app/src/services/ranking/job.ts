@@ -273,7 +273,7 @@ export function jobView(record: RankingJobRecord, nowIso: string): RankingJobVie
 export const MSG_TENANT_UNREADABLE = "Could not read this tenant's record. Press Rank again.";
 /** PR43: the property anchor's own reads failed after its pool (the job is done, nothing scored). */
 export const MSG_PROPERTY_UNREADABLE = "Could not read this property's record. Press Rank again.";
-/** R2B5: the pause before the guard's one retry. */
+/** R2B5: the pause before the guard's one retry (and the finish write's, code review R1 A1-4a). */
 export const GUARD_RETRY_MS = 500;
 
 const defaultSleep = (ms: number): Promise<void> =>
@@ -304,11 +304,24 @@ async function finishJob(
   status: 'done' | 'failed',
   message: string | undefined,
 ): Promise<void> {
-  const updated = await deps.jobs.finishJob(job, {
-    status,
-    finishedAt: deps.now(),
-    ...(message !== undefined && { message }),
-  });
+  const outcome = { status, finishedAt: deps.now(), ...(message !== undefined && { message }) };
+  let updated: RankingJobRecord | undefined;
+  try {
+    updated = await deps.jobs.finishJob(job, outcome);
+  } catch (err) {
+    // Code review R1 A1-4a: a transient error here would turn a job whose
+    // every batch landed into "could not finish", so the write is retried
+    // ONCE after the guard's pause. Safe: S2 conditions it on status running
+    // AND this generation, so a first write that did land answers undefined
+    // on the retry (a lost condition never throws) and a newer generation is
+    // never touched. A second throw goes to the caller, as before.
+    deps.logger.warn(
+      { anchorKind: job.anchorKind, anchorId: job.anchorId, generation: job.generation, status, err },
+      'ranking job finish write failed - retrying once',
+    );
+    await (deps.sleep ?? defaultSleep)(GUARD_RETRY_MS);
+    updated = await deps.jobs.finishJob(job, outcome);
+  }
   if (updated === undefined) return;
   emitRankingEvent(deps, updated);
   deps.logger.info(

@@ -297,6 +297,26 @@ describe('rankAnchor', () => {
     expect(h.runs.writes.some((w) => w.startsWith('finishJob'))).toBe(false);
   });
 
+  it('a done write that throws once is retried after the pause, so a fully scored job ends done, not failed (code review R1 A1-4a)', async () => {
+    const h = harness();
+    const finish = h.runs.repo.finishJob;
+    let throws = 1;
+    h.runs.repo.finishJob = async (ref, outcome) => {
+      if (throws > 0) {
+        throws -= 1;
+        throw new Error('ProvisionedThroughputExceededException');
+      }
+      return finish(ref, outcome);
+    };
+    await rankAnchor(h.job, h.deps);
+    expect(h.record()).toMatchObject({ status: 'done', batchCount: 3 });
+    expect('message' in h.record()).toBe(false);
+    expect(h.matches.rows.size).toBe(5);
+    expect(h.emitted.at(-1)).toMatchObject({ status: 'done', batchesDone: 3, batchCount: 3 });
+    expect(h.capture.lines.some((l) => l['msg'] === 'ranking job finish write failed - retrying once')).toBe(true);
+    expect(h.sleeps).toEqual([GUARD_RETRY_MS]);
+  });
+
   it('PR36: a generation check that throws twice fails the job with MSG_ERROR and calls no model', async () => {
     const h = harness();
     h.runs.onGetJob = () => {

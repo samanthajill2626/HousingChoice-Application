@@ -44,6 +44,10 @@ export function RankingCostTotals({
           <p className={styles.note}>Environment: {cost.environment}</p>
           {rangeNote !== undefined ? <p className={styles.note}>{rangeNote}</p> : null}
           {cost.incomplete === true ? <p className={styles.note}>Some runs could not be read; totals may be low</p> : null}
+          {/* The server stops totaling at its page cap (plan PR34: never a silent drop). */}
+          {cost.truncated ? (
+            <p className={styles.note}>Too many runs in this range to total them all; totals are low. Choose a shorter range.</p>
+          ) : null}
           {cost.weeks.length === 0 ? (
             <p className={styles.empty}>No ranking cost in this range.</p>
           ) : (

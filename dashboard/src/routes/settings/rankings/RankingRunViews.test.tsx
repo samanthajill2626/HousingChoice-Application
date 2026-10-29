@@ -246,8 +246,24 @@ describe('RankingCostTotals', () => {
     );
     expect(screen.getByText('The last 12 weeks.')).toBeInTheDocument();
     expect(screen.getByText('Some runs could not be read; totals may be low')).toBeInTheDocument();
+    expect(screen.queryByText(TRUNCATED_NOTE)).not.toBeInTheDocument();
+  });
+
+  // Conformance N2 (plan PR34: never a silent drop): the server stops
+  // totaling at its page cap and says `truncated`; the page says so too.
+  it('says when the range held more runs than the totals count', () => {
+    const { rerender } = render(
+      <RankingCostTotals cost={{ environment: 'local', weeks: [], totalUsd: 0, truncated: false }} status="ready" rangeNote={undefined} onRetry={vi.fn()} />,
+    );
+    expect(screen.queryByText(TRUNCATED_NOTE)).not.toBeInTheDocument();
+    rerender(
+      <RankingCostTotals cost={{ environment: 'local', weeks: [], totalUsd: 0, truncated: true }} status="ready" rangeNote={undefined} onRetry={vi.fn()} />,
+    );
+    expect(screen.getByRole('region', { name: 'Cost by week' })).toHaveTextContent(TRUNCATED_NOTE);
   });
 });
+
+const TRUNCATED_NOTE = 'Too many runs in this range to total them all; totals are low. Choose a shorter range.';
 
 describe('RankingRunDetail', () => {
   it('shows the run fields', () => {

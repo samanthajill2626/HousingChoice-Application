@@ -697,8 +697,9 @@ export interface RankingCostResponse {
   /** This deployment's environment name. */
   environment: string;
   weeks: RankingCostWeek[];
-  /** S6 always sends both; the page does not show them. */
+  /** S6 always sends it; the page does not show it. */
   totalUsd: number;
+  /** The server stopped totaling at its page cap, so the totals are low; the page says so (conformance N2). */
   truncated: boolean;
   /** A run in range could not be read even after a retry (plan PR34). */
   incomplete?: true;

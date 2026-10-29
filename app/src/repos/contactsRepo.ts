@@ -182,6 +182,17 @@ export interface ContactItem extends TenantMatchingInputValues {
    * client-settable (the parser does not copy it).
    */
   staff_notes_updated_at?: string;
+  /**
+   * ISO 8601 - when the Notes box (`notes`) was last written (WP1 B2a spec
+   * D14.3). Stamped in the SAME write as the box by EVERY Notes writer: the
+   * contacts PATCH and manual create (routes/contacts.ts), extraction's
+   * append (services/extraction/apply.ts) and the importer
+   * (lib/import/apply.ts). Server-owned: a client value is refused
+   * (SERVER_OWNED_CONTACT_FIELDS). Absent = never stamped (every box written
+   * before B2a, and every seed). The PATCH's notes_expected_updated_at guard
+   * compares it. Off the ranking card (services/ranking/cardFields.ts).
+   */
+  notes_updated_at?: string;
   /** E.164 (byPhone GSI) — the PRIMARY number (back-compat scalar). */
   phone?: string;
   /**

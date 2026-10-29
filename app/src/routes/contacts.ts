@@ -4,7 +4,7 @@
 //   GET   /api/contacts?type=&status=&phone=&limit=&cursor=  → { contacts, nextCursor }   (M1.5)
 //   POST  /api/contacts  { type, firstName, lastName, phone, … }  → 201 { contact } | 409  (M1.5)
 //   GET   /api/contacts/:contactId   → { contact }                                          (M1.4)
-//   PATCH /api/contacts/:contactId   { type?, firstName?, lastName?, voucherSize?, status?, notes?, staff_notes?, staff_notes_expected_updated_at? }
+//   PATCH /api/contacts/:contactId   { type?, firstName?, lastName?, voucherSize?, status?, notes?, notes_expected_updated_at?, staff_notes?, staff_notes_expected_updated_at? }
 //                                    → { contact }                                          (M1.4)
 //                                    + the 15 landlord requirement keys req_* (landlords only;
 //                                      lib/requirements.ts, property-requirements spec D2)
@@ -312,7 +312,9 @@ function isContactType(value: unknown): value is ContactType {
  * `last_heard_from_at` is written only by contactsRepo.touchLastHeardFrom
  * (spec 5.1, invariant I1); `last_reached_out_at` only by
  * contactsRepo.touchLastReachedOut (today-checklist spec 7.3 - the
- * staff-outreach helper and the one-time backfill).
+ * staff-outreach helper and the one-time backfill). `notes_updated_at` is
+ * stamped by every Notes writer in the same write as the box (WP1 B2a spec
+ * D14.3: this PATCH, the manual create, extraction apply, the importer).
  */
 const SERVER_OWNED_CONTACT_FIELDS = [
   'caseworker_review',
@@ -320,6 +322,7 @@ const SERVER_OWNED_CONTACT_FIELDS = [
   'type_source',
   'last_heard_from_at',
   'last_reached_out_at',
+  'notes_updated_at',
 ] as const;
 
 function refuseServerOwnedFields(b: Record<string, unknown>): { error: string } | undefined {
@@ -1239,6 +1242,12 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       parsed.item.consent_captured_by = req.user?.userId;
     }
 
+    // WP1 B2a spec D14.3: a create that writes the Notes box stamps it in
+    // the same write, as the PATCH does (a client value was refused above).
+    if (parsed.item.notes !== undefined) {
+      parsed.item.notes_updated_at = new Date().toISOString();
+    }
+
     const contact = await contacts.create(parsed.item);
     await audit.append(`contacts#${contact.contactId}`, 'contact_created', {
       actor: req.user?.userId,
@@ -1949,6 +1958,13 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // for this key, so this is the only writer.
     if ('staff_notes' in parsed.patch) {
       parsed.patch['staff_notes_updated_at'] = new Date().toISOString();
+    }
+
+    // WP1 B2a spec D14.3: the Notes box's own stamp, set on every notes
+    // write (a clear included) in the same write. A client value is refused
+    // (SERVER_OWNED_CONTACT_FIELDS), so this route is its only PATCH writer.
+    if ('notes' in parsed.patch) {
+      parsed.patch['notes_updated_at'] = new Date().toISOString();
     }
 
     // Capture the PRIOR stored voucher date BEFORE the write so the voucher

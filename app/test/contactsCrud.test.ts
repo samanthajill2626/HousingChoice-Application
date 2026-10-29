@@ -555,6 +555,8 @@ describe('server-owned contact fields (caseworkers spec D21, D22)', () => {
     ['last_heard_from_at', '2030-01-01T00:00:00.000Z'],
     // today-checklist PR4 (spec 7.3): written only by touchLastReachedOut.
     ['last_reached_out_at', '2030-01-01T00:00:00.000Z'],
+    // WP1 B2a spec D14.3 (WI4): stamped by every Notes writer, never a client.
+    ['notes_updated_at', '2030-01-01T00:00:00.000Z'],
   ] as const;
 
   for (const [key, value] of OWNED) {

@@ -353,6 +353,94 @@ Notes box.
 - PR11 Hours (Cameron's hands-on hours): charter amendment 13's 24-30
   stands until the drafts are assembled; firmed in plan v2.
 
+### Assembly rulings (from the section drafts; findings and the interface reconciliation in `plan-drafts/`)
+
+- PR12 Interface reconciliation (`plan-drafts/interface-reconciliation.md`,
+  IR1-IR36): every IR's RECOMMENDED resolution is adopted and written into
+  the drafts, except where PR13-PR28 say otherwise.
+- PR13 (S5-F1, IR22) Not-scored candidates outside a failed call: the job
+  record gains `notScored: { candidateId: string; reason: 'omitted' |
+  'unreadable' }[]` (S2 types it; a takeover resets it with the other
+  progress fields). `failedBatches` holds failed CALLS only (no `index:
+  -1`, no "omitted" entries). The read: a candidate in the anchor's last
+  job's `failedBatches` or `notScored` reads `notScored` when it has no
+  match, and carries out-of-date reason `failedBatch` when its match's
+  `computedAt` is before that job's `startedAt` (spec D9's rule, applied
+  to both lists). The job message counts both kinds; the page's job status
+  counts failed batches by batch and not-scored candidates separately.
+- PR14 (IR19, S7-F1) The run detail: each `results[]` entry stores the
+  pair's MERGED `missing` list (code flags then the model's unknowns,
+  spec D3) beside `unknowns`; S6's wire uses S7's field names (`missing`,
+  `cappedAtRun`, `currentRunId`, `anchorDisplay` at the top level); each
+  pair's band is computed server side with `bandOf` (PR7).
+- PR15 (IR4) `matchesWritten` is `{ count: number; at: string }` (S2);
+  S5 writes it, S7 reads `count`.
+- PR16 (IR18) A pool over the ceiling: the read answers 200 with the
+  anchor block present (display, `anchorNotes`, missing), `rows: []` and
+  `poolTooLarge: { size }`; the page checks `poolTooLarge` first.
+- PR17 (IR24, IR25) A 503 comes ONLY from the anchor's own reads (its
+  card, its seen set, and for a property anchor its own flag read). A
+  candidate whose reads (card, sends, tours, flags) are incomplete is a
+  row with out-of-date reason `unverified` showing its stored match; when
+  its `propertyFacts` are unavailable, its cap treats every failed
+  cap-eligible key as recorded and no flag as open, and the row still
+  says `unverified`. The read never throws on an unverified candidate.
+- PR18 (S4-F1) `promptFingerprint` = sha256 over the system text, a
+  newline, and the stable JSON of the schema sent on that call. RUNBOOK's
+  "Changing a structured-output schema" says a change to the ranking
+  schema's enums bumps `RUBRIC_VERSION`, which marks matches out of date.
+  Departs from spec D4's text (system text only): listed for Cameron.
+- PR19 (S4-F2) S5's `buildRankingPrompt` call passes `batchIndex` and
+  `landlordCard: deps.config.rankingLandlordCard`.
+- PR20 (S3/S4 cross-slice, IR17) A tenant card's properties-seen entry
+  names its home under the key `home`. In the call: a seen home that is
+  the property ANCHOR is `home: "anchor"` (written once, as the anchor
+  card); one that is a candidate in the call is its `c` handle; any other
+  is its `h` handle in `homesSeen`. The rubric text says so.
+- PR21 (S3-F1, S5-F2) "Anchor not found" (404): a tenant anchor is a
+  contact that exists, is not soft-deleted and is typed `tenant`; a unit
+  anchor is a unit that exists and is not soft-deleted, any status. ONE
+  function, used by the claim and by the pool.
+- PR22 (S2-F1) Startup refuses `RANKING_PAIR_TTL_DAYS` below
+  `RANKING_MAX_AGE_DAYS` (charter 10.2: the TTL outlives the age rule).
+- PR23 (S3-F2, S3-F3) A seen home whose address gives no label is listed
+  as "a property with no address on file" and never attaches a Notes
+  line. With the landlord card switch on, a landlord-default pets item
+  closes the property's `pets` completeness gap (spec D2.1: a landlord
+  default counts as recorded).
+- PR24 (S6-F1, S6-F2) The read budget: under 5 s asserted when
+  `RANKING_READ_BUDGET=1` is set, in a run of that test file alone; inside
+  `npm test` the same test asserts a 20 s ceiling (DynamoDB Local
+  contention). The S6 report records the isolated number. A miss may be
+  fixed in S3's files (`assemble.ts`, `seenSet.ts`, `pairHistory.ts`);
+  the S6 report names each change.
+- PR25 (S8-F1, S8-F2) The two controls run three times in EACH direction
+  and must pass in each. Every counterfactual call holds the subject at
+  `c1` plus the same two fixed synthetic fillers for that pair.
+- PR26 (S7 N7, N8) The include-older checkbox names the configured
+  window: the read returns `poolWindowDays` and the copy is "Include
+  tenants not heard from in N days". S7.12 (the Notes conflict e2e) is
+  e2e-only: its RED is waived (S1 already ships the behavior).
+- PR27 Files outside PR2's lists, allowed: S1 - `jobs/extraction.ts` (the
+  run record), the non-ranking types in `dashboard/src/api/types.ts`,
+  `ContactEditForm.module.css`, and the stale `toSingleLine` comments at
+  `lib/propertyLabel.ts:14` and `test/propertyLabel.test.ts:22-23`. S2 -
+  `test/helpers/twilioWebhookHarness.ts` (the two new fake methods) and
+  the nine production-boot config fixtures. S5 -
+  `services/ranking/jobWiring.ts` (the one deps builder the worker and the
+  dev tick share), the SSE block of `routes/api.ts`, the
+  `eventBridge.test.ts` event count, the helpers
+  `test/helpers/rankingJobFixtures.ts` and `test/helpers/rankingRunsFake.ts`.
+  S6 - the two mounts and the test-seam fields of `ApiRouterDeps` in
+  `routes/api.ts`. S8 - the issue `units-contacts-batchget-walk-duplicated`
+  (the third copy, `getManyByIds`).
+- PR28 The handback lists for Cameron: `move_in_date` classified exclude as
+  "unclassified at B2a" (seed attribute no decision names), every other
+  unclassified attribute the build finds, the rubric r1 and examples e1
+  for his reading, and that extraction runs recorded before B2a whose
+  window holds U+2028 / U+2029 now show hash status "mismatch" (spec
+  D14.1, accepted).
+
 <!-- Slice sections 5-12 (S1-S8) are assembled here from the drafts. -->
 
 ## 13. S9 - Sync, gates, self-QA, handback

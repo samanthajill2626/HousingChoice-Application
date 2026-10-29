@@ -27,6 +27,7 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
+import { queryAll } from '../lib/dynamoPaging.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { RepoDeps } from './conversationsRepo.js';
 import type { MatchFairHousingFlag, MatchMissing, MatchReason, RankingAnchorKind } from './matchesRepo.js';
@@ -845,9 +846,97 @@ function createRunFamily(ctx: FamilyCtx): RankingRunFamily {
   };
 }
 
+// --- The unlawful-flag family (spec D10) ------------------------------------------
+
+export const unlawfulFlagItemId = (unitId: string, field: string): string => `uflag#${unitId}#${field}`;
+export const unlawfulFlagEntityKey = (unitId: string): string => `uflags#${unitId}`;
+
+export interface UnlawfulFlagRecord {
+  itemId: string;
+  unitId: string;
+  /** A property card field, or its `landlord:<key>` twin (switch on). */
+  field: string;
+  /** sha256 of the field's trimmed text when raised. */
+  textHash: string;
+  /** The model's reason naming the field, else the default sentence (spec D10). */
+  reason: string;
+  runId: string;
+  raisedAt: string;
+  entityKey: string;
+  sortKey: string;
+  /** Reserved for B4's admin Dismiss; nothing in B2a writes them. */
+  dismissedAt?: string;
+  dismissedBy?: string;
+  textAtDismiss?: string;
+}
+
+export type UnlawfulFlagInput = Pick<UnlawfulFlagRecord, 'unitId' | 'field' | 'textHash' | 'reason' | 'runId' | 'raisedAt'>;
+
+export interface RankingFlagFamily {
+  /**
+   * Write the flag unless one is OPEN for that property and field: condition
+   * attribute_not_exists OR stored textHash <> the given (current) hash. An
+   * open flag keeps its first raising run (false); a closed one is replaced
+   * whole (true). No TTL.
+   */
+  putFlagIfAbsentOrClosed(flag: UnlawfulFlagInput): Promise<boolean>;
+  /** Every flag record of the unit (open or closed - the read decides), by field. */
+  getOpenCandidateFlags(unitId: string): Promise<UnlawfulFlagRecord[]>;
+}
+
+function createFlagFamily(ctx: FamilyCtx): RankingFlagFamily {
+  const { doc, table, log } = ctx;
+  return {
+    async putFlagIfAbsentOrClosed(flag) {
+      const item: UnlawfulFlagRecord = {
+        itemId: unlawfulFlagItemId(flag.unitId, flag.field),
+        unitId: flag.unitId,
+        field: flag.field,
+        textHash: flag.textHash,
+        reason: flag.reason,
+        runId: flag.runId,
+        raisedAt: flag.raisedAt,
+        entityKey: unlawfulFlagEntityKey(flag.unitId),
+        sortKey: flag.field,
+      };
+      try {
+        await doc.send(
+          new PutCommand({
+            TableName: table,
+            Item: item,
+            ConditionExpression: 'attribute_not_exists(#itemId) OR #textHash <> :textHash',
+            ExpressionAttributeNames: { '#itemId': 'itemId', '#textHash': 'textHash' },
+            ExpressionAttributeValues: { ':textHash': flag.textHash },
+          }),
+        );
+        return true;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return false;
+        throw err;
+      }
+    },
+
+    async getOpenCandidateFlags(unitId) {
+      // Every page, through the house walk (page cap + WARN, lib/dynamoPaging.ts).
+      return queryAll<UnlawfulFlagRecord>(
+        doc,
+        {
+          TableName: table,
+          IndexName: 'byEntity',
+          KeyConditionExpression: '#ek = :ek',
+          ExpressionAttributeNames: { '#ek': 'entityKey' },
+          ExpressionAttributeValues: { ':ek': unlawfulFlagEntityKey(unitId) },
+          ScanIndexForward: true,
+        },
+        { logger: log },
+      );
+    },
+  };
+}
+
 // --- The repository ---
 
-export type RankingRunsRepo = RankingJobFamily & RankingRunFamily;
+export type RankingRunsRepo = RankingJobFamily & RankingRunFamily & RankingFlagFamily;
 
 export function createRankingRunsRepo(deps: RepoDeps = {}): RankingRunsRepo {
   const ctx: FamilyCtx = {
@@ -855,5 +944,5 @@ export function createRankingRunsRepo(deps: RepoDeps = {}): RankingRunsRepo {
     table: tableName('ai_runs', deps.env),
     log: deps.logger ?? defaultLogger,
   };
-  return { ...createJobFamily(ctx), ...createRunFamily(ctx) };
+  return { ...createJobFamily(ctx), ...createRunFamily(ctx), ...createFlagFamily(ctx) };
 }

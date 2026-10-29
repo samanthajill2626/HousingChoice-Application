@@ -108,6 +108,14 @@ describe.skipIf(!reachable)('the extraction run log never returns a ranking reco
       queuedExpiresAt: '2026-10-28T11:10:00.000Z',
       expiresAt: rankingExpiresAt(startedAt, 180),
     });
+    await rankings.putFlagIfAbsentOrClosed({
+      unitId: 'unit-x',
+      field: 'qualifications',
+      textHash: 'h'.repeat(64),
+      reason: 'flagged as a requirement fair housing does not allow',
+      runId: rankingRunId,
+      raisedAt: startedAt,
+    });
   }, 120_000);
 
   afterAll(async () => {

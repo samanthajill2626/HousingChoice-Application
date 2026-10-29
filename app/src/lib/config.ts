@@ -17,7 +17,7 @@ export type MessagingDriverName = 'twilio' | 'console';
 /** Outbound email driver: real AWS SES send vs the local console fake. */
 export type EmailDriverName = 'ses' | 'console';
 
-export interface AppConfig {
+export interface AppConfig extends RankingConfig {
   nodeEnv: string;
   /** Dev-only test/QA endpoints (dev-login, reseed) are gated on this.
    *  MUST be false in production — loadConfig fails fast otherwise. */
@@ -401,10 +401,13 @@ export interface AppConfig {
    */
   eventBridgeUrl?: string;
   /**
-   * Cadence (ms) for the worker's three stateless polls (tour reminders,
-   * placement nudges, extraction - worker.ts). Default 60000. Lowering it is a
-   * QA/dev affordance; the e2e harness deliberately keeps the default (see the
-   * bridge e2e spec's race rationale in
+   * Cadence (ms) shared by the worker polls started through worker.ts's
+   * startPoll wrapper: tour reminders, placement nudges, roster actions,
+   * extraction, group guardrails, the journal sweep and the ranking poll (the
+   * tour auto-close poll runs on its own code constant instead). Default
+   * 30000, kept in step with the .env examples. Lowering it is a QA/dev
+   * affordance; the e2e harness deliberately keeps the default (see the bridge
+   * e2e spec's race rationale in
    * docs/superpowers/plans/2026-07-20-event-bridge.md). Positive integer.
    */
   workerPollIntervalMs: number;
@@ -543,6 +546,326 @@ export function parseExtractionFactMinConfidence(raw: string | undefined): numbe
   return parsed;
 }
 
+// === WP1 B2a ranking engine (spec D6, D19; plan PR4) ========================
+// Every ranking variable has a code default, so none is required to boot.
+// ONE parse rule for all of them: unset, or blank after the trim, is the
+// default; any other value is parsed strictly and a bad one THROWS (startup
+// refuses) - a typo in a cost or fair-housing knob must never ride through
+// silently. Enum values compare with case folded; model ids exactly.
+
+export type RankingDriverName = 'anthropic' | 'console' | 'fake';
+export type RankingEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type RankingPriorityStrength = 'within_band' | 'one_band_up' | 'always_first';
+
+/** Dollars per million input and output tokens for one model (spec D6). */
+export interface AiPrice {
+  in: number;
+  out: number;
+}
+export type AiPriceTable = Record<string, AiPrice>;
+
+const RANKING_DRIVERS: readonly RankingDriverName[] = ['anthropic', 'console', 'fake'];
+/** The API's effort levels for both supported models. */
+const RANKING_EFFORTS: readonly RankingEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+const RANKING_PRIORITY_STRENGTHS: readonly RankingPriorityStrength[] = [
+  'within_band',
+  'one_band_up',
+  'always_first',
+];
+
+/**
+ * The models the ranking driver accepts (spec D6, "the thinking trap"): both
+ * run adaptive thinking with an effort. Any other AI_RANKING_MODEL stops
+ * startup. The extraction driver's thinkingOff handling is not used here.
+ */
+export const RANKING_SUPPORTED_MODELS: readonly string[] = ['claude-sonnet-5-5', 'claude-opus-5-5'];
+export const AI_RANKING_MODEL_DEFAULT = 'claude-sonnet-5-5';
+
+/**
+ * The built-in AI_PRICE_TABLE (spec D6; Cameron confirmed at the spec gate,
+ * 2026-10-28): the Claude API model table as of 2026-10-06, dollars per
+ * million tokens. An AI_PRICE_TABLE value REPLACES it whole.
+ */
+export const DEFAULT_AI_PRICE_TABLE: Readonly<Record<string, Readonly<AiPrice>>> = Object.freeze({
+  'claude-sonnet-5-5': Object.freeze({ in: 2, out: 10 }),
+  'claude-opus-5-5': Object.freeze({ in: 4, out: 20 }),
+});
+
+/** WP1 B2a ranking configuration (spec D19; plan PR4), flat on AppConfig. */
+export interface RankingConfig {
+  /**
+   * RANKING_DRIVER: anthropic (the real model) | console (local development:
+   * logs counts only, scores with the fake rules) | fake (the deterministic
+   * test seam). Default anthropic in production AND on real tables outside
+   * production (no local DYNAMODB_ENDPOINT; PR30), console otherwise. fake
+   * and console are REFUSED in both places: either would write made-up scores
+   * into a real matches store (charter 7.4).
+   */
+  rankingDriver: RankingDriverName;
+  /** AI_RANKING_MODEL (default claude-sonnet-5-5); one of RANKING_SUPPORTED_MODELS. */
+  aiRankingModel: string;
+  /** RANKING_EFFORT, the request's output_config effort (default low; charter 14). */
+  rankingEffort: RankingEffort;
+  /** RANKING_MAX_OUTPUT_TOKENS (default 16000); thinking tokens count against it. */
+  rankingMaxOutputTokens: number;
+  /** RANKING_CALL_TIMEOUT_MS, one model call's request timeout (default 120000). */
+  rankingCallTimeoutMs: number;
+  /** RANKING_BATCH_SIZE, candidates per model call (default 40; charter 7.1). */
+  rankingBatchSize: number;
+  /** RANKING_BATCH_CONCURRENCY, batches of one job run in parallel (default 4). */
+  rankingBatchConcurrency: number;
+  /** RANKING_MAX_CONCURRENT_JOBS, jobs one worker process runs at once (default 2). */
+  rankingMaxConcurrentJobs: number;
+  /** RANKING_LEASE_MS, a running job's lease (default 90000; renewed every third of it). */
+  rankingLeaseMs: number;
+  /** RANKING_QUEUE_EXPIRY_MS, how long a queued job waits for a poller (default 600000). */
+  rankingQueueExpiryMs: number;
+  /** RANKING_POOL_WINDOW_DAYS, the property anchor's last-heard-from window (default 90). */
+  rankingPoolWindowDays: number;
+  /** RANKING_MAX_POOL, the safety ceiling on one pool (default 300). */
+  rankingMaxPool: number;
+  /** RANKING_SEEN_MAX, the properties-seen entries one tenant card lists (default 8). */
+  rankingSeenMax: number;
+  /** RANKING_MAX_AGE_DAYS, a match older than this reads out of date (default 7). */
+  rankingMaxAgeDays: number;
+  /**
+   * RANKING_PAIR_TTL_DAYS (default 180): the TTL of matches, ranking runs,
+   * their pointers and ranking job records. At least RANKING_MAX_AGE_DAYS
+   * (charter 10.2: a job's failed-batch list must outlive the matches it flags).
+   */
+  rankingPairTtlDays: number;
+  /** RANKING_PRIORITY_STRENGTH, how priority lifts a tenant anchor's properties (default within_band). */
+  rankingPriorityStrength: RankingPriorityStrength;
+  /** RANKING_LANDLORD_CARD, the landlord-defaults switch on the property card (default false). */
+  rankingLandlordCard: boolean;
+  /** RANKING_READ_CONCURRENCY, the ranking read's per-candidate read concurrency (default 16). */
+  rankingReadConcurrency: number;
+  /** RATE_LIMIT_RANK_PER_MIN, presses of Rank per user per minute (default 6). */
+  rateLimitRankPerMin: number;
+  /**
+   * AI_PRICE_TABLE (a JSON object) or the built-in table: dollars per million
+   * input and output tokens per model. The ranking model must have a price.
+   */
+  aiPriceTable: AiPriceTable;
+  /**
+   * RANKING_WORKER_POLL on | off. off keeps the worker from starting the
+   * ranking poll: the hermetic e2e lane (jobs run through
+   * POST /__dev/ranking/tick) and, by DEFAULT, a non-production process on
+   * real tables (PR30: a laptop never claims a hosted-dev job). Default on
+   * otherwise. off is REFUSED in production.
+   */
+  rankingWorkerPoll: boolean;
+}
+
+/**
+ * PR30: is the DynamoDB target local? True only for a DYNAMODB_ENDPOINT whose
+ * host is localhost, 127.0.0.1 or [::1] (DynamoDB Local: the hermetic lanes,
+ * the dev loop's local mode, the test suites). Unset, blank, unparseable or
+ * any other host means REAL tables (AWS - `npm run dev` live mode reads hosted
+ * dev's). Exported for the scripts that must tell the two apart.
+ */
+export function isLocalDynamoTarget(endpoint: string | undefined): boolean {
+  const value = endpoint?.trim();
+  if (value === undefined || value.length === 0) return false;
+  try {
+    const hostname = new URL(value).hostname.toLowerCase();
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]';
+  } catch {
+    return false;
+  }
+}
+
+/** Unset, or blank after the trim, reads as undefined; else the trimmed text. */
+function rankingEnvValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const raw = env[name];
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function rankingPositiveInteger(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  const value = rankingEnvValue(env, name);
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!/^[0-9]+$/.test(value) || !Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer, got: ${env[name]}`);
+  }
+  return parsed;
+}
+
+function rankingChoice<T extends string>(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  choices: readonly T[],
+  fallback: T,
+): T {
+  const value = rankingEnvValue(env, name);
+  if (value === undefined) return fallback;
+  const folded = value.toLowerCase();
+  const match = choices.find((choice) => choice === folded);
+  if (match === undefined) {
+    throw new Error(`${name} must be one of ${choices.join(', ')}, got: ${env[name]}`);
+  }
+  return match;
+}
+
+function rankingBoolean(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
+  const value = rankingEnvValue(env, name);
+  if (value === undefined) return fallback;
+  const folded = value.toLowerCase();
+  if (folded === 'true' || folded === '1' || folded === 'yes') return true;
+  if (folded === 'false' || folded === '0' || folded === 'no') return false;
+  throw new Error(`${name} must be one of true, 1, yes, false, 0, no, got: ${env[name]}`);
+}
+
+/** A price-table model id: plain id characters, starting with a letter or digit. */
+const PRICE_TABLE_MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+
+/**
+ * Parse AI_PRICE_TABLE (spec D6). Unset or blank -> a COPY of the built-in
+ * table. Otherwise a JSON object of model id -> { "in": dollars, "out":
+ * dollars } per million tokens, each price a finite number of 0 or more and
+ * nothing else in the entry; anything else THROWS. Exported so the merge-gate
+ * scripts (S8) read prices through the same rule.
+ */
+export function parseAiPriceTable(raw: string | undefined): AiPriceTable {
+  const value = raw?.trim();
+  if (value === undefined || value.length === 0) {
+    return Object.fromEntries(
+      Object.entries(DEFAULT_AI_PRICE_TABLE).map(([model, price]) => [model, { in: price.in, out: price.out }]),
+    );
+  }
+  const shape =
+    'AI_PRICE_TABLE must be a JSON object of model id -> { "in": dollars, "out": dollars } per million tokens';
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error(`${shape}; it is not valid JSON`);
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`${shape}; got a value that is not an object`);
+  }
+  const table: AiPriceTable = {};
+  for (const [model, price] of Object.entries(parsed as Record<string, unknown>)) {
+    if (!PRICE_TABLE_MODEL_ID.test(model)) {
+      throw new Error(`${shape}; "${model}" is not a model id`);
+    }
+    if (typeof price !== 'object' || price === null || Array.isArray(price)) {
+      throw new Error(`${shape}; the entry for ${model} is not an object`);
+    }
+    const entry = price as Record<string, unknown>;
+    const keys = Object.keys(entry).sort();
+    if (keys.length !== 2 || keys[0] !== 'in' || keys[1] !== 'out') {
+      throw new Error(`${shape}; the entry for ${model} must hold exactly "in" and "out"`);
+    }
+    const input = entry['in'];
+    const output = entry['out'];
+    if (
+      typeof input !== 'number' ||
+      !Number.isFinite(input) ||
+      input < 0 ||
+      typeof output !== 'number' ||
+      !Number.isFinite(output) ||
+      output < 0
+    ) {
+      throw new Error(`${shape}; the prices for ${model} must be numbers of 0 or more`);
+    }
+    table[model] = { in: input, out: output };
+  }
+  return table;
+}
+
+/**
+ * Every ranking variable (spec D19). Called LAST by loadConfig, so the
+ * existing production gates (CF secret, job delivery, auth, messaging) keep
+ * firing first with their own errors.
+ */
+export function parseRankingConfig(env: NodeJS.ProcessEnv, nodeEnv: string): RankingConfig {
+  // PR30: a non-production process whose DynamoDB target is not local is on
+  // REAL tables (live local dev against hosted dev's tables).
+  const onRealTablesOutsideProduction = nodeEnv !== 'production' && !isLocalDynamoTarget(env.DYNAMODB_ENDPOINT);
+  const rankingDriver = rankingChoice(
+    env,
+    'RANKING_DRIVER',
+    RANKING_DRIVERS,
+    nodeEnv === 'production' || onRealTablesOutsideProduction ? 'anthropic' : 'console',
+  );
+
+  const aiRankingModel = rankingEnvValue(env, 'AI_RANKING_MODEL') ?? AI_RANKING_MODEL_DEFAULT;
+  if (!RANKING_SUPPORTED_MODELS.includes(aiRankingModel)) {
+    throw new Error(
+      `AI_RANKING_MODEL must be one of ${RANKING_SUPPORTED_MODELS.join(', ')} (the models that run ` +
+        `adaptive thinking with an effort), got: ${env.AI_RANKING_MODEL}`,
+    );
+  }
+
+  const rankingEffort = rankingChoice(env, 'RANKING_EFFORT', RANKING_EFFORTS, 'low');
+  const rankingMaxOutputTokens = rankingPositiveInteger(env, 'RANKING_MAX_OUTPUT_TOKENS', 16000);
+  const rankingCallTimeoutMs = rankingPositiveInteger(env, 'RANKING_CALL_TIMEOUT_MS', 120000);
+  const rankingBatchSize = rankingPositiveInteger(env, 'RANKING_BATCH_SIZE', 40);
+  const rankingBatchConcurrency = rankingPositiveInteger(env, 'RANKING_BATCH_CONCURRENCY', 4);
+  const rankingMaxConcurrentJobs = rankingPositiveInteger(env, 'RANKING_MAX_CONCURRENT_JOBS', 2);
+  const rankingLeaseMs = rankingPositiveInteger(env, 'RANKING_LEASE_MS', 90000);
+  const rankingQueueExpiryMs = rankingPositiveInteger(env, 'RANKING_QUEUE_EXPIRY_MS', 600000);
+  const rankingPoolWindowDays = rankingPositiveInteger(env, 'RANKING_POOL_WINDOW_DAYS', 90);
+  const rankingMaxPool = rankingPositiveInteger(env, 'RANKING_MAX_POOL', 300);
+  const rankingSeenMax = rankingPositiveInteger(env, 'RANKING_SEEN_MAX', 8);
+  const rankingMaxAgeDays = rankingPositiveInteger(env, 'RANKING_MAX_AGE_DAYS', 7);
+  const rankingPairTtlDays = rankingPositiveInteger(env, 'RANKING_PAIR_TTL_DAYS', 180);
+  if (rankingPairTtlDays < rankingMaxAgeDays) {
+    throw new Error(
+      `RANKING_PAIR_TTL_DAYS (${rankingPairTtlDays}) must be at least RANKING_MAX_AGE_DAYS ` +
+        `(${rankingMaxAgeDays}): a ranking job's failed-batch list must outlive every match it flags.`,
+    );
+  }
+  const rankingPriorityStrength = rankingChoice(
+    env,
+    'RANKING_PRIORITY_STRENGTH',
+    RANKING_PRIORITY_STRENGTHS,
+    'within_band',
+  );
+  const rankingLandlordCard = rankingBoolean(env, 'RANKING_LANDLORD_CARD', false);
+  const rankingReadConcurrency = rankingPositiveInteger(env, 'RANKING_READ_CONCURRENCY', 16);
+  const rateLimitRankPerMin = rankingPositiveInteger(env, 'RATE_LIMIT_RANK_PER_MIN', 6);
+
+  const aiPriceTable = parseAiPriceTable(env.AI_PRICE_TABLE);
+  if (!Object.hasOwn(aiPriceTable, aiRankingModel)) {
+    throw new Error(
+      `AI_PRICE_TABLE has no price for the ranking model ${aiRankingModel} - every ranking run ` +
+        'records its cost. Add the model to AI_PRICE_TABLE or change AI_RANKING_MODEL.',
+    );
+  }
+
+  const rankingWorkerPoll =
+    rankingChoice(env, 'RANKING_WORKER_POLL', ['on', 'off'] as const, onRealTablesOutsideProduction ? 'off' : 'on') ===
+    'on';
+
+  return {
+    rankingDriver,
+    aiRankingModel,
+    rankingEffort,
+    rankingMaxOutputTokens,
+    rankingCallTimeoutMs,
+    rankingBatchSize,
+    rankingBatchConcurrency,
+    rankingMaxConcurrentJobs,
+    rankingLeaseMs,
+    rankingQueueExpiryMs,
+    rankingPoolWindowDays,
+    rankingMaxPool,
+    rankingSeenMax,
+    rankingMaxAgeDays,
+    rankingPairTtlDays,
+    rankingPriorityStrength,
+    rankingLandlordCard,
+    rankingReadConcurrency,
+    rateLimitRankPerMin,
+    aiPriceTable,
+    rankingWorkerPoll,
+  };
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const nodeEnv = env.NODE_ENV ?? 'development';
 
@@ -627,9 +950,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     throw new Error(`PORT must be a valid TCP port, got: ${env.PORT}`);
   }
 
-  // Worker poll cadence (ms) for the SIX stateless polls that share it (tour
+  // Worker poll cadence (ms) for the stateless polls that share it (tour
   // reminders, placement nudges, roster actions, extraction, group guardrails,
-  // journal sweep - worker.ts). The tour auto-close poll is the one exception:
+  // the journal sweep and the ranking poll - worker.ts). The tour auto-close
+  // poll is the one exception:
   // it runs on its own code constant (TOUR_AUTO_CLOSE_INTERVAL_MS, 15 minutes).
   // Default 30000; fail-fast on a non-positive-integer so a QA typo never
   // silently disables or hot-loops the polls.
@@ -1300,6 +1624,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     }
   }
 
+  // WP1 B2a (spec D6, D19): LAST, after every other gate (see parseRankingConfig).
+  const ranking = parseRankingConfig(env, nodeEnv);
+
   return {
     nodeEnv,
     devAuthEnabled,
@@ -1377,5 +1704,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     emailConfigurationSet,
     inboundMailBucket,
     inboundMailQueueUrl,
+    ...ranking,
   };
 }

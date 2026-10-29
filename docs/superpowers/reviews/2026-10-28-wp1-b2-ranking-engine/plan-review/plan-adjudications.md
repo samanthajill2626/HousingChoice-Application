@@ -120,7 +120,19 @@ section 4); the rest are precision edits.
   Rank again."; the read then shows "not scored - retry" rows (the read
   itself still answers 503 when the anchor is unreadable at read time,
   PR17).
+- PR39 (S8-F3, raised while applying PR30/PR35) The env example files:
+  every new variable is listed with its default VALUE, uncommented,
+  EXCEPT the lines that would override PR30's real-tables safety in live
+  local dev: `.env.example` writes `RANKING_DRIVER` and
+  `RANKING_WORKER_POLL` as comments with their per-target defaults
+  explained; `.env.dev.example` writes `RANKING_WORKER_POLL` as a comment;
+  `.env.prod.example` sets both. An S8.6 test pins the layout. PR35 is
+  corrected from the code: `secrets:sync` adds a new key with an EMPTY
+  value, so the RUNBOOK step is "sync, copy each value from the example
+  (or delete the line), push, check" - never push a blank. Departs from
+  Cameron's "every var uncommented with its default" rule: listed for
+  Cameron.
 
 ## Round 1 decision count
 
-Decisions changed: PR29-PR38 (10). Round 2 follows (the cap is 4).
+Decisions changed: PR29-PR39 (11; PR39 raised while the fixes were applied). Round 2 follows (the cap is 4).

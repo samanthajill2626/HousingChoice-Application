@@ -27,7 +27,7 @@ vi.mock('./useContactVocabulary.js', () => ({
   useContactVocabulary: () => ({ roles: [], relationshipRoles: [], fieldLabels: [] }),
 }));
 
-import { CONTACT_TYPE_CHANGED_SAVE_COPY, ContactEditForm } from './ContactEditForm.js';
+import { CONTACT_TYPE_CHANGED_SAVE_COPY, ContactEditForm, NOTES_STALE_COPY } from './ContactEditForm.js';
 import { TENANT_MATCHING_INPUTS } from './tenantMatchingInputs.js';
 
 const TENANT: Contact = {
@@ -2238,5 +2238,189 @@ describe('ContactEditForm - the tenant matching inputs (WP1 B1 spec D2)', () => 
     expect(await screen.findByRole('alert')).toHaveTextContent(PORTION_ERROR);
     expect(updateContact).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
+  });
+});
+
+// WP1 B2a spec D14.3: the Notes stale-save guard - the Staff notes card's
+// pattern (StaffNotesCard.tsx) on the edit form's Notes box.
+describe('ContactEditForm - the Notes stale-save guard (WP1 B2a D14.3)', () => {
+  const OPENED = '2026-10-28T10:00:00.000Z';
+  const LATER = '2026-10-28T11:00:00.000Z';
+  const WITH_NOTES: Contact = { ...TENANT, notes: 'prefers mornings', notes_updated_at: OPENED };
+  const notesBox = (): HTMLElement => screen.getByLabelText('Notes', { exact: true });
+  const saveButton = (): HTMLElement => screen.getByRole('button', { name: /^Save$/i });
+  const staleNotes = (contact?: Contact): ApiError =>
+    new ApiError(409, 'notes_stale', 'notes_stale', contact === undefined ? { error: 'notes_stale' } : { error: 'notes_stale', contact });
+
+  it('sends the stamp the form opened with beside a changed Notes box', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...WITH_NOTES, notes: 'works nights', notes_updated_at: LATER });
+    render(<ContactEditForm contact={WITH_NOTES} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.clear(notesBox());
+    await user.type(notesBox(), 'works nights');
+    await user.click(saveButton());
+    expect(updateContact).toHaveBeenCalledWith('k1', { notes: 'works nights', notes_expected_updated_at: OPENED });
+  });
+
+  it('sends null for a box that was never stamped', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...TENANT, notes: 'works nights' });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(notesBox(), 'works nights');
+    await user.click(saveButton());
+    expect(updateContact).toHaveBeenCalledWith('k1', { notes: 'works nights', notes_expected_updated_at: null });
+  });
+
+  it('sends no stamp when the save does not touch the Notes box', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...WITH_NOTES, firstName: 'Natasha' });
+    render(<ContactEditForm contact={WITH_NOTES} onClose={vi.fn()} onSaved={vi.fn()} />);
+    const first = screen.getByLabelText(/First name/i);
+    await user.clear(first);
+    await user.type(first, 'Natasha');
+    await user.click(saveButton());
+    expect(updateContact).toHaveBeenCalledWith('k1', { firstName: 'Natasha' });
+  });
+
+  it('a whitespace-only Notes edit is no change (compared trimmed)', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ContactEditForm contact={WITH_NOTES} onClose={onClose} onSaved={vi.fn()} />);
+    await user.type(notesBox(), '   ');
+    await user.click(saveButton());
+    expect(updateContact).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('on 409 notes_stale keeps every typed field, shows the current notes beside the box, and a second Save sends THEIR stamp', async () => {
+    const user = userEvent.setup();
+    const onSaved = vi.fn();
+    const onClose = vi.fn();
+    const theirs: Contact = { ...WITH_NOTES, notes: 'prefers mornings\n[Auto - Oct 28] works nights downtown', notes_updated_at: LATER };
+    const saved: Contact = { ...theirs, firstName: 'Natasha', notes: 'my notes', notes_updated_at: '2026-10-28T12:00:00.000Z' };
+    updateContact.mockRejectedValueOnce(staleNotes(theirs)).mockResolvedValueOnce(saved);
+    render(<ContactEditForm contact={WITH_NOTES} onClose={onClose} onSaved={onSaved} />);
+    const first = screen.getByLabelText(/First name/i);
+    await user.clear(first);
+    await user.type(first, 'Natasha');
+    await user.clear(notesBox());
+    await user.type(notesBox(), 'my notes');
+    await user.click(saveButton());
+
+    const panel = await screen.findByRole('alert');
+    expect(panel).toHaveTextContent(NOTES_STALE_COPY);
+    expect(panel).toHaveTextContent('works nights downtown');
+    expect(notesBox()).toHaveValue('my notes');
+    expect(screen.getByLabelText(/First name/i)).toHaveValue('Natasha');
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(updateContact).toHaveBeenNthCalledWith(1, 'k1', { firstName: 'Natasha', notes: 'my notes', notes_expected_updated_at: OPENED });
+
+    await user.click(saveButton());
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(saved));
+    expect(updateContact).toHaveBeenNthCalledWith(2, 'k1', { firstName: 'Natasha', notes: 'my notes', notes_expected_updated_at: LATER });
+  });
+
+  it('after a refusal the box takes focus and names the panel as its description', async () => {
+    const user = userEvent.setup();
+    updateContact.mockRejectedValueOnce(staleNotes({ ...WITH_NOTES, notes: 'newer', notes_updated_at: LATER }));
+    render(<ContactEditForm contact={WITH_NOTES} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.clear(notesBox());
+    await user.type(notesBox(), 'my notes');
+    await user.click(saveButton());
+    const panel = await screen.findByRole('alert');
+    await waitFor(() => expect(notesBox()).toHaveFocus());
+    expect(notesBox()).toHaveAttribute('aria-describedby', panel.id);
+  });
+
+  it('a box someone cleared reads "(The notes were cleared.)"', async () => {
+    const user = userEvent.setup();
+    updateContact.mockRejectedValueOnce(staleNotes({ ...WITH_NOTES, notes: '', notes_updated_at: LATER }));
+    render(<ContactEditForm contact={WITH_NOTES} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.clear(notesBox());
+    await user.type(notesBox(), 'my notes');
+    await user.click(saveButton());
+    expect(await screen.findByRole('alert')).toHaveTextContent('(The notes were cleared.)');
+  });
+
+  it('re-based: typing the current notes back is no Notes change on the next Save', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    updateContact.mockRejectedValueOnce(staleNotes({ ...WITH_NOTES, notes: 'newer', notes_updated_at: LATER }));
+    render(<ContactEditForm contact={WITH_NOTES} onClose={onClose} onSaved={vi.fn()} />);
+    await user.clear(notesBox());
+    await user.type(notesBox(), 'my notes');
+    await user.click(saveButton());
+    await screen.findByRole('alert');
+    await user.clear(notesBox());
+    await user.type(notesBox(), 'newer');
+    await user.click(saveButton());
+    expect(updateContact).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('a 409 notes_stale that carries no contact is the plain save failure', async () => {
+    const user = userEvent.setup();
+    updateContact.mockRejectedValueOnce(staleNotes());
+    render(<ContactEditForm contact={WITH_NOTES} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.clear(notesBox());
+    await user.type(notesBox(), 'my notes');
+    await user.click(saveButton());
+    expect(await screen.findByText("Couldn't save - please try again.")).toBeInTheDocument();
+    expect(screen.queryByText(NOTES_STALE_COPY)).toBeNull();
+  });
+
+  // Plan review FB8: the field PATCH runs before the status write. When the
+  // PATCH stored the notes and the status write then fails, the form stays
+  // open - and the Notes baseline must already be the PATCH's answer, or the
+  // next Save would meet a false notes_stale about the user's own save.
+  it('a PATCH that stored the notes re-bases the baseline before a failed status write: the next Save sends the NEW stamp', async () => {
+    const user = userEvent.setup();
+    const onSaved = vi.fn();
+    const opened: Contact = { ...WITH_NOTES, status: 'searching' };
+    const patched: Contact = { ...opened, notes: 'my notes', notes_updated_at: LATER };
+    const final: Contact = { ...patched, status: 'placing', notes: 'my notes again', notes_updated_at: '2026-10-28T12:00:00.000Z' };
+    updateContact.mockResolvedValueOnce(patched).mockResolvedValueOnce({ ...final, status: 'searching' });
+    setTenantStatus
+      .mockRejectedValueOnce(new ApiError(500, 'http_500', 'Request failed (500)'))
+      .mockResolvedValueOnce(final);
+    render(<ContactEditForm contact={opened} onClose={vi.fn()} onSaved={onSaved} />);
+    await user.selectOptions(screen.getByRole('combobox', { name: /^Status$/i }), 'placing');
+    await user.clear(notesBox());
+    await user.type(notesBox(), 'my notes');
+    await user.click(saveButton());
+    expect(await screen.findByText("Couldn't save - please try again.")).toBeInTheDocument();
+    expect(updateContact).toHaveBeenNthCalledWith(1, 'k1', { notes: 'my notes', notes_expected_updated_at: OPENED });
+
+    await user.type(notesBox(), ' again');
+    await user.click(saveButton());
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(final));
+    expect(updateContact).toHaveBeenNthCalledWith(2, 'k1', { notes: 'my notes again', notes_expected_updated_at: LATER });
+    expect(setTenantStatus).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText(NOTES_STALE_COPY)).toBeNull();
+  });
+
+  it('a PATCH WITHOUT notes never re-bases the baseline: a stamp the user never saw stays out of the next Save', async () => {
+    const user = userEvent.setup();
+    const opened: Contact = { ...WITH_NOTES, status: 'searching' };
+    // Extraction appended a line while the form was open; the name PATCH's
+    // answer carries it, but the user has not seen it.
+    const patched: Contact = { ...opened, firstName: 'Natasha', notes: 'prefers mornings\n[Auto - Oct 28] works nights', notes_updated_at: LATER };
+    updateContact.mockResolvedValueOnce(patched).mockRejectedValueOnce(staleNotes(patched));
+    setTenantStatus.mockRejectedValueOnce(new ApiError(500, 'http_500', 'Request failed (500)'));
+    render(<ContactEditForm contact={opened} onClose={vi.fn()} onSaved={vi.fn()} />);
+    const first = screen.getByLabelText(/First name/i);
+    await user.clear(first);
+    await user.type(first, 'Natasha');
+    await user.selectOptions(screen.getByRole('combobox', { name: /^Status$/i }), 'placing');
+    await user.click(saveButton());
+    expect(await screen.findByText("Couldn't save - please try again.")).toBeInTheDocument();
+    expect(updateContact).toHaveBeenNthCalledWith(1, 'k1', { firstName: 'Natasha' });
+
+    await user.clear(notesBox());
+    await user.type(notesBox(), 'my notes');
+    await user.click(saveButton());
+    expect(updateContact).toHaveBeenNthCalledWith(2, 'k1', expect.objectContaining({ notes: 'my notes', notes_expected_updated_at: OPENED }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('works nights');
   });
 });

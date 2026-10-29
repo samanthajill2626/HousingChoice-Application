@@ -7,7 +7,7 @@
 // PATCHed (the server SET-merges, so an untouched field is never blanked) -
 // switching type leaves the other type's old fields on the record (harmless; they
 // just stop showing). On success the parent applies the returned contact in place.
-import { useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import {
   ApiError,
   setTenantStatus,
@@ -130,6 +130,23 @@ export const DEPOSIT_CONFLICT_COPY =
 export const CONTACT_TYPE_CHANGED_SAVE_COPY =
   "This contact's type changed while you were editing, so its status was not saved. Reload the contact to pick a status for its new type.";
 
+/** WP1 B2a spec D14.3: a save refused 409 notes_stale - the Notes box was
+ *  written (by a colleague, extraction or the importer) since the form
+ *  opened, and the PATCH stored nothing. The Staff notes card's wording for
+ *  this form; "Nothing was saved." first (plan S1 C6). */
+export const NOTES_STALE_COPY =
+  'Nothing was saved. These notes were changed since you opened this form. The current notes are below, and your text is still in the box. Save again to replace them, or Cancel to keep them.';
+
+/** The current contact a 409 notes_stale carries, or null for any other
+ *  failure (StaffNotesCard.tsx staleContact's rule). */
+function staleNotesContact(err: unknown): Contact | null {
+  if (!(err instanceof ApiError) || err.status !== 409 || err.code !== 'notes_stale') return null;
+  const body = err.body;
+  if (typeof body !== 'object' || body === null) return null;
+  const current = (body as { contact?: unknown }).contact;
+  return typeof current === 'object' && current !== null ? (current as Contact) : null;
+}
+
 export interface ContactEditFormProps {
   contact: Contact;
   onClose: () => void;
@@ -231,6 +248,29 @@ export function ContactEditForm({
   );
   const [porting, setPorting] = useState(contact.porting === true);
   const [notes, setNotes] = useState(str(contact.notes));
+  // WP1 B2a spec D14.3: the Notes stale-save guard (StaffNotesCard.tsx's
+  // pattern). The Notes box's own baseline - its text and the
+  // notes_updated_at the form OPENED with (null = never stamped) - kept
+  // apart from `base`: a 409 notes_stale re-bases it on the current contact
+  // while every other field still diffs against `base`.
+  const [notesBaseline, setNotesBaseline] = useState<{ text: string; stamp: string | null }>(() => ({
+    text: str(contact.notes),
+    stamp: typeof contact.notes_updated_at === 'string' ? contact.notes_updated_at : null,
+  }));
+  // The current notes a notes_stale refusal carried (null = no conflict),
+  // shown beside the box until a save lands or the form closes.
+  const [notesConflict, setNotesConflict] = useState<string | null>(null);
+  // Counts refusals; the focus effect keys on it, so a second refusal with
+  // the same notes refocuses too.
+  const [notesRefusals, setNotesRefusals] = useState(0);
+  const notesRef = useRef<HTMLTextAreaElement>(null);
+  const notesConflictId = useId();
+  // After a refusal, focus the box: the user's text is there and its
+  // aria-describedby now names the conflict panel. An effect, not a focus()
+  // in the handler, so the description is attached before focus lands.
+  useEffect(() => {
+    if (notesRefusals > 0) notesRef.current?.focus();
+  }, [notesRefusals]);
   const [voucher, setVoucher] = useState(
     typeof contact.voucherSize === 'number' ? String(contact.voucherSize) : '',
   );
@@ -396,7 +436,13 @@ export function ContactEditForm({
     } else if (isLandlord && status !== initialStatus) {
       patch.status = status;
     }
-    if (notes !== str(base.notes)) patch.notes = notes;
+    // WP1 B2a D14.3: the Notes box diffs against ITS baseline (re-based by a
+    // notes_stale refusal), trimmed as the server stores it (C5); every save
+    // that sends notes sends the stamp that baseline holds.
+    if (notes.trim() !== notesBaseline.text.trim()) {
+      patch.notes = notes;
+      patch.notes_expected_updated_at = notesBaseline.stamp;
+    }
     if (isLandlord && company !== str(base['company'])) patch.company = company;
 
     // Landlord onboarding deal terms + approval criteria — dirty-tracked, only the
@@ -606,6 +652,20 @@ export function ContactEditForm({
       let updated: Contact = contact;
       if (Object.keys(result).length > 0) {
         updated = await updateContact(contact.contactId, result);
+        // Plan review FB8: a PATCH that carried notes has STORED them, so the
+        // Notes baseline (text and stamp) moves to its answer before any later
+        // write - the status write below may still fail and leave the form
+        // open, and the next Save must not meet a false notes_stale about the
+        // user's own save. ONLY then: a PATCH without notes must never adopt a
+        // stamp the user has not seen (the next Save would overwrite lines
+        // written since the form opened without a conflict).
+        if ('notes' in result) {
+          setNotesBaseline({
+            text: str(updated.notes),
+            stamp: typeof updated.notes_updated_at === 'string' ? updated.notes_updated_at : null,
+          });
+          setNotesConflict(null);
+        }
       }
       // The transition-service write (see statusTransition above), AFTER the
       // PATCH so a type change lands first. The returned contact supersedes the
@@ -632,8 +692,22 @@ export function ContactEditForm({
       // A refused org value (422 org_not_on_list, spec D5) names its field:
       // say why under that picker, from the body - never the raw code.
       const refused = orgNotOnListBody(err);
+      const currentNotes = staleNotesContact(err);
       if (refused !== null && isOrgFormField(refused.field)) {
         setOrgFieldError({ field: refused.field, message: notOnListMessage(refused) });
+      } else if (currentNotes !== null) {
+        // WP1 B2a D14.3: the Notes box was written since this form opened,
+        // and the PATCH stored nothing (the status write never ran). Keep
+        // every typed field; show the current notes beside the box; re-base
+        // the Notes baseline on them, so the next Save is a deliberate
+        // overwrite of notes the user has now seen, and Cancel keeps them.
+        const theirText = str(currentNotes.notes);
+        setNotesBaseline({
+          text: theirText,
+          stamp: typeof currentNotes.notes_updated_at === 'string' ? currentNotes.notes_updated_at : null,
+        });
+        setNotesConflict(theirText);
+        setNotesRefusals((n) => n + 1);
       } else if (err instanceof ApiError && err.status === 409 && err.code === 'caseworker_use_conversion') {
         // A save never makes a contact a caseworker (spec D16) - say where to go.
         setError(CASEWORKER_USE_CONVERSION);
@@ -1187,13 +1261,28 @@ export function ContactEditForm({
           </label>
         ) : null}
 
+        {notesConflict !== null ? (
+          // WP1 B2a D14.3: the Staff notes card's conflict panel, beside the
+          // Notes box (outside its wrapping label, so it never joins the
+          // box's accessible name) and linked to it by aria-describedby.
+          <div id={notesConflictId} role="alert" className={styles.conflict}>
+            <p className={styles.conflictLead}>{NOTES_STALE_COPY}</p>
+            {notesConflict.trim().length > 0 ? (
+              <p className={styles.conflictText}>{notesConflict}</p>
+            ) : (
+              <p className={styles.conflictEmpty}>(The notes were cleared.)</p>
+            )}
+          </div>
+        ) : null}
         <label className={styles.field}>
           <span className={styles.label}>Notes</span>
           <textarea
+            ref={notesRef}
             className={styles.textarea}
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
             rows={3}
+            {...(notesConflict !== null && { 'aria-describedby': notesConflictId })}
           />
         </label>
 

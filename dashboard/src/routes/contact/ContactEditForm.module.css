@@ -146,3 +146,37 @@
   align-items: center;
   gap: var(--sp-1);
 }
+
+/* WP1 B2a spec D14.3: the Notes stale-save conflict, beside the Notes box -
+ * the Staff notes card's frame (StaffNotesCard.module.css .conflict). */
+.conflict {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface-2);
+}
+
+.conflictLead {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-danger);
+}
+
+.conflictText {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* "(The notes were cleared.)" - a statement ABOUT the notes, not note text. */
+.conflictEmpty {
+  margin: 0;
+  font-size: var(--fs-sm);
+  font-style: italic;
+  color: var(--c-text-muted);
+}

@@ -2388,6 +2388,11 @@ export interface Contact extends TenantMatchingInputValues, TenantMatchingInputS
   /** ISO 8601 - server-stamped on every staff_notes write (a clear included).
    *  Renders as "Last edited <date>" while the box holds text. */
   staff_notes_updated_at?: string;
+  /** ISO 8601 - when `notes` was last written, stamped by every Notes writer
+   *  (WP1 B2a spec D14.3); absent = never stamped. The edit form sends it
+   *  back as notes_expected_updated_at. Never sent as a field (the server
+   *  refuses a client value). MIRRORS ContactItem.notes_updated_at. */
+  notes_updated_at?: string;
   /** The helper organization a PARTNER works for (spec 2026-10-06 D17): one
    *  list name of either kind; never stored as '' (a clear REMOVEs it).
    *  MIRRORS ContactItem.organization. */
@@ -2529,6 +2534,11 @@ export interface ContactPatch extends TenantMatchingInputPatch {
    *  beat with 409 `staff_notes_stale` + `{ contact }` (the current one).
    *  A guard, never stored. Omit it for last-write-wins. */
   staff_notes_expected_updated_at?: string | null;
+  /** The Notes stale-save guard (WP1 B2a spec D14.3): the notes_updated_at
+   *  the edit form OPENED with (null = never stamped), sent with every
+   *  `notes`. A save that a newer Notes write beat is refused with 409
+   *  `notes_stale` + `{ contact }` (the current one). A guard, never stored. */
+  notes_expected_updated_at?: string | null;
   /** A partner's organization (spec D17): a list name of either kind (422
    *  org_not_on_list otherwise); '' clears it. Only the partner edit form
    *  sends it. */

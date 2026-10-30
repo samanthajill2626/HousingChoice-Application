@@ -5,7 +5,9 @@
 // either anchor, so each pair is marked against the current match's runId:
 // "This run", "Since re-scored" or "No current match". "Since re-scored" is a
 // control that opens the run holding the pair's current match (spec D11:
-// each pair is linked to its current match).
+// each pair is linked to its current match). A tenant anchor's run shows no
+// flag list (spec D10 rev 7): no open-flags section and no unlawful flag in a
+// pair's Flags cell; an accommodation flag is the pair's and still shows.
 import type { RankingFairHousingFlag, RankingRunDetailResponse } from '../../../api/index.js';
 import { Spinner } from '../../../ui/index.js';
 import { bandLabel, candidateCountText, currentMatchText, directionLabel, formatCost, reasonsText } from './rankingFormat.js';
@@ -19,9 +21,11 @@ function prettyInput(input: string): string {
   }
 }
 
-function flagsText(flags: readonly RankingFairHousingFlag[]): string {
-  if (flags.length === 0) return '-';
-  return flags.map((flag) => `${flag.kind} on ${flag.field}`).join(', ');
+/** A tenant anchor's run names no unlawful flag (spec D10 rev 7); an accommodation flag is the pair's and shows on either anchor. */
+function flagsText(flags: readonly RankingFairHousingFlag[], propertyRun: boolean): string {
+  const shown = propertyRun ? flags : flags.filter((flag) => flag.kind !== 'unlawful');
+  if (shown.length === 0) return '-';
+  return shown.map((flag) => `${flag.kind} on ${flag.field}`).join(', ');
 }
 
 export function RankingRunDetail({
@@ -128,7 +132,7 @@ export function RankingRunDetail({
                       <td>{reasonsText(pair.for)}</td>
                       <td>{reasonsText(pair.against)}</td>
                       <td>{pair.missing.length === 0 ? '-' : pair.missing.map((item) => item.text).join(', ')}</td>
-                      <td>{flagsText(pair.fairHousingFlags)}</td>
+                      <td>{flagsText(pair.fairHousingFlags, propertyRun)}</td>
                       <td>
                         {rescoredIn !== null && onOpenRun !== undefined ? (
                           <button

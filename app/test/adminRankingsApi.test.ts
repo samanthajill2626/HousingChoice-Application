@@ -2,7 +2,8 @@
 // server (requireRole('admin'); WI17). The runs list reads rankingRunsRepo's
 // own pointers (rankings#global or rankings#<kind>#<id>) and always names the
 // anchor; the run detail renders the run's OWN results[] in S7's names and
-// links each pair to its current match's run; the cost totals by ISO week
+// links each pair to its current match's run (a tenant-anchor run's pairs
+// drop their unlawful flags, spec D10 rev 7); the cost totals by ISO week
 // and environment.
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
@@ -278,6 +279,45 @@ describe('GET /api/admin/rankings/runs/:runId', () => {
     expect(res.status).toBe(200);
     expect(res.body.flagsUnavailable).toBe(true);
     expect(res.body.flags).toEqual([]);
+  });
+
+  // Spec D10 rev 7 (PFW1-6): a tenant anchor's runs carry no flag list, so a
+  // pair's unlawful flag (about the property) leaves its detail; an
+  // accommodation flag is about the pair and stays. A property-anchor run
+  // answers both, as the run said.
+  const bothKinds: NonNullable<RankingRunRecord['results'][number]['fairHousingFlags']> = [
+    { kind: 'unlawful', field: 'qualifications' },
+    { kind: 'accommodation', field: 'no_pets' },
+  ];
+
+  it("a tenant-anchor run's pair answers its accommodation flag and no unlawful flag", async () => {
+    const run = tenantRun(['u-1']);
+    const scored = {
+      ...run.results[0]!,
+      returned: true,
+      score: 60,
+      for: [],
+      against: [],
+      unknowns: [],
+      missing: [],
+      failedRequirements: [],
+      fairHousingFlags: bothKinds,
+      cappedAtRun: { capped: false, capReason: null },
+    };
+    const { app } = makeApp({ runs: [{ ...run, results: [scored] }] });
+    const res = await admin(app, '/api/admin/rankings/runs/run-1');
+    expect(res.status).toBe(200);
+    expect(res.body.pairs[0]).toMatchObject({ candidateId: 'u-1', returned: true, score: 60 });
+    expect(res.body.pairs[0].fairHousingFlags).toEqual([{ kind: 'accommodation', field: 'no_pets' }]);
+  });
+
+  it("(PIN) a property-anchor run's pair answers both its unlawful and its accommodation flag", async () => {
+    const run = rankingRun();
+    const { app } = makeApp({ runs: [{ ...run, results: [{ ...run.results[0]!, fairHousingFlags: bothKinds }, run.results[1]!] }] });
+    const res = await admin(app, '/api/admin/rankings/runs/run-1');
+    expect(res.status).toBe(200);
+    expect(res.body.pairs[0].fairHousingFlags).toEqual(bothKinds);
+    expect(res.body.pairs[1].fairHousingFlags).toEqual([]);
   });
 });
 

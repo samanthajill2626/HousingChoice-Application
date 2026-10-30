@@ -30,7 +30,8 @@
 //
 // Open unlawful flags (spec D10 rev 7, charter item 16) show only on a
 // PROPERTY anchor's runs, that property's own; a tenant-anchor run's detail
-// reads no flag record.
+// reads no flag record, and its pairs answer no `unlawful` entry in
+// fairHousingFlags (their `accommodation` entries stay - they are the pair's).
 import { Router } from 'express';
 import type { AppConfig } from '../lib/config.js';
 import { contactDisplayName } from '../lib/contactName.js';
@@ -268,9 +269,10 @@ export function createAdminRankingsRouter(deps: AdminRankingsRouterDeps): Router
     // Spec D10 rev 7: only a property-anchor run reads its property's open
     // flags; a tenant-anchor run reads none (no `flags` entries, never
     // `flagsUnavailable`).
+    const propertyRun = run.anchorKind === 'unit';
     let flags: RankingReadFlag[] = [];
     let flagsUnavailable = false;
-    if (run.anchorKind === 'unit') {
+    if (propertyRun) {
       const unitId = run.anchorId;
       try {
         const unitFacts = (await propertyFacts([unitId])).get(unitId);
@@ -304,7 +306,9 @@ export function createAdminRankingsRouter(deps: AdminRankingsRouterDeps): Router
         missing: result.missing ?? [],
         unknowns: result.unknowns ?? [],
         failedRequirements: result.failedRequirements ?? [],
-        fairHousingFlags: result.fairHousingFlags ?? [],
+        // Spec D10 rev 7: a tenant-anchor run's pairs carry no unlawful flag
+        // (the property's); an accommodation flag is the pair's and stays.
+        fairHousingFlags: (result.fairHousingFlags ?? []).filter((flag) => propertyRun || flag.kind !== 'unlawful'),
         currentRunId,
         sinceRescored: currentRunId !== null && currentRunId !== run.runId,
       };

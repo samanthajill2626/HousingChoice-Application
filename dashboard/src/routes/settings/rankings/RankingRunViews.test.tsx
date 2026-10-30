@@ -365,6 +365,40 @@ describe('RankingRunDetail', () => {
     expect(screen.queryByText('Could not read the open fair-housing flags.')).not.toBeInTheDocument();
   });
 
+  // Spec D10 rev 7 (PFW1-6): a tenant anchor's runs carry no flag list, so
+  // a pair's Flags cell names no unlawful flag (about the property) whatever
+  // the server sends; an accommodation flag is about the pair and shows. A
+  // property-anchor run shows both, as the run said.
+  const BOTH_KINDS: RankingRunPair['fairHousingFlags'] = [
+    { kind: 'unlawful', field: 'qualifications' },
+    { kind: 'accommodation', field: 'no_pets' },
+  ];
+  const flagsCellOf = (table: HTMLElement): string | null =>
+    within(within(table).getAllByRole('row')[1] as HTMLElement).getAllByRole('cell')[6]?.textContent ?? null;
+
+  it("a tenant-anchor run's Flags column shows a pair's accommodation flag and no unlawful flag", () => {
+    render(
+      <RankingRunDetail
+        detail={{
+          ...DETAIL,
+          run: { ...DETAIL.run, anchorKind: 'tenant', anchorId: 'contact-1', direction: 'properties_for_tenant' },
+          pairs: [pair({ candidateId: 'unit-7', display: '7 Elm St, Atlanta', fairHousingFlags: BOTH_KINDS })],
+          flags: [],
+        }}
+        status="ready"
+        onRetry={vi.fn()}
+      />,
+    );
+    const table = screen.getByRole('table', { name: 'Run pairs' });
+    expect(flagsCellOf(table)).toBe('accommodation on no_pets');
+    expect(table).not.toHaveTextContent('unlawful on');
+  });
+
+  it("(PIN) a property-anchor run's Flags column shows a pair's unlawful and accommodation flags", () => {
+    render(<RankingRunDetail detail={{ ...DETAIL, pairs: [pair({ fairHousingFlags: BOTH_KINDS })] }} status="ready" onRetry={vi.fn()} />);
+    expect(flagsCellOf(screen.getByRole('table', { name: 'Run pairs' }))).toBe('unlawful on qualifications, accommodation on no_pets');
+  });
+
   it('keeps the raw output and the decompressed input collapsed', () => {
     render(<RankingRunDetail detail={DETAIL} status="ready" onRetry={vi.fn()} />);
     const raw = screen.getByText('Raw model output').closest('details');

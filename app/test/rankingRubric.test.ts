@@ -10,9 +10,9 @@ import { RUBRIC_TEXT, RUBRIC_VERSION } from '../src/services/ranking/rubric.js';
 import { PROPERTY_FREE_TEXT_FIELDS } from '../src/services/ranking/cardFields.js';
 import { RANKING_SOURCES } from '../src/services/ranking/schema.js';
 
-describe('the rubric (r1)', () => {
-  it('is version r1', () => {
-    expect(RUBRIC_VERSION).toBe('r1');
+describe('the rubric (r2)', () => {
+  it('is version r2', () => {
+    expect(RUBRIC_VERSION).toBe('r2');
   });
 
   it('is ASCII only (no character outside tab, LF and printable ASCII)', () => {
@@ -55,11 +55,46 @@ describe('the rubric (r1)', () => {
   it('states the fair housing rules', () => {
     for (const phrase of [
       'race', 'color', 'religion', 'sexual orientation and gender identity', 'national origin',
-      'familial status', 'disability', 'NEVER lower a score', 'only for the tenant\'s benefit',
+      'familial status', 'disability', 'NEVER move a score, up or down', 'only for the tenant\'s benefit',
       'Credit and income are disregarded', 'are NOT credit or income',
     ]) {
       expect(RUBRIC_TEXT).toContain(phrase);
     }
+  });
+
+  // r2 (charter section 20 item 17): every fair-housing rule is two-way.
+  // The first counterfactual run failed on swaps that RAISED scores (a
+  // credit and income line, an equivalent address) and on an authority swap
+  // that lowered one; "never lower" allowed the first two.
+  it('r2: the fair housing rules are two-way (never move a score, up or down)', () => {
+    const start = RUBRIC_TEXT.indexOf('FAIR HOUSING\n');
+    const section = RUBRIC_TEXT.slice(start, RUBRIC_TEXT.indexOf('FAIR HOUSING FLAGS'));
+    const lineOf = (prefix: string): string => section.split('\n').find((line) => line.startsWith(prefix)) ?? '';
+    expect(lineOf('- Protected characteristics')).toContain('NEVER move a score, up or down');
+    expect(lineOf('- Protected characteristics')).toContain('an address (the tenant\'s current address included), a housing authority or a voucher program');
+    expect(lineOf('- Protected characteristics')).toContain('each never moves a score up or down and is never a reason for or against');
+    expect(lineOf('- Credit and income')).toContain('never let one move a score, up or down');
+    expect(RUBRIC_TEXT).not.toContain('NEVER lower a score');
+    expect(RUBRIC_TEXT).not.toContain('never let one lower a score');
+    expect(RUBRIC_TEXT).not.toContain('never give one as a reason against.');
+  });
+
+  it('r2: affordability comes only from rent, payment standard, utilities and the maximum portion', () => {
+    expect(RUBRIC_TEXT).toContain('Affordability is judged ONLY from the rents, the payment standard, tenant-paid utilities and the "Maximum tenant portion".');
+    expect(RUBRIC_TEXT).toContain('An income or credit fact never adjusts, confirms or stands in for the "Maximum tenant portion".');
+    expect(RUBRIC_TEXT).toContain('When the "Maximum tenant portion" is missing, affordability is uncertainty (unknowns), never inferred from income.');
+  });
+
+  it('r2: in the pool, the authority and voucher program add nothing to fit; the payment standard is used as given', () => {
+    const eligibility = RUBRIC_TEXT.split('\n').find((line) => line.startsWith('- Every CANDIDATE already passed eligibility')) ?? '';
+    expect(eligibility).toContain('the housing authority and the voucher program (any program name, DBHDD included) add nothing to fit and never move a score up or down');
+    expect(eligibility).toContain('the only exception is the all-"unmapped" case, which stays uncertainty');
+    expect(eligibility).toContain('use the property\'s payment_standard as given');
+  });
+
+  it('r2: area fit comes from "Area preference", never the tenant\'s current address', () => {
+    const area = RUBRIC_TEXT.split('\n').find((line) => line.startsWith('- Area:')) ?? '';
+    expect(area).toContain('Area fit comes from "Area preference" against the property\'s location, never from the tenant\'s current address.');
   });
 
   it('states both flag kinds; unlawful names only a free-text field, never a checkbox', () => {

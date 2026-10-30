@@ -1,4 +1,4 @@
-// WP1 B2a spec D4 (charter 7.2, 12): the worked examples, version e1. Ten
+// WP1 B2a spec D4 (charter 7.2, 12): the worked examples, version e2. Eleven
 // SYNTHETIC pairs spread across the bands - made-up people (surnames
 // Example, Sample, Placeholder) and made-up streets in real metro-Atlanta
 // cities. Each is written in the exact wire shape of a real call (prompt.ts
@@ -9,10 +9,13 @@
 //
 // Exempt from the tenant-matching-inputs reader scan (spec D2.1): the cards
 // are synthetic and key the inputs by their list LABELS, as real cards do.
+//
+// e2 (charter section 20 item 17, B2a rev 8) adds example 11: a rent-gap
+// pair whose Notes carry a credit and income line that is not a reason.
 import type { RankingSource } from './schema.js';
 import type { Card, Direction, PairHistory } from './types.js';
 
-export const EXAMPLES_VERSION = 'e1';
+export const EXAMPLES_VERSION = 'e2';
 
 export interface ExampleHome {
   handle: string;
@@ -744,6 +747,73 @@ export const RANKING_EXAMPLES: readonly RankingExample[] = [
           against: [{ text: 'eviction in 2023 vs the 5-year rule', source: 'evictions' }],
           unknowns: [],
           failedRequirements: ['qualifications'],
+          fairHousingFlags: [],
+        },
+      ],
+    },
+  },
+  // 11. e2 (charter section 20 item 17): rent over the payment standard,
+  // scored only from rent, payment standard, tenant-paid utilities and the
+  // Maximum tenant portion. The credit and income line in Notes is not a
+  // reason and does not move the score, up or down.
+  {
+    title: 'Rent over the payment standard: scored from rent, payment standard, utilities and the maximum portion; a credit and income line in Notes is ignored (a tenant anchor)',
+    direction: 'properties_for_tenant',
+    anchor: {
+      card: {
+        firstName: 'Parker',
+        lastName: 'Placeholder',
+        status: 'searching',
+        voucherSize: 2,
+        housingAuthority: 'Atlanta Housing Authority',
+        address: { line1: '31 Sample Terrace', city: 'Atlanta', state: 'GA', zip: '30310' },
+        created_at: '2026-08-19',
+        notes: 'Takes the bus to work.\nCredit score around 600. Income about $1,500 a month.',
+        'Area preference': 'West End',
+        'Maximum tenant portion': 300,
+        lastHeardFrom: 'this week',
+        propertiesSeen: [],
+      },
+      missing: [],
+    },
+    homesSeen: [],
+    candidates: [
+      {
+        handle: 'c1',
+        card: {
+          address: { line1: '240 Example Street', city: 'Atlanta', state: 'GA', zip: '30310' },
+          status: 'available',
+          beds: 2,
+          baths: 1,
+          area: 'West End',
+          rent_min: 1750,
+          payment_standard: 1500,
+          utilities: 'Electric',
+          notes: 'Half a block from the bus.',
+          created_at: '2026-09-22',
+          voucherSizes: [2],
+          voucherSizesInferredFromBeds: false,
+          authorities: { mapped: ['Atlanta Housing Authority'], unmapped: [] },
+        },
+        missing: ['Pets', 'Accessibility'],
+        pairHistory: NO_HISTORY,
+      },
+    ],
+    output: {
+      candidates: [
+        {
+          candidateId: 'c1',
+          score: 48,
+          for: [
+            { text: 'in West End, the preferred area', source: 'area' },
+            { text: 'half a block from the bus', source: 'property_details' },
+          ],
+          against: [
+            { text: 'rent $250 over payment standard', source: 'rent' },
+            { text: 'gap plus electric near the $300 max', source: 'rent' },
+          ],
+          unknowns: ['electric cost not stated'],
+          failedRequirements: [],
           fairHousingFlags: [],
         },
       ],

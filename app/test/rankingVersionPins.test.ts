@@ -13,11 +13,11 @@ import { PROMPT_FRAMING, buildRankingSystemPrompt, renderExamplesText } from '..
 import { RUBRIC_TEXT, RUBRIC_VERSION } from '../src/services/ranking/rubric.js';
 import { rankingSchema } from '../src/services/ranking/schema.js';
 
-const RUBRIC_PINS: Readonly<Record<string, string>> = { r1: '2fdf3c3e189b172210362180dd2a6851416fea3a11389e77207081bbdeeda538' };
-const FRAMING_PINS: Readonly<Record<string, string>> = { r1: '1f4690fb12bfceb3f15a61b831b16325648d546b3281b33a2f7c674ee88749ef' };
-const SCHEMA_PINS: Readonly<Record<string, { off: string; on: string }>> = { r1: { off: '14169f30e27245c76a3f5ee50807a73ff359999ac429b471d657694f0d5758eb', on: '587274585ffcac596cc1e1305c459ee9d4597c9f7523e9b5dca51bc5129022ba' } };
-const EXAMPLES_PINS: Readonly<Record<string, string>> = { e1: 'c1bd64e7a42ecf1da7eb2b512d788698083b44414559fe103b389edb46be5fb8' };
-const SYSTEM_PINS: Readonly<Record<string, string>> = { 'r1/e1': 'a4d00efd999b11ef8eded27d74225366113fd9dfaa5eebd4f7ac184ad7e1cb6a' };
+const RUBRIC_PINS: Readonly<Record<string, string>> = { r1: '2fdf3c3e189b172210362180dd2a6851416fea3a11389e77207081bbdeeda538', r2: '364fb195d5fdf8ee7eba676464a14cbfbd0847584a9c00bed1cdf0bc4b0912d8' };
+const FRAMING_PINS: Readonly<Record<string, string>> = { r1: '1f4690fb12bfceb3f15a61b831b16325648d546b3281b33a2f7c674ee88749ef', r2: '1f4690fb12bfceb3f15a61b831b16325648d546b3281b33a2f7c674ee88749ef' };
+const SCHEMA_PINS: Readonly<Record<string, { off: string; on: string }>> = { r1: { off: '14169f30e27245c76a3f5ee50807a73ff359999ac429b471d657694f0d5758eb', on: '587274585ffcac596cc1e1305c459ee9d4597c9f7523e9b5dca51bc5129022ba' }, r2: { off: '14169f30e27245c76a3f5ee50807a73ff359999ac429b471d657694f0d5758eb', on: '587274585ffcac596cc1e1305c459ee9d4597c9f7523e9b5dca51bc5129022ba' } };
+const EXAMPLES_PINS: Readonly<Record<string, string>> = { e1: 'c1bd64e7a42ecf1da7eb2b512d788698083b44414559fe103b389edb46be5fb8', e2: '873e39d82e5bfce78d92dbf1273256ec8d0e3a78520c7e7bf627720def368abc' };
+const SYSTEM_PINS: Readonly<Record<string, string>> = { 'r1/e1': 'a4d00efd999b11ef8eded27d74225366113fd9dfaa5eebd4f7ac184ad7e1cb6a', 'r2/e2': '2f0ad5f10b2ccc3ec37fea4e58f95de2be23f76e8183815019a2220956ee3726' };
 
 const sha256 = (text: string): string => createHash('sha256').update(text, 'utf8').digest('hex');
 

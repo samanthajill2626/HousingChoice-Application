@@ -76,10 +76,25 @@ function capped(p: (typeof pairs)[number]): boolean {
   }).capped;
 }
 
-describe('the worked examples (e1)', () => {
-  it('is version e1 with ten examples', () => {
-    expect(EXAMPLES_VERSION).toBe('e1');
-    expect(RANKING_EXAMPLES).toHaveLength(10);
+describe('the worked examples (e2)', () => {
+  it('is version e2 with eleven examples', () => {
+    expect(EXAMPLES_VERSION).toBe('e2');
+    expect(RANKING_EXAMPLES).toHaveLength(11);
+  });
+
+  // e2 (charter section 20 item 17): a rent-gap pair whose Notes carry a
+  // credit and income line. It is scored from rent, the payment standard and
+  // the maximum portion; no reason names credit or income.
+  it('has a rent-over-payment-standard pair with a credit and income Notes line that is not a reason', () => {
+    const p = pairs.find((x) => /credit/i.test(String(x.tenant['notes'])) && /income/i.test(String(x.tenant['notes'])));
+    expect(p).toBeDefined();
+    expect(Number(p!.property['rent_min'])).toBeGreaterThan(Number(p!.property['payment_standard']));
+    expect(typeof p!.tenant['Maximum tenant portion']).toBe('number');
+    expect(p!.out.against.some((r) => r.source === 'rent')).toBe(true);
+    const text = [...p!.out.for, ...p!.out.against].map((r) => r.text).concat(p!.out.unknowns).join(' | ');
+    expect(text).not.toMatch(/credit|income/i);
+    expect(capped(p!)).toBe(false);
+    expect(p!.out.failedRequirements).toEqual([]);
   });
 
   it('covers every band and both directions', () => {

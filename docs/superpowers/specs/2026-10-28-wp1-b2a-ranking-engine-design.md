@@ -1,7 +1,9 @@
 # WP1 B2a Ranking engine - design
 
 Status: APPROVED revision 6 (Cameron passed the spec gate 2026-10-28; answers in
-section 10). Design review CLOSED after round 4.
+section 10). Design review CLOSED after round 4. Rev 7 (2026-10-29, the
+handback review, Cameron's rulings): D10's fixed flag reason and where
+flags show (charter items 15, 16).
 Rev 6 records the spec-gate answers so far (Q2 full cards, Q4 LIF off). Rev 2 folded in design review
 round 1 (two reviewers, 41 findings, all accepted after checking the
 code); rev 3 folded in round 2 (12 findings, all accepted); rev 4 folded
@@ -827,11 +829,22 @@ Derivations, all in `app/src/services/ranking/readRanking.ts`:
 
 In the AI runs table: `itemId = uflag#<unitId>#<field>`, `unitId`,
 `field`, `textHash` (sha256 of the field's trimmed text when raised),
-`reason` (the model's against-reason or unknown text naming it, else
-"flagged as a requirement fair housing does not allow"), `runId`,
+`reason` (ALWAYS the fixed sentence "flagged as a requirement fair
+housing does not allow"; never the model's text, which describes the
+pair and can carry the tenant's own facts - AMENDED rev 7, charter item
+15), `runId`,
 `raisedAt`, index keys `entityKey = uflags#<unitId>`, `sortKey = field`,
 no TTL. Dismissal fields are reserved (`dismissedAt`, `dismissedBy`,
-`textAtDismiss`); the admin Dismiss and its display are B4's.
+`textAtDismiss`); the admin Dismiss is B4's.
+
+- Shown (AMENDED rev 7, charter item 16): a read-only notice on the
+  property page for every staff role that can open it, naming the field,
+  giving the fixed reason and saying that editing the text clears it; it
+  re-checks after the property is saved, so an edited field's notice
+  goes at once. On the admin Rankings page, open flags appear only for a
+  PROPERTY anchor's ranking and that property's runs; a tenant anchor's
+  ranking and its runs carry no flag list. The composer never shows
+  flags. The cap rule below is unchanged.
 
 - Raised: unlawful flags are merged across a job's batches by property
   and field; a batch writes a flag record when none is open for that

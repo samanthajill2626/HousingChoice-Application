@@ -519,9 +519,13 @@ asks for no record change. Only an unlawful flag ever asks Sam to change a
 record.
 
 An unlawful flag becomes a PROPERTY-level record (field, a hash of the
-field's text, the model's reason, the run that raised it), kept in the AI
-runs table under a per-property key family and shown on the property
-record (B4) and in the composer. It closes on read as soon as the field's
+field's text, the fixed reason "flagged as a requirement fair housing
+does not allow", the run that raised it), kept in the AI runs table
+under a per-property key family and shown on the property page and on
+the admin Rankings page for that property's own ranking and runs - never
+on a tenant's ranking and never in the composer (AMENDED 2026-10-29,
+section 20 items 15 and 16; was "the model's reason" and "shown on the
+property record (B4) and in the composer"). It closes on read as soon as the field's
 text no longer matches the hash, so no unit writer has to know about it.
 While it is open, that field caps no pair of that property, including
 pairs where the model missed it: a false flag costs a cap, never a
@@ -1008,7 +1012,7 @@ reply yet / Interested / Not interested) remain where they are today.
 | B1 Ranking inputs | Tenant fields area preference, maximum tenant portion, accessibility need, preferences and constraints on the record and edit form; `priority` boolean on the unit, its edit-form control and record display; extraction schema widened (fixed fields; the noteLines instruction widened to matching facts, each line with a confidence and the floor, no lines from unknown-speaker runs, the never-written list; feedback lines, free-form Notes lines naming the home the tenant is talking about, the shared property label function, and the list of properties sent to the tenant given to extraction so it can name them; amended 2026-10-26); the never-written test covering Notes lines, feedback lines included, run as B1's merge gate (no production switch, amended 2026-10-26); the one list of tenant matching inputs and their sources (section 6.4). Ships to production first. | 8-10 |
 | B2 Ranking engine | Pool in both directions with the window and the sendability fences; cards by classification with the runtime allowlist and the landlord switch; card fingerprint helpers; completeness pass; rubric, examples, structured output; anthropic/fake/console drivers; the ranking poll loop and properties seen on the tenant card, each home's feedback lines under it, with its fingerprint rule (amended 2026-10-26); the ranking-job record (claim generation, lease, one takeover, failed batches, carried trace); persisted batches, event hint, GET and base-table re-read; matches with the out-of-date, age and version rules and the one-button whole-pool re-score; the lean seed row replaced; review records with direction and input snapshots, the in-app review list, example promotion and `examplesVersion`, the synthetic examples and evaluation set, the de-identified export, the evaluation script; the Staff notes comment corrected; the cap with its key list, accommodation flags and the property-level unlawful-flag record; the counterfactual fair-housing check on synthetic pairs, run as B2's merge gate (no production switch: `AI_RANKING_ENABLED` dropped, amended 2026-10-28); the Rank rate-limit knob and roles; run log under its own keys with cost by environment; band and priority policy on read; endpoints: rank, read ranking by anchor, review a pair; the Rankings page with "Rank this anchor". | 33-42 |
 | B3 Send property from a tenant | The ranked row; the composer's tenant anchor; priority-only view; completeness banner; Rank/Update; one-step send with the outcome on the pair; agree/disagree with the disagree direction; the tenant record's Send re-pointed. | 10-12 |
-| B4 Send property from a property | The composer's property anchor; ranked tenants replacing the filter-only audience, the window toggle, rows unchecked by default and Select all, with hand-picks, the tour-hold chip and confirm, old filter drafts and the partner flow kept (section 13.1); already-sent No reply filter chip; pick one, a few or many; (the switch-off composer is dropped, amended 2026-10-28); the unlawful-flag display on the property record with the admin Dismiss; the Matching nav entry asking which record to start from; the property page's Send re-pointed; the Similar panel relabeled "similarity". | 13-16 |
+| B4 Send property from a property | The composer's property anchor; ranked tenants replacing the filter-only audience, the window toggle, rows unchecked by default and Select all, with hand-picks, the tour-hold chip and confirm, old filter drafts and the partner flow kept (section 13.1); already-sent No reply filter chip; pick one, a few or many; (the switch-off composer is dropped, amended 2026-10-28); the admin Dismiss on the property page's unlawful-flag notice (the read-only notice itself moved to B2a, amended 2026-10-29; the composer never shows flags); the Matching nav entry asking which record to start from; the property page's Send re-pointed; the Similar panel relabeled "similarity". | 13-16 |
 
 AMENDED 2026-10-28 (section 20, item 13): B2 is built as TWO branches,
 each its own feature mission. B2a, the engine: everything in the B2 row
@@ -1272,3 +1276,30 @@ date; this list is the index.
      Proposed by the planner as defaults at the B2 restatement; Cameron:
      "Take the defaults you mention here for those 3 bulleted items"
      (section 6.4).
+- 2026-10-29, at the B2a handback review (records:
+  docs/superpowers/reviews/2026-10-28-wp1-b2-ranking-engine/intent.md and
+  code-review/planner-adjudications.md):
+  15. The property's unlawful-flag record stores the FIXED reason
+     "flagged as a requirement fair housing does not allow", never the
+     model's text. Found by the build's plan-blind review (R2-server-1)
+     and the planner's (PA-1): the model's against-reason or unknowns
+     note that names the field describes the PAIR - often the tenant's
+     own facts (an eviction, a pet, a wheelchair) - and would sit on a
+     record with no TTL shown to staff for every later tenant. The pair's
+     own text stays on its match and run (180-day TTL). Recommended by
+     the planner, accepted by Cameron (section 7.2).
+  16. Where an unlawful flag shows. Cameron: "it doesn't need to show in
+     a million places, just on the property page itself. Then, if the
+     requirement is changed, that flag should be dropped immediately";
+     "Showing it on the rankings page, which is only the admin page,
+     that's fine, against just the property, not the tenants. It should
+     show on the actual property page too though, otherwise I'm not sure
+     it's easy for anyone to realize that it's an issue ... And yes the
+     send composer doesn't show it"; and, on moving the property-page
+     notice out of B4: "Yes, add it now". So: B2a shows a read-only
+     notice on the property page to every staff member who can open it,
+     and the admin Rankings page shows flags only on the property's own
+     ranking and that property's runs, never on a tenant's ranking; the
+     composer never shows them; B4 keeps only the admin Dismiss. The
+     close-on-edit rule is unchanged (it already drops the flag on the
+     next read) (sections 7.2, 15.1 B4).

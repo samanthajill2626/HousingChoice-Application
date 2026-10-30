@@ -260,3 +260,33 @@ can retest that."
   rankings handle location; revisit if it becomes a bigger issue. Filed
   docs/issues/ranking-location-distance-on-cards.md (deferred).
 - SPEC GATE PASSED on rev 6.
+
+## Handback-review rulings (2026-10-29)
+
+Cameron, verbatim: "Are we saying that a staff member can input an
+unlawful requirement on a property (fine), but then it's only flagged
+when it tries to rank a tenant against it? If so fine, but it doesn't
+need to show in a million places, just on the property page itself. Then,
+if the requirement is changed, that flag should be dropped immediately.
+Does that make sense?"
+
+Cameron, verbatim: "Showing it on the rankings page, which is only the
+admin page, that's fine, against just the property, not the tenants. It
+should show on the actual property page too though, otherwise I'm not
+sure it's easy for anyone to realize that it's an issue. Why do you want
+to wait for b4 to make the showing on hte property page amendment? And
+yes the send composer doesn't show it"
+
+Cameron, verbatim (on the read-only property-page notice in B2a now):
+"Yes, add it now"
+
+- Q1 (flag reason): the fixed sentence. Planner proposed it as change 1
+  of three and then stated it as settled; Cameron did not object and
+  answered the rest. Charter item 15.
+- Display: property-page read-only notice in B2a, all staff roles that
+  can open the property; Rankings page shows flags only on the
+  property's own ranking and runs; composer never; B4 keeps only the
+  admin Dismiss. Charter item 16. Close-on-edit already holds (open is
+  derived on read from the text hash).
+- Taste: flags should be visible where the property is managed, not
+  spread across every ranking.

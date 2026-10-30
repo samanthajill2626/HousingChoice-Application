@@ -121,6 +121,10 @@ describe('property anchor - the tenants of one property', () => {
       pairHistory: pairHistoryFingerprint(c1.pairHistory),
     });
     expect(c1.propertyFacts).toEqual(anchorSide.facts);
+    // Charter section 20 item 18: the anchor maps ATLANTA, so the pool fenced every candidate: matched.
+    expect(result.candidates.map((c) => verified(c).authority)).toEqual(['matched', 'matched', 'matched']);
+    expect(c1.card).not.toHaveProperty('housingAuthority');
+    expect(result.anchor.card).not.toHaveProperty('authorities');
     expect(verified(result.candidates[2]).pairHistory).toEqual({ sends: [], declined: null, tours: [], daysSinceLastSend: null });
     expect([...result.homes.keys()]).toEqual(['u1', 'u2', 'u3']);
     expect(result.homes.get('u3')).toEqual({ label: 'u3 Main St, Decatur', card: propertyCard(U3, OFF) });
@@ -268,6 +272,20 @@ describe('tenant anchor - the properties of one tenant', () => {
       pairHistory: pairHistoryFingerprint(c1.pairHistory),
     });
     expect([...result.homes.keys()]).toEqual([...anchorSide.homes.keys()]);
+  });
+
+  it('charter section 20 item 18: each property candidate carries its own pair authority fact; no card names an authority', async () => {
+    // u1 accepts the tenant's mapped authority (the pool fenced it: matched);
+    // u2 records only a name the organization list does not know (the pool did
+    // not fence it: unconfirmed).
+    const w = world({ units: [U1, unit('u2', { accepted_authorities: ['Nowhere Board'] })] });
+    const result = ok(await assembleRanking({ kind: 'tenant', id: 't1' }, OPTS, w.deps));
+    expect(result.candidates.map((c) => [c.candidateId, verified(c).authority])).toEqual([
+      ['u1', 'matched'],
+      ['u2', 'unconfirmed'],
+    ]);
+    expect(result.anchor.card).not.toHaveProperty('housingAuthority');
+    for (const c of result.candidates) expect(verified(c).card).not.toHaveProperty('authorities');
   });
 
   it("an incomplete read of the anchor's own seen units fails the whole result", async () => {

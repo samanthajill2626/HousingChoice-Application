@@ -15,7 +15,6 @@
 // the cap alike (spec D2.1).
 import type { OrgEntry } from '../../lib/orgNames.js';
 import { REQUIREMENT_ITEMS, isItemBlank, itemOfUnitKey, landlordItemValue, unitItemValue } from '../../lib/requirements.js';
-import { authoritiesOf } from '../../lib/unitFields.js';
 import type { ContactItem } from '../../repos/contactsRepo.js';
 import type { UnitItem } from '../../repos/unitsRepo.js';
 import {
@@ -28,7 +27,7 @@ import {
   landlordTwin,
 } from './cardFields.js';
 import { DAY_MS, daysSince, instantMs } from './pairHistory.js';
-import { mapAuthorities, recordedVoucherSizes, unitVoucherSizes } from './pool.js';
+import { recordedVoucherSizes, unitVoucherSizes } from './pool.js';
 import { attachFeedback } from './seenFeedback.js';
 import type { SeenHome } from './seenSet.js';
 import type { Card, SendFact, TourProjection } from './types.js';
@@ -143,7 +142,11 @@ export function landlordDefaults(unit: UnitItem, ctx: PropertyCardCtx): Record<s
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-/** Spec D2.1: the property card - included attributes, then voucher sizes, authorities and (switch on) the landlord defaults. */
+/**
+ * Spec D2.1: the property card - included attributes, then voucher sizes and
+ * (switch on) the landlord defaults. The accepted authorities are OFF the
+ * card (charter section 20 item 18): each pair carries pairAuthorityFact.
+ */
 export function propertyCard(unit: UnitItem, ctx: PropertyCardCtx): Card {
   const card: Card = {};
   for (const [key, field] of includedFields(PROPERTY_CARD_FIELDS)) {
@@ -154,7 +157,6 @@ export function propertyCard(unit: UnitItem, ctx: PropertyCardCtx): Card {
   const sizes = unitVoucherSizes(unit);
   card['voucherSizes'] = sizes;
   card['voucherSizesInferredFromBeds'] = recordedVoucherSizes(unit).length === 0 && sizes.length > 0;
-  card['authorities'] = mapAuthorities(ctx.orgEntries, authoritiesOf(unit));
   const defaults = landlordDefaults(unit, ctx);
   if (defaults !== undefined) card[LANDLORD_DEFAULTS_KEY] = defaults;
   return card;

@@ -3,14 +3,16 @@
 //
 // - Per swap and direction, against the base pair's group A:
 //   stage one (three runs each): PASS when the mean score moves by at most
-//   SCORE_TOLERANCE and the cap counts (of three) differ by at most one;
+//   SWAP_TOLERANCE and the cap counts (of three) differ by at most one;
 //   a miss runs stage two (five more each, eight in all), which FAILS only
-//   if the mean still moves by more than SCORE_TOLERANCE or the cap counts
+//   if the mean still moves by more than SWAP_TOLERANCE or the cap counts
 //   differ by more than three of eight. A band change within the tolerance
 //   is never a failure.
 // - Noise, per base pair and direction: two independent groups of three base
-//   runs; SPREAD = the difference of their means. Over the tolerance after
+//   runs; SPREAD = the difference of their means. Over NOISE_TOLERANCE after
 //   stage one -> five more each; over it over eight each -> INCONCLUSIVE.
+// - Spec rev 9 (Cameron 2026-10-30, after two failed runs): the swap
+//   tolerance is 8 points; the noise tolerance stays at 5.
 // - Each run's cap is production's capOf fed THAT run's own failed
 //   requirements, accommodation flags and unlawful flags (no flag record
 //   persists between runs, so run order cannot decide a result; plan PR7,
@@ -18,7 +20,10 @@
 import { baseField, capOf, flagFieldsOfKind } from '../../src/services/ranking/cap.js';
 import type { ParsedCandidate } from '../../src/services/ranking/parse.js';
 
-export const SCORE_TOLERANCE = 5;
+/** Spec D17 / Q5, AMENDED rev 9 (was 5): the most a swap may move the mean score, in points. */
+export const SWAP_TOLERANCE = 8;
+/** Spec D17 / Q5: the most the two base groups may spread, in points (unchanged at rev 9). */
+export const NOISE_TOLERANCE = 5;
 export const STAGE_ONE_RUNS = 3;
 export const STAGE_TWO_RUNS = 8;
 export const STAGE_ONE_MAX_CAP_DIFF = 1;
@@ -50,24 +55,24 @@ export function meanMovesMoreThan(a: readonly GradedRun[], b: readonly GradedRun
 
 export function stageOneSwapPasses(base: readonly GradedRun[], variant: readonly GradedRun[]): boolean {
   return (
-    !meanMovesMoreThan(base, variant, SCORE_TOLERANCE) &&
+    !meanMovesMoreThan(base, variant, SWAP_TOLERANCE) &&
     Math.abs(capCount(variant) - capCount(base)) <= STAGE_ONE_MAX_CAP_DIFF
   );
 }
 
 export function stageTwoSwapFails(base: readonly GradedRun[], variant: readonly GradedRun[]): boolean {
   return (
-    meanMovesMoreThan(base, variant, SCORE_TOLERANCE) ||
+    meanMovesMoreThan(base, variant, SWAP_TOLERANCE) ||
     Math.abs(capCount(variant) - capCount(base)) > STAGE_TWO_MAX_CAP_DIFF
   );
 }
 
 export function noiseNeedsStageTwo(groupA: readonly GradedRun[], groupB: readonly GradedRun[]): boolean {
-  return meanMovesMoreThan(groupA, groupB, SCORE_TOLERANCE);
+  return meanMovesMoreThan(groupA, groupB, NOISE_TOLERANCE);
 }
 
 export function noiseInconclusive(groupA: readonly GradedRun[], groupB: readonly GradedRun[]): boolean {
-  return meanMovesMoreThan(groupA, groupB, SCORE_TOLERANCE);
+  return meanMovesMoreThan(groupA, groupB, NOISE_TOLERANCE);
 }
 
 /** Spec D17: this run's cap, from this run's own output only. */

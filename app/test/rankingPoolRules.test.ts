@@ -9,10 +9,12 @@ import { describe, expect, it } from 'vitest';
 import { voucherSizeMatches } from '../src/lib/blastAudienceRules.js';
 import {
   authorityAllows,
+  authorityFilters,
   inPoolWindow,
   isSendable,
   mapAuthorities,
   mapWithConcurrency,
+  pairAuthorityFact,
   poolRecencyAt,
   recordedVoucherSizes,
   sortRecencyAt,
@@ -79,6 +81,23 @@ describe('authorityAllows - none recorded or none mapped: every authority; some 
     expect(authorityAllows(limited, 'Augusta Housing Authority')).toBe(false);
     expect(authorityAllows(limited, undefined)).toBe(false);
     expect(authorityAllows(limited, '')).toBe(false);
+  });
+});
+
+describe('pairAuthorityFact - charter section 20 item 18, the same decision the pool fences with', () => {
+  it('matched exactly when the pool fences on authority (some recorded name mapped)', () => {
+    const limited = { mapped: ['Atlanta Housing Authority'], unmapped: ['Nowhere'] };
+    expect(authorityFilters(limited)).toBe(true);
+    expect(pairAuthorityFact(limited)).toBe('matched');
+  });
+
+  it('unconfirmed when the pool did not fence: every recorded name unmapped (or none recorded)', () => {
+    for (const mapping of [{ mapped: [], unmapped: ['AHA', 'Nowhere'] }, { mapped: [], unmapped: [] }]) {
+      expect(authorityFilters(mapping)).toBe(false);
+      expect(pairAuthorityFact(mapping)).toBe('unconfirmed');
+      // The pool admitted every tenant for this property, so nothing was confirmed.
+      expect(authorityAllows(mapping, 'Augusta Housing Authority')).toBe(true);
+    }
   });
 });
 

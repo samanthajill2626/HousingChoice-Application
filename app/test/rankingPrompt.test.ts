@@ -125,7 +125,17 @@ describe('buildRankingBatch - handles and the user content', () => {
     expect(lines[1]).toBe('Score every candidate. Return exactly one entry per candidate handle, with the handle as candidateId.');
     expect(inputJson(batch.user)).toEqual(JSON.parse(JSON.stringify(batch.wire)));
     expect(Object.keys(batch.wire)).toEqual(['anchor', 'homesSeen', 'candidates']);
-    expect(Object.keys(batch.wire.candidates[0]!)).toEqual(['handle', 'card', 'missing', 'pairHistory']);
+    expect(Object.keys(batch.wire.candidates[0]!)).toEqual(['handle', 'card', 'missing', 'authority', 'pairHistory']);
+  });
+
+  it('charter section 20 item 18: each candidate carries its pair authority fact as given', () => {
+    const src = tenantsForPropertySource([tenantCardFixture(), tenantCardFixture({ firstName: 'Other' })]);
+    const batch = buildRankingBatch({
+      ...src,
+      candidates: [src.candidates[0]!, { ...src.candidates[1]!, authority: 'unconfirmed' }],
+    });
+    expect(batch.wire.candidates.map((c) => c.authority)).toEqual(['matched', 'unconfirmed']);
+    expect(batch.user).toContain('"authority":"unconfirmed"');
   });
 
   it('the tenant anchor direction line', () => {

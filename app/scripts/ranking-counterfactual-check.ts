@@ -31,6 +31,7 @@
  *   npx tsx app/scripts/ranking-counterfactual-check.ts --model <id> --dry-run
  *   npx tsx app/scripts/ranking-counterfactual-check.ts --model <id> --out <record.md> [--concurrency 4]
  *   npx tsx app/scripts/ranking-counterfactual-check.ts --model <id> --timing --out <record.md>
+ *   npx tsx app/scripts/ranking-counterfactual-check.ts --model <id> --only <targets> (--dry-run | --out <record.md>)
  *
  *   --timing       instead of the check: score ONE synthetic 40-candidate
  *                  batch (P1's property and forty tenants) three times, one
@@ -44,6 +45,15 @@
  *   --concurrency  parallel calls (default 4); it changes no result.
  *   --dry-run      build every stage-one request and print the plan; calls
  *                  nothing, reads no key, writes nothing.
+ *   --only         a TARGETED re-run, NEVER the gate (spec rev 9): a
+ *                  comma-separated list of P<n>:<direction>:<swap>
+ *                  (direction tenants_for_property or properties_for_tenant).
+ *                  Runs base groups A and B only for the named pair and
+ *                  direction pairs, and only the named swaps, through the same
+ *                  two stages; no controls. Its record section is headed
+ *                  "TARGETED re-run - NOT the gate" and its verdict reads
+ *                  "TARGETED PASS" or "TARGETED FAIL" (exit 0 or 1). An unknown
+ *                  pair, direction or swap is a usage error (exit 2, no call).
  *
  * It prints the planned call count and a cost estimate (built-in prices)
  * before the first call. Exit codes: 0 PASS (or a dry run); 1 FAIL or DECIDE
@@ -71,7 +81,10 @@ import { RUBRIC_VERSION } from '../src/services/ranking/rubric.js';
 import { runCapped } from './rankingCounterfactual/evaluate.js';
 import {
   DEFAULT_SUITE,
+  ONLY_FORMAT,
   estimateCostUsd,
+  onlyTargetText,
+  parseOnlyTargets,
   planStageOne,
   planStageTwo,
   worstCaseStageTwoCalls,
@@ -81,7 +94,7 @@ import {
 } from './rankingCounterfactual/plan.js';
 import { prepareProperty, prepareTenant } from './rankingCounterfactual/cards.js';
 import { BASE_PAIRS, timingTenants } from './rankingCounterfactual/records.js';
-import { evaluateCheck, renderCheckRecord, renderTimingRecord, type RecordHeader } from './rankingCounterfactual/report.js';
+import { evaluateCheck, renderCheckRecord, renderTimingRecord, verdictLabel, type RecordHeader } from './rankingCounterfactual/report.js';
 
 export const SCRIPT_NAME = 'ranking-counterfactual-check';
 
@@ -96,6 +109,7 @@ const USAGE = [
   'usage: npx tsx app/scripts/ranking-counterfactual-check.ts --model <id> --out <record.md> [--concurrency 4]',
   '       npx tsx app/scripts/ranking-counterfactual-check.ts --model <id> --timing --out <record.md>',
   '       npx tsx app/scripts/ranking-counterfactual-check.ts --model <id> --dry-run [--timing]',
+  `       npx tsx app/scripts/ranking-counterfactual-check.ts --model <id> --only ${ONLY_FORMAT} (--dry-run | --out <record.md>)`,
 ].join('\n');
 
 /** Spec D17 item 3: one batch of this many synthetic candidates, scored this many times. */
@@ -108,6 +122,8 @@ export interface CheckArgs {
   dryRun: boolean;
   timing: boolean;
   concurrency: number;
+  /** --only as given; checked against the suite by main (parseOnlyTargets). */
+  only?: string;
 }
 
 const OPTIONS = {
@@ -116,6 +132,7 @@ const OPTIONS = {
   'dry-run': { type: 'boolean' },
   timing: { type: 'boolean' },
   concurrency: { type: 'string' },
+  only: { type: 'string' },
 } as const;
 
 function readArgs(argv: readonly string[]) {
@@ -143,12 +160,15 @@ export function parseCheckArgs(argv: readonly string[]): CheckArgs | { usage: st
   if (!Number.isInteger(concurrency) || concurrency < 1) {
     return { usage: `--concurrency must be a positive integer, got "${values.concurrency}"` };
   }
+  if (values.only !== undefined && values.timing === true) return { usage: '--only cannot be combined with --timing' };
+  if (values.only !== undefined && values.only.trim().length === 0) return { usage: `--only needs at least one target (${ONLY_FORMAT})` };
   return {
     model,
     ...(values.out === undefined ? {} : { out: values.out.trim() }),
     dryRun,
     timing: values.timing === true,
     concurrency,
+    ...(values.only === undefined ? {} : { only: values.only }),
   };
 }
 
@@ -311,16 +331,24 @@ function header(args: CheckArgs, deps: CheckCliDeps, apiKey: string): RecordHead
   };
 }
 
-async function runCheck(args: CheckArgs, deps: CheckCliDeps, apiKey: string): Promise<0 | 1> {
-  const stageOne = planStageOne(deps.suite);
-  const worst = worstCaseStageTwoCalls(deps.suite);
+async function runCheck(args: CheckArgs, deps: CheckCliDeps, apiKey: string, suite: CounterfactualSuite): Promise<0 | 1> {
+  const stageOne = planStageOne(suite);
+  const worst = worstCaseStageTwoCalls(suite);
   const perCall = stageOne.length === 0 ? 0 : estimateCostUsd(stageOne, args.model) / stageOne.length;
   deps.print(`${SCRIPT_NAME} - model ${args.model}; key ${keyTail(apiKey)}; ${endpointLine(deps.env)}`);
   deps.print(`Rubric ${RUBRIC_VERSION}, examples ${EXAMPLES_VERSION}, prompt fingerprint ${rankingPromptFingerprint({ landlordCard: false })} (${buildRankingSystemPrompt().length} system characters)`);
-  deps.print(
-    `Suite: ${deps.suite.basePairs.length} base pairs x 2 directions, ${deps.suite.swaps.length} swaps (${deps.suite.swaps.map((s) => s.id).join(', ')}), ` +
-      `${deps.suite.controls.length} controls`,
-  );
+  if (suite.only === undefined) {
+    deps.print(
+      `Suite: ${suite.basePairs.length} base pairs x 2 directions, ${suite.swaps.length} swaps (${suite.swaps.map((s) => s.id).join(', ')}), ` +
+        `${suite.controls.length} controls`,
+    );
+  } else {
+    const pairDirections = new Set(suite.only.map((t) => `${t.pairId}:${t.direction}`));
+    deps.print(
+      `TARGETED re-run - NOT the gate: ${suite.only.length} swap(s) on ${pairDirections.size} pair and direction pair(s), base groups A and B each, no controls`,
+    );
+    deps.print(`Targets: ${suite.only.map(onlyTargetText).join(', ')}`);
+  }
   deps.print(`Planned calls, stage one: ${stageOne.length} (estimated $${estimateCostUsd(stageOne, args.model).toFixed(2)} on ${args.model})`);
   deps.print(`Stage two, only for misses: at most ${worst} more calls (estimated at most $${(Math.round(perCall * worst * 100) / 100).toFixed(2)})`);
   if (args.dryRun) {
@@ -329,17 +357,17 @@ async function runCheck(args: CheckArgs, deps: CheckCliDeps, apiKey: string): Pr
   }
   const driver = deps.createDriver({ model: args.model, apiKey });
   const first = await runAll(driver, stageOne, args.concurrency);
-  const stageTwo = planStageTwo(first, deps.suite);
+  const stageTwo = planStageTwo(first, suite);
   deps.print(`Stage two: ${stageTwo.length} calls`);
   const second = stageTwo.length === 0 ? [] : await runAll(driver, stageTwo, args.concurrency);
-  const result = evaluateCheck([...first, ...second], deps.suite, {
+  const result = evaluateCheck([...first, ...second], suite, {
     model: args.model,
     stageOneCalls: stageOne.length,
     stageTwoCalls: stageTwo.length,
   });
   const text = renderCheckRecord(result, header(args, deps, apiKey));
   const appendProblem = tryAppendRecord(deps, args.out!, text);
-  deps.print(`Verdict: ${result.verdict}`);
+  deps.print(`Verdict: ${verdictLabel(result)}`);
   for (const reason of result.reasons) deps.print(`  - ${reason}`);
   if (appendProblem !== undefined) return printUnsavedRecord(deps, args.out!, text, appendProblem);
   deps.print(`Record appended to ${args.out}`);
@@ -360,6 +388,7 @@ async function runTiming(args: CheckArgs, deps: CheckCliDeps, apiKey: string): P
       unitId: pair.unit.unitId,
       card: t.card,
       missing: t.missing,
+      authority: property.authority,
       pairHistory: { sends: [], declined: null, tours: [], daysSinceLastSend: null },
       propertyFacts: property.facts,
     })),
@@ -404,6 +433,17 @@ export async function main(argv: readonly string[], cli: Partial<CheckCliDeps> =
     deps.printError(USAGE);
     return 2;
   }
+  // Spec rev 9: --only names targets of THIS suite; anything else is a usage error before any key, record or call.
+  let suite: CounterfactualSuite = deps.suite;
+  if (parsed.only !== undefined) {
+    const targets = parseOnlyTargets(parsed.only, deps.suite);
+    if ('usage' in targets) {
+      deps.printError(`${SCRIPT_NAME}: ${targets.usage}. No call made.`);
+      deps.printError(USAGE);
+      return 2;
+    }
+    suite = { ...deps.suite, only: targets };
+  }
   // A dry run never reads the key (plan PR1).
   const apiKey = parsed.dryRun ? '' : (deps.env.ANTHROPIC_API_KEY ?? '').trim();
   if (!parsed.dryRun && apiKey.length === 0) {
@@ -419,7 +459,7 @@ export async function main(argv: readonly string[], cli: Partial<CheckCliDeps> =
     }
   }
   try {
-    return parsed.timing ? await runTiming(parsed, deps, apiKey) : await runCheck(parsed, deps, apiKey);
+    return parsed.timing ? await runTiming(parsed, deps, apiKey) : await runCheck(parsed, deps, apiKey, suite);
   } catch (err) {
     deps.printError(`${SCRIPT_NAME} - FAILED: ${err instanceof Error ? err.message : String(err)}`);
     return 1;

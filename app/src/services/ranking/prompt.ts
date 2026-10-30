@@ -8,6 +8,8 @@
 //   object: { anchor: { card, missing }, homesSeen, candidates }.
 //   * candidates carry handles c1..cn in pool order; record ids never reach
 //     the text (handles map back through RankingBatchInput.handles).
+//   * each candidate carries ONE authority fact, "matched" or "unconfirmed"
+//     (charter section 20 item 18): the authority names are off both cards.
 //   * homesSeen holds every distinct home any tenant card in the call lists
 //     under propertiesSeen, written ONCE as { handle, label, card } with
 //     handles h1..hn in first-reference order; each propertiesSeen entry's
@@ -25,7 +27,7 @@ import { PROPERTIES_SEEN_KEY } from './cards.js';
 import { RANKING_EXAMPLES, type RankingExample } from './examples.js';
 import { RUBRIC_TEXT } from './rubric.js';
 import { rankingSchema } from './schema.js';
-import type { Card, Direction, MissingFlag, PairHistory } from './types.js';
+import type { AuthorityFact, Card, Direction, MissingFlag, PairHistory } from './types.js';
 
 /** The entry key naming a seen home on S3's tenant card (PropertiesSeenEntry.home, PR20). */
 export const SEEN_HOME_KEY = 'home';
@@ -42,6 +44,8 @@ export interface WireCandidate {
   handle: string;
   card: Card;
   missing: string[];
+  /** Charter section 20 item 18: the pair's authority fact (pool.ts pairAuthorityFact). */
+  authority: AuthorityFact;
   pairHistory: PairHistory;
 }
 
@@ -63,6 +67,8 @@ export interface RankingBatchCandidateSource {
   unitId: string;
   card: Card;
   missing: readonly MissingFlag[];
+  /** Charter section 20 item 18: the pair's authority fact (pool.ts pairAuthorityFact). */
+  authority: AuthorityFact;
   pairHistory: PairHistory;
   propertyFacts: PropertyFactsLike;
 }
@@ -236,6 +242,7 @@ export function buildRankingBatch(src: RankingBatchSource): RankingBatchInput {
     handle: handles[i]!.handle,
     card: rewriteSeen(c.card, handleFor),
     missing: c.missing.map((flag) => flag.label),
+    authority: c.authority,
     pairHistory: c.pairHistory,
   }));
   const wire: RankingWire = {

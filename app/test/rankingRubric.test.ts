@@ -10,9 +10,9 @@ import { RUBRIC_TEXT, RUBRIC_VERSION } from '../src/services/ranking/rubric.js';
 import { PROPERTY_FREE_TEXT_FIELDS } from '../src/services/ranking/cardFields.js';
 import { RANKING_SOURCES } from '../src/services/ranking/schema.js';
 
-describe('the rubric (r2)', () => {
-  it('is version r2', () => {
-    expect(RUBRIC_VERSION).toBe('r2');
+describe('the rubric (r3)', () => {
+  it('is version r3', () => {
+    expect(RUBRIC_VERSION).toBe('r3');
   });
 
   it('is ASCII only (no character outside tab, LF and printable ASCII)', () => {
@@ -85,11 +85,32 @@ describe('the rubric (r2)', () => {
     expect(RUBRIC_TEXT).toContain('When the "Maximum tenant portion" is missing, affordability is uncertainty (unknowns), never inferred from income.');
   });
 
-  it('r2: in the pool, the authority and voucher program add nothing to fit; the payment standard is used as given', () => {
+  it('r2/r3: in the pool, the authority and voucher program add nothing to fit; the payment standard is used as given', () => {
     const eligibility = RUBRIC_TEXT.split('\n').find((line) => line.startsWith('- Every CANDIDATE already passed eligibility')) ?? '';
-    expect(eligibility).toContain('the housing authority and the voucher program (any program name, DBHDD included) add nothing to fit and never move a score up or down');
-    expect(eligibility).toContain('the only exception is the all-"unmapped" case, which stays uncertainty');
+    expect(eligibility).toContain('the housing authority and the voucher program add nothing to fit and never move a score up or down');
     expect(eligibility).toContain('use the property\'s payment_standard as given');
+  });
+
+  // r3 (charter section 20 item 18): the authority names are off both cards;
+  // each candidate carries "matched" or "unconfirmed", and the unmapped
+  // exception reads off "unconfirmed".
+  it('r3: the cards name no authority; the candidate authority fact is described and drives the exception', () => {
+    const lines = RUBRIC_TEXT.split('\n');
+    const tenantCardLine = lines.find((line) => line.startsWith('- A tenant card can hold:')) ?? '';
+    const propertyCardLine = lines.find((line) => line.startsWith('- A property card can hold:')) ?? '';
+    expect(tenantCardLine).not.toContain('housingAuthority');
+    expect(propertyCardLine).not.toContain('authorities');
+    expect(RUBRIC_TEXT).toContain('- candidates: each with its handle, card, missing, authority and pairHistory.');
+    const fact = lines.find((line) => line.startsWith('- authority:')) ?? '';
+    expect(fact).toContain('"matched" when the tenant\'s housing authority matched one the property accepts');
+    expect(fact).toContain('"unconfirmed" when the property has no accepted authority the organization list knows, so the pool did not filter on authority');
+    expect(fact).toContain('The authority names are on neither card.');
+    const eligibility = lines.find((line) => line.startsWith('- Every CANDIDATE already passed eligibility')) ?? '';
+    expect(eligibility).toContain('when a candidate\'s authority is "unconfirmed", the pool did not filter on authority');
+    expect(eligibility).toContain('the only exception is authority "unconfirmed", which stays uncertainty');
+    expect(RUBRIC_TEXT).not.toContain('all "unmapped"');
+    expect(RUBRIC_TEXT).not.toContain('all-"unmapped"');
+    expect(RUBRIC_TEXT).not.toContain('DBHDD');
   });
 
   it('r2: area fit comes from "Area preference", never the tenant\'s current address', () => {

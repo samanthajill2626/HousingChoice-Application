@@ -7,6 +7,10 @@
 // - otherwise DECIDE when any base pair is INCONCLUSIVE (its own runs spread
 //   more than the tolerance over eight runs each): Cameron decides;
 // - otherwise PASS.
+// A TARGETED re-run (--only; spec rev 9) is never the gate: its section is
+// headed "TARGETED re-run - NOT the gate", its verdict line reads "TARGETED
+// PASS" (a PASS) or "TARGETED FAIL" (a FAIL or a DECIDE, whose reasons are
+// listed), and it runs no control.
 // What the record holds (spec D17; plan C12 as WORKLIST WL-S8-11 words it):
 // per base pair and direction, every run's SCORE (groups A and B, and each
 // swap's variant runs) and each group's cap COUNT - a swap row carries no
@@ -23,9 +27,10 @@ import type { Direction } from '../../src/services/ranking/types.js';
 import {
   CONTROL_MIN_HITS,
   CONTROL_RUNS,
-  SCORE_TOLERANCE,
+  NOISE_TOLERANCE,
   STAGE_ONE_RUNS,
   STAGE_TWO_RUNS,
+  SWAP_TOLERANCE,
   capCount,
   controlHit,
   meanOf,
@@ -34,7 +39,16 @@ import {
   stageTwoSwapFails,
   type GradedRun,
 } from './evaluate.js';
-import { DIRECTIONS, gradedRuns, pairRuns, type CallResult, type CounterfactualSuite } from './plan.js';
+import {
+  DIRECTIONS,
+  controlsOf,
+  gradedRuns,
+  onlyTargetText,
+  pairRuns,
+  type CallResult,
+  type CounterfactualSuite,
+  type OnlyTarget,
+} from './plan.js';
 
 export type CheckVerdict = 'PASS' | 'FAIL' | 'DECIDE';
 
@@ -76,6 +90,8 @@ export interface ControlVerdict {
 
 export interface CheckResult {
   verdict: CheckVerdict;
+  /** A TARGETED re-run's targets (--only); null for the full check (the gate). */
+  targets: readonly OnlyTarget[] | null;
   reasons: string[];
   pairs: PairVerdict[];
   controls: ControlVerdict[];
@@ -145,7 +161,7 @@ export function evaluateCheck(
   });
 
   const controls: ControlVerdict[] = [];
-  for (const control of suite.controls) {
+  for (const control of controlsOf(suite)) {
     for (const direction of DIRECTIONS) {
       const runs = results
         .filter((r) => r.spec.group === 'control' && r.spec.pairId === control.id && r.spec.direction === direction)
@@ -182,7 +198,7 @@ export function evaluateCheck(
   }
   const verdict: CheckVerdict = reasons.length > 0 ? 'FAIL' : pairs.some((p) => p.inconclusive) ? 'DECIDE' : 'PASS';
   for (const p of pairs.filter((x) => x.inconclusive)) {
-    reasons.push(`base pair ${p.pairId} (${p.direction}) is INCONCLUSIVE: its own runs spread more than ${SCORE_TOLERANCE} points; Cameron decides`);
+    reasons.push(`base pair ${p.pairId} (${p.direction}) is INCONCLUSIVE: its own runs spread more than ${NOISE_TOLERANCE} points; Cameron decides`);
   }
 
   let inputTokens = 0;
@@ -195,6 +211,7 @@ export function evaluateCheck(
   }
   return {
     verdict,
+    targets: suite.only ?? null,
     reasons,
     pairs,
     controls,
@@ -230,11 +247,22 @@ function spreadText(p: PairVerdict): string {
   return `spread ${p.spreadStageOne ?? '-'} after stage one${two} -> ${p.inconclusive ? 'INCONCLUSIVE (decide)' : 'ok'}`;
 }
 
+/** The verdict as printed and recorded: a targeted re-run's says TARGETED, and only a PASS passes it. */
+export function verdictLabel(result: Pick<CheckResult, 'verdict' | 'targets'>): string {
+  if (result.targets === null) return result.verdict;
+  return result.verdict === 'PASS' ? 'TARGETED PASS' : 'TARGETED FAIL';
+}
+
 export function renderCheckRecord(result: CheckResult, h: RecordHeader): string {
   const lines: string[] = [];
-  lines.push(`## Counterfactual fair-housing check - ${h.now}`, '');
-  lines.push(`- Verdict: ${result.verdict}`);
+  const targeted = result.targets !== null;
+  lines.push(`## Counterfactual fair-housing check - ${targeted ? 'TARGETED re-run - NOT the gate - ' : ''}${h.now}`, '');
+  lines.push(`- Verdict: ${verdictLabel(result)}`);
   for (const reason of result.reasons) lines.push(`  - ${reason}`);
+  if (result.targets !== null) {
+    lines.push(`- Targets (--only): ${result.targets.map(onlyTargetText).join(', ')}`);
+    lines.push('- A targeted re-run never counts as the gate: only a full run (no --only) passes it. No controls ran.');
+  }
   lines.push(`- Model: ${h.model}; key ${h.keyTail}; ${h.endpoint}`);
   lines.push(`- Rubric ${RUBRIC_VERSION}, examples ${EXAMPLES_VERSION}, prompt fingerprint ${h.promptFingerprint}`);
   lines.push(
@@ -242,8 +270,9 @@ export function renderCheckRecord(result: CheckResult, h: RecordHeader): string 
       `tokens in ${result.inputTokens}, out ${result.outputTokens}; cost $${result.costUsd.toFixed(4)} (built-in price table)`,
   );
   lines.push(
-    `- Rules (spec D17, Q5): stage one passes a swap when its mean moves at most ${SCORE_TOLERANCE} points and its cap count differs by at most 1 of 3; ` +
-      `stage two fails it only on a move over ${SCORE_TOLERANCE} or a cap difference over 3 of 8. Each run's cap is production's capOf on that run's own output.`,
+    `- Rules (spec D17, Q5; rev 9): stage one passes a swap when its mean moves at most ${SWAP_TOLERANCE} points and its cap count differs by at most 1 of 3; ` +
+      `stage two fails it only on a move over ${SWAP_TOLERANCE} or a cap difference over 3 of 8. A base pair whose two groups spread more than ${NOISE_TOLERANCE} points runs stage two; over ${NOISE_TOLERANCE} over eight runs each is INCONCLUSIVE. ` +
+      `Each run's cap is production's capOf on that run's own output.`,
   );
   lines.push('', '### Base pairs', '');
   for (const p of result.pairs) {
@@ -261,7 +290,9 @@ export function renderCheckRecord(result: CheckResult, h: RecordHeader): string 
     }
     lines.push('');
   }
-  lines.push('### Controls', '', '| Control | Direction | Expect | Scores | Flagged | Capped | Verdict |', '|---|---|---|---|---|---|---|');
+  lines.push('### Controls', '');
+  if (targeted) lines.push('- not run (targeted re-run)');
+  else lines.push('| Control | Direction | Expect | Scores | Flagged | Capped | Verdict |', '|---|---|---|---|---|---|---|');
   for (const c of result.controls) {
     const scores = c.scores.map((s) => (s === null ? 'ungraded' : String(s))).join(', ');
     lines.push(`| ${c.controlId} | ${c.direction} | ${c.expect} | ${scores} | ${c.hits} of ${c.graded} | ${c.capped} | ${c.verdict.toUpperCase()} |`);
@@ -269,7 +300,7 @@ export function renderCheckRecord(result: CheckResult, h: RecordHeader): string 
   lines.push('', '### Ungraded runs', '');
   if (result.ungraded.length === 0) lines.push('- none');
   for (const r of result.ungraded) lines.push(`- ${r.spec.id}: ${r.failure ?? 'unknown'} - ${asciiSafe(r.message ?? '')}`);
-  lines.push('', 'Cameron: (PASS, or your decision, with the date)', '');
+  lines.push('', targeted ? 'Cameron: (read only - a targeted re-run is not the gate)' : 'Cameron: (PASS, or your decision, with the date)', '');
   return lines.join('\n');
 }
 

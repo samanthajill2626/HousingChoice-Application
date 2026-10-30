@@ -104,7 +104,6 @@ const FULL_CARD = {
   created_at: '2026-09-01',
   voucherSizes: [2, 3],
   voucherSizesInferredFromBeds: false,
-  authorities: { mapped: [ATLANTA.name], unmapped: ['Nowhere Board'] },
 };
 
 const LANDLORD: ContactItem = {
@@ -125,6 +124,10 @@ describe('propertyCard (spec D2.1, D2.2)', () => {
     const card = propertyCard(FULL_UNIT, OFF);
     expect(card).toEqual(FULL_CARD);
     expect(Object.keys(card)).toEqual(Object.keys(FULL_CARD));
+    // Charter section 20 item 18: the record holds accepted authorities; the card never does.
+    expect(FULL_UNIT.accepted_authorities).toEqual([ATLANTA.name, 'Nowhere Board']);
+    expect(card).not.toHaveProperty('authorities');
+    expect(card).not.toHaveProperty('accepted_authorities');
   });
 
   it('serializes the same record to the same bytes whatever its stored key order', () => {

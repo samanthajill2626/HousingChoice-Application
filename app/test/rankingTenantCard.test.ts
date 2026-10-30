@@ -69,7 +69,6 @@ const T_CARD = {
   lastName: 'Example',
   status: 'searching',
   voucherSize: 2,
-  housingAuthority: ATLANTA.name,
   voucher_expiration_date: '2027-01-31T00:00:00.000Z',
   rta_expiration_date: '2026-12-01',
   porting: false,
@@ -103,6 +102,9 @@ describe('tenantCard - the attributes (spec D2.1)', () => {
     const card = tenantCard(T, { now: NOW, seenMax: 8, seen: [] });
     expect(card).toEqual(T_CARD);
     expect(Object.keys(card)).toEqual(Object.keys(T_CARD));
+    // Charter section 20 item 18: the record holds an authority; the card never does.
+    expect(T['housingAuthority']).toBe(ATLANTA.name);
+    expect(card).not.toHaveProperty('housingAuthority');
     expect(card).not.toHaveProperty('notes_updated_at');
   });
 

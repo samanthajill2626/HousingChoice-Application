@@ -55,6 +55,8 @@ const REASON = {
   media: 'media and links (charter 6.1)',
   derived: 'read through a derived card field (spec D2.1)',
   legacy: 'a legacy or tombstoned attribute (charter 6.1)',
+  authority:
+    'the pool fences on housing authority; the model gets the per-pair authority fact (matched or unconfirmed) instead (charter 20 item 18)',
 } as const;
 
 function include(label: string): CardFieldUse {
@@ -119,7 +121,7 @@ const TENANT_BASE_FIELDS = {
   lastName: include('Last name'),
   status: include('Status'),
   voucherSize: include('Voucher size'),
-  housingAuthority: include('Housing authority'),
+  housingAuthority: exclude(REASON.authority),
   voucher_expiration_date: include('Voucher expiration'),
   rta_expiration_date: include('RTA expiration'),
   porting: include('Porting'),
@@ -313,7 +315,7 @@ export const PROPERTY_CARD_FIELDS: Readonly<Record<PropertyCardKey, CardFieldUse
   deleted_at: exclude(REASON.plumbing),
   updated_at: exclude(REASON.timestamp),
   voucher_size_accepted: exclude(REASON.derived),
-  accepted_authorities: exclude(REASON.derived),
+  accepted_authorities: exclude(REASON.authority),
 } satisfies Record<PropertyCardKey, CardFieldUse>);
 
 /** Never on a card and never reported failed (A1, charter 7.2). */

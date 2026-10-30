@@ -140,7 +140,6 @@ describe('the registries (spec D2.1)', () => {
       ['lastName', 'lastName'],
       ['status', 'status'],
       ['voucherSize', 'voucherSize'],
-      ['housingAuthority', 'housingAuthority'],
       ['voucher_expiration_date', 'voucher_expiration_date'],
       ['rta_expiration_date', 'rta_expiration_date'],
       ['porting', 'porting'],
@@ -155,6 +154,17 @@ describe('the registries (spec D2.1)', () => {
       ['notes', 'notes'],
       ...TENANT_MATCHING_INPUTS.filter((input) => input.source === 'field').map((input) => [input.key, input.label]),
     ]);
+  });
+
+  it('charter section 20 item 18: the housing authority names are off both cards, for the per-pair fact', () => {
+    for (const [registry, key] of [[TENANT, 'housingAuthority'], [PROPERTY, 'accepted_authorities']] as const) {
+      const entry = registry[key];
+      expect(entry?.use, key).toBe('exclude');
+      if (entry?.use === 'exclude') {
+        expect(entry.reason).toContain('the pool fences on housing authority');
+        expect(entry.reason).toContain('per-pair authority fact');
+      }
+    }
   });
 
   it('the matching inputs are mapped from the list by source, each with its excluded provenance key', () => {

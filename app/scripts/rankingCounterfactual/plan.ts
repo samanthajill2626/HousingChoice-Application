@@ -10,6 +10,12 @@
 // adds five runs (runs 4-8) to group A and a missed swap, or to both groups
 // for a noisy base - never for a pair and direction holding an ungraded run
 // (C6).
+//
+// TARGETED mode (spec rev 9; Cameron: "If we need to retest, lets just retest
+// these ones only before we retest the whole thing"): a suite with `only`
+// set runs the base groups only for the named pair and direction pairs, and
+// only the named swaps, through the same two stages; no controls. A targeted
+// run is never the gate (report.ts marks its record section).
 import { DEFAULT_AI_PRICE_TABLE } from '../../src/lib/config.js';
 import type { ContactItem } from '../../src/repos/contactsRepo.js';
 import type { UnitItem } from '../../src/repos/unitsRepo.js';
@@ -31,13 +37,91 @@ export const ESTIMATED_OUTPUT_TOKENS_PER_CALL = 2500;
 
 const EMPTY_PAIR_HISTORY: PairHistory = { sends: [], declined: null, tours: [], daysSinceLastSend: null };
 
+/** One --only target: a base pair, a direction and one swap. */
+export interface OnlyTarget {
+  pairId: string;
+  direction: Direction;
+  swapId: string;
+}
+
 export interface CounterfactualSuite {
   basePairs: readonly BasePair[];
   swaps: readonly Swap[];
   controls: readonly Control[];
+  /** TARGETED mode (--only): run only these swaps (with their pair and direction base groups) and no control. */
+  only?: readonly OnlyTarget[];
 }
 
 export const DEFAULT_SUITE: CounterfactualSuite = { basePairs: BASE_PAIRS, swaps: SWAPS, controls: CONTROLS };
+
+/** The --only list format, for usage messages. */
+export const ONLY_FORMAT = 'P<n>:<direction>:<swap>[,P<n>:<direction>:<swap>...]';
+
+/** "P2:tenants_for_property:sogi" - the text form of a target. */
+export function onlyTargetText(t: OnlyTarget): string {
+  return `${t.pairId}:${t.direction}:${t.swapId}`;
+}
+
+/**
+ * Parses an --only list against the suite: comma-separated
+ * P<n>:<direction>:<swap>, each naming a base pair, a direction and a swap of
+ * the suite. Duplicates collapse; the order kept is the list's. Anything
+ * else is a usage error (the caller exits 2 having called nothing).
+ */
+export function parseOnlyTargets(text: string, suite: CounterfactualSuite): OnlyTarget[] | { usage: string } {
+  const items = text.split(',').map((item) => item.trim()).filter((item) => item.length > 0);
+  if (items.length === 0) return { usage: `--only needs at least one target (${ONLY_FORMAT})` };
+  const out: OnlyTarget[] = [];
+  for (const item of items) {
+    const parts = item.split(':').map((part) => part.trim());
+    if (parts.length !== 3) return { usage: `--only target "${item}" is not ${'P<n>:<direction>:<swap>'}` };
+    const [pairId, direction, swapId] = parts as [string, string, string];
+    if (!/^P\d+$/.test(pairId) || !suite.basePairs.some((p) => p.id === pairId)) {
+      return { usage: `--only target "${item}": unknown base pair "${pairId}" (one of ${suite.basePairs.map((p) => p.id).join(', ')})` };
+    }
+    if (!(DIRECTIONS as readonly string[]).includes(direction)) {
+      return { usage: `--only target "${item}": unknown direction "${direction}" (one of ${DIRECTIONS.join(', ')})` };
+    }
+    if (!suite.swaps.some((s) => s.id === swapId)) {
+      return { usage: `--only target "${item}": unknown swap "${swapId}" (one of ${suite.swaps.map((s) => s.id).join(', ')})` };
+    }
+    const target: OnlyTarget = { pairId, direction: direction as Direction, swapId };
+    if (!out.some((t) => onlyTargetText(t) === onlyTargetText(target))) out.push(target);
+  }
+  return out;
+}
+
+/** One base pair and direction the run covers, with the swaps it runs there. */
+export interface Selection {
+  pair: BasePair;
+  direction: Direction;
+  swaps: readonly Swap[];
+}
+
+/**
+ * The pairs, directions and swaps a run covers, in suite order: all of them
+ * for the full check; for a targeted run only the named pair and direction
+ * pairs, each with only its named swaps.
+ */
+export function selectionOf(suite: CounterfactualSuite): Selection[] {
+  const out: Selection[] = [];
+  for (const pair of suite.basePairs) {
+    for (const direction of DIRECTIONS) {
+      if (suite.only === undefined) {
+        out.push({ pair, direction, swaps: suite.swaps });
+        continue;
+      }
+      const named = suite.only.filter((t) => t.pairId === pair.id && t.direction === direction).map((t) => t.swapId);
+      if (named.length > 0) out.push({ pair, direction, swaps: suite.swaps.filter((s) => named.includes(s.id)) });
+    }
+  }
+  return out;
+}
+
+/** The controls a run covers: every one for the full check, none for a targeted run. */
+export function controlsOf(suite: CounterfactualSuite): readonly Control[] {
+  return suite.only === undefined ? suite.controls : [];
+}
 
 export type CallGroup = 'base-A' | 'base-B' | 'variant' | 'control' | 'timing';
 
@@ -94,6 +178,7 @@ export function pairBatch(
         unitId: unit.unitId,
         card: t.card,
         missing: t.missing,
+        authority: property.authority,
         pairHistory: EMPTY_PAIR_HISTORY,
         propertyFacts: property.facts,
       })),
@@ -113,6 +198,7 @@ export function pairBatch(
       unitId: p.unitId,
       card: p.card,
       missing: p.missing,
+      authority: p.authority,
       pairHistory: EMPTY_PAIR_HISTORY,
       propertyFacts: p.facts,
     })),
@@ -149,20 +235,18 @@ function fillersFor(subject: ContactItem): { tenants: ContactItem[]; units: Unit
 
 export function planStageOne(suite: CounterfactualSuite): CallSpec[] {
   const specs: CallSpec[] = [];
-  for (const pair of suite.basePairs) {
+  for (const { pair, direction, swaps } of selectionOf(suite)) {
     const fillers = fillersFor(pair.tenant);
-    for (const direction of DIRECTIONS) {
-      const base = pairBatch(direction, pair.tenant, pair.unit, fillers);
-      for (const group of ['base-A', 'base-B'] as const) {
-        for (let run = 1; run <= STAGE_ONE_RUNS; run += 1) specs.push(makeSpec(group, pair.id, undefined, direction, run, base));
-      }
-      for (const swap of suite.swaps) {
-        const variant = pairBatch(direction, swap.apply(pair), pair.unit, fillers);
-        for (let run = 1; run <= STAGE_ONE_RUNS; run += 1) specs.push(makeSpec('variant', pair.id, swap.id, direction, run, variant));
-      }
+    const base = pairBatch(direction, pair.tenant, pair.unit, fillers);
+    for (const group of ['base-A', 'base-B'] as const) {
+      for (let run = 1; run <= STAGE_ONE_RUNS; run += 1) specs.push(makeSpec(group, pair.id, undefined, direction, run, base));
+    }
+    for (const swap of swaps) {
+      const variant = pairBatch(direction, swap.apply(pair), pair.unit, fillers);
+      for (let run = 1; run <= STAGE_ONE_RUNS; run += 1) specs.push(makeSpec('variant', pair.id, swap.id, direction, run, variant));
     }
   }
-  for (const control of suite.controls) {
+  for (const control of controlsOf(suite)) {
     const fillers = fillersFor(control.tenant);
     for (const direction of DIRECTIONS) {
       const prepared = pairBatch(direction, control.tenant, control.unit, fillers);
@@ -188,21 +272,19 @@ function byRun(results: readonly CallResult[]): CallResult[] {
 /** The base-pair results grouped per pair and direction, in suite order, runs ascending. */
 export function pairRuns(results: readonly CallResult[], suite: CounterfactualSuite): PairRuns[] {
   const out: PairRuns[] = [];
-  for (const pair of suite.basePairs) {
-    for (const direction of DIRECTIONS) {
-      const mine = results.filter((r) => r.spec.pairId === pair.id && r.spec.direction === direction);
-      out.push({
-        pairId: pair.id,
-        about: pair.about,
-        direction,
-        groupA: byRun(mine.filter((r) => r.spec.group === 'base-A')),
-        groupB: byRun(mine.filter((r) => r.spec.group === 'base-B')),
-        variants: suite.swaps.map((swap) => ({
-          swapId: swap.id,
-          runs: byRun(mine.filter((r) => r.spec.group === 'variant' && r.spec.swapId === swap.id)),
-        })),
-      });
-    }
+  for (const { pair, direction, swaps } of selectionOf(suite)) {
+    const mine = results.filter((r) => r.spec.pairId === pair.id && r.spec.direction === direction);
+    out.push({
+      pairId: pair.id,
+      about: pair.about,
+      direction,
+      groupA: byRun(mine.filter((r) => r.spec.group === 'base-A')),
+      groupB: byRun(mine.filter((r) => r.spec.group === 'base-B')),
+      variants: swaps.map((swap) => ({
+        swapId: swap.id,
+        runs: byRun(mine.filter((r) => r.spec.group === 'variant' && r.spec.swapId === swap.id)),
+      })),
+    });
   }
   return out;
 }
@@ -238,7 +320,7 @@ export function planStageTwo(stageOne: readonly CallResult[], suite: Counterfact
 }
 
 export function worstCaseStageTwoCalls(suite: CounterfactualSuite): number {
-  return suite.basePairs.length * DIRECTIONS.length * (2 + suite.swaps.length) * (STAGE_TWO_RUNS - STAGE_ONE_RUNS);
+  return selectionOf(suite).reduce((total, s) => total + (2 + s.swaps.length) * (STAGE_TWO_RUNS - STAGE_ONE_RUNS), 0);
 }
 
 /** C9: a planning estimate in dollars (built-in prices), rounded to the cent. */

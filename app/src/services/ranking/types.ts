@@ -59,3 +59,12 @@ export interface AuthorityMapping {
   mapped: string[];
   unmapped: string[];
 }
+
+/**
+ * Charter section 20 item 18: the ONE authority fact a pair carries to the
+ * model in place of the authority names (off both cards). "matched": the pool
+ * fenced on authority and this pair passed it. "unconfirmed": the pool did
+ * not fence on authority, because the property has no recorded authority the
+ * organization list maps (pool.ts authorityFilters).
+ */
+export type AuthorityFact = 'matched' | 'unconfirmed';

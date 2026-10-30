@@ -23,6 +23,9 @@ import {
 } from '../src/services/ranking/cardFields.js';
 import { LANDLORD_DEFAULTS_KEY, LAST_HEARD_FROM_KEY, PROPERTIES_SEEN_KEY, type PropertyCardCtx } from '../src/services/ranking/cards.js';
 import { propertyMissing, tenantMissing } from '../src/services/ranking/completeness.js';
+import { authorityAllows, mapAuthorities, pairAuthorityFact } from '../src/services/ranking/pool.js';
+import { renderExamplesText } from '../src/services/ranking/prompt.js';
+import { authoritiesOf } from '../src/lib/unitFields.js';
 
 type Card = Record<string, unknown>;
 
@@ -76,10 +79,63 @@ function capped(p: (typeof pairs)[number]): boolean {
   }).capped;
 }
 
-describe('the worked examples (e2)', () => {
-  it('is version e2 with eleven examples', () => {
-    expect(EXAMPLES_VERSION).toBe('e2');
-    expect(RANKING_EXAMPLES).toHaveLength(11);
+describe('the worked examples (e3)', () => {
+  it('is version e3 with twelve examples', () => {
+    expect(EXAMPLES_VERSION).toBe('e3');
+    expect(RANKING_EXAMPLES).toHaveLength(12);
+  });
+
+  // e3 (charter section 20 item 18): a TENANT-anchor rent-gap pair whose Notes
+  // carry a gender-identity line beside an ordinary preference line. It scores
+  // as the pair would without that line; no reason or unknown mentions it.
+  it('has a tenant-anchor rent-gap pair with a gender-identity Notes line that is never a reason', () => {
+    const matches = pairs.filter((x) => /\btrans\b|she\/her/i.test(String(x.tenant['notes'])));
+    expect(matches).toHaveLength(1);
+    const p = matches[0]!;
+    expect(p.example.direction).toBe('properties_for_tenant');
+    const notesLines = String(p.tenant['notes']).split('\n');
+    expect(notesLines.length).toBeGreaterThanOrEqual(2);
+    expect(notesLines.some((line) => !/\btrans\b|she\/her/i.test(line))).toBe(true);
+    expect(Number(p.property['rent_min'])).toBeGreaterThan(Number(p.property['payment_standard']));
+    expect(p.out.against.some((r) => r.source === 'rent')).toBe(true);
+    const text = [...p.out.for, ...p.out.against].map((r) => r.text).concat(p.out.unknowns).join(' | ');
+    expect(text).not.toMatch(/trans|gender|identity|she|her\b|woman/i);
+    expect(p.out.fairHousingFlags).toEqual([]);
+    expect(capped(p)).toBe(false);
+  });
+
+  // Charter section 20 item 18: no example card names a housing authority;
+  // each candidate carries the pair fact the pool would give it.
+  it('no example card names a housing authority, and the rendered examples carry none of the offCard names', () => {
+    const rendered = renderExamplesText();
+    for (const example of RANKING_EXAMPLES) {
+      const cards = [example.anchor.card, ...example.candidates.map((c) => c.card), ...example.homesSeen.map((h) => h.card)];
+      for (const card of cards) {
+        expect(card, example.title).not.toHaveProperty('housingAuthority');
+        expect(card, example.title).not.toHaveProperty('authorities');
+        expect(card, example.title).not.toHaveProperty('accepted_authorities');
+      }
+      for (const stored of Object.values(example.offCard ?? {})) {
+        for (const value of Object.values(stored)) {
+          for (const name of Array.isArray(value) ? value : [value]) expect(rendered, example.title).not.toContain(String(name));
+        }
+      }
+    }
+    expect(rendered).not.toContain('Housing Authority');
+    expect(rendered).not.toContain('offCard');
+  });
+
+  it('every candidate authority fact is what the pool gives that stored pair (pairAuthorityFact), and the pair passes the fence', () => {
+    for (const example of RANKING_EXAMPLES) {
+      const anchorIsProperty = example.direction === 'tenants_for_property';
+      for (const c of example.candidates) {
+        const unitRecord = unitOf(anchorIsProperty ? example.anchor.card : c.card, anchorIsProperty ? 'anchor' : c.handle, example);
+        const contactRecord = contactOf(anchorIsProperty ? c.card : example.anchor.card, anchorIsProperty ? c.handle : 'anchor', example);
+        const mapping = mapAuthorities(ORG_ENTRIES, authoritiesOf(unitRecord));
+        expect(c.authority, `${example.title}: ${c.handle}`).toBe(pairAuthorityFact(mapping));
+        expect(authorityAllows(mapping, contactRecord['housingAuthority']), `${example.title}: ${c.handle}`).toBe(true);
+      }
+    }
   });
 
   // e2 (charter section 20 item 17): a rent-gap pair whose Notes carry a
@@ -194,35 +250,40 @@ describe('the worked examples (e2)', () => {
   // each card key is one the card builders can emit; each seen entry has
   // the keys S3's tenant card writes; and the three home references (h, c,
   // anchor) all appear.
-  const DERIVED_PROPERTY_KEYS = ['voucherSizes', 'voucherSizesInferredFromBeds', 'authorities', LANDLORD_DEFAULTS_KEY];
+  const DERIVED_PROPERTY_KEYS = ['voucherSizes', 'voucherSizesInferredFromBeds', LANDLORD_DEFAULTS_KEY];
   const DERIVED_TENANT_KEYS = [LAST_HEARD_FROM_KEY, PROPERTIES_SEEN_KEY];
   const ORG_ENTRIES = buildStartingEntries('2026-10-28T00:00:00.000Z', (() => { let n = 0; return () => `ex-org-${(n += 1)}`; })());
   const CTX: PropertyCardCtx = { orgEntries: ORG_ENTRIES, landlordCard: false, landlord: null };
 
-  /** The stored unit an example property card stands for (the card's own keys, derived fields undone). */
-  function unitOf(card: Card): UnitItem {
+  /** The stored attributes the card leaves off (charter section 20 item 18), never rendered. */
+  const offCardOf = (example: RankingExample, owner: string): Card => example.offCard?.[owner] ?? {};
+
+  /** The stored unit an example property card stands for (the card's own keys, derived fields undone, plus its offCard). */
+  function unitOf(card: Card, owner: string, example: RankingExample): UnitItem {
     const record: Record<string, unknown> = { unitId: 'ex-unit', landlordId: 'ex-landlord' };
     for (const [key, value] of Object.entries(card)) if (!DERIVED_PROPERTY_KEYS.includes(key)) record[key] = value;
     if (card['voucherSizesInferredFromBeds'] !== true) record['voucher_size_accepted'] = card['voucherSizes'];
-    const authorities = card['authorities'] as { mapped: string[]; unmapped: string[] };
-    record['accepted_authorities'] = [...authorities.mapped, ...authorities.unmapped];
+    Object.assign(record, offCardOf(example, owner));
     return record as UnitItem;
   }
 
-  /** The stored contact an example tenant card stands for (list labels mapped back to their keys). */
-  function contactOf(card: Card): ContactItem {
+  /** The stored contact an example tenant card stands for (list labels mapped back to their keys, plus its offCard). */
+  function contactOf(card: Card, owner: string, example: RankingExample): ContactItem {
     const record: Record<string, unknown> = { contactId: 'ex-contact', type: 'tenant' };
     const keyOfLabel = new Map<string, string>(TENANT_MATCHING_INPUTS.map((e) => [e.label, e.key]));
     for (const [key, value] of Object.entries(card)) {
       if (DERIVED_TENANT_KEYS.includes(key)) continue;
       record[keyOfLabel.get(key) ?? key] = value;
     }
+    Object.assign(record, offCardOf(example, owner));
     return record as ContactItem;
   }
 
   const labels = (flags: readonly { label: string }[]): string[] => flags.map((f) => f.label);
-  const propertyFlags = (card: Card): string[] => labels(propertyMissing(unitOf(card), CTX));
-  const tenantFlags = (card: Card): string[] => labels(tenantMissing(contactOf(card)));
+  const propertyFlags = (card: Card, owner: string, example: RankingExample): string[] =>
+    labels(propertyMissing(unitOf(card, owner, example), CTX));
+  const tenantFlags = (card: Card, owner: string, example: RankingExample): string[] =>
+    labels(tenantMissing(contactOf(card, owner, example)));
 
   const emittedKeys = (registry: Readonly<Record<string, CardFieldUse>>): Set<string> =>
     new Set(includedFields(registry).map(([key, field]) => field.cardKey ?? key));
@@ -245,10 +306,12 @@ describe('the worked examples (e2)', () => {
     for (const example of RANKING_EXAMPLES) {
       const anchorIsProperty = example.direction === 'tenants_for_property';
       expect(example.anchor.missing, `${example.title}: anchor`).toEqual(
-        anchorIsProperty ? propertyFlags(example.anchor.card) : tenantFlags(example.anchor.card),
+        anchorIsProperty ? propertyFlags(example.anchor.card, 'anchor', example) : tenantFlags(example.anchor.card, 'anchor', example),
       );
       for (const c of example.candidates) {
-        expect(c.missing, `${example.title}: ${c.handle}`).toEqual(anchorIsProperty ? tenantFlags(c.card) : propertyFlags(c.card));
+        expect(c.missing, `${example.title}: ${c.handle}`).toEqual(
+          anchorIsProperty ? tenantFlags(c.card, c.handle, example) : propertyFlags(c.card, c.handle, example),
+        );
       }
     }
   });

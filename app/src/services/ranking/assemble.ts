@@ -15,6 +15,7 @@ import type { Logger } from '../../lib/logger.js';
 import type { OrgEntry } from '../../lib/orgNames.js';
 import { propertyLabel } from '../../lib/propertyLabel.js';
 import { hasSmsConsent } from '../../lib/smsCompliance.js';
+import { authoritiesOf } from '../../lib/unitFields.js';
 import { createContactsRepo, type ContactItem, type ContactsRepo } from '../../repos/contactsRepo.js';
 import type { RepoDeps } from '../../repos/conversationsRepo.js';
 import { createListingSendsRepo, type ListingSendItem, type ListingSendsRepo } from '../../repos/listingSendsRepo.js';
@@ -27,11 +28,12 @@ import { listedHomeIds, propertyCard, propertyFacts, tenantCard, type PropertyCa
 import { propertyMissing, tenantMissing } from './completeness.js';
 import { pairHistoryFingerprint, tenantCardFingerprint, unitCardFingerprint } from './fingerprints.js';
 import { pairHistoryOf } from './pairHistory.js';
-import { computePool, mapWithConcurrency, type PoolDeps, type PoolFailure, type PoolOpts } from './pool.js';
+import { computePool, mapAuthorities, mapWithConcurrency, pairAuthorityFact, type PoolDeps, type PoolFailure, type PoolOpts } from './pool.js';
 import { MISSING_UNIT_LABEL, NO_ADDRESS_LABEL, buildSeenSet, seenUnitIds, type SeenHome } from './seenSet.js';
 import type {
   AnchorNote,
   AnchorRef,
+  AuthorityFact,
   AuthorityMapping,
   Card,
   CardFingerprints,
@@ -172,6 +174,12 @@ export interface VerifiedCandidate extends CandidateBase {
   unverified: false;
   card: Card;
   missing: MissingFlag[];
+  /**
+   * Charter section 20 item 18: the pair's authority fact, from the mapping
+   * the pool fenced this pair with (pool.ts pairAuthorityFact). Sent to the
+   * model; in no fingerprint (it moves only with an authority mapping).
+   */
+  authority: AuthorityFact;
   pairHistory: PairHistory;
   fingerprints: CardFingerprints;
   /** The pair's property's facts (the cap and the flag check read them). */
@@ -361,6 +369,8 @@ export async function assembleRanking(anchor: AnchorRef, opts: AssembleOpts, dep
       return { ...unreadable(landlord.err), candidateIds: pool.candidates.map((contact) => contact.contactId) };
     }
     const anchorSide = buildPropertySide(unit, { orgEntries: ctx.orgEntries, landlordCard: ctx.landlordCard, landlord: landlord.value });
+    // Every candidate's pair property is the anchor: the pool fenced them all with pool.authorities.
+    const authority = pairAuthorityFact(pool.authorities);
     const results = await mapWithConcurrency(pool.candidates, limit, async (contact) => {
       const base = {
         tenantId: contact.contactId,
@@ -391,6 +401,7 @@ export async function assembleRanking(anchor: AnchorRef, opts: AssembleOpts, dep
         unverified: false,
         card: side.card,
         missing: side.missing,
+        authority,
         pairHistory,
         fingerprints: {
           tenantCard: side.fingerprint,
@@ -453,6 +464,8 @@ export async function assembleRanking(anchor: AnchorRef, opts: AssembleOpts, dep
       unverified: false,
       card: side.card,
       missing: side.missing,
+      // The same mapping tenantPool fenced this unit with (pool order, same organization list).
+      authority: pairAuthorityFact(mapAuthorities(ctx.orgEntries, authoritiesOf(unit))),
       pairHistory,
       fingerprints: {
         tenantCard: anchorSide.fingerprint,

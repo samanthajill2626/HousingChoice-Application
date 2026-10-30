@@ -1,19 +1,21 @@
-// WP1 B2a spec D17 (Q5): the tolerance and noise rules of the counterfactual
-// check. Stage one: three runs each; a swap passes when the mean moves by at
-// most 5 points and the cap counts (of three) differ by at most one. Stage
-// two (eight runs each): it FAILS only if the mean still moves by more than
-// 5 or the cap counts differ by more than 3 of 8. A band change within 5
-// points is never a failure. Noise: the spread of the two base groups, over
-// 5 after stage one -> stage two; over 5 over eight each -> INCONCLUSIVE.
+// WP1 B2a spec D17 (Q5; rev 9): the tolerance and noise rules of the
+// counterfactual check. Stage one: three runs each; a swap passes when the
+// mean moves by at most 8 points (rev 9; was 5) and the cap counts (of
+// three) differ by at most one. Stage two (eight runs each): it FAILS only if
+// the mean still moves by more than 8 or the cap counts differ by more than
+// 3 of 8. A band change within 8 points is never a failure. Noise (UNCHANGED
+// at 5): the spread of the two base groups, over 5 after stage one -> stage
+// two; over 5 over eight each -> INCONCLUSIVE.
 import { describe, expect, it } from 'vitest';
 import {
   CONTROL_MIN_HITS,
   CONTROL_RUNS,
-  SCORE_TOLERANCE,
+  NOISE_TOLERANCE,
   STAGE_ONE_MAX_CAP_DIFF,
   STAGE_ONE_RUNS,
   STAGE_TWO_MAX_CAP_DIFF,
   STAGE_TWO_RUNS,
+  SWAP_TOLERANCE,
   capCount,
   controlHit,
   meanMovesMoreThan,
@@ -36,7 +38,8 @@ function parsed(over: Partial<ParsedCandidate> = {}): ParsedCandidate {
 
 describe('the numbers (spec D17, Q5)', () => {
   it('are the spec values', () => {
-    expect(SCORE_TOLERANCE).toBe(5);
+    expect(SWAP_TOLERANCE).toBe(8);
+    expect(NOISE_TOLERANCE).toBe(5);
     expect(STAGE_ONE_RUNS).toBe(3);
     expect(STAGE_TWO_RUNS).toBe(8);
     expect(STAGE_ONE_MAX_CAP_DIFF).toBe(1);
@@ -61,32 +64,43 @@ describe('the mean move, in whole numbers', () => {
 });
 
 describe('stage one (three runs each)', () => {
-  it('passes a move of at most 5 points and a cap difference of at most one', () => {
+  it('passes a move of at most 8 points and a cap difference of at most one', () => {
     expect(stageOneSwapPasses(runs([70, 70, 70]), runs([74, 75, 76]))).toBe(true);
+    expect(stageOneSwapPasses(runs([70, 70, 70]), runs([78, 78, 78]))).toBe(true);
+    expect(stageOneSwapPasses(runs([78, 78, 78]), runs([70, 70, 70]))).toBe(true);
     expect(stageOneSwapPasses(runs([70, 70, 70]), runs([70, 70, 70], 1))).toBe(true);
   });
 
-  it('misses a move over 5 or a cap difference of two or more', () => {
-    expect(stageOneSwapPasses(runs([70, 70, 70]), runs([77, 77, 77]))).toBe(false);
+  it('misses a move over 8 or a cap difference of two or more', () => {
+    expect(stageOneSwapPasses(runs([70, 70, 70]), runs([79, 78, 78]))).toBe(false);
+    expect(stageOneSwapPasses(runs([70, 70, 70]), runs([61, 61, 61]))).toBe(false);
     expect(stageOneSwapPasses(runs([70, 70, 70]), runs([70, 70, 70], 2))).toBe(false);
   });
 
-  it('a band change within 5 points is never a miss (a boundary is not a bias)', () => {
+  it('a band change within 8 points is never a miss (a boundary is not a bias)', () => {
     expect(stageOneSwapPasses(runs([78, 78, 78]), runs([82, 82, 82]))).toBe(true);
+    expect(stageOneSwapPasses(runs([75, 75, 75]), runs([83, 83, 83]))).toBe(true);
   });
 });
 
 describe('stage two (eight runs each)', () => {
-  it('fails only on a move over 5 or a cap difference over 3 of 8', () => {
+  it('fails only on a move over 8 or a cap difference over 3 of 8', () => {
     const base = runs([70, 70, 70, 70, 70, 70, 70, 70]);
-    expect(stageTwoSwapFails(base, runs([75, 75, 75, 75, 75, 75, 75, 75]))).toBe(false);
-    expect(stageTwoSwapFails(base, runs([76, 76, 76, 76, 76, 76, 76, 76]))).toBe(true);
+    expect(stageTwoSwapFails(base, runs([78, 78, 78, 78, 78, 78, 78, 78]))).toBe(false);
+    expect(stageTwoSwapFails(base, runs([79, 78, 78, 78, 78, 78, 78, 78]))).toBe(true);
+    expect(stageTwoSwapFails(base, runs([62, 62, 62, 62, 62, 62, 62, 62]))).toBe(false);
+    expect(stageTwoSwapFails(base, runs([61, 62, 62, 62, 62, 62, 62, 62]))).toBe(true);
     expect(stageTwoSwapFails(base, runs([70, 70, 70, 70, 70, 70, 70, 70], 3))).toBe(false);
     expect(stageTwoSwapFails(base, runs([70, 70, 70, 70, 70, 70, 70, 70], 4))).toBe(true);
   });
 });
 
 describe('the noise check', () => {
+  it('the noise rule stays at 5 (rev 9 changed only the swap tolerance)', () => {
+    expect(NOISE_TOLERANCE).toBeLessThan(SWAP_TOLERANCE);
+    expect(noiseNeedsStageTwo(runs([60, 60, 60]), runs([68, 68, 68]))).toBe(true);
+  });
+
   it('a spread over 5 after stage one needs stage two; at most 5 does not', () => {
     expect(noiseNeedsStageTwo(runs([60, 60, 60]), runs([65, 65, 65]))).toBe(false);
     expect(noiseNeedsStageTwo(runs([60, 60, 60]), runs([66, 66, 66]))).toBe(true);

@@ -20,7 +20,6 @@ export function propertyCardFixture(over: Card = {}): Card {
     status: 'available',
     voucherSizes: [2],
     voucherSizesInferredFromBeds: false,
-    authorities: { mapped: ['Decatur Housing Authority'], unmapped: [] },
     ...over,
   };
 }
@@ -30,7 +29,6 @@ export function tenantCardFixture(over: Card = {}): Card {
     firstName: 'Fixture',
     lastName: 'Tenant',
     voucherSize: 2,
-    housingAuthority: 'Decatur Housing Authority',
     status: 'searching',
     notes: 'Works days.',
     lastHeardFrom: 'this week',
@@ -74,6 +72,7 @@ export function tenantsForPropertySource(tenants: Card[], property: Card = prope
       unitId: 'unit-anchor',
       card,
       missing: [],
+      authority: 'matched',
       pairHistory: NO_HISTORY,
       propertyFacts: factsOf(property),
     })),
@@ -97,6 +96,7 @@ export function propertiesForTenantSource(
       unitId: p.unitId,
       card: p.card,
       missing: [],
+      authority: 'matched',
       pairHistory: NO_HISTORY,
       propertyFacts: factsOf(p.card),
     })),

@@ -29,7 +29,7 @@ import type { PlacementsRepo } from '../../repos/placementsRepo.js';
 import { isDeleted as isUnitDeleted, type UnitItem, type UnitsRepo } from '../../repos/unitsRepo.js';
 import type { OrgNamesService } from '../orgNames.js';
 import { DAY_MS, instantMs } from './pairHistory.js';
-import type { AnchorNote, AnchorRef, AuthorityMapping } from './types.js';
+import type { AnchorNote, AnchorRef, AuthorityFact, AuthorityMapping } from './types.js';
 // (FB4) RankingAnchorRecord, used by PoolFailure, is declared below with readRankingAnchor.
 
 /** Spec D1: each recorded name mapped by the server rule; mapped and unmapped de-duplicated in property order. */
@@ -71,13 +71,32 @@ export function tenantVoucherSize(contact: ContactItem): number | undefined {
   return typeof size === 'number' && Number.isInteger(size) ? size : undefined;
 }
 
+/**
+ * Spec D1: the pool fences on authority only when the property records a name
+ * the organization list maps; none recorded or none mapped limits nothing.
+ * THE one decision authorityAllows and pairAuthorityFact both read.
+ */
+export function authorityFilters(mapping: AuthorityMapping): boolean {
+  return mapping.mapped.length > 0;
+}
+
 /** Spec D1: true when the property's mapped authorities admit the tenant's. */
 export function authorityAllows(mapping: AuthorityMapping, tenantAuthority: unknown): boolean {
-  if (mapping.mapped.length === 0) return true;
+  if (!authorityFilters(mapping)) return true;
   if (typeof tenantAuthority !== 'string') return false;
   const folded = normalizeOrgText(tenantAuthority);
   if (folded === '') return false;
   return mapping.mapped.some((name) => normalizeOrgText(name) === folded);
+}
+
+/**
+ * Charter section 20 item 18: the authority fact of a pair IN the pool, from
+ * the pair property's mapping (the one the pool fenced with): "matched" when
+ * the pool fenced on authority (so this pair passed it), "unconfirmed" when
+ * it did not.
+ */
+export function pairAuthorityFact(mapping: AuthorityMapping): AuthorityFact {
+  return authorityFilters(mapping) ? 'matched' : 'unconfirmed';
 }
 
 /** Not opted out, not unreachable, has a phone. */

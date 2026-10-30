@@ -11,13 +11,18 @@ import {
   DEFAULT_SUITE,
   DIRECTIONS,
   SUBJECT_HANDLE,
+  controlsOf,
   estimateCostUsd,
+  onlyTargetText,
+  parseOnlyTargets,
   planStageOne,
   planStageTwo,
+  selectionOf,
   worstCaseStageTwoCalls,
   type CallResult,
   type CallSpec,
   type CounterfactualSuite,
+  type OnlyTarget,
 } from '../scripts/rankingCounterfactual/plan.js';
 import { BASE_PAIRS, CONTROLS } from '../scripts/rankingCounterfactual/records.js';
 import { SWAPS } from '../scripts/rankingCounterfactual/swaps.js';
@@ -62,9 +67,34 @@ describe('the stage-one plan of the default suite', () => {
         expect(mine.find((s) => s.group === 'base-B')!.batch.user).toBe(base.batch.user);
         for (const swap of SWAPS) {
           const variant = mine.find((s) => s.swapId === swap.id)!;
-          expect(variant.batch.user, `${pair.id} ${direction} ${swap.id}`).not.toBe(base.batch.user);
           expect(variant.batch.handles.slice(1)).toEqual(base.batch.handles.slice(1));
+          // Charter section 20 item 18: the authority swap is the one swap that
+          // must NOT reach the call text (its regression guard is the next test).
+          if (swap.id === 'authority') continue;
+          expect(variant.batch.user, `${pair.id} ${direction} ${swap.id}`).not.toBe(base.batch.user);
         }
+      }
+    }
+  });
+
+  it('charter section 20 item 18: the authority swap leaves the model input byte-identical (it now tests the absence)', () => {
+    const swap = SWAPS.find((s) => s.id === 'authority')!;
+    for (const pair of BASE_PAIRS) {
+      // The swap still changes the stored record ...
+      const swapped = swap.apply(pair)['housingAuthority'];
+      expect(swapped, pair.id).not.toBe(pair.tenant['housingAuthority']);
+      for (const direction of DIRECTIONS) {
+        const mine = plan.filter((s) => s.pairId === pair.id && s.direction === direction);
+        const base = mine.find((s) => s.group === 'base-A')!;
+        const variant = mine.find((s) => s.swapId === 'authority')!;
+        const where = `${pair.id} ${direction}`;
+        // ... but not one byte of what the model is sent.
+        expect(variant.batch.system, where).toBe(base.batch.system);
+        expect(variant.batch.user, where).toBe(base.batch.user);
+        expect(variant.batch.promptFingerprint, where).toBe(base.batch.promptFingerprint);
+        expect(variant.batch.wire, where).toEqual(base.batch.wire);
+        expect(variant.batch.user, where).not.toContain(String(swapped));
+        expect(variant.batch.user, where).not.toContain(String(pair.tenant['housingAuthority']));
       }
     }
   });
@@ -140,5 +170,90 @@ describe('the cost estimate', () => {
     const estimate = estimateCostUsd(plan, 'claude-sonnet-5-5');
     expect(estimate).toBeGreaterThan(0);
     expect(Math.round(estimate * 100) / 100).toBe(estimate);
+  });
+});
+
+// Spec rev 9 (Cameron: "If we need to retest, lets just retest these ones
+// only before we retest the whole thing"): the --only targets and the
+// targeted plan. A targeted run is never the gate.
+const GATE_SHEET_ONLY =
+  'P2:tenants_for_property:sogi,P3:properties_for_tenant:address,P3:properties_for_tenant:sogi,P3:properties_for_tenant:authority,' +
+  'P2:tenants_for_property:credit_income,P3:properties_for_tenant:credit_income,P3:tenants_for_property:authority,P3:tenants_for_property:sogi';
+
+function gradedRun(spec: CallSpec, score: number): CallResult {
+  return { spec, graded: true, score, capped: false, latencyMs: 1, candidatesScored: 3 };
+}
+
+function targetsOf(text: string): OnlyTarget[] {
+  const parsed = parseOnlyTargets(text, DEFAULT_SUITE);
+  if ('usage' in parsed) throw new Error(parsed.usage);
+  return parsed;
+}
+
+describe('parseOnlyTargets (--only)', () => {
+  it('reads comma-separated P<n>:<direction>:<swap>, trimmed, in list order, duplicates collapsed', () => {
+    expect(targetsOf(' P3:properties_for_tenant:sogi , P2:tenants_for_property:sogi,P3:properties_for_tenant:sogi,')).toEqual([
+      { pairId: 'P3', direction: 'properties_for_tenant', swapId: 'sogi' },
+      { pairId: 'P2', direction: 'tenants_for_property', swapId: 'sogi' },
+    ]);
+    expect(targetsOf(GATE_SHEET_ONLY).map(onlyTargetText)).toEqual(GATE_SHEET_ONLY.split(','));
+  });
+
+  it('an unknown pair, direction or swap, a malformed target or an empty list is a usage error', () => {
+    const usage = (text: string): string => {
+      const parsed = parseOnlyTargets(text, DEFAULT_SUITE);
+      return 'usage' in parsed ? parsed.usage : '';
+    };
+    expect(usage('P9:tenants_for_property:sogi')).toMatch(/unknown base pair "P9"/);
+    expect(usage('C1:tenants_for_property:sogi')).toMatch(/unknown base pair "C1"/);
+    expect(usage('P3:sideways:sogi')).toMatch(/unknown direction "sideways"/);
+    expect(usage('P3:properties_for_tenant:height')).toMatch(/unknown swap "height"/);
+    expect(usage('P3:properties_for_tenant')).toMatch(/is not P<n>:<direction>:<swap>/);
+    expect(usage('P3:properties_for_tenant:sogi:extra')).toMatch(/is not P<n>:<direction>:<swap>/);
+    expect(usage(' , ')).toMatch(/at least one target/);
+  });
+});
+
+describe('the targeted plan (--only)', () => {
+  const targeted: CounterfactualSuite = { ...DEFAULT_SUITE, only: targetsOf(GATE_SHEET_ONLY) };
+  const specs = planStageOne(targeted);
+
+  it('runs base groups A and B only for the named pair and direction pairs, and only the named swaps; no controls', () => {
+    expect(selectionOf(targeted).map((s) => [s.pair.id, s.direction, s.swaps.map((w) => w.id)])).toEqual([
+      ['P2', 'tenants_for_property', ['credit_income', 'sogi']],
+      ['P3', 'tenants_for_property', ['sogi', 'authority']],
+      ['P3', 'properties_for_tenant', ['address', 'credit_income', 'sogi', 'authority']],
+    ]);
+    // 3 pair and direction pairs x 6 base runs + 8 swaps x 3 = 42.
+    expect(specs).toHaveLength(42);
+    expect(specs.filter((s) => s.group === 'control')).toEqual([]);
+    expect(controlsOf(targeted)).toEqual([]);
+    expect(new Set(specs.filter((s) => s.group === 'variant').map((s) => `${s.pairId}:${s.direction}:${s.swapId}`))).toEqual(
+      new Set(GATE_SHEET_ONLY.split(',')),
+    );
+    for (const group of ['base-A', 'base-B'] as const) expect(specs.filter((s) => s.group === group)).toHaveLength(9);
+  });
+
+  it('its batches are the full plan\'s batches, byte for byte', () => {
+    for (const spec of specs) {
+      const same = plan.find((s) => s.id === spec.id);
+      expect(same, spec.id).toBeDefined();
+      expect(spec.batch.user, spec.id).toBe(same!.batch.user);
+    }
+  });
+
+  it('stage two follows the same rules, and the worst case counts only the targets', () => {
+    expect(worstCaseStageTwoCalls(targeted)).toBe((3 * 2 + 8) * 5);
+    const results = specs.map((s) => gradedRun(s, s.swapId === 'sogi' && s.pairId === 'P3' && s.direction === 'properties_for_tenant' ? 90 : 70));
+    const two = planStageTwo(results, targeted);
+    expect(two.map((s) => [s.group, s.swapId ?? '-', s.run])).toEqual([
+      ...[4, 5, 6, 7, 8].map((run) => ['base-A', '-', run]),
+      ...[4, 5, 6, 7, 8].map((run) => ['variant', 'sogi', run]),
+    ]);
+  });
+
+  it('without --only the suite is the full check: every pair, direction, swap and control', () => {
+    expect(selectionOf(DEFAULT_SUITE)).toHaveLength(BASE_PAIRS.length * 2);
+    expect(controlsOf(DEFAULT_SUITE)).toBe(CONTROLS);
   });
 });

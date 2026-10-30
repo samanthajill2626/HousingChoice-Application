@@ -12,15 +12,19 @@
 // authorities map against it) with the landlord card switch OFF; the clock
 // (COUNTERFACTUAL_NOW, so every card is byte-stable), the D19 default seen
 // bound (8) and an EMPTY seen set (synthetic tenants have no sends and no
-// tours).
+// tours). Each property also carries its pair authority fact (charter
+// section 20 item 18), from production's mapAuthorities and
+// pairAuthorityFact over the same organization list.
 import type { OrgEntry } from '../../src/lib/orgNames.js';
 import { buildStartingEntries } from '../../src/lib/orgStartingList.js';
 import type { ContactItem } from '../../src/repos/contactsRepo.js';
+import { authoritiesOf } from '../../src/lib/unitFields.js';
 import type { UnitItem } from '../../src/repos/unitsRepo.js';
 import { propertyCard, propertyFacts, tenantCard, type PropertyCardCtx, type TenantCardCtx } from '../../src/services/ranking/cards.js';
 import { propertyMissing, tenantMissing } from '../../src/services/ranking/completeness.js';
+import { mapAuthorities, pairAuthorityFact } from '../../src/services/ranking/pool.js';
 import type { PropertyFactsLike } from '../../src/services/ranking/prompt.js';
-import type { Card, MissingFlag } from '../../src/services/ranking/types.js';
+import type { AuthorityFact, Card, MissingFlag } from '../../src/services/ranking/types.js';
 import { COUNTERFACTUAL_NOW } from './records.js';
 
 export interface PreparedTenant {
@@ -36,6 +40,8 @@ export interface PreparedProperty {
   card: Card;
   missing: MissingFlag[];
   facts: PropertyFactsLike;
+  /** The authority fact of any pair this property is in (charter section 20 item 18). */
+  authority: AuthorityFact;
 }
 
 let entriesCache: OrgEntry[] | undefined;
@@ -72,5 +78,6 @@ export function prepareProperty(unit: UnitItem): PreparedProperty {
     card: propertyCard(unit, ctx),
     missing: propertyMissing(unit, ctx),
     facts: propertyFacts(unit, ctx),
+    authority: pairAuthorityFact(mapAuthorities(ctx.orgEntries, authoritiesOf(unit))),
   };
 }

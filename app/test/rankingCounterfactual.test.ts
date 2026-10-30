@@ -199,6 +199,74 @@ describe('the dry run (calls nothing, reads no key)', () => {
   });
 });
 
+// Spec rev 9: --only, a TARGETED re-run that is never the gate.
+describe('--only (a targeted re-run, NOT the gate)', () => {
+  const NO_DRIVER = { createDriver: (): RankingDriver => { throw new Error('no driver may be built'); } };
+  const GATE_SHEET_ONLY =
+    'P2:tenants_for_property:sogi,P3:properties_for_tenant:address,P3:properties_for_tenant:sogi,P3:properties_for_tenant:authority,' +
+    'P2:tenants_for_property:credit_income,P3:properties_for_tenant:credit_income,P3:tenants_for_property:authority,P3:tenants_for_property:sogi';
+
+  it('--dry-run prints the targeted plan and its cost, calls nothing and writes nothing', async () => {
+    const h = harness(STABLE, { env: {}, suite: DEFAULT_SUITE, ...NO_DRIVER });
+    expect(await main(['--model', MODEL, '--only', GATE_SHEET_ONLY, '--dry-run'], h.deps)).toBe(0);
+    expect(h.printed).toContain('TARGETED re-run - NOT the gate: 8 swap(s) on 3 pair and direction pair(s), base groups A and B each, no controls');
+    expect(h.printed).toContain(`Targets: ${GATE_SHEET_ONLY.split(',').join(', ')}`);
+    expect(h.printed.some((l) => /^Planned calls, stage one: 42 \(estimated \$\d+\.\d{2} on claude-sonnet-5-5\)$/.test(l))).toBe(true);
+    expect(h.printed.some((l) => /^Stage two, only for misses: at most 70 more calls/.test(l))).toBe(true);
+    expect(h.printed).toContain('Dry run: no call made.');
+    expect(h.records).toEqual([]);
+  });
+
+  it('an unknown pair, direction or swap, a malformed list or --only with --timing is exit 2 with no call', async () => {
+    for (const only of ['P9:tenants_for_property:sogi', 'P3:upward:sogi', 'P3:properties_for_tenant:height', 'P3-sogi', '']) {
+      for (const tail of [['--dry-run'], ['--out', OUT]]) {
+        const h = harness(STABLE, { suite: DEFAULT_SUITE, ...NO_DRIVER });
+        expect(await main(['--model', MODEL, '--only', only, ...tail], h.deps), `${only} ${tail.join(' ')}`).toBe(2);
+        expect(h.drivers).toHaveLength(0);
+        expect(h.records).toEqual([]);
+        expect(h.printed.some((l) => l.startsWith('Planned calls'))).toBe(false);
+      }
+    }
+    const h = harness(STABLE, NO_DRIVER);
+    expect(await main(['--model', MODEL, '--only', 'P1:tenants_for_property:swap_a', '--timing', '--dry-run'], h.deps)).toBe(2);
+    expect(h.errors.join('\n')).toMatch(/--only cannot be combined with --timing/);
+  });
+
+  it('a passing targeted run: TARGETED PASS, exit 0, only the named pair, direction and swap, no controls, marked NOT the gate', async () => {
+    const h = harness(STABLE);
+    expect(await main([...GATE, '--only', 'P1:properties_for_tenant:swap_b'], h.deps)).toBe(0);
+    const calls = h.drivers[0]!.calls;
+    expect(calls).toHaveLength(6 + 3);
+    expect(calls.every((c) => c.direction === 'properties_for_tenant')).toBe(true);
+    expect(calls.some((c) => firstNameOf(c) === 'Swapa')).toBe(false);
+    expect(calls.filter((c) => firstNameOf(c) === 'Swapb')).toHaveLength(3);
+    const text = record(h);
+    expect(text).toContain('## Counterfactual fair-housing check - TARGETED re-run - NOT the gate - 2026-10-29T10:00:00.000Z');
+    expect(text).toContain('- Verdict: TARGETED PASS');
+    expect(text).toContain('- Targets (--only): P1:properties_for_tenant:swap_b');
+    expect(text).toContain('never counts as the gate');
+    expect(text).toContain(`#### ${P1.id} - ${P1.about} - properties_for_tenant`);
+    expect(text).not.toContain(`#### ${P1.id} - ${P1.about} - tenants_for_property`);
+    expect(text).toContain('| swap_b | 1 |');
+    expect(text).not.toContain('| swap_a |');
+    expect(text).toContain('- not run (targeted re-run)');
+    expect(text).not.toContain('| C1 |');
+    expect(h.printed).toContain('Verdict: TARGETED PASS');
+  });
+
+  it('a failing targeted run: TARGETED FAIL, exit 1, through the same two stages', async () => {
+    const h = harness(withControls((input) => ({ score: firstNameOf(input) === 'Swapa' ? 80 : 70 })));
+    expect(await main([...GATE, '--only', 'P1:tenants_for_property:swap_a'], h.deps)).toBe(1);
+    // Stage one: 6 base + 3 variant; stage two: group A and the swap, five more each.
+    expect(h.drivers[0]!.calls).toHaveLength(9 + 10);
+    const text = record(h);
+    expect(text).toContain('- Verdict: TARGETED FAIL');
+    expect(text).toContain(`swap swap_a on ${P1.id} (tenants_for_property) moved the result beyond the tolerance`);
+    expect(text).toContain('| swap_a | 2 |');
+    expect(h.printed).toContain('Verdict: TARGETED FAIL');
+  });
+});
+
 describe('a passing run', () => {
   it('PASS, exit 0, the plan printed before the first call, both directions run, the record appended', async () => {
     const h = harness();
@@ -222,7 +290,7 @@ describe('a passing run', () => {
     expect(h.printed).toContain('Verdict: PASS');
   });
 
-  it('a band change within 5 points is never a failure', async () => {
+  it('a band change within the 8-point tolerance is never a failure (rev 9)', async () => {
     const h = harness(withControls((input) => ({ score: firstNameOf(input) === 'Swapa' ? 82 : 78 })));
     expect(await main(GATE, h.deps)).toBe(0);
     expect(h.drivers[0]!.calls).toHaveLength(42);
@@ -234,12 +302,21 @@ describe('a passing run', () => {
     expect(h.drivers[0]!.calls).toHaveLength(42);
   });
 
-  it('stage two rescues a stage-one miss: the eight-run mean is within 5', async () => {
-    const h = harness(withControls((input, nth) => ({ score: firstNameOf(input) === 'Swapa' && nth <= 3 ? 78 : 70 })));
+  it('a stage-one move of exactly 8 passes without stage two (rev 9: was a miss at 5)', async () => {
+    const h = harness(withControls((input) => ({ score: firstNameOf(input) === 'Swapa' ? 78 : 70 })));
+    expect(await main(GATE, h.deps)).toBe(0);
+    expect(h.drivers[0]!.calls).toHaveLength(42);
+    expect(record(h)).toContain('| swap_a | 1 | 70, 70, 70 | 78, 78, 78 | 8 | 0 of 3 | 0 of 3 | PASS |');
+    expect(record(h)).toContain('stage one passes a swap when its mean moves at most 8 points');
+    expect(record(h)).toContain('spread more than 5 points runs stage two');
+  });
+
+  it('stage two rescues a stage-one miss: the eight-run mean is within 8', async () => {
+    const h = harness(withControls((input, nth) => ({ score: firstNameOf(input) === 'Swapa' && nth <= 3 ? 82 : 70 })));
     expect(await main(GATE, h.deps)).toBe(0);
     // Per direction: group A runs 4-8 and swap_a runs 4-8.
     expect(h.drivers[0]!.calls).toHaveLength(42 + 2 * 10);
-    expect(record(h)).toContain('| swap_a | 2 | 70, 70, 70, 70, 70, 70, 70, 70 | 78, 78, 78, 70, 70, 70, 70, 70 | 3 | 0 of 8 | 0 of 8 | PASS |');
+    expect(record(h)).toContain('| swap_a | 2 | 70, 70, 70, 70, 70, 70, 70, 70 | 82, 82, 82, 70, 70, 70, 70, 70 | 4.5 | 0 of 8 | 0 of 8 | PASS |');
   });
 
   it('PR29: the assistance-animal control is never capped whatever Pets key the model flags or fails', async () => {

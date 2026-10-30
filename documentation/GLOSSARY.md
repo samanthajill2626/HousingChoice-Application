@@ -940,9 +940,13 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   listed on Settings > Rankings (never in the AI run log).
 - **Unlawful flag** - the model's report that a free-text requirement on a
   property is unacceptable for any tenant under fair housing (e.g. "no
-  kids"); stored per property and field, never applied, closed when the
-  field's text is edited. Only an unlawful flag ever asks staff to change a
-  record.
+  kids"); stored per property and field with the fixed reason "flagged as a
+  requirement fair housing does not allow" (never the model's text, which
+  describes one tenant's pair), never applied, closed when the field's text
+  is edited. Staff see it as a read-only notice on the property page (every
+  staff role) and on Settings > Rankings for that property's own ranking and
+  runs - never on a tenant's ranking and never in the composer. Only an
+  unlawful flag ever asks staff to change a record.
 - **Accommodation flag** - the model's report that a lawful requirement
   does not apply to THIS tenant (e.g. No pets against an assistance
   animal); it stays on that pair's match and lifts the Weak cap for that

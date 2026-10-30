@@ -1893,11 +1893,19 @@ and detail.
   `RANKING_CALL_TIMEOUT_MS` or lower `RANKING_BATCH_SIZE`.
 
 **Fair-housing flags.** An **unlawful flag** (the model judged a free-text requirement on a property
-unacceptable for any tenant, e.g. "no kids") is stored per property and field in the AI runs table; it
-closes on its own as soon as that field's text is edited, and while open that field caps no pair of the
-property. An **accommodation flag** (a lawful requirement that does not apply to this tenant, e.g. No pets
-against an assistance animal) lives on the pair's match only and lifts the cap for that pair. B4 builds the
-display and the admin Dismiss.
+unacceptable for any tenant, e.g. "no kids") is stored per property and field in the AI runs table with the
+fixed reason "flagged as a requirement fair housing does not allow" - never the model's own wording, which
+describes one tenant's pair and stays on that pair's match and run. It closes on its own as soon as that
+field's text is edited, and while open that field caps no pair of the property. Where it shows: a read-only
+notice on the property page for every staff member who can open it ("Fair-housing flag - Qualifications:
+flagged as a requirement fair housing does not allow. Edit this text to clear the flag."; a landlord
+default reads "<field> (from the landlord)"), which checks again after the property is saved so an edited
+field's notice goes at once; and on Settings > Rankings, only on that property's own ranking and its runs -
+never on a tenant's ranking or a tenant's runs, and never in the composer. "Could not check fair-housing
+flags." on the property page means its flag read (`GET /api/rankings/unit/:unitId/flags`) failed - a
+DynamoDB read; the rest of the page works, and a reload checks again. An **accommodation flag** (a lawful
+requirement that does not apply to this tenant, e.g. No pets against an assistance animal) lives on the
+pair's match only and lifts the cap for that pair. B4 builds only the admin Dismiss.
 
 **Changing the rubric, the worked examples, the schema or the model.** `RUBRIC_VERSION`
 (`app/src/services/ranking/rubric.ts`) and `EXAMPLES_VERSION` (`examples.ts`) are recorded on every match

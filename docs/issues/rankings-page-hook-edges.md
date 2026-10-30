@@ -174,3 +174,12 @@ copy stays through both.
 Source (item 5 and item 3's second path): docs/superpowers/reviews/
 2026-10-28-wp1-b2-ranking-engine/code-review/R4-dashboard.md
 (R4-dashboard-2, R4-dashboard-3) and R4-adjudications.md.
+
+## Appended 2026-10-30 (B2a planner re-review PA-20)
+
+The property page's fair-housing notice (`dashboard/src/routes/listing/useUnitFlags.ts`):
+a failed RE-check replaces flags already on screen with "Could not check
+fair-housing flags." instead of keeping the last known flags beside the
+note; and a roster change that moves the landlord of record does not
+re-check the notice (only the edit form's save does), which matters only
+for `landlord:<key>` flags with RANKING_LANDLORD_CARD on (default off).

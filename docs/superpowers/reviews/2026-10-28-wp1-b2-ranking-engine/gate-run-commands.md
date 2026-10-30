@@ -7,15 +7,18 @@ merge. They never stop the build; a failure blocks the merge (and with it
 every production ranking) until it passes or you decide (charter 7.2).
 
 - Branch `feat/wp1-b2-ranking-engine`, worktree `W:\tmp\wp1-b2-ranking-engine`,
-  measured at commit `7fb7b723` (the last code commit; every later commit
-  on the branch is records or docs only). Any rubric, examples, schema,
-  card or model change after a passing run needs a new run.
+  measured at commit `45fc3326` (the last code commit, after the planner's
+  fix wave PFW1; every later commit on the branch is records or docs only.
+  PFW1 changed no rubric, example, schema, card or prompt byte, so the
+  fingerprint below is unchanged from 7fb7b723). Any rubric, examples,
+  schema, card or model change after a passing run needs a new run.
 - Prompt fingerprint
   `33e406a60079c1b829b123dbb27d63599bb4ced7e66934550a2793ce13e4bce9`
   (rubric r1, examples e1); the dry run prints the one you are about to
-  measure. Re-checked 2026-10-29 by the orchestrator's dry run at 11fd9407
-  (key unset): the same fingerprint, 28926 system characters, stage one 414
-  calls (estimated $16.80), stage two at most 660 more (at most $26.78).
+  measure. Re-checked by the orchestrator's dry run (key unset) at 11fd9407
+  (2026-10-29) and again at 2c4894ad after PFW1 (2026-10-30): the same
+  fingerprint, 28926 system characters, stage one 414 calls (estimated
+  $16.80), stage two at most 660 more (at most $26.78).
 
 ## Before you start
 

@@ -1,28 +1,57 @@
-# WP1 B2a Ranking engine - build orchestrator handback (2026-10-29)
+# WP1 B2a Ranking engine - build orchestrator handback (2026-10-29, refreshed 2026-10-30 after PFW1)
 
-**MERGE-READY @542e6874 on `feat/wp1-b2-ranking-engine`
+**CODE-COMPLETE @2c4894ad on `feat/wp1-b2-ranking-engine`
 (`W:\tmp\wp1-b2-ranking-engine`), 0 behind `main` (main = 404e039d = the
-merge base; the one sync was "Already up to date"), UNMERGED (human gate) -
-PENDING (1) Cameron's three real-model runs (`gate-run-commands.md`, the
-merge gate) and (2) Cameron's answer to Q1 below.** Every commit after
-542e6874 is this handback only (records).
+merge base), UNMERGED (human gate). GATES PENDING THE PLANNER'S RE-RUN on
+the post-PFW1 tree: the last full green battery is 542e6874, BEFORE the
+planner's fix wave PFW1 (below). Then PENDING Cameron's three real-model
+runs (`gate-run-commands.md`, the merge gate; measured commit now
+45fc3326, fingerprint unchanged).**
 
-## Q1 - open decision for Cameron (relayed via the planner's ledger entry)
+## Q1 - ANSWERED by Cameron: option (a) (spec rev 7 D10, charter item 15)
 
-Code review round 2 (plan-blind R2-server-1, MEDIUM, mechanism CONFIRMED):
-spec D10 takes an unlawful-flag record's `reason` from ONE pair's model text
-("the model's against-reason or unknown text naming it",
-`app/src/services/ranking/flags.ts:75-81`). The rubric forbids stating the
-unlawful rule as a reason against, so a matching against-reason is about
-the PAIR - a lawful clause or the tenant (reproduced: "eviction in 2024
-fails qualifications"; an accessibility need) - yet it is written on the
-PROPERTY's flag record (no TTL) and shown on every ranking that lists the
-property. Options: **(a) RECOMMENDED** store only the fixed sentence
-"flagged as a requirement fair housing does not allow" (the pair's text
-stays on its own match and run, 180-day TTL); **(b)** keep D10 as written.
-Either is a one-line change plus its test (`rankingFlags.test.ts:67-88`).
-Filed as `docs/issues/ranking-unlawful-flag-reason-source.md` (med). If
-(a): a micro fix wave and a gate re-run before merge.
+The unlawful-flag record's `reason` is ALWAYS the fixed sentence "flagged
+as a requirement fair housing does not allow"; the pair's own text stays
+on its match and run (180-day TTL). Built in PFW1-1 (`flagReason` removed;
+tests pin that no against / unknowns text reaches the record). The issue
+`ranking-unlawful-flag-reason-source` is resolved.
+
+## Planner fix wave PFW1 (2026-10-30; records code-review/planner-*.md, PFW1-report.md)
+
+Cameron also widened where flags show (spec rev 7 D10 "Shown", charter
+item 16). Commits 1a590afb..2c4894ad:
+
+- PFW1-1 fixed reason (1a590afb, d6ef89d8).
+- PFW1-2 (de8c1f2c): the Rankings page lists open unlawful flags only for
+  a PROPERTY anchor's ranking and that property's runs; a tenant anchor's
+  read answers `flags: []` and a tenant-anchor run detail reads no flag
+  record. The cap is unchanged (candidate properties' open flags still
+  suppress caps on a tenant anchor).
+- PFW1-3 (2a131b18, 45fc3326): a read-only fair-housing notice on the
+  property page for admin and va ("Fair-housing flag - <field label>:
+  flagged as a requirement fair housing does not allow. Edit this text to
+  clear the flag."), from `GET /api/rankings/unit/:unitId/flags` (400 for a
+  tenant, 404 missing or deleted, 503 on a failed read -> the page shows
+  "Could not check fair-housing flags."). One definition of open (the
+  shared `openFlags` over the property's current card, read consistently);
+  every card edit goes through the property edit form, whose save
+  re-checks the notice without a reload. No Dismiss (B4). The e2e perf
+  registry declares the new GET.
+- PFW1-4 (40238a00): GLOSSARY and RUNBOOK flag lines.
+- PFW1-5 (0a7c85f7): seven new issues, two appends, one resolved.
+- Verification by the child (no full battery - the planner runs it):
+  typecheck 0; app ranking tests 47 files / 855 passed (DynamoDB Local
+  integrations included); dashboard rankings + listing + endpoints 33 /
+  872 and src/api 13 / 188; e2e performance unit 17 / 479; eslint 0 on 32
+  files; `rankings.spec.ts` 6 passed (run 2; run 1 failed only the new
+  test's tenant pick, fixed in the e2e helper 45fc3326 - the anchor-type
+  radio follows the URL and settles one render later). The 16 other
+  property-page specs were not run (the planner's full e2e covers them).
+- Open point for the planner: on a TENANT-anchor run, the run detail's
+  per-pair "Flags" column (the run's own model output, D11) still reads
+  e.g. "unlawful on qualifications" / "accommodation on no_pets". Spec rev
+  7 gates the open-flag LIST; say if that column should drop the unlawful
+  kind on tenant-anchor runs too.
 
 ## Work map
 
@@ -46,7 +75,7 @@ route pins, a key-printing dry-run step), 59 MINOR - all folded into the
 briefs. 14 implementer children + 12 review/fix children, 0 misfires,
 0 recoveries.
 
-## Gates on the final commit 542e6874 (bare, real exit codes, quiet tree)
+## Gates - PENDING the planner's re-run on the post-PFW1 tree; the last full battery, at 542e6874 (before PFW1), below (bare, real exit codes, quiet tree)
 
 1. `npm run typecheck` - EXIT=0
 2. `npm test` (DynamoDB Local up, no AWS_* exported) - EXIT=0: app 602
@@ -65,9 +94,9 @@ briefs. 14 implementer children + 12 review/fix children, 0 misfires,
 - Battery 1 at a1077128 (before review): all EXIT=0, e2e 391 passed
   (15.8m), read budget 228 / 178 / 158 ms. No flake, no re-run.
 
-Delta vs main: 155 commits; excluding docs/superpowers 209 files
-+30934 / -221; production source (app/src, dashboard/src non-test,
-scripts) 74 files +11077 / -107.
+Delta vs main (after PFW1, at 2c4894ad): 169 commits; excluding
+docs/superpowers 225 files +32132 / -224; production source (app/src,
+dashboard/src non-test, scripts) 79 files +11360 / -107.
 
 ## Code review (records: code-review/)
 
@@ -104,14 +133,16 @@ and runs list refresh on Refresh, not when a job ends (QA-1).
 
 ## For Cameron (PR28, rulings, build decisions)
 
-1. Q1 (above).
-2. The real-model runs: `gate-run-commands.md` - measured commit 7fb7b723
-   (last code commit), prompt fingerprint
-   33e406a60079c1b829b123dbb27d63599bb4ced7e66934550a2793ce13e4bce9;
-   orchestrator dry run (key unset) at 11fd9407: stage one 414 calls
-   (est. $16.80), stage two at most 660 more (est. at most $26.78), timing
-   est. $0.15 (likely under $0.60). Check ANTHROPIC_BASE_URL /
-   ANTHROPIC_AUTH_TOKEN are unset in your shell first (the sheet says how).
+1. Q1: answered (a), built in PFW1-1; the flag display per charter item
+   16 built in PFW1-2 / PFW1-3 (above).
+2. The real-model runs: `gate-run-commands.md` - measured commit 45fc3326
+   (last code commit, after PFW1), prompt fingerprint
+   33e406a60079c1b829b123dbb27d63599bb4ced7e66934550a2793ce13e4bce9
+   (unchanged by PFW1); orchestrator dry run (key unset) at 2c4894ad:
+   stage one 414 calls (est. $16.80), stage two at most 660 more (est. at
+   most $26.78), timing est. $0.15 (likely under $0.60). Check
+   ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN are unset in your shell first
+   (the sheet says how).
 3. `move_in_date` (matrix-seed placed tenants, matrix.ts:542/568) is
    classified EXCLUDE "unclassified at B2a" - classify it.
 4. `customFields` reach the model whole (spec D2.1) and two 180-day stores;
@@ -136,10 +167,14 @@ and runs list refresh on Refresh, not when a job ends (QA-1).
 9. Worth your eye (NOTEs): no production-legal pause of ranking spend, and
    a missing ANTHROPIC_API_KEY now stops BOTH the app and the worker from
    booting (A1-9); `uflag#` rows have no TTL and runs / matches keep a
-   hard-deleted contact's card up to 180 days (A1-12); one run's unlawful
-   flag lifts that field's cap property-wide until the text changes, by
-   spec D10 (A1-16); a counterfactual control "hit" needs the flag on a
-   listed field - fails safe (N13).
+   hard-deleted contact's card up to 180 days (A1-12; the record itself now
+   carries only the fixed reason, PFW1-1); one run's unlawful flag lifts
+   that field's cap property-wide until the text changes, by spec D10
+   (A1-16) - it now shows as a notice on the property page; a
+   counterfactual control "hit" needs the flag on a listed field - fails
+   safe (N13). The planner review's medium FILE rows (reason text and
+   protected traits, a spend ceiling, stored-input retention) are issues
+   for you (below).
 10. Your launch-gate question holds (R1-conformance 3.1): the prompt
     fingerprint is the matching model's only and feeds no out-of-date
     test; an extraction change marks a match out of date only by writing
@@ -148,16 +183,21 @@ and runs list refresh on Refresh, not when a job ends (QA-1).
 ## Issues
 
 Closed (resolved 2026-10-29): `contact-edit-form-notes-save-drops-auto-lines`,
-`extraction-note-line-break-unprefixed-continuation`. Updated:
+`extraction-note-line-break-unprefixed-continuation`,
+`ranking-unlawful-flag-reason-source` (Q1, by PFW1-1). Updated:
 `notes-guard-stale-reread-vs-flip-back` (part one; open),
 `import-overwrites-notes-box`, `units-contacts-batchget-walk-duplicated`,
-`extraction-text-field-write-races-staff-fill`. New:
-`ranking-unlawful-flag-reason-source` (med, Q1),
+`extraction-text-field-write-races-staff-fill` (twice: R1 and PA-11),
+`ranking-job-lifecycle-robustness` (PA-6, PA-7). New, build review:
 `ranking-card-custom-fields-unclassified` (med),
 `ranking-job-lifecycle-robustness`, `ranking-unlawful-flag-stale-overwrite`,
 `notes-box-line-readers-split-differently`,
 `notes-guard-double-click-overwrite`, `rankings-page-hook-edges`,
-`perf-pages-settings-rankings-surface` (all low). Planner-filed:
+`perf-pages-settings-rankings-surface` (all low). New, planner review
+(PFW1-5): `ranking-reason-text-protected-traits`, `ranking-spend-ceiling`,
+`ranking-stored-input-retention` (med); `ranking-card-text-length`,
+`ranking-read-cost`, `ranking-cost-undercount`,
+`ranking-notes-injection-surface` (low). Planner-filed:
 `ranking-location-distance-on-cards` (deferred).
 
 ## Post-merge / deploy - NO infra (no Terraform, no table, no index)

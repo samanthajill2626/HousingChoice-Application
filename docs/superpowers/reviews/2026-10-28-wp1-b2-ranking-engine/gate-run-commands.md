@@ -6,19 +6,29 @@ testing key or wrote the record. Run them at the end of the build, before
 merge. They never stop the build; a failure blocks the merge (and with it
 every production ranking) until it passes or you decide (charter 7.2).
 
+- 2026-10-30: run 1 (rubric r1, examples e1, fingerprint 33e406a6...)
+  FAILED - 6 swaps beyond the tolerance (record: counterfactual-check.md,
+  committed 2d004c9b). A credit and income Notes line RAISED scores by 7
+  and 14 points and an equivalent tenant address by 6.6, which r1's "never
+  lower a score" allowed; a DBHDD authority swap LOWERED the
+  rent-over-payment-standard pair by 7-9; "Is transgender" lowered the same
+  pair (P3) by 5.75. B2a was already merged to main, so this check is now
+  the DEPLOY gate. The fix is rubric r2 and examples e2 (charter section 20
+  item 17: every fair-housing rule is two-way; records:
+  rubric-r2-report.md). Run 1's verdict does not carry over: run the
+  commands below again on r2 / e2.
 - Branch `feat/wp1-b2-ranking-engine`, worktree `W:\tmp\wp1-b2-ranking-engine`,
-  measured at commit `e499a0d9` (the last code commit, after the planner's
-  fix wave PFW1 and its micro row PFW1-6; every later commit on the branch is records or docs only.
-  Neither changed a rubric, example, schema, card or prompt byte, so the
-  fingerprint below is unchanged from 7fb7b723). Any rubric, examples,
-  schema, card or model change after a passing run needs a new run.
+  measured at commit `bd1572a9` (the last code commit: rubric r2 and
+  examples e2; every later commit on the branch is records or docs only).
+  Any rubric, examples, schema, card or model change after a passing run
+  needs a new run.
 - Prompt fingerprint
-  `33e406a60079c1b829b123dbb27d63599bb4ced7e66934550a2793ce13e4bce9`
-  (rubric r1, examples e1); the dry run prints the one you are about to
-  measure. Re-checked by the orchestrator's dry run (key unset) at 11fd9407
-  (2026-10-29) and again at 2c4894ad after PFW1 (2026-10-30): the same
-  fingerprint, 28926 system characters, stage one 414 calls (estimated
-  $16.80), stage two at most 660 more (at most $26.78).
+  `6bf864de79715bd01a8c072d758623b2cba1850647d4bcd15e08e365d6e92329`
+  (rubric r2, examples e2; landlord switch off, as the check runs); the dry
+  run prints the one you are about to measure. Checked by a dry run (key
+  unset) at bd1572a9 (2026-10-30): 31637 system characters, stage one 414
+  calls (estimated $17.36), stage two at most 660 more (at most $27.68).
+  The r1 / e1 fingerprint was 33e406a6... (28926 system characters).
 
 ## Before you start
 
@@ -48,11 +58,13 @@ Remove-Item Env:ANTHROPIC_API_KEY
 1. The dry run is free (no call, no key read, nothing written): it prints
    the suite, the planned stage-one calls (414) with a cost estimate, the
    worst-case stage-two count (660) and the prompt fingerprint. Read it
-   before spending. On this build its plan lines read:
+   before spending. On this build (r2 / e2, bd1572a9) its lines read:
 
    ```
-   Planned calls, stage one: 414 (estimated $16.80 on claude-sonnet-5-5)
-   Stage two, only for misses: at most 660 more calls (estimated at most $26.78)
+   Rubric r2, examples e2, prompt fingerprint 6bf864de79715bd01a8c072d758623b2cba1850647d4bcd15e08e365d6e92329 (31637 system characters)
+   Suite: 6 base pairs x 2 directions, 9 swaps (name, address, children, marital_status, credit_income, religion, disability, sogi, authority), 3 controls
+   Planned calls, stage one: 414 (estimated $17.36 on claude-sonnet-5-5)
+   Stage two, only for misses: at most 660 more calls (estimated at most $27.68)
    Dry run: no call made.
    ```
 2. The compile check is five tiny calls; all five must say COMPILES (exit
@@ -83,8 +95,8 @@ Remove-Item Env:ANTHROPIC_API_KEY
 | Command | Calls | Est. cost on claude-sonnet-5-5 ($2 / $10 per MTok) |
 |---|---|---|
 | compile check | 5 | cents |
-| counterfactual, stage one | 414 (6 pairs x 2 directions x (6 base runs + 9 swaps x 3) + 3 controls x 2 directions x 3) | about $16.80 by the dry run's estimate (spec D17: 10-20 dollars) |
-| counterfactual, stage two | only for misses: at most 660 more | scales with misses; at most about $26.78 |
+| counterfactual, stage one | 414 (6 pairs x 2 directions x (6 base runs + 9 swaps x 3) + 3 controls x 2 directions x 3) | about $17.36 by the dry run's estimate (spec D17: 10-20 dollars) |
+| counterfactual, stage two | only for misses: at most 660 more | scales with misses; at most about $27.68 |
 | timing | 3 calls of 40 candidates | about $0.15 estimated; under $0.60 even if every call writes its whole 16,000-token output budget |
 
 ## Reading the record

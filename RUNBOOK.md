@@ -1922,14 +1922,18 @@ re-run the counterfactual check below; a schema change also needs the compile ch
   `npx tsx app/scripts/ranking-counterfactual-check.ts --model claude-sonnet-5-5 --out <record.md>`.
   SYNTHETIC records only, through production's cards, prompt, driver, parser and cap: six base pairs in both
   directions, nine one-fact swaps (name, address, children, marital status, a credit and income line,
-  religion, a disability, sexual orientation or gender identity, the housing authority), and three controls
+  religion, a disability, sexual orientation or gender identity, the housing authority - since rubric r3 the
+  authority name is on no card, so that swap must leave the request byte-identical), and three controls
   (an assistance animal against No pets; a "no kids" property; an assistance animal against a pets rule
   written only in qualifications). A swap passes when its mean score moves at
-  most 5 points and its cap count differs by at most 1 of 3, with five more runs for a miss (it fails only
-  past 5 points or 3 of 8); a base pair whose own runs spread more than 5 points is INCONCLUSIVE ("decide").
-  414 small calls in stage one (about $16.80 by its own estimate; at most 660 more in stage two, only for
-  misses); `--dry-run` prints the plan and estimate without a key. Exit 0 only on PASS; 1 FAIL or DECIDE;
+  most 8 points (B2a spec rev 9; was 5) and its cap count differs by at most 1 of 3, with five more runs for a
+  miss (it fails only past 8 points or 3 of 8); a base pair whose own runs spread more than 5 points is
+  INCONCLUSIVE ("decide"). 414 small calls in stage one (about $17.38 by its own estimate on r3 / e3; at most
+  660 more in stage two, only for misses); `--dry-run` prints the plan and estimate without a key. Exit 0 only on PASS; 1 FAIL or DECIDE;
   2 a usage error, no key, or an `--out` the record cannot be written to (checked before the first call).
+  `--only P<n>:<direction>:<swap>[,...]` is a TARGETED re-run of just those swaps (their pair and direction
+  base groups, no controls): its record section says "TARGETED re-run - NOT the gate" and it NEVER counts as
+  the gate - only a full run does.
 - Batch timing: the same script with `--timing` scores one synthetic 40-candidate batch three times and
   records latency and tokens.
 - The exact commands, costs and how to read the record:

@@ -57,6 +57,8 @@ const REASON = {
   legacy: 'a legacy or tombstoned attribute (charter 6.1)',
   authority:
     'the pool fences on housing authority; the model gets the per-pair authority fact (matched or unconfirmed) instead (charter 20 item 18)',
+  nameAddress:
+    "the tenant's name and current address are off the card: a candidate is named by its handle and area fit comes from Area preference (charter 20 item 19)",
 } as const;
 
 function include(label: string): CardFieldUse {
@@ -117,15 +119,15 @@ export type PropertyCardKey = KnownKeys<UnitItem> | UntypedUnitKey;
 
 const TENANT_BASE_FIELDS = {
   // Included (spec D2.1), in card order.
-  firstName: include('First name'),
-  lastName: include('Last name'),
+  firstName: exclude(REASON.nameAddress),
+  lastName: exclude(REASON.nameAddress),
   status: include('Status'),
   voucherSize: include('Voucher size'),
   housingAuthority: exclude(REASON.authority),
   voucher_expiration_date: include('Voucher expiration'),
   rta_expiration_date: include('RTA expiration'),
   porting: include('Porting'),
-  address: include('Address'),
+  address: exclude(REASON.nameAddress),
   tenure: include('Time at current address'),
   pets: include('Pets'),
   evictions: include('Evictions'),
@@ -176,15 +178,15 @@ const TENANT_BASE_FIELDS = {
   import_retract_started_at: exclude(REASON.imports),
   status_source: exclude(REASON.provenance),
   type_source: exclude(REASON.provenance),
-  firstName_source: exclude(REASON.provenance),
-  lastName_source: exclude(REASON.provenance),
+  firstName_source: exclude(REASON.nameAddress),
+  lastName_source: exclude(REASON.nameAddress),
   voucherSize_source: exclude(REASON.provenance),
   housingAuthority_source: exclude(REASON.provenance),
   pets_source: exclude(REASON.provenance),
   evictions_source: exclude(REASON.provenance),
   tenure_source: exclude(REASON.provenance),
   porting_source: exclude(REASON.provenance),
-  address_source: exclude(REASON.provenance),
+  address_source: exclude(REASON.nameAddress),
   last_heard_from_at: exclude(REASON.recency),
   last_reached_out_at: exclude(REASON.timestamp),
   staff_notes_updated_at: exclude(REASON.timestamp),

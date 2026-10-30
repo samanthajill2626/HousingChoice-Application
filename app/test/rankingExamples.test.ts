@@ -79,9 +79,9 @@ function capped(p: (typeof pairs)[number]): boolean {
   }).capped;
 }
 
-describe('the worked examples (e3)', () => {
-  it('is version e3 with twelve examples', () => {
-    expect(EXAMPLES_VERSION).toBe('e3');
+describe('the worked examples (e4)', () => {
+  it('is version e4 with twelve examples', () => {
+    expect(EXAMPLES_VERSION).toBe('e4');
     expect(RANKING_EXAMPLES).toHaveLength(12);
   });
 
@@ -116,13 +116,38 @@ describe('the worked examples (e3)', () => {
         expect(card, example.title).not.toHaveProperty('accepted_authorities');
       }
       for (const stored of Object.values(example.offCard ?? {})) {
-        for (const value of Object.values(stored)) {
-          for (const name of Array.isArray(value) ? value : [value]) expect(rendered, example.title).not.toContain(String(name));
+        for (const name of [stored['accepted_authorities'], stored['housingAuthority']].flat()) {
+          if (typeof name === 'string') expect(rendered, example.title).not.toContain(name);
         }
       }
     }
     expect(rendered).not.toContain('Housing Authority');
     expect(rendered).not.toContain('offCard');
+  });
+
+  // Charter section 20 item 19: no example TENANT card carries a name or a
+  // current address (the stored record keeps them, in offCard); a property
+  // card keeps its own address.
+  it('no example tenant card carries a name or current address, and the rendered examples carry none of them', () => {
+    const rendered = renderExamplesText();
+    for (const example of RANKING_EXAMPLES) {
+      const anchorIsProperty = example.direction === 'tenants_for_property';
+      const tenants = anchorIsProperty
+        ? example.candidates.map((c) => [c.card, c.handle] as const)
+        : [[example.anchor.card, 'anchor'] as const];
+      for (const [card, owner] of tenants) {
+        for (const key of ['firstName', 'lastName', 'address']) expect(card, `${example.title}: ${owner}`).not.toHaveProperty(key);
+        const stored = example.offCard?.[owner] ?? {};
+        expect(typeof stored['firstName'], `${example.title}: ${owner}`).toBe('string');
+        const fullName = `${String(stored['firstName'])} ${String(stored['lastName'])}`;
+        expect(rendered, example.title).not.toContain(fullName);
+        expect(rendered.split(/[^A-Za-z]+/), example.title).not.toContain(stored['firstName']);
+        const line1 = (stored['address'] as { line1?: string } | undefined)?.line1;
+        if (line1 !== undefined) expect(rendered, example.title).not.toContain(JSON.stringify(line1));
+      }
+      const properties = anchorIsProperty ? [example.anchor.card] : example.candidates.map((c) => c.card);
+      for (const card of properties) expect(card, example.title).toHaveProperty('address');
+    }
   });
 
   it('every candidate authority fact is what the pool gives that stored pair (pairAuthorityFact), and the pair passes the fence', () => {
@@ -347,6 +372,12 @@ describe('the worked examples (e3)', () => {
       for (const card of cards) {
         if (typeof card['lastName'] === 'string') expect(['Example', 'Sample', 'Placeholder']).toContain(card['lastName']);
         const address = card['address'] as { line1?: string } | undefined;
+        if (address?.line1 !== undefined) expect(address.line1).toMatch(/Example|Sample|Placeholder/);
+      }
+      // The stored values off the cards (charter section 20 items 18 and 19) are synthetic too.
+      for (const stored of Object.values(example.offCard ?? {})) {
+        if (stored['lastName'] !== undefined) expect(['Example', 'Sample', 'Placeholder']).toContain(stored['lastName']);
+        const address = stored['address'] as { line1?: string } | undefined;
         if (address?.line1 !== undefined) expect(address.line1).toMatch(/Example|Sample|Placeholder/);
       }
     }

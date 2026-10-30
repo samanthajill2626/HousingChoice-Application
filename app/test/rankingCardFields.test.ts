@@ -136,14 +136,11 @@ describe('the registries (spec D2.1)', () => {
 
   it('the tenant card includes exactly the spec D2.1 fields, the matching inputs keyed by their list label', () => {
     expect(includedFields(TENANT).map(([key, field]) => [key, field.cardKey ?? key])).toEqual([
-      ['firstName', 'firstName'],
-      ['lastName', 'lastName'],
       ['status', 'status'],
       ['voucherSize', 'voucherSize'],
       ['voucher_expiration_date', 'voucher_expiration_date'],
       ['rta_expiration_date', 'rta_expiration_date'],
       ['porting', 'porting'],
-      ['address', 'address'],
       ['tenure', 'tenure'],
       ['pets', 'pets'],
       ['evictions', 'evictions'],
@@ -165,6 +162,15 @@ describe('the registries (spec D2.1)', () => {
         expect(entry.reason).toContain('per-pair authority fact');
       }
     }
+  });
+
+  it('charter section 20 item 19: the tenant name and current address (and their provenance) are off the tenant card; the property keeps its address', () => {
+    for (const key of ['firstName', 'lastName', 'address', 'firstName_source', 'lastName_source', 'address_source']) {
+      const entry = TENANT[key];
+      expect(entry?.use, key).toBe('exclude');
+      if (entry?.use === 'exclude') expect(entry.reason, key).toContain('charter 20 item 19');
+    }
+    expect(PROPERTY['address']?.use).toBe('include');
   });
 
   it('the matching inputs are mapped from the list by source, each with its excluded provenance key', () => {

@@ -1,4 +1,4 @@
-// WP1 B2a spec D4 (charter 7.2, 12): the worked examples, version e3. Twelve
+// WP1 B2a spec D4 (charter 7.2, 12): the worked examples, version e4. Twelve
 // SYNTHETIC pairs spread across the bands - made-up people (surnames
 // Example, Sample, Placeholder) and made-up streets in real metro-Atlanta
 // cities. Each is written in the exact wire shape of a real call (prompt.ts
@@ -17,10 +17,13 @@
 // names a record holds sit in offCard, which is never rendered), and example
 // 12 adds a rent-gap pair whose Notes carry a gender-identity line that is
 // not a reason and does not move the score.
+// e4 (charter section 20 item 19, B2a rev 10): the tenant's name and current
+// address are off every tenant card too (they sit in offCard); a property
+// card keeps its own address.
 import type { RankingSource } from './schema.js';
 import type { AuthorityFact, Card, Direction, PairHistory } from './types.js';
 
-export const EXAMPLES_VERSION = 'e3';
+export const EXAMPLES_VERSION = 'e4';
 
 export interface ExampleHome {
   handle: string;
@@ -53,7 +56,8 @@ export interface RankingExample {
   /**
    * NEVER rendered (prompt.ts renders only anchor, homesSeen and candidates):
    * the stored attributes a record holds that its card leaves off (charter
-   * section 20 item 18 - the housing authority names), keyed "anchor" or a
+   * section 20 item 18 - the housing authority names; item 19 - the tenant's
+   * name and current address), keyed "anchor" or a
    * candidate handle. The shape test rebuilds each stored record from its
    * card plus these, so the missing lists stay what production computes.
    */
@@ -71,7 +75,7 @@ export const RANKING_EXAMPLES: readonly RankingExample[] = [
   {
     title: 'Strong: preferences met, nothing against (a property anchor)',
     direction: 'tenants_for_property',
-    offCard: { anchor: { accepted_authorities: ['Decatur Housing Authority', 'DeKalb County Housing Authority'] }, c1: { housingAuthority: 'Decatur Housing Authority' } },
+    offCard: { anchor: { accepted_authorities: ['Decatur Housing Authority', 'DeKalb County Housing Authority'] }, c1: { housingAuthority: 'Decatur Housing Authority', firstName: 'Robin', lastName: 'Example', address: { line1: '9 Placeholder Court', city: 'Decatur', state: 'GA', zip: '30030' } } },
     anchor: {
       card: {
         address: { line1: '100 Sample Lane', city: 'Decatur', state: 'GA', zip: '30030' },
@@ -100,11 +104,8 @@ export const RANKING_EXAMPLES: readonly RankingExample[] = [
       {
         handle: 'c1',
         card: {
-          firstName: 'Robin',
-          lastName: 'Example',
           status: 'searching',
           voucherSize: 2,
-          address: { line1: '9 Placeholder Court', city: 'Decatur', state: 'GA', zip: '30030' },
           pets: 'One cat',
           created_at: '2026-08-14',
           notes: '[Auto - Oct 2] Works near the Decatur square and takes the bus.',
@@ -141,14 +142,11 @@ export const RANKING_EXAMPLES: readonly RankingExample[] = [
   {
     title: 'Absolute scores: two properties for one tenant, each scored on its own (a tenant anchor)',
     direction: 'properties_for_tenant',
-    offCard: { anchor: { housingAuthority: 'Atlanta Housing Authority' }, c1: { accepted_authorities: ['Atlanta Housing Authority'] }, c2: { accepted_authorities: ['Atlanta Housing Authority', 'DeKalb County Housing Authority'] } },
+    offCard: { anchor: { housingAuthority: 'Atlanta Housing Authority', firstName: 'Jordan', lastName: 'Sample', address: { line1: '55 Example Avenue', city: 'Atlanta', state: 'GA', zip: '30316' } }, c1: { accepted_authorities: ['Atlanta Housing Authority'] }, c2: { accepted_authorities: ['Atlanta Housing Authority', 'DeKalb County Housing Authority'] } },
     anchor: {
       card: {
-        firstName: 'Jordan',
-        lastName: 'Sample',
         status: 'searching',
         voucherSize: 3,
-        address: { line1: '55 Example Avenue', city: 'Atlanta', state: 'GA', zip: '30316' },
         created_at: '2026-07-01',
         notes: 'No car; takes the bus to work.',
         'Area preference': 'East Atlanta or Kirkwood',
@@ -280,7 +278,7 @@ export const RANKING_EXAMPLES: readonly RankingExample[] = [
   {
     title: 'Good: workable with a real compromise on area (a property anchor)',
     direction: 'tenants_for_property',
-    offCard: { anchor: { accepted_authorities: ['DeKalb County Housing Authority'] }, c1: { housingAuthority: 'DeKalb County Housing Authority' } },
+    offCard: { anchor: { accepted_authorities: ['DeKalb County Housing Authority'] }, c1: { housingAuthority: 'DeKalb County Housing Authority', firstName: 'Casey', lastName: 'Placeholder' } },
     anchor: {
       card: {
         address: { line1: '410 Example Boulevard', city: 'Tucker', state: 'GA', zip: '30084' },
@@ -304,8 +302,6 @@ export const RANKING_EXAMPLES: readonly RankingExample[] = [
       {
         handle: 'c1',
         card: {
-          firstName: 'Casey',
-          lastName: 'Placeholder',
           status: 'searching',
           voucherSize: 2,
           created_at: '2026-06-30',
@@ -345,7 +341,7 @@ export const RANKING_EXAMPLES: readonly RankingExample[] = [
   {
     title: 'Weak: a recorded No pets the tenant fails, the failure first (capped)',
     direction: 'tenants_for_property',
-    offCard: { anchor: { accepted_authorities: ['Decatur Housing Authority'] }, c1: { housingAuthority: 'Decatur Housing Authority' } },
+    offCard: { anchor: { accepted_authorities: ['Decatur Housing Authority'] }, c1: { housingAuthority: 'Decatur Housing Authority', firstName: 'Taylor', lastName: 'Example' } },
     anchor: {
       card: {
         address: { line1: '77 Sample Street', city: 'Decatur', state: 'GA', zip: '30032' },
@@ -368,8 +364,6 @@ export const RANKING_EXAMPLES: readonly RankingExample[] = [
       {
         handle: 'c1',
         card: {
-          firstName: 'Taylor',
-          lastName: 'Example',
           status: 'searching',
           voucherSize: 2,
           pets: 'Two dogs, about 50 lb each',
@@ -405,7 +399,7 @@ export const RANKING_EXAMPLES: readonly RankingExample[] = [
   {
     title: 'Accommodation: No pets against an assistance animal - flagged, not failed, not lowered',
     direction: 'tenants_for_property',
-    offCard: { anchor: { accepted_authorities: ['Decatur Housing Authority'] }, c1: { housingAuthority: 'Decatur Housing Authority' } },
+    offCard: { anchor: { accepted_authorities: ['Decatur Housing Authority'] }, c1: { housingAuthority: 'Decatur Housing Authority', firstName: 'Morgan', lastName: 'Sample' } },
     anchor: {
       card: {
         address: { line1: '88 Sample Street', city: 'Decatur', state: 'GA', zip: '30030' },
@@ -428,8 +422,6 @@ export const RANKING_EXAMPLES: readonly RankingExample[] = [
       {
         handle: 'c1',
         card: {
-          firstName: 'Morgan',
-          lastName: 'Sample',
           status: 'searching',
           voucherSize: 1,
           pets: 'Service dog (assistance animal)',
@@ -466,7 +458,7 @@ export const RANKING_EXAMPLES: readonly RankingExample[] = [
   {
     title: 'Unlawful requirement: a no-kids rule is flagged on its field and not applied',
     direction: 'tenants_for_property',
-    offCard: { anchor: { accepted_authorities: ['East Point Housing Authority'] }, c1: { housingAuthority: 'East Point Housing Authority' } },
+    offCard: { anchor: { accepted_authorities: ['East Point Housing Authority'] }, c1: { housingAuthority: 'East Point Housing Authority', firstName: 'Avery', lastName: 'Example' } },
     anchor: {
       card: {
         address: { line1: '15 Example Way', city: 'East Point', state: 'GA', zip: '30344' },
@@ -488,8 +480,6 @@ export const RANKING_EXAMPLES: readonly RankingExample[] = [
       {
         handle: 'c1',
         card: {
-          firstName: 'Avery',
-          lastName: 'Example',
           status: 'searching',
           voucherSize: 3,
           created_at: '2026-08-11',
@@ -526,7 +516,7 @@ export const RANKING_EXAMPLES: readonly RankingExample[] = [
   {
     title: 'Maybe: a staff Not interested plus unsure feedback on the same home weighs only slightly',
     direction: 'tenants_for_property',
-    offCard: { anchor: { accepted_authorities: ['Decatur Housing Authority'] }, c1: { housingAuthority: 'Decatur Housing Authority' } },
+    offCard: { anchor: { accepted_authorities: ['Decatur Housing Authority'] }, c1: { housingAuthority: 'Decatur Housing Authority', firstName: 'Riley', lastName: 'Placeholder' } },
     anchor: {
       card: {
         address: { line1: '400 Example Court', city: 'Decatur', state: 'GA', zip: '30030' },
@@ -550,8 +540,6 @@ export const RANKING_EXAMPLES: readonly RankingExample[] = [
       {
         handle: 'c1',
         card: {
-          firstName: 'Riley',
-          lastName: 'Placeholder',
           status: 'searching',
           voucherSize: 2,
           created_at: '2026-07-22',
@@ -602,7 +590,7 @@ export const RANKING_EXAMPLES: readonly RankingExample[] = [
   {
     title: 'Missing inputs on both cards: scored as uncertainty, not guessed',
     direction: 'tenants_for_property',
-    offCard: { anchor: { accepted_authorities: ['DeKalb County Housing Authority', 'Stone Mtn HA'] }, c1: { housingAuthority: 'DeKalb County Housing Authority' } },
+    offCard: { anchor: { accepted_authorities: ['DeKalb County Housing Authority', 'Stone Mtn HA'] }, c1: { housingAuthority: 'DeKalb County Housing Authority', firstName: 'Quinn', lastName: 'Example' } },
     anchor: {
       card: {
         address: { line1: '500 Sample Parkway', city: 'Stone Mountain', state: 'GA', zip: '30083' },
@@ -623,8 +611,6 @@ export const RANKING_EXAMPLES: readonly RankingExample[] = [
       {
         handle: 'c1',
         card: {
-          firstName: 'Quinn',
-          lastName: 'Example',
           status: 'searching',
           voucherSize: 3,
           created_at: '2026-09-30',
@@ -655,11 +641,9 @@ export const RANKING_EXAMPLES: readonly RankingExample[] = [
   {
     title: 'Weak without a cap: an accessibility need the home cannot meet (a tenant anchor)',
     direction: 'properties_for_tenant',
-    offCard: { anchor: { housingAuthority: 'Atlanta Housing Authority' }, c1: { accepted_authorities: ['Atlanta Housing Authority'] } },
+    offCard: { anchor: { housingAuthority: 'Atlanta Housing Authority', firstName: 'Drew', lastName: 'Sample' }, c1: { accepted_authorities: ['Atlanta Housing Authority'] } },
     anchor: {
       card: {
-        firstName: 'Drew',
-        lastName: 'Sample',
         status: 'searching',
         voucherSize: 1,
         created_at: '2026-08-05',
@@ -710,7 +694,7 @@ export const RANKING_EXAMPLES: readonly RankingExample[] = [
   {
     title: 'Capped on the evictions part only: credit and income in the same field are ignored',
     direction: 'tenants_for_property',
-    offCard: { anchor: { accepted_authorities: ['College Park Housing Authority'] }, c1: { housingAuthority: 'College Park Housing Authority' } },
+    offCard: { anchor: { accepted_authorities: ['College Park Housing Authority'] }, c1: { housingAuthority: 'College Park Housing Authority', firstName: 'Jamie', lastName: 'Example' } },
     anchor: {
       card: {
         address: { line1: '25 Placeholder Avenue', city: 'College Park', state: 'GA', zip: '30337' },
@@ -732,8 +716,6 @@ export const RANKING_EXAMPLES: readonly RankingExample[] = [
       {
         handle: 'c1',
         card: {
-          firstName: 'Jamie',
-          lastName: 'Example',
           status: 'searching',
           voucherSize: 2,
           evictions: 'Eviction in 2023',
@@ -773,14 +755,11 @@ export const RANKING_EXAMPLES: readonly RankingExample[] = [
   {
     title: 'Rent over the payment standard: scored from rent, payment standard, utilities and the maximum portion; a credit and income line in Notes is ignored (a tenant anchor)',
     direction: 'properties_for_tenant',
-    offCard: { anchor: { housingAuthority: 'Atlanta Housing Authority' }, c1: { accepted_authorities: ['Atlanta Housing Authority'] } },
+    offCard: { anchor: { housingAuthority: 'Atlanta Housing Authority', firstName: 'Parker', lastName: 'Placeholder', address: { line1: '31 Sample Terrace', city: 'Atlanta', state: 'GA', zip: '30310' } }, c1: { accepted_authorities: ['Atlanta Housing Authority'] } },
     anchor: {
       card: {
-        firstName: 'Parker',
-        lastName: 'Placeholder',
         status: 'searching',
         voucherSize: 2,
-        address: { line1: '31 Sample Terrace', city: 'Atlanta', state: 'GA', zip: '30310' },
         created_at: '2026-08-19',
         notes: 'Takes the bus to work.\nCredit score around 600. Income about $1,500 a month.',
         'Area preference': 'West End',
@@ -840,14 +819,11 @@ export const RANKING_EXAMPLES: readonly RankingExample[] = [
   {
     title: 'Rent over the payment standard: a gender-identity line in Notes changes nothing - same score, never a reason (a tenant anchor)',
     direction: 'properties_for_tenant',
-    offCard: { anchor: { housingAuthority: 'Atlanta Housing Authority' }, c1: { accepted_authorities: ['Atlanta Housing Authority'] } },
+    offCard: { anchor: { housingAuthority: 'Atlanta Housing Authority', firstName: 'Rowan', lastName: 'Sample', address: { line1: '8 Placeholder Row', city: 'Atlanta', state: 'GA', zip: '30316' } }, c1: { accepted_authorities: ['Atlanta Housing Authority'] } },
     anchor: {
       card: {
-        firstName: 'Rowan',
-        lastName: 'Sample',
         status: 'searching',
         voucherSize: 1,
-        address: { line1: '8 Placeholder Row', city: 'Atlanta', state: 'GA', zip: '30316' },
         created_at: '2026-08-26',
         notes: 'Wants to be near the train.\nIs a trans woman; uses she/her.',
         'Area preference': 'Kirkwood',

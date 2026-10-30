@@ -10,9 +10,9 @@ import { RUBRIC_TEXT, RUBRIC_VERSION } from '../src/services/ranking/rubric.js';
 import { PROPERTY_FREE_TEXT_FIELDS } from '../src/services/ranking/cardFields.js';
 import { RANKING_SOURCES } from '../src/services/ranking/schema.js';
 
-describe('the rubric (r3)', () => {
-  it('is version r3', () => {
-    expect(RUBRIC_VERSION).toBe('r3');
+describe('the rubric (r4)', () => {
+  it('is version r4', () => {
+    expect(RUBRIC_VERSION).toBe('r4');
   });
 
   it('is ASCII only (no character outside tab, LF and printable ASCII)', () => {
@@ -113,9 +113,18 @@ describe('the rubric (r3)', () => {
     expect(RUBRIC_TEXT).not.toContain('DBHDD');
   });
 
-  it('r2: area fit comes from "Area preference", never the tenant\'s current address', () => {
+  it('r2/r4: area fit comes from "Area preference" against the property\'s location', () => {
     const area = RUBRIC_TEXT.split('\n').find((line) => line.startsWith('- Area:')) ?? '';
-    expect(area).toContain('Area fit comes from "Area preference" against the property\'s location, never from the tenant\'s current address.');
+    expect(area).toContain('Area fit comes from "Area preference" against the property\'s location.');
+    // r4 (charter section 20 item 19): the current address is off the card, so the clause is gone.
+    expect(area).not.toContain('current address');
+  });
+
+  it('r4: the tenant card line lists no name or current address; the stand-in sentence still covers both', () => {
+    const tenantCardLine = RUBRIC_TEXT.split('\n').find((line) => line.startsWith('- A tenant card can hold:')) ?? '';
+    expect(tenantCardLine).toContain('- A tenant card can hold: voucherSize (bedrooms), porting, tenure,');
+    expect(tenantCardLine).not.toMatch(/name|address/);
+    expect(RUBRIC_TEXT).toContain('Never use a name, an address (the tenant\'s current address included), a housing authority or a voucher program as a stand-in');
   });
 
   it('states both flag kinds; unlawful names only a free-text field, never a checkbox', () => {

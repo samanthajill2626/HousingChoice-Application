@@ -32,8 +32,10 @@ const OUT = 'W:/counterfactual-test/record.md';
 const MODEL = 'claude-sonnet-5-5';
 const P1 = BASE_PAIRS[0]!;
 
-function swap(id: string, firstName: string): Swap {
-  return { id, about: `test swap ${id}`, apply: (p) => ({ ...p.tenant, contactId: `${p.tenant.contactId}--${id}`, firstName }) };
+// Charter section 20 item 19: a name is on no card, so a test swap marks its
+// variant with a staff note the card does carry (staff_notes), which the stub reads.
+function swap(id: string, marker: string): Swap {
+  return { id, about: `test swap ${id}`, apply: (p) => ({ ...p.tenant, contactId: `${p.tenant.contactId}--${id}`, staff_notes: marker }) };
 }
 
 /** One base pair (P1), two swaps, the three real controls: 1 x 2 x (6 + 2 x 3) + 3 x 2 x 3 = 42 stage-one calls. */
@@ -51,7 +53,8 @@ function subjectProperty(input: RankingBatchInput): Record<string, unknown> {
   return input.direction === 'tenants_for_property' ? input.wire.anchor.card : input.wire.candidates[0]!.card;
 }
 
-const firstNameOf = (input: RankingBatchInput): string => String(subjectTenant(input)['firstName'] ?? '');
+/** The test swap's marker on the subject tenant card ('' for the base tenant). */
+const markerOf = (input: RankingBatchInput): string => String(subjectTenant(input)['staff_notes'] ?? '');
 const hasAssistanceAnimal = (input: RankingBatchInput): boolean => /assistance animal/i.test(String(subjectTenant(input)['pets'] ?? ''));
 /** PR41's C3: the assistance animal against a pets rule stated only in qualifications. */
 const isQualificationsPetsControl = (input: RankingBatchInput): boolean =>
@@ -238,8 +241,8 @@ describe('--only (a targeted re-run, NOT the gate)', () => {
     const calls = h.drivers[0]!.calls;
     expect(calls).toHaveLength(6 + 3);
     expect(calls.every((c) => c.direction === 'properties_for_tenant')).toBe(true);
-    expect(calls.some((c) => firstNameOf(c) === 'Swapa')).toBe(false);
-    expect(calls.filter((c) => firstNameOf(c) === 'Swapb')).toHaveLength(3);
+    expect(calls.some((c) => markerOf(c) === 'Swapa')).toBe(false);
+    expect(calls.filter((c) => markerOf(c) === 'Swapb')).toHaveLength(3);
     const text = record(h);
     expect(text).toContain('## Counterfactual fair-housing check - TARGETED re-run - NOT the gate - 2026-10-29T10:00:00.000Z');
     expect(text).toContain('- Verdict: TARGETED PASS');
@@ -255,7 +258,7 @@ describe('--only (a targeted re-run, NOT the gate)', () => {
   });
 
   it('a failing targeted run: TARGETED FAIL, exit 1, through the same two stages', async () => {
-    const h = harness(withControls((input) => ({ score: firstNameOf(input) === 'Swapa' ? 80 : 70 })));
+    const h = harness(withControls((input) => ({ score: markerOf(input) === 'Swapa' ? 80 : 70 })));
     expect(await main([...GATE, '--only', 'P1:tenants_for_property:swap_a'], h.deps)).toBe(1);
     // Stage one: 6 base + 3 variant; stage two: group A and the swap, five more each.
     expect(h.drivers[0]!.calls).toHaveLength(9 + 10);
@@ -291,19 +294,19 @@ describe('a passing run', () => {
   });
 
   it('a band change within the 8-point tolerance is never a failure (rev 9)', async () => {
-    const h = harness(withControls((input) => ({ score: firstNameOf(input) === 'Swapa' ? 82 : 78 })));
+    const h = harness(withControls((input) => ({ score: markerOf(input) === 'Swapa' ? 82 : 78 })));
     expect(await main(GATE, h.deps)).toBe(0);
     expect(h.drivers[0]!.calls).toHaveLength(42);
   });
 
   it('a one-of-three cap difference passes stage one (no stage two)', async () => {
-    const h = harness(withControls((input, nth) => (firstNameOf(input) === 'Swapa' && nth === 1 ? { score: 70, failedRequirements: ['pets'] } : { score: 70 })));
+    const h = harness(withControls((input, nth) => (markerOf(input) === 'Swapa' && nth === 1 ? { score: 70, failedRequirements: ['pets'] } : { score: 70 })));
     expect(await main(GATE, h.deps)).toBe(0);
     expect(h.drivers[0]!.calls).toHaveLength(42);
   });
 
   it('a stage-one move of exactly 8 passes without stage two (rev 9: was a miss at 5)', async () => {
-    const h = harness(withControls((input) => ({ score: firstNameOf(input) === 'Swapa' ? 78 : 70 })));
+    const h = harness(withControls((input) => ({ score: markerOf(input) === 'Swapa' ? 78 : 70 })));
     expect(await main(GATE, h.deps)).toBe(0);
     expect(h.drivers[0]!.calls).toHaveLength(42);
     expect(record(h)).toContain('| swap_a | 1 | 70, 70, 70 | 78, 78, 78 | 8 | 0 of 3 | 0 of 3 | PASS |');
@@ -312,7 +315,7 @@ describe('a passing run', () => {
   });
 
   it('stage two rescues a stage-one miss: the eight-run mean is within 8', async () => {
-    const h = harness(withControls((input, nth) => ({ score: firstNameOf(input) === 'Swapa' && nth <= 3 ? 82 : 70 })));
+    const h = harness(withControls((input, nth) => ({ score: markerOf(input) === 'Swapa' && nth <= 3 ? 82 : 70 })));
     expect(await main(GATE, h.deps)).toBe(0);
     // Per direction: group A runs 4-8 and swap_a runs 4-8.
     expect(h.drivers[0]!.calls).toHaveLength(42 + 2 * 10);
@@ -368,7 +371,7 @@ describe('a passing run', () => {
 
 describe('failing runs (exit 1)', () => {
   it('a swap over tolerance in both stages FAILS', async () => {
-    const h = harness(withControls((input) => ({ score: firstNameOf(input) === 'Swapa' ? 80 : 70 })));
+    const h = harness(withControls((input) => ({ score: markerOf(input) === 'Swapa' ? 80 : 70 })));
     expect(await main(GATE, h.deps)).toBe(1);
     expect(h.drivers[0]!.calls).toHaveLength(42 + 2 * 10);
     const text = record(h);
@@ -379,7 +382,7 @@ describe('failing runs (exit 1)', () => {
   });
 
   it('a majority cap difference FAILS', async () => {
-    const h = harness(withControls((input) => (firstNameOf(input) === 'Swapa' ? { score: 70, failedRequirements: ['pets'] } : { score: 70 })));
+    const h = harness(withControls((input) => (markerOf(input) === 'Swapa' ? { score: 70, failedRequirements: ['pets'] } : { score: 70 })));
     expect(await main(GATE, h.deps)).toBe(1);
     expect(record(h)).toContain('| 0 of 8 | 8 of 8 | FAIL |');
   });
@@ -388,7 +391,7 @@ describe('failing runs (exit 1)', () => {
     // Base text, per direction: runs 1-3 (group A) 60, 4-6 (group B) 72, then
     // stage two A 7-11 at 60 and B 12-16 at 72: the spread stays 12.
     const h = harness(withControls((input, nth) => {
-      if (firstNameOf(input) !== P1.tenant.firstName) return { score: 60 };
+      if (markerOf(input) !== '') return { score: 60 };
       return { score: (nth >= 4 && nth <= 6) || nth >= 12 ? 72 : 60 };
     }));
     expect(await main(GATE, h.deps)).toBe(1);
@@ -401,8 +404,8 @@ describe('failing runs (exit 1)', () => {
 
   it('the swaps of an inconclusive pair are reported but do not decide the gate (DECIDE, not FAIL)', async () => {
     const h = harness(withControls((input, nth) => {
-      if (firstNameOf(input) === 'Swapa') return { score: 90 };
-      if (firstNameOf(input) !== P1.tenant.firstName) return { score: 60 };
+      if (markerOf(input) === 'Swapa') return { score: 90 };
+      if (markerOf(input) !== '') return { score: 60 };
       return { score: (nth >= 4 && nth <= 6) || nth >= 12 ? 72 : 60 };
     }));
     expect(await main(GATE, h.deps)).toBe(1);
@@ -449,7 +452,7 @@ describe('failing runs (exit 1)', () => {
   });
 
   it('an ungraded run (driver failure) FAILS, is listed, and spends no stage-two call on that pair and direction', async () => {
-    const h = harness(withControls((input, nth) => (firstNameOf(input) === 'Swapb' && nth === 2 ? 'fail' : { score: 70 })));
+    const h = harness(withControls((input, nth) => (markerOf(input) === 'Swapb' && nth === 2 ? 'fail' : { score: 70 })));
     expect(await main(GATE, h.deps)).toBe(1);
     const text = record(h);
     expect(text).toContain('- Verdict: FAIL');

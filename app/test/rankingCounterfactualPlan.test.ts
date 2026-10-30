@@ -29,6 +29,10 @@ import { SWAPS } from '../scripts/rankingCounterfactual/swaps.js';
 
 const plan = planStageOne(DEFAULT_SUITE);
 
+/** Charter section 20 items 18 and 19: the swaps whose fact is on no card, with the stored fields each changes. */
+const ABSENT_SWAPS = ['name', 'address', 'authority'];
+const ABSENT_FIELDS: Record<string, string[]> = { name: ['firstName', 'lastName'], address: ['address'], authority: ['housingAuthority'] };
+
 function family(id: string): string {
   return id.split('--')[0]!;
 }
@@ -68,33 +72,53 @@ describe('the stage-one plan of the default suite', () => {
         for (const swap of SWAPS) {
           const variant = mine.find((s) => s.swapId === swap.id)!;
           expect(variant.batch.handles.slice(1)).toEqual(base.batch.handles.slice(1));
-          // Charter section 20 item 18: the authority swap is the one swap that
-          // must NOT reach the call text (its regression guard is the next test).
-          if (swap.id === 'authority') continue;
+          // Charter section 20 items 18 and 19: the authority, name and address
+          // swaps must NOT reach the call text (their guard is the next test).
+          if (ABSENT_SWAPS.includes(swap.id)) continue;
           expect(variant.batch.user, `${pair.id} ${direction} ${swap.id}`).not.toBe(base.batch.user);
         }
       }
     }
   });
 
-  it('charter section 20 item 18: the authority swap leaves the model input byte-identical (it now tests the absence)', () => {
-    const swap = SWAPS.find((s) => s.id === 'authority')!;
-    for (const pair of BASE_PAIRS) {
-      // The swap still changes the stored record ...
-      const swapped = swap.apply(pair)['housingAuthority'];
-      expect(swapped, pair.id).not.toBe(pair.tenant['housingAuthority']);
-      for (const direction of DIRECTIONS) {
-        const mine = plan.filter((s) => s.pairId === pair.id && s.direction === direction);
-        const base = mine.find((s) => s.group === 'base-A')!;
-        const variant = mine.find((s) => s.swapId === 'authority')!;
-        const where = `${pair.id} ${direction}`;
-        // ... but not one byte of what the model is sent.
-        expect(variant.batch.system, where).toBe(base.batch.system);
-        expect(variant.batch.user, where).toBe(base.batch.user);
-        expect(variant.batch.promptFingerprint, where).toBe(base.batch.promptFingerprint);
-        expect(variant.batch.wire, where).toEqual(base.batch.wire);
-        expect(variant.batch.user, where).not.toContain(String(swapped));
-        expect(variant.batch.user, where).not.toContain(String(pair.tenant['housingAuthority']));
+  it('charter section 20 items 18 and 19: the authority, name and address swaps leave the model input byte-identical (they now test the absence)', () => {
+    for (const swapId of ABSENT_SWAPS) {
+      const swap = SWAPS.find((s) => s.id === swapId)!;
+      for (const pair of BASE_PAIRS) {
+        const swapped = swap.apply(pair);
+        // The swap still changes the stored record ...
+        const fields = ABSENT_FIELDS[swapId]!;
+        expect(fields.some((f) => JSON.stringify(swapped[f]) !== JSON.stringify(pair.tenant[f])), `${swapId} ${pair.id}`).toBe(true);
+        for (const direction of DIRECTIONS) {
+          const mine = plan.filter((s) => s.pairId === pair.id && s.direction === direction);
+          const base = mine.find((s) => s.group === 'base-A')!;
+          const variant = mine.find((s) => s.swapId === swapId)!;
+          const where = `${swapId} ${pair.id} ${direction}`;
+          // ... but not one byte of what the model is sent.
+          expect(variant.batch.system, where).toBe(base.batch.system);
+          expect(variant.batch.user, where).toBe(base.batch.user);
+          expect(variant.batch.promptFingerprint, where).toBe(base.batch.promptFingerprint);
+          expect(variant.batch.wire, where).toEqual(base.batch.wire);
+          // Neither the base value nor the swapped one is in the request: a
+          // one-word value (a name) as a whole word, a longer one as text, an
+          // address as its JSON.
+          const words = new Set(variant.batch.user.split(/[^A-Za-z0-9]+/));
+          for (const record of [pair.tenant, swapped]) {
+            for (const f of fields) {
+              const value = record[f];
+              if (value === undefined) continue;
+              const line1 = (value as { line1?: unknown } | null)?.line1;
+              const present =
+                typeof value !== 'string'
+                  ? variant.batch.user.includes(JSON.stringify(value)) ||
+                    (typeof line1 === 'string' && variant.batch.user.includes(JSON.stringify(line1)))
+                  : /\s/.test(value.trim())
+                    ? variant.batch.user.includes(value)
+                    : words.has(value.trim());
+              expect(present, `${where} ${f}`).toBe(false);
+            }
+          }
+        }
       }
     }
   });

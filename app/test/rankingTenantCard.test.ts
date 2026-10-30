@@ -65,14 +65,11 @@ const T: ContactItem = {
 };
 
 const T_CARD = {
-  firstName: 'Dana',
-  lastName: 'Example',
   status: 'searching',
   voucherSize: 2,
   voucher_expiration_date: '2027-01-31T00:00:00.000Z',
   rta_expiration_date: '2026-12-01',
   porting: false,
-  address: { line1: '5 Elm St', city: 'Atlanta', state: 'GA', zip: '30310' },
   tenure: '3 years',
   pets: 'One cat',
   evictions: 'None',
@@ -105,6 +102,11 @@ describe('tenantCard - the attributes (spec D2.1)', () => {
     // Charter section 20 item 18: the record holds an authority; the card never does.
     expect(T['housingAuthority']).toBe(ATLANTA.name);
     expect(card).not.toHaveProperty('housingAuthority');
+    // Charter section 20 item 19: the record holds a name and an address; the card holds neither.
+    expect([T['firstName'], T['lastName']]).toEqual([' Dana ', 'Example']);
+    expect(T['address']).toBeDefined();
+    for (const key of ['firstName', 'lastName', 'address']) expect(card).not.toHaveProperty(key);
+    expect(JSON.stringify(card)).not.toMatch(/Dana|Example|5 Elm St/);
     expect(card).not.toHaveProperty('notes_updated_at');
   });
 

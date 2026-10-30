@@ -31,6 +31,7 @@ import { propertyCard, propertyFacts } from '../src/services/ranking/cards.js';
 import { propertyMissing, tenantMissing } from '../src/services/ranking/completeness.js';
 import { pairHistoryFingerprint } from '../src/services/ranking/fingerprints.js';
 import { POOL_MESSAGES } from '../src/services/ranking/pool.js';
+import { buildRankingPrompt } from '../src/services/ranking/prompt.js';
 import { NO_ADDRESS_LABEL } from '../src/services/ranking/seenSet.js';
 import { ATLANTA } from './helpers/orgFixtures.js';
 import {
@@ -395,6 +396,61 @@ describe('createAssembleDeps - the production deps (IR9)', () => {
     expect(await deps.contacts.getById('c1')).toBeUndefined();
     expect(await deps.units.getById('u1')).toBeUndefined();
     expect(tables).toEqual(['hc-test-assemble-contacts', 'hc-test-assemble-units']);
+  });
+});
+
+// Charter section 20 item 19: the tenant's name and current address never
+// reach the model - not on a card, not through a `display` string, not in the
+// snapshot - while staff still get the name from the record (`display`).
+describe('the request carries no tenant name or address (charter 20 item 19)', () => {
+  const ZELDA = tenant('t9', {
+    firstName: 'Zelda',
+    lastName: 'Quixote',
+    address: { line1: '77 Hidden Lane', city: 'Decatur', state: 'GA', zip: '30030' },
+  });
+
+  function assertAbsent(text: string, where: string): void {
+    expect(text, where).not.toContain('Zelda');
+    expect(text, where).not.toContain('Quixote');
+    expect(text, where).not.toContain('77 Hidden Lane');
+  }
+
+  it('a property anchor: the built request and the pair snapshot hold neither; staff display still names her', async () => {
+    const w = world({ contacts: [ZELDA] });
+    const result = ok(await assembleRanking({ kind: 'unit', id: 'u1' }, OPTS, w.deps));
+    const candidates = result.candidates.map(verified);
+    const mine = candidates.find((c) => c.candidateId === 't9')!;
+    expect(mine.display).toBe('Zelda Quixote');
+    const prompt = buildRankingPrompt({
+      direction: result.direction,
+      batchIndex: 0,
+      landlordCard: false,
+      anchor: { card: result.anchor.card, missing: result.anchor.missing },
+      candidates,
+      homes: result.homes,
+    });
+    assertAbsent(prompt.userText, 'user');
+    assertAbsent(prompt.batchInput.system, 'system');
+    assertAbsent(JSON.stringify(prompt.batchInput.wire), 'wire');
+    assertAbsent(JSON.stringify(prompt.snapshotOf('t9')), 'snapshot');
+    expect(prompt.handles.find((h) => h.candidateId === 't9')!.display).toBe('Zelda Quixote');
+  });
+
+  it('a tenant anchor: the built request holds neither; the property keeps its own address', async () => {
+    const w = world({ contacts: [ZELDA] });
+    const result = ok(await assembleRanking({ kind: 'tenant', id: 't9' }, OPTS, w.deps));
+    expect(result.anchor.display).toBe('Zelda Quixote');
+    const prompt = buildRankingPrompt({
+      direction: result.direction,
+      batchIndex: 0,
+      landlordCard: false,
+      anchor: { card: result.anchor.card, missing: result.anchor.missing },
+      candidates: result.candidates.map(verified),
+      homes: result.homes,
+    });
+    assertAbsent(prompt.userText, 'user');
+    assertAbsent(JSON.stringify(prompt.batchInput.wire), 'wire');
+    expect(prompt.userText).toContain('u1 Main St');
   });
 });
 

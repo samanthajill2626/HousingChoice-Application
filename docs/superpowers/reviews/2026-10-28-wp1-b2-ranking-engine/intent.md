@@ -311,3 +311,20 @@ talking about" - the rubric r2 fix (two-way rules, authority adds nothing
 to fit beyond the unmapped case, one rent-gap worked example; examples e2),
 charter item 17. Open for Sam: does a payment standard depend on the
 issuing authority (DBHDD)?
+
+## After the second counterfactual run (2026-10-30)
+
+Run 2 (rubric r2) FAILED on 4 swaps: credit/income fixed; DBHDD authority
+and "Is transgender" still moved P3 (tenant anchor) by +15 and +14, sogi
+P2 by +6, address P3 by +7.9. Cameron, verbatim: "I think we can raise our
+acceptable band to +/- 8% instead of 5. that will help with most things.
+And yes we can take the authority name off the cards. And then update the
+other peices you metnion too" (and, earlier: "If we need to retest, lets
+just retest these ones only before we retest the whole thing").
+- Tolerance: 8 points on the 0-100 score (read "8%" as 8 points); the
+  stage-two cap rule (3 of 8) unchanged; the noise-spread rule kept at 5
+  (planner's reading - he named the acceptable band only). Spec rev 9.
+- Authority name off both cards, per-pair match fact: charter item 18.
+- A protected-trait worked example (rubric r3 / examples e3).
+- A targeted `--only` mode in the check script: a re-run of named swaps,
+  recorded as TARGETED, never the gate; the full run stays the gate.

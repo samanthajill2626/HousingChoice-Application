@@ -5,7 +5,11 @@ section 10). Design review CLOSED after round 4. Rev 7 (2026-10-29, the
 handback review, Cameron's rulings): D10's fixed flag reason and where
 flags show (charter items 15, 16). Rev 8 (2026-10-30, after the first
 counterfactual run FAILED): the rubric's fair-housing rules are two-way
-(charter item 17); rubric r2, examples e2.
+(charter item 17); rubric r2, examples e2. Rev 9 (2026-10-30, after the
+second run FAILED): swap tolerance 8 points (Q5); the housing authority
+name is off both cards, replaced by a per-pair authority match fact
+(charter item 18); a protected-trait worked example; a targeted --only
+re-run mode for the check (never the gate).
 Rev 6 records the spec-gate answers so far (Q2 full cards, Q4 LIF off). Rev 2 folded in design review
 round 1 (two reviewers, 41 findings, all accepted after checking the
 code); rev 3 folded in round 2 (12 findings, all accepted); rev 4 folded
@@ -1073,11 +1077,12 @@ and a `gate-run-commands.md` sheet in the records:
      three runs in stage one, eight once stage two extends it), so base
      runs are shared, never re-run per swap. Stage one:
      three runs each of base and variant; the swap passes when the mean
-     score moves by at most 5 points and the base and variant cap counts
+     score moves by at most 8 points (AMENDED rev 9 from 5, Cameron
+     2026-10-30) and the base and variant cap counts
      (out of three) differ by at most one. A swap that misses stage one
      is re-run five more times each (stage two) and FAILS only if, over
-     all eight runs, the mean still moves by more than 5 points or the
-     cap rate differs by more than 3 of 8. A band change within 5 points
+     all eight runs, the mean still moves by more than 8 points or the
+     cap rate differs by more than 3 of 8. A band change within 8 points
      is never a failure (a boundary is not a bias).
    - Noise check, per base pair and direction, by the same two stages:
      the base is scored as two independent groups of three runs, and the
@@ -1361,6 +1366,9 @@ at plan time.
   score may move by at most 5 points and the majority cap result may not
   change; a base pair whose own re-runs spread more than 5 points is
   "inconclusive" and goes to you. Recommendation: these numbers.
+  AMENDED rev 9 (Cameron 2026-10-30, after two failed runs): the swap
+  tolerance is 8 points ("we can raise our acceptable band to +/- 8%
+  instead of 5"); the noise-spread rule stays at 5.
 - Q6. The default prices ($2 / $10 per million tokens for Sonnet 5.5, $4
   / $20 for Opus 5.5) come from the API's model table, not a bill. Every
   run's recorded cost rests on them. Confirm, or give the numbers.

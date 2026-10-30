@@ -273,8 +273,10 @@ disregarded by the rubric (section 7.2), as A1 requires.
 ### 6.2 The two cards
 
 Tenant card: everything on the tenant contact except the exclusions, which
-today means name, address, voucher size, housing authority, porting,
-tenure, pets, evictions, status, voucher expiration, custom fields, last
+today means name, address, voucher size, porting, tenure (the housing
+authority NAME is off both cards, AMENDED 2026-10-30, section 20 item
+18: the pool already fences on it, and the model sees only whether the
+pair's authority matched or is unconfirmed), pets, evictions, status, voucher expiration, custom fields, last
 heard from as a recency bucket (section 9.1), the B1 fields (area
 preference, maximum tenant portion, accessibility need, preferences and
 constraints), the Notes box with extraction's matching lines (section
@@ -1322,3 +1324,14 @@ date; this list is the index.
      on the property record for staff (A1: "staff see those as notes
      only"). Proposed by the planner; Cameron: "Ok fine. Go ahead and
      make the other fixes you were talking about" (section 7.2).
+  18. The housing authority NAME is off both cards (the tenant's
+     `housingAuthority` and the property's accepted `authorities`). The
+     pool already fences on authority (section 5), so the model gains
+     nothing from the name; each pair instead carries one fact: the
+     authority matched, or it is unconfirmed (every property authority
+     "unmapped", which stays uncertainty, never a reason). Found by the
+     second counterfactual run: a DBHDD (disability-linked) authority
+     swap moved a rent-gap pair -7 in run 1 and +15 in run 2 even with
+     r2's rule against it, so the signal is removed rather than
+     forbidden. Proposed by the planner; Cameron: "And yes we can take
+     the authority name off the cards" (sections 6.2, 7.2).

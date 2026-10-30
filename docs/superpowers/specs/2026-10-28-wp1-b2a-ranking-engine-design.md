@@ -9,7 +9,10 @@ counterfactual run FAILED): the rubric's fair-housing rules are two-way
 second run FAILED): swap tolerance 8 points (Q5); the housing authority
 name is off both cards, replaced by a per-pair authority match fact
 (charter item 18); a protected-trait worked example; a targeted --only
-re-run mode for the check (never the gate).
+re-run mode for the check (never the gate). Rev 10 (2026-10-30, after
+the third run FAILED on the name swap alone): the tenant's name and
+current address are off the tenant card (charter item 19); rubric r4,
+examples e4.
 Rev 6 records the spec-gate answers so far (Q2 full cards, Q4 LIF off). Rev 2 folded in design review
 round 1 (two reviewers, 41 findings, all accepted after checking the
 code); rev 3 folded in round 2 (12 findings, all accepted); rev 4 folded

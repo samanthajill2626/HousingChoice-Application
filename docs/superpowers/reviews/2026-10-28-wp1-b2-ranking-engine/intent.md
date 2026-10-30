@@ -328,3 +328,14 @@ just retest these ones only before we retest the whole thing").
 - A protected-trait worked example (rubric r3 / examples e3).
 - A targeted `--only` mode in the check script: a re-run of named swaps,
   recorded as TARGETED, never the gate; the full run stays the gate.
+
+## After the third run (2026-10-30)
+
+Targeted re-run (8 swaps) TARGETED PASS ($1.48). Full run 3 (r3/e3,
+tolerance 8) FAILED on one swap: the name, P3 tenant anchor, -9.6 ("Anne
+Miller" -> "Maria Hernandez"); all controls passed; near misses on the same
+pair: credit_income -7.3, address -6.3; P3 property anchor disability 5.3.
+Cameron, verbatim: "Ok fine, take them off, this proves it. Name and
+address." - the tenant's name and current address off the tenant card
+(charter item 19, spec rev 10, rubric r4 / examples e4). The property's
+own address stays (location fit).

@@ -273,7 +273,8 @@ disregarded by the rubric (section 7.2), as A1 requires.
 ### 6.2 The two cards
 
 Tenant card: everything on the tenant contact except the exclusions, which
-today means name, address, voucher size, porting, tenure (the housing
+today means voucher size, porting, tenure (the tenant's name and current
+address are off the card, AMENDED 2026-10-30, section 20 item 19; the housing
 authority NAME is off both cards, AMENDED 2026-10-30, section 20 item
 18: the pool already fences on it, and the model sees only whether the
 pair's authority matched or is unconfirmed), pets, evictions, status, voucher expiration, custom fields, last
@@ -503,8 +504,9 @@ income, in ANY field (qualifications, notes, deposit notes, application
 process, custom fields), is disregarded and never reported failed (A1).
 So is a tenant's credit or income fact wherever it is written (the Notes
 box, Staff notes, custom fields). Rent, the payment standard and the
-tenant's maximum portion are not credit or income and stay inputs. Names stay on the cards
-(Cameron 2026-10-25); the pool (section 5) uses no protected
+tenant's maximum portion are not credit or income and stay inputs. The
+tenant's name and current address are OFF the cards (AMENDED 2026-10-30,
+section 20 item 19; was "Names stay on the cards (Cameron 2026-10-25)"); the pool (section 5) uses no protected
 characteristic. A landlord or property requirement that is unacceptable
 under fair housing (for example "no kids", which discriminates on
 familial status) is NOT applied: the model is
@@ -1335,3 +1337,19 @@ date; this list is the index.
      r2's rule against it, so the signal is removed rather than
      forbidden. Proposed by the planner; Cameron: "And yes we can take
      the authority name off the cards" (sections 6.2, 7.2).
+  19. The tenant's NAME and CURRENT ADDRESS are off the tenant card
+     (reversing round 15's "names stay", Cameron 2026-10-25: "I don't
+     know if we need to go as far as taking the tenant's name off"). The
+     third counterfactual run failed on the name swap alone: "Anne
+     Miller" -> "Maria Hernandez" dropped a rent-gap pair (tenant anchor)
+     from 48-52 to 35-42 over eight runs each (mean -9.6, tolerance 8),
+     while swaps with no proxy (and an authority swap with byte-identical
+     input) held at 50; the current address had moved the same pair in
+     all three runs (+6.6, +7.9, -6.3). The model needs neither: a
+     candidate is named by its handle, and area fit comes only from
+     "Area preference" against the property's location (the property's
+     own address stays on its card). Staff screens read names and
+     addresses from the records, unchanged. A name or address a person
+     typed into Notes free text is not scrubbed. Proposed by the
+     planner; Cameron: "Ok fine, take them off, this proves it. Name and
+     address." (sections 6.2, 7.2).

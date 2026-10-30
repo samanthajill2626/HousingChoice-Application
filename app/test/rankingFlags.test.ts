@@ -8,7 +8,6 @@ import { describe, expect, it } from 'vitest';
 import type { UnlawfulFlagInput } from '../src/repos/rankingRunsRepo.js';
 import {
   DEFAULT_FLAG_REASON,
-  flagReason,
   isFlagOpen,
   mergeRaisedFlags,
   openFlagFields,
@@ -64,27 +63,55 @@ describe('isFlagOpen / openFlags / openFlagFields', () => {
   });
 });
 
-describe('flagReason', () => {
-  it('takes the first against text naming the field (underscores as spaces, case folded)', () => {
-    const result = parsed({
-      against: [
-        { text: 'far from work', source: 'area' },
-        { text: 'Lease Terms say adults only', source: 'requirements' },
-      ],
-    });
-    expect(flagReason('lease_terms', result)).toBe('Lease Terms say adults only');
-  });
+// Spec D10 rev 7 (charter item 15, PFW1-1): the record's reason is ALWAYS
+// the fixed sentence. A pair's against-reasons and unknowns describe THAT
+// pair - often the tenant's own facts - and must never reach a property
+// record with no TTL; they stay on the pair's match and run.
+describe('the flag record reason is always the fixed sentence', () => {
+  const raiseOne = (field: string, text: string, result: ReturnType<typeof parsed>): UnlawfulFlagInput | undefined =>
+    mergeRaisedFlags(new Map(), [{ unitId: 'unit-1', freeTextByField: { [field]: text }, result }], {
+      runId: 'run-a',
+      raisedAt: T0,
+    })[0];
 
-  it('falls back to an unknown naming it, then to the default', () => {
-    expect(flagReason('qualifications', parsed({ unknowns: ['qualifications may bar children'] }))).toBe(
-      'qualifications may bar children',
+  it('an against-reason and an unknown naming the field never reach the record (accessibility, a wheelchair user)', () => {
+    const flag = raiseOne(
+      'accessibility',
+      'No wheelchairs. 3rd floor.',
+      parsed({
+        against: [{ text: 'accessibility: 3rd floor walkup, tenant uses a wheelchair', source: 'accessibility' }],
+        unknowns: ['accessibility: tenant uses a wheelchair, rule not applied (fair housing)'],
+        fairHousingFlags: [{ kind: 'unlawful', field: 'accessibility' }],
+      }),
     );
-    expect(flagReason('qualifications', parsed())).toBe(DEFAULT_FLAG_REASON);
+    expect(flag?.reason).toBe(DEFAULT_FLAG_REASON);
+    expect(JSON.stringify(flag)).not.toMatch(/wheelchair|walkup/);
   });
 
-  it('names a landlord: field by its plain key', () => {
-    const result = parsed({ against: [{ text: 'qualifications: no kids', source: 'requirements' }] });
-    expect(flagReason('landlord:qualifications', result)).toBe('qualifications: no kids');
+  it("a pets against-reason about this tenant is not the record's reason", () => {
+    const flag = raiseOne(
+      'pets',
+      'No children. Cats OK.',
+      parsed({
+        against: [{ text: 'no pets rule, tenant has 2 cats', source: 'pets' }],
+        unknowns: ['pets: whether the cats are assistance animals is unknown'],
+        fairHousingFlags: [{ kind: 'unlawful', field: 'pets' }],
+      }),
+    );
+    expect(flag?.reason).toBe(DEFAULT_FLAG_REASON);
+    expect(JSON.stringify(flag)).not.toMatch(/cats|assistance/);
+  });
+
+  it('a landlord: flag records the fixed sentence too', () => {
+    const flag = raiseOne(
+      'landlord:qualifications',
+      'No kids.',
+      parsed({
+        against: [{ text: 'qualifications: no kids, tenant has a son', source: 'qualifications' }],
+        fairHousingFlags: [{ kind: 'unlawful', field: 'landlord:qualifications' }],
+      }),
+    );
+    expect(flag?.reason).toBe(DEFAULT_FLAG_REASON);
   });
 });
 

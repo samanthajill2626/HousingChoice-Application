@@ -320,6 +320,25 @@ describe('runBatch', () => {
     expect(h.runs.runs.get('run-2')?.results[0]?.cappedAtRun).toEqual({ capped: false, capReason: null });
   });
 
+  it("PFW1-1 (spec D10 rev 7): the property's flag record holds the fixed sentence; the pair's own text stays on its run", async () => {
+    const flagged = { accessibility: 'No wheelchairs. 3rd floor.' };
+    const h = harness({
+      resultFor: () =>
+        parsed({
+          against: [{ text: 'accessibility: 3rd floor walkup, tenant uses a wheelchair', source: 'accessibility' }],
+          unknowns: ['accessibility: tenant uses a wheelchair'],
+          fairHousingFlags: [{ kind: 'unlawful', field: 'accessibility' }],
+        }),
+    });
+    await runBatch([tenantCandidate('t-1', { propertyFacts: facts({ freeTextByField: flagged }) })], 0, h.ctx, h.deps);
+    const record = h.runs.flags.get(unlawfulFlagItemId(ANCHOR_UNIT, 'accessibility'));
+    expect(record?.reason).toBe('flagged as a requirement fair housing does not allow');
+    expect(JSON.stringify(record)).not.toMatch(/wheelchair|walkup/);
+    expect(h.runs.runs.get('run-1')?.results[0]?.against).toEqual([
+      { text: 'accessibility: 3rd floor walkup, tenant uses a wheelchair', source: 'accessibility' },
+    ]);
+  });
+
   it('WL-S5-2: a putRun failure drops the flags its batch newly raised, so a later batch raising the same flag writes it', async () => {
     const flagged = { qualifications: 'No kids under 12.' };
     const h = harness({ resultFor: () => parsed({ fairHousingFlags: [{ kind: 'unlawful', field: 'qualifications' }] }) });

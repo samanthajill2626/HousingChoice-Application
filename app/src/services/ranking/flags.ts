@@ -15,10 +15,17 @@
 //
 // Accommodation flags are never property records: they stay on the pair's
 // match only.
+//
+// The record's `reason` is ALWAYS DEFAULT_FLAG_REASON (spec D10 rev 7,
+// charter item 15): the model's against-reasons and unknowns describe the
+// PAIR - often the tenant's own facts - and a property record has no TTL and
+// is shown for every later tenant. The pair's own text stays on its match and
+// its run.
 import { createHash } from 'node:crypto';
 import type { UnlawfulFlagInput, UnlawfulFlagRecord } from '../../repos/rankingRunsRepo.js';
 import type { ParsedCandidate } from './parse.js';
 
+/** The one reason every unlawful-flag record stores (spec D10 rev 7). */
 export const DEFAULT_FLAG_REASON = 'flagged as a requirement fair housing does not allow';
 
 /** sha256 hex of the field's TRIMMED text - the stamp a flag is raised with. */
@@ -58,36 +65,14 @@ export function openFlagFields(
   return [...new Set(openFlags(records, freeTextByField).map((record) => record.field))];
 }
 
-function fieldWords(field: string): string {
-  const key = field.startsWith('landlord:') ? field.slice('landlord:'.length) : field;
-  return key.replace(/_/g, ' ').toLowerCase();
-}
-
-function folded(text: string): string {
-  return text.toLowerCase().replace(/\s+/g, ' ');
-}
-
-/**
- * D10's reason: the model's against-reason, else its unknown, whose text names
- * the field (the field key with underscores as spaces, case and spacing
- * folded; a landlord: flag by its plain key), else the default sentence.
- */
-export function flagReason(field: string, result: Pick<ParsedCandidate, 'against' | 'unknowns'>): string {
-  const words = fieldWords(field);
-  const against = result.against.find((reason) => folded(reason.text).includes(words));
-  if (against !== undefined) return against.text;
-  const unknown = result.unknowns.find((text) => folded(text).includes(words));
-  if (unknown !== undefined) return unknown;
-  return DEFAULT_FLAG_REASON;
-}
-
 /**
  * The job-wide merge (D10: "merged across a job's batches by property and
  * field"). `raised` is the job's map, keyed `${unitId}#${field}`; the FIRST
  * raising run keeps its entry. Returns only the flags this call newly added -
  * the ones the calling batch writes. A field that holds no text on the card is
  * skipped (parse already drops such a flag and counts it; this keeps a record
- * from ever carrying the hash of nothing).
+ * from ever carrying the hash of nothing). Every entry's reason is
+ * DEFAULT_FLAG_REASON: no pair text reaches the record (spec D10 rev 7).
  */
 export function mergeRaisedFlags(
   raised: Map<string, UnlawfulFlagInput>,
@@ -106,7 +91,7 @@ export function mergeRaisedFlags(
         unitId,
         field: flag.field,
         textHash: textHashOf(text),
-        reason: flagReason(flag.field, result),
+        reason: DEFAULT_FLAG_REASON,
         runId: run.runId,
         raisedAt: run.raisedAt,
       };

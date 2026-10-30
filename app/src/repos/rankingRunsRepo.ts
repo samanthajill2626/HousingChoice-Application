@@ -858,7 +858,7 @@ export interface UnlawfulFlagRecord {
   field: string;
   /** sha256 of the field's trimmed text when raised. */
   textHash: string;
-  /** The model's reason naming the field, else the default sentence (spec D10). */
+  /** Always the fixed sentence, never the model's text (spec D10 rev 7; flags.ts DEFAULT_FLAG_REASON). */
   reason: string;
   runId: string;
   raisedAt: string;

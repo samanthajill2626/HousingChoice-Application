@@ -366,3 +366,66 @@ Open points for the planner (not changed; outside this row):
   (readRanking.ts:211) on both anchors, unlawful entries included; nothing
   on the page renders them (the ranking table shows no per-pair flags), so
   this is wire-only.
+
+### PFW1-6 (b) - the read API (2026-10-29)
+
+The planner's answer to the last open point above, under the same ruling:
+the ranking READ is the same leak. `GET /api/rankings/tenant/:id` (admin
+AND va, spec D12) answered each row's `match.fairHousingFlags` as stored,
+`unlawful` entries included, although the page renders none of them. Now a
+TENANT anchor's rows drop their `unlawful` entries and keep their
+`accommodation` entries; a PROPERTY anchor's read is unchanged. The route
+answers `result.rows` as the read builds them
+(app/src/routes/rankings.ts:217), so the fix is in the read alone.
+
+Commit: e499a0d9 (3 files, +38 -1).
+
+Changes:
+- app/src/services/ranking/readRanking.ts:217 - deriveMatch's response
+  `fairHousingFlags` is the stored list filtered to
+  `ctx.anchorKind === 'unit' || flag.kind !== 'unlawful'` (comment
+  :214-216). The read's anchor kind reaches it through a new REQUIRED
+  `RowContext.anchorKind` (:125-126), set from the anchor at :465. The cap
+  inputs are untouched: accommodation fields still come from the stored,
+  unfiltered list (:201) and open unlawful fields from the property's flag
+  records (:203). A doc line on `RankingReadMatch.fairHousingFlags` (:67)
+  names the rule.
+- app/test/rankingReadDerive.test.ts:37 - its `ctx()` helper gains the
+  required field's default, `anchorKind: 'unit'`, so every derive case keeps
+  its property-anchor behavior; no assertion changed.
+
+Tests (RED for the stated reason, then GREEN):
+- app/test/rankingRead.test.ts:249-260 (fixture `BOTH_KINDS` :240-247). A
+  tenant-anchor read whose stored match for u-1 carries
+  `[unlawful on qualifications, accommodation on no_pets]` and a failed,
+  recorded `no_pets` answers only the accommodation entry (:256), and the
+  pair still reads uncapped and Strong (:259): the accommodation still lifts
+  the cap. RED: 1 failed | 25 passed (26), "expected [ { kind: 'unlawful',
+  ...(1) }, ...(1) ] to deeply equal [ { kind: 'accommodation', ...(1) } ]"
+  at :256; the cap assertion was already green.
+- app/test/rankingRead.test.ts:262-267 (PIN). A property-anchor read
+  answers both kinds (:266) - green before and after.
+- GREEN: 26 passed.
+
+Verification (at e499a0d9):
+
+| Check | Result |
+|---|---|
+| app: `npx vitest run test/rankingRead.test.ts test/rankingsApi.test.ts test/rankingReadDerive.test.ts` | 3 files, 91 passed (26 + 25 + 40) |
+| app: `npx vitest run test/rankingRead.integration.test.ts` (the read over the real repos, DynamoDB Local) | 1 file, 12 passed |
+| root `npm run typecheck` | exit 0 (all 5 workspaces) |
+| `npx eslint` on the 3 touched files | exit 0 |
+| ASCII: added lines in the diff | 0 non-ASCII |
+| e2e | not run, by the dispatch: rankings.spec.ts calls `GET /api/rankings/tenant/:id` only for its status (:346-347, the VA case) and checks the tenant ranking's page for no flag line (:298-301); nothing reads `match.fairHousingFlags` |
+
+Dashboard: no change. A grep of dashboard/src for `fairHousingFlags` finds,
+on the ranking-read side, only the `RankingMatchView` type field
+(api/types.ts:519) and test fixtures; RankingTable.tsx renders no per-pair
+flags. The one rendered use is RankingRunDetail.tsx:135
+`pair.fairHousingFlags` (a run's pairs, filtered by PFW1-6 above), and
+ListingDetail.tsx:254 / :954 is the property page's own flag read
+(useUnitFlags), not a match.
+
+Deviations: one file beyond the dispatch's list - the derive test's `ctx()`
+fixture needed the new required field (one line, no assertion change). No
+one-value test fixes.

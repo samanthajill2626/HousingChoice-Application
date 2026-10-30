@@ -86,7 +86,13 @@ async function pickProperty(page: Page, line1: string): Promise<void> {
 
 async function pickTenant(page: Page, name: string): Promise<void> {
   const panel = rankPanel(page);
-  await panel.getByRole('radio', { name: 'Tenant', exact: true }).check();
+  // A click, then a web-first assertion (never `check()`): when a property
+  // anchor is already picked, the radio follows the anchor in the URL, which
+  // the router clears after the click, so the radio settles a render later
+  // and `check()`'s immediate state test misreads it.
+  const tenantRadio = panel.getByRole('radio', { name: 'Tenant', exact: true });
+  await tenantRadio.click();
+  await expect(tenantRadio).toBeChecked();
   await panel.getByRole('combobox', { name: 'Tenant to rank', exact: true }).fill(name);
   await page.getByRole('option', { name: new RegExp(escapeRegExp(name)) }).click();
 }

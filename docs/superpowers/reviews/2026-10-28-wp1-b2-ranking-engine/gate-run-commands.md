@@ -7,9 +7,9 @@ merge. They never stop the build; a failure blocks the merge (and with it
 every production ranking) until it passes or you decide (charter 7.2).
 
 - Branch `feat/wp1-b2-ranking-engine`, worktree `W:\tmp\wp1-b2-ranking-engine`,
-  measured at commit `45fc3326` (the last code commit, after the planner's
-  fix wave PFW1; every later commit on the branch is records or docs only.
-  PFW1 changed no rubric, example, schema, card or prompt byte, so the
+  measured at commit `e499a0d9` (the last code commit, after the planner's
+  fix wave PFW1 and its micro row PFW1-6; every later commit on the branch is records or docs only.
+  Neither changed a rubric, example, schema, card or prompt byte, so the
   fingerprint below is unchanged from 7fb7b723). Any rubric, examples,
   schema, card or model change after a passing run needs a new run.
 - Prompt fingerprint

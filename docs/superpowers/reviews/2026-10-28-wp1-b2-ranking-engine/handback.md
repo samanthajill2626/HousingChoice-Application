@@ -1,12 +1,12 @@
 # WP1 B2a Ranking engine - build orchestrator handback (2026-10-29, refreshed 2026-10-30 after PFW1)
 
-**CODE-COMPLETE @2c4894ad on `feat/wp1-b2-ranking-engine`
+**CODE-COMPLETE @e499a0d9 (last code commit) on `feat/wp1-b2-ranking-engine`
 (`W:\tmp\wp1-b2-ranking-engine`), 0 behind `main` (main = 404e039d = the
 merge base), UNMERGED (human gate). GATES PENDING THE PLANNER'S RE-RUN on
 the post-PFW1 tree: the last full green battery is 542e6874, BEFORE the
 planner's fix wave PFW1 (below). Then PENDING Cameron's three real-model
 runs (`gate-run-commands.md`, the merge gate; measured commit now
-45fc3326, fingerprint unchanged).**
+e499a0d9, fingerprint unchanged).**
 
 ## Q1 - ANSWERED by Cameron: option (a) (spec rev 7 D10, charter item 15)
 
@@ -47,11 +47,20 @@ item 16). Commits 1a590afb..2c4894ad:
   test's tenant pick, fixed in the e2e helper 45fc3326 - the anchor-type
   radio follows the URL and settles one render later). The 16 other
   property-page specs were not run (the planner's full e2e covers them).
-- Open point for the planner: on a TENANT-anchor run, the run detail's
-  per-pair "Flags" column (the run's own model output, D11) still reads
-  e.g. "unlawful on qualifications" / "accommodation on no_pets". Spec rev
-  7 gates the open-flag LIST; say if that column should drop the unlawful
-  kind on tenant-anchor runs too.
+- PFW1-6 (the planner's micro row from the first open point; 7a17a29f,
+  e499a0d9): on a TENANT anchor nothing names an unlawful flag - a
+  tenant-anchor run's pairs drop their `unlawful` entries on the run-detail
+  API and in the page's Flags cell, and the tenant-anchor ranking read's
+  rows drop them from `match.fairHousingFlags` (va can call that read).
+  `accommodation` entries stay (they are the pair's); a property anchor is
+  unchanged; the cap still reads the stored flags as before. Tests on each
+  side, RED first; typecheck 0. Residual, visible only to admins: a
+  tenant-anchor run's collapsed "Raw model output" is the model's raw text
+  and still holds any unlawful flag it returned (the audit copy).
+- Accepted as is (the planner, 2026-10-30): a roster write that changes a
+  property's landlord of record does not re-check the notice until the next
+  page load; it only matters for `landlord:<key>` flags, which need
+  RANKING_LANDLORD_CARD on (default off).
 
 ## Work map
 
@@ -135,8 +144,8 @@ and runs list refresh on Refresh, not when a job ends (QA-1).
 
 1. Q1: answered (a), built in PFW1-1; the flag display per charter item
    16 built in PFW1-2 / PFW1-3 (above).
-2. The real-model runs: `gate-run-commands.md` - measured commit 45fc3326
-   (last code commit, after PFW1), prompt fingerprint
+2. The real-model runs: `gate-run-commands.md` - measured commit e499a0d9
+   (last code commit, after PFW1 and PFW1-6), prompt fingerprint
    33e406a60079c1b829b123dbb27d63599bb4ced7e66934550a2793ce13e4bce9
    (unchanged by PFW1); orchestrator dry run (key unset) at 2c4894ad:
    stage one 414 calls (est. $16.80), stage two at most 660 more (est. at

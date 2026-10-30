@@ -51,3 +51,35 @@ Logs: .superpowers/sdd/logs/p-*.log (gitignored run state).
 From the shared main checkout:
 
     git -C "W:\AI Projects\Housing Choice\HC Application" merge --ff-only feat/wp1-b2-ranking-engine
+
+## Update 2026-10-30 - the real-model runs and the second merge
+
+B2a was merged to main (002e4363) before the runs; the counterfactual
+check became the DEPLOY gate. Cameron's runs (record:
+counterfactual-check.md):
+
+| Run | Rubric / examples | Result | Cost |
+|---|---|---|---|
+| compile check | (schema unchanged throughout) | 5/5 COMPILES | cents |
+| 1 | r1 / e1 | FAIL, 6 swaps (credit_income up 7 and 14, address up 6.6, DBHDD authority down 7-9, sogi down 5.8) | $15.44 |
+| 2 | r2 / e2 (two-way rules, charter 17) | FAIL, 4 swaps (DBHDD +15, sogi +14 and +6, address +7.9) | ~$16 |
+| targeted | r3 / e3 (authority off the cards, charter 18; tolerance 8, spec rev 9) | TARGETED PASS | $1.48 |
+| 3 | r3 / e3 | FAIL, 1 swap: name "Anne Miller" -> "Maria Hernandez", -9.6 | $14.84 |
+| targeted | r4 / e4 (tenant name and address off the card, charter 19) | TARGETED PASS | $1.37 |
+| 4 | r4 / e4 | **PASS** (414 calls, no stage two; controls 6/6) | $14.09 |
+| timing | r4 / e4 | 3 x 40-candidate batches: 23.7, 24.1, 24.6 s | ~$0.14 |
+
+Sign-off: PASS, written by the planner at Cameron's instruction. Watch
+items: three P3 property-anchor swaps (religion, disability, sogi) moved
+exactly 8, at the tolerance.
+
+Gates at 051ba7ab (planner, bare, quiet tree): typecheck 0, smoke 0, lint 0
+(27 files), npm test 0 (app 12787 passed), read budget 0 (159-237 ms), e2e 0
+(392 passed, 16.3m).
+Second merge (Cameron's), from the shared main checkout:
+
+    git -C "W:\AI Projects\Housing Choice\HC Application" merge --ff-only feat/wp1-b2-ranking-engine
+
+Before deploy: ANTHROPIC_API_KEY in dev and prod; the new env keys by
+RUNBOOK's sync-copy-push-check. Every stored match reads out of date once
+after deploy (r4 / e4 and the card change) - none exist outside test data.

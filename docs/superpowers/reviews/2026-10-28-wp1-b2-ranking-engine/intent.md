@@ -12,7 +12,13 @@ cut from main @404e039d.
 
 ## STATE
 
-UPDATE 2026-10-30 - Phase: VERDICT DELIVERED. MERGE-READY at bb7a4819 PENDING
+UPDATE 2026-10-30 (late) - Phase: DEPLOY GATE PASSED. Run 4 (r4/e4) PASS,
+signed off by the planner at Cameron's instruction ("you can aign off for me
+and ill merge tgis in after"). NEXT: Cameron ff-merges the r2-r4 commits;
+then unregister compact-resume (--off). Deploy is Cameron's (key in dev +
+prod first). Never merge, never deploy.
+
+Earlier: UPDATE 2026-10-30 - Phase: VERDICT DELIVERED. MERGE-READY at bb7a4819 PENDING
 Cameron's real-model runs (planner-verdict.md; planner gates all 0, e2e 392
 passed). Nothing in flight. NEXT: Cameron runs gate-run-commands.md, then
 merges; on merge, unregister compact-resume (--off). Never merge.

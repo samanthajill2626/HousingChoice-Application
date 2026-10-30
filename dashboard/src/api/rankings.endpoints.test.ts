@@ -13,6 +13,7 @@ import {
   getRankingCost,
   getRankingJob,
   getRankingRun,
+  getUnitFairHousingFlags,
   listRankingRuns,
   startRanking,
 } from './endpoints.js';
@@ -70,4 +71,15 @@ it('getRankingRun and getRankingCost read the admin routes', async () => {
   expect(request).toHaveBeenLastCalledWith('/api/admin/rankings/cost', {
     query: { from: '2026-07-01', to: undefined },
   });
+});
+
+// Spec D10 rev 7 (charter item 16): the property page's read-only notice.
+it("getUnitFairHousingFlags reads one property's open flags and passes the signal", async () => {
+  const body = { flags: [{ field: 'qualifications', label: 'Qualifications', reason: 'flagged as a requirement fair housing does not allow' }] };
+  vi.mocked(request).mockResolvedValueOnce(body);
+  const signal = new AbortController().signal;
+  await expect(getUnitFairHousingFlags('unit 1', signal)).resolves.toEqual(body);
+  expect(request).toHaveBeenLastCalledWith('/api/rankings/unit/unit%201/flags', { signal });
+  await getUnitFairHousingFlags('u1');
+  expect(request).toHaveBeenLastCalledWith('/api/rankings/unit/u1/flags', {});
 });

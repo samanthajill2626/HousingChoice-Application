@@ -504,19 +504,32 @@ export async function poolTooLargeMissing(
 
 /**
  * IR9: each property's CURRENT-card facts, for the run detail's open-flag
- * check (S6): one complete units read for the distinct ids and, switch on,
- * one landlord read, then propertyFacts. A unit the complete read did not
- * find is absent; an incomplete read THROWS (the caller scopes the failure).
- * The facts read no authority mapping, so no organization list is read.
+ * check (S6): one complete units read for the distinct ids, then
+ * propertyFactsOf. A unit the complete read did not find is absent; an
+ * incomplete read THROWS (the caller scopes the failure). The facts read no
+ * authority mapping, so no organization list is read.
  */
 export async function loadPropertyFacts(
   unitIds: readonly string[],
   deps: Pick<AssembleDeps, 'contacts' | 'units' | 'config'>,
 ): Promise<Map<string, PropertyFacts>> {
   const ids = [...new Set(unitIds)].sort();
+  if (ids.length === 0) return new Map();
+  return propertyFactsOf(await deps.units.getManyByIds(ids, { requireComplete: true }), deps);
+}
+
+/**
+ * The CURRENT-card facts of units already read: switch on, one landlord
+ * read (complete, THROWS when it cannot finish), then propertyFacts. The one
+ * builder loadPropertyFacts and the property page's flag read share
+ * (propertyFlags.ts reads its one unit consistently, so a re-check right
+ * after a save sees the saved text - spec D10 rev 7).
+ */
+export async function propertyFactsOf(
+  units: ReadonlyMap<string, UnitItem>,
+  deps: { contacts: Pick<ContactsRepo, 'getManyByIds'>; config: Pick<AppConfig, 'rankingLandlordCard'> },
+): Promise<Map<string, PropertyFacts>> {
   const out = new Map<string, PropertyFacts>();
-  if (ids.length === 0) return out;
-  const units = await deps.units.getManyByIds(ids, { requireComplete: true });
   const landlordCard = deps.config.rankingLandlordCard;
   const landlords = landlordCard ? await readLandlords([...units.values()], deps.contacts) : new Map<string, ContactItem>();
   for (const [unitId, unit] of units) {

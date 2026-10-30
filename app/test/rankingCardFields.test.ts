@@ -34,6 +34,7 @@ import {
   RANKED_REQUIREMENT_KEYS,
   TENANT_CARD_FIELDS,
   UNCLASSIFIED_REASON,
+  flagFieldLabel,
   includedFields,
   landlordTwin,
   matchingInputCardFields,
@@ -362,5 +363,28 @@ describe('seed-world attributes are classified (spec D2.4 source 3)', () => {
     expect(TENANT['move_in_date']).toEqual({ use: 'exclude', reason: UNCLASSIFIED_REASON });
     expect(unclassifiedKeys(TENANT)).toEqual(['move_in_date']);
     expect(unclassifiedKeys(PROPERTY)).toEqual([]);
+  });
+});
+
+// Spec D10 rev 7 (charter item 16): the property page's fair-housing notice
+// names an unlawful flag's field by its human label from this registry.
+describe('flagFieldLabel', () => {
+  it('names every free-text field an unlawful flag may name by its property card label', () => {
+    for (const field of PROPERTY_FREE_TEXT_FIELDS) {
+      const entry = PROPERTY_CARD_FIELDS[field as keyof typeof PROPERTY_CARD_FIELDS];
+      expect(entry.use).toBe('include');
+      expect(flagFieldLabel(field)).toBe((entry as Extract<CardFieldUse, { use: 'include' }>).label);
+    }
+    expect(flagFieldLabel('qualifications')).toBe('Qualifications');
+    expect(flagFieldLabel('lease_terms')).toBe('Lease terms');
+  });
+
+  it('a landlord: flag names the landlord default in plain copy', () => {
+    expect(flagFieldLabel(landlordTwin('qualifications'))).toBe('Qualifications (from the landlord)');
+    expect(flagFieldLabel(landlordTwin('notes'))).toBe('Notes (from the landlord)');
+  });
+
+  it('a key the registry does not include reads as its words', () => {
+    expect(flagFieldLabel('some_new_field')).toBe('some new field');
   });
 });

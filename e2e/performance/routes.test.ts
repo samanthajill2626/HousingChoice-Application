@@ -136,7 +136,7 @@ const EXPECTED_WARM: Record<(typeof EXPECTED_KEYS)[number], readonly string[]> =
     '/api/units/:unitId?#required', '/api/units?limit#required', '/api/placements?limit#required',
     '/api/units/:unitId/related?#required', '/api/units/:unitId/recipients?#required',
     '/api/units/:unitId/similar?#required', '/api/units/:unitId/activity?#required',
-    '/api/tours?unitId#required', ...CONTACT_SHAPES, ...CONTACT_DELETED_SHAPES,
+    '/api/tours?unitId#required', '/api/rankings/unit/:unitId/flags?#required', ...CONTACT_SHAPES, ...CONTACT_DELETED_SHAPES,
     '/api/contacts/:contactId?#required',
   ],
   '/tours/:tourId': [

@@ -96,6 +96,7 @@ import type {
   TourReminderView,
   UnitActivityEvent,
   UnitContact,
+  UnitFairHousingFlagsResponse,
   UnitItem,
   UnitsPage,
   MmsMediaAttachment,
@@ -3098,6 +3099,15 @@ export function getRankingJob(
   signal?: AbortSignal,
 ): Promise<RankingJobResponse> {
   return request<RankingJobResponse>(`/api/rankings/${kind}/${encodeURIComponent(anchorId)}/job`, {
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** GET /api/rankings/unit/:unitId/flags - one property's OPEN unlawful flags
+ *  for its page's read-only notice (spec D10 rev 7, charter item 16); admin
+ *  AND va. 404 a missing or deleted property; 503 the check failed. */
+export function getUnitFairHousingFlags(unitId: string, signal?: AbortSignal): Promise<UnitFairHousingFlagsResponse> {
+  return request<UnitFairHousingFlagsResponse>(`/api/rankings/unit/${encodeURIComponent(unitId)}/flags`, {
     ...(signal !== undefined && { signal }),
   });
 }

@@ -349,7 +349,8 @@ const UNIT_DETAIL_BASE_GETS = Object.freeze([
   required('/api/units/:unitId'), required('/api/units', ['limit']), required('/api/placements', ['limit']),
   required('/api/units/:unitId/related'), required('/api/units/:unitId/recipients'),
   required('/api/units/:unitId/similar'), required('/api/units/:unitId/activity'),
-  required('/api/tours', ['unitId']), ...CONTACT_LIVE_WALK, ...CONTACT_DELETED_WALK,
+  // WP1 B2a spec D10 rev 7: the fair-housing notice's read (useUnitFlags), on mount.
+  required('/api/tours', ['unitId']), required('/api/rankings/unit/:unitId/flags'), ...CONTACT_LIVE_WALK, ...CONTACT_DELETED_WALK,
 ]);
 const TOUR_DETAIL_BASE_GETS = Object.freeze([
   required('/api/tours/:tourId'), required('/api/units/:unitId'), required('/api/contacts/:contactId'),
@@ -809,7 +810,7 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/settings/ai-runs': { base: 'dashboard/src/routes/settings/aiRuns/useAiRuns.ts:32-105' },
     '/settings/numbers': { base: 'dashboard/src/routes/settings/NumbersSection.tsx:89-164,207-244' },
     '/contacts/:contactId': { base: 'dashboard/src/routes/contact/useContactFile.ts:115-136; dashboard/src/api/endpoints.ts:1415-1427; dashboard/src/routes/contact/useContactTimeline.ts:130-185,320-337' },
-    '/listings/:unitId': { base: 'dashboard/src/routes/listing/useListing.ts:116-193; dashboard/src/routes/listing/ListingDetail.tsx:192-193' },
+    '/listings/:unitId': { base: 'dashboard/src/routes/listing/useListing.ts:116-193; dashboard/src/routes/listing/ListingDetail.tsx:192-193; dashboard/src/routes/listing/useUnitFlags.ts:31-47' },
     '/tours/:tourId': { base: 'dashboard/src/routes/tours/useTourChannels.ts:102-323; dashboard/src/routes/shared/useRoster.ts:75-137' },
     '/placements/:placementId': { base: 'dashboard/src/routes/placements/usePlacementChannels.ts:103-333; dashboard/src/routes/shared/useRoster.ts:75-137' },
     '/conversations/:conversationId': { base: 'dashboard/src/routes/conversation/ConversationDetail.tsx:173-214' },

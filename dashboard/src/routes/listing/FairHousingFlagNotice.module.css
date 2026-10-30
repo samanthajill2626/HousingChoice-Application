@@ -1,0 +1,25 @@
+/* The property page's read-only fair-housing notice (WP1 B2a spec D10 rev 7). */
+
+.notice {
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--c-surface-2);
+  border-bottom: 1px solid var(--c-border);
+  border-left: 3px solid var(--c-warning);
+  font-size: var(--fs-sm);
+}
+
+.list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.note {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-4);
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}

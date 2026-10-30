@@ -6,8 +6,15 @@
 //        -> 202 { job, joined } | 400 | 404 anchor_not_found | 409 ranking_running | 429 rate_limited
 //   GET  /api/rankings/:anchorKind/:anchorId?includeOlder=true|false
 //        -> 200 { anchor, job, rows, flags, poolWindowDays[, poolTooLarge] } | 400 | 404 | 503 ranking_unavailable
+//        (`flags` is a property anchor's own open flags; [] for a tenant anchor - spec D10 rev 7)
 //   GET  /api/rankings/:anchorKind/:anchorId/job
 //        -> 200 { job: RankingJobView | null } | 400        (what the page polls)
+//   GET  /api/rankings/unit/:unitId/flags
+//        -> 200 { flags: [{ field, label, reason }] } | 400 invalid_anchor_kind (a tenant)
+//           | 404 anchor_not_found (missing or soft-deleted) | 503 flags_unavailable
+//        The property page's read-only fair-housing notice (spec D10 rev 7,
+//        charter item 16; services/ranking/propertyFlags.ts): the property's
+//        OPEN flags by the one open rule, its unit read consistently.
 //
 // The rank POST - and only it - sits behind a per-USER sliding-window limiter
 // (RATE_LIMIT_RANK_PER_MIN): ONE createUserRateLimit instance created with the
@@ -27,10 +34,11 @@ import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { AuthedRequest } from '../middleware/auth.js';
 import { createUserRateLimit } from '../middleware/rateLimit.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
-import { createRankingRunsRepo, type RankingJobRecord } from '../repos/rankingRunsRepo.js';
+import { createRankingRunsRepo, type RankingJobRecord, type RankingRunsRepo } from '../repos/rankingRunsRepo.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import { claimRanking, jobView, MSG_RUNNING, type ClaimResult, type RankingPress } from '../services/ranking/job.js';
 import { rankingAnchorExists } from '../services/ranking/pool.js';
+import { readPropertyFlags } from '../services/ranking/propertyFlags.js';
 import {
   createRankingReadDeps,
   readRanking,
@@ -42,9 +50,14 @@ import type { AnchorRef } from '../services/ranking/types.js';
 export interface RankingsRouterDeps {
   config: AppConfig;
   logger?: Logger;
-  /** The /api mount's shared repos (default wiring for the 404 check). */
-  contactsRepo?: Pick<ContactsRepo, 'getById'>;
+  /**
+   * The /api mount's shared repos (default wiring for the 404 check and the
+   * property flag read: its unit read and, switch on, its landlord read).
+   */
+  contactsRepo?: Pick<ContactsRepo, 'getById' | 'getManyByIds'>;
   unitsRepo?: Pick<UnitsRepo, 'getById'>;
+  /** The property flag read's flag records; the router's own rankingRunsRepo otherwise. */
+  flagsRepo?: Pick<RankingRunsRepo, 'getOpenCandidateFlags'>;
   /** Test seams; the real claim / read / job read otherwise. */
   claim?(anchor: AnchorRef, press: RankingPress): Promise<ClaimResult>;
   read?(anchor: AnchorRef, opts: { includeOlder: boolean; now: Date }): Promise<RankingRead>;
@@ -150,6 +163,38 @@ export function createRankingsRouter(deps: RankingsRouterDeps): Router {
     }
     const record = await getJob(parsed.anchor);
     res.json({ job: record === undefined ? null : jobView(record, now().toISOString()) });
+  });
+
+  // The property page's fair-housing notice (spec D10 rev 7). A property
+  // only: a tenant has no flags of its own.
+  router.get('/:anchorKind/:anchorId/flags', async (req, res) => {
+    const parsed = parseAnchor(req);
+    if (!parsed.ok) {
+      res.status(400).json({ error: parsed.error });
+      return;
+    }
+    if (parsed.anchor.kind !== 'unit') {
+      res.status(400).json({ error: 'invalid_anchor_kind' });
+      return;
+    }
+    const unitId = parsed.anchor.id;
+    try {
+      const result = await readPropertyFlags(unitId, {
+        units,
+        contacts,
+        flags: deps.flagsRepo ?? jobs,
+        config,
+      });
+      if (result.kind === 'not_found') {
+        res.status(404).json({ error: 'anchor_not_found' });
+        return;
+      }
+      res.json({ flags: result.flags });
+    } catch (err) {
+      // PII: ids only. The page shows a short note and keeps working.
+      log.warn({ unitId, err }, 'property flag read failed');
+      res.status(503).json({ error: 'flags_unavailable' });
+    }
   });
 
   router.get('/:anchorKind/:anchorId', async (req, res) => {

@@ -38,6 +38,8 @@ vi.mock('../../api/index.js', async () => {
     getTours: (...a: unknown[]) => getTours(...a),
     restoreUnit: (...a: unknown[]) => restoreUnit(...a),
     getAllContacts: (...a: unknown[]) => getAllContacts(...a),
+    // ListingDetail's fair-housing notice read (WP1 B2a spec D10 rev 7): no open flag.
+    getUnitFairHousingFlags: () => Promise.resolve({ flags: [] }),
   };
 });
 

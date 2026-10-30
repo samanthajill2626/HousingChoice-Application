@@ -1,7 +1,8 @@
 // Unlawful fair-housing flags as PROPERTY records (WP1 B2a spec D10; charter
-// 7.2). The ranking job raises them (runBatch.ts); the read (readRanking.ts)
-// and the run detail (routes/adminRankings.ts) ask whether each is still
-// OPEN. Open is derived on read, never stored: the flagged field is on the
+// 7.2). The ranking job raises them (runBatch.ts); the read (readRanking.ts),
+// the run detail (routes/adminRankings.ts) and the property page's notice
+// (propertyFlags.ts) ask whether each is still OPEN, all through openFlags.
+// Open is derived on read, never stored: the flagged field is on the
 // property's CURRENT card and its trimmed text there still hashes to the
 // stored textHash. So no unit writer knows about flags - an edit to the text
 // closes one by construction, and a `landlord:<key>` flag closes when the

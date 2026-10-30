@@ -347,6 +347,21 @@ export function landlordTwin(key: string): string {
   return `${LANDLORD_FIELD_PREFIX}${key}`;
 }
 
+/**
+ * Spec D10 rev 7 (charter item 16): an unlawful flag's field in staff copy,
+ * for the property page's notice - its property card label from
+ * PROPERTY_CARD_FIELDS; a `landlord:<key>` flag names the landlord default,
+ * "<label> (from the landlord)". A key the registry does not include reads
+ * as its words (never expected: parse admits only the free-text fields).
+ */
+export function flagFieldLabel(field: string): string {
+  const fromLandlord = field.startsWith(LANDLORD_FIELD_PREFIX);
+  const key = fromLandlord ? field.slice(LANDLORD_FIELD_PREFIX.length) : field;
+  const entry = (PROPERTY_CARD_FIELDS as Readonly<Record<string, CardFieldUse | undefined>>)[key];
+  const label = entry?.use === 'include' ? entry.label : key.replace(/_/g, ' ');
+  return fromLandlord ? `${label} (from the landlord)` : label;
+}
+
 /** PR33: the keys a card's landlord defaults may carry - the ranked requirement keys and the landlord contact's notes. */
 export const LANDLORD_DEFAULT_KEYS: readonly string[] = Object.freeze([...RANKED_REQUIREMENT_KEYS, 'notes']);
 

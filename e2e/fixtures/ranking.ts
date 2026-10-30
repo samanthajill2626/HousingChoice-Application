@@ -75,10 +75,13 @@ export async function createSearchingTenant(
 }
 
 /** An AVAILABLE 2-BR property that accepts a 2-BR voucher and only the given
- *  authority. New units start in Setup; the transition route publishes it. */
+ *  authority. New units start in Setup; the transition route publishes it.
+ *  `notes` can carry a fake-driver seam such as `[fake:unlawful:<field>]`
+ *  (app/src/adapters/rankingFake.ts); the flagged field must hold text on the
+ *  card for the flag to survive parsing (e.g. `qualifications`). */
 export async function createAvailableProperty(
   api: APIRequestContext,
-  opts: { line1: string; authority: string; area?: string; noPets?: boolean },
+  opts: { line1: string; authority: string; area?: string; noPets?: boolean; notes?: string; qualifications?: string },
 ): Promise<string> {
   const res = await api.post(`${NEXT}/api/units`, {
     data: {
@@ -91,6 +94,8 @@ export async function createAvailableProperty(
       rent_max: 1600,
       ...(opts.area !== undefined && { area: opts.area }),
       ...(opts.noPets === true && { no_pets: true }),
+      ...(opts.notes !== undefined && { notes: opts.notes }),
+      ...(opts.qualifications !== undefined && { qualifications: opts.qualifications }),
     },
   });
   expect(res.ok(), await res.text()).toBeTruthy();

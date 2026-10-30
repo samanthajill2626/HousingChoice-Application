@@ -51,6 +51,8 @@ import { isCaseworkerContact } from '../contact/caseworkerRole.js';
 import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
 import { ScheduleTourForm } from '../tours/ScheduleTourForm.js';
 import { useListing } from './useListing.js';
+import { useUnitFlags } from './useUnitFlags.js';
+import { FairHousingFlagNotice } from './FairHousingFlagNotice.js';
 import { ROSTER_READ_FAILED_COPY, ROSTER_RETRY_COPY } from './rosterCopy.js';
 import { listingRoster, ROLE_LABEL, type RosterRow } from './buildListingFile.js';
 import { useContacts } from '../contacts/useContacts.js';
@@ -242,6 +244,14 @@ export function ListingDetail(): React.JSX.Element {
   const { unitId = '' } = useParams<{ unitId: string }>();
   const navigate = useNavigate();
   const state = useListing(unitId);
+  // WP1 B2a spec D10 rev 7 (charter item 16): the read-only fair-housing
+  // notice's read, for every staff role that can open this page. A save bumps
+  // `flagsCheck` so the notice re-checks and an edited field's flag goes
+  // without a reload; a deleted property reads nothing (a restore reads again).
+  const [flagsCheck, setFlagsCheck] = useState(0);
+  const unitDeleted =
+    state.unit !== null && typeof state.unit.deleted_at === 'string' && state.unit.deleted_at.length > 0;
+  const fairHousingFlags = useUnitFlags(unitId, flagsCheck, !unitDeleted);
   // Contacts back the "Placements on this property" + "Tours on this property"
   // rows: resolve each row's tenantId to a display name (falls back to the id
   // when a contact hasn't loaded). Soft-deleted contacts are included too — a
@@ -939,6 +949,10 @@ export function ListingDetail(): React.JSX.Element {
         </div>
       ) : null}
 
+      {/* WP1 B2a spec D10 rev 7: the read-only fair-housing notice (none on a
+          deleted property, which is read-only and hidden). */}
+      {deleted ? null : <FairHousingFlagNotice state={fairHousingFlags} />}
+
       <div className={styles.cols}>
         {/* LEFT column */}
         <div className={styles.left}>
@@ -1618,6 +1632,8 @@ export function ListingDetail(): React.JSX.Element {
           onSaved={(updated) => {
             setUnit(updated);
             setEditing(false);
+            // Spec D10 rev 7: the fair-housing notice re-checks after a save.
+            setFlagsCheck((n) => n + 1);
           }}
         />
       ) : null}

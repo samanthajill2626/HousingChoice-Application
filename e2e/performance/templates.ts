@@ -158,6 +158,8 @@ const ENDPOINT_TEMPLATES = Object.freeze([
   '/api/ai-runs/:runId',
   '/api/ai-runs',
   '/api/pool-numbers',
+  // WP1 B2a spec D10 rev 7: the property page's fair-housing notice read.
+  '/api/rankings/unit/:unitId/flags',
   '/api/push/subscriptions',
   '/api/push/vapid-public-key',
   '/api/push/test',

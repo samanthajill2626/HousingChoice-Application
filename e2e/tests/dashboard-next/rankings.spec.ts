@@ -17,7 +17,9 @@
 // the pair to Weak and sorts it last); plus 10 when the tenant's area
 // preference appears in the property's area. So: area match 80 Strong, plain
 // 70 Good, pets against No pets capped Weak. `[fake:fail-batch]` in a
-// tenant's notes fails every batch holding that tenant.
+// tenant's notes fails every batch holding that tenant; `[fake:unlawful:
+// <field>]` in a PROPERTY's notes raises an unlawful flag on <field> for
+// every pair (kept only while that field holds text on the card).
 //
 // getByRole name matching is a SUBSTRING match, so labels that are prefixes
 // of others pass `exact: true`.
@@ -254,6 +256,69 @@ test('a tenant anchor ranks the available properties', async ({ page }) => {
   await expect(rows.nth(2)).toContainText('Capped: requirement not met');
 });
 
+// Spec D10 rev 7 (charter items 15 and 16): an unlawful flag's record holds
+// the fixed reason; it shows on the property's own ranking and on the
+// property page, never on a tenant's ranking; editing the flagged text on the
+// property page clears the notice at once, with no reload.
+test('an unlawful flag shows on the property ranking and the property page, never on the tenant ranking, and goes when its text is edited', async ({
+  page,
+}) => {
+  test.slow();
+  await devLoginAs(page, 'founder@example.com');
+  const api = page.request;
+  const s = stamp();
+  const authority = await runUniqueAuthority(api, `Rankflag Authority ${s}`);
+  const line1 = `${s} Rankflag Ln`;
+  // The marker flags `qualifications` unlawful on every pair; the field holds text, so the flag survives parsing.
+  const unitId = await createAvailableProperty(api, {
+    line1,
+    authority,
+    notes: '[fake:unlawful:qualifications]',
+    qualifications: 'No kids under 12.',
+  });
+  const tenant = await createSearchingTenant(api, { firstName: `Flagpair${s}`, authority });
+
+  await openRankings(page);
+  await pickProperty(page, line1);
+  await pressRank(page);
+  await rankingTick(api);
+  await expect(jobStatus(page)).toContainText('Done: 1 batch');
+  await expect(rankingRow(page, tenant.name)).toContainText('Good');
+  // The property anchor's own ranking lists its open flag, with the fixed reason.
+  const facts = rankPanel(page).getByRole('list', { name: 'About this anchor' });
+  await expect(facts).toContainText(`Fair-housing flag on ${line1}`);
+  await expect(facts).toContainText('qualifications: flagged as a requirement fair housing does not allow');
+
+  // The tenant anchor's ranking of the same pair: the stored match shows, no flag line.
+  await pickTenant(page, tenant.name);
+  await expect(rankingRow(page, line1)).toContainText('Good');
+  await expect(rankPanel(page).getByText(/Fair-housing flag/)).toHaveCount(0);
+
+  // The property page: the read-only notice.
+  await page.goto(`${NEXT}/listings/${unitId}`);
+  const notice = page.getByRole('region', { name: 'Fair-housing flags' });
+  await expect(notice).toHaveText(
+    'Fair-housing flag - Qualifications: flagged as a requirement fair housing does not allow. Edit this text to clear the flag.',
+  );
+
+  // Edit the flagged text through the property's edit form; the save's
+  // re-check clears the notice in place (a window marker proves no reload).
+  await page.evaluate(() => {
+    (window as unknown as { __rankflagNoReload?: boolean }).__rankflagNoReload = true;
+  });
+  await page.getByRole('button', { name: 'Edit property details', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: /Edit property/i });
+  await dialog.getByLabel('Qualifications', { exact: true }).fill('Two years of rental history.');
+  const recheck = page.waitForResponse(
+    (r) => r.request().method() === 'GET' && new URL(r.url()).pathname === `/api/rankings/unit/${unitId}/flags`,
+  );
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(dialog).toHaveCount(0, { timeout: 10_000 });
+  expect((await recheck).status()).toBe(200);
+  await expect(notice).toHaveCount(0);
+  expect(await page.evaluate(() => (window as unknown as { __rankflagNoReload?: boolean }).__rankflagNoReload)).toBe(true);
+});
+
 test('a VA cannot open the Rankings tab, but can rank, read and poll a ranking (WI17)', async ({ page }) => {
   await devLoginAs(page, 'va@example.com');
   await page.goto(`${NEXT}/settings`);
@@ -280,4 +345,8 @@ test('a VA cannot open the Rankings tab, but can rank, read and poll a ranking (
   const jobRes = await api.get(`${NEXT}/api/rankings/tenant/${tenantId}/job`);
   expect(jobRes.status(), await jobRes.text()).toBe(200);
   expect(((await jobRes.json()) as { job: { status: string } | null }).job?.status).toBe('done');
+  // The property page's fair-housing flag read is admin AND va (spec D10 rev 7).
+  const flags = await api.get(`${NEXT}/api/rankings/unit/unit-0001/flags`);
+  expect(flags.status(), await flags.text()).toBe(200);
+  expect(await flags.json()).toEqual({ flags: [] });
 });

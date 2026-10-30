@@ -10,6 +10,13 @@ import type { ListingState } from './useListing.js';
 const useListing = vi.fn();
 vi.mock('./useListing.js', () => ({ useListing: (id: string) => useListing(id) }));
 
+// The fair-housing notice's read (WP1 B2a spec D10 rev 7): the hook is
+// mocked like useListing; its own fetch rules live in useUnitFlags.test.tsx.
+const useUnitFlags = vi.fn();
+vi.mock('./useUnitFlags.js', () => ({
+  useUnitFlags: (id: string, check: number, enabled?: boolean) => useUnitFlags(id, check, enabled),
+}));
+
 // The "Placements on this property" card resolves tenant names from useContacts.
 const useContacts = vi.fn();
 vi.mock('../contacts/useContacts.js', () => ({ useContacts: (filter: string) => useContacts(filter) }));
@@ -150,6 +157,8 @@ const READY: ListingState = {
 // answer per filter (deleted empty by default).
 beforeEach(() => {
   getOrgList.mockReset().mockResolvedValue({ version: 1, entries: [] });
+  // No open fair-housing flag unless a test says otherwise.
+  useUnitFlags.mockReset().mockReturnValue({ status: 'ready', flags: [] });
   useContacts.mockImplementation((filter: string) =>
     filter === 'deleted'
       ? { status: 'ready', contacts: [] }
@@ -3432,5 +3441,85 @@ describe('ListingDetail - Priority (WP1 B1 spec D6)', () => {
     renderAt();
     expect(priorityRow()).toHaveTextContent('No');
     expect(within(header()).queryByText('Priority')).toBeNull();
+  });
+});
+
+// WP1 B2a spec D10 rev 7 (charter item 16): a read-only fair-housing notice
+// for every staff role that can open the property - the field by its label,
+// the fixed reason, and that editing the text clears it. A failed check is a
+// short plain note that never breaks the page; a save re-checks, so an edited
+// field's notice goes without a reload. No Dismiss (B4's).
+describe('ListingDetail - fair-housing flag notice (WP1 B2a spec D10 rev 7)', () => {
+  const REASON = 'flagged as a requirement fair housing does not allow';
+  const QUALIFICATIONS = { field: 'qualifications', label: 'Qualifications', reason: REASON };
+  const LANDLORD_NOTES = { field: 'landlord:notes', label: 'Notes (from the landlord)', reason: REASON };
+  const notice = (): HTMLElement | null => screen.queryByRole('region', { name: 'Fair-housing flags' });
+
+  it("names each open flag by its label with the fixed reason and how to clear it, for this property's id", () => {
+    useUnitFlags.mockReturnValue({ status: 'ready', flags: [QUALIFICATIONS, LANDLORD_NOTES] });
+    useListing.mockReturnValue(READY);
+    renderAt();
+    const region = notice();
+    expect(region).not.toBeNull();
+    expect(within(region!).getAllByRole('listitem').map((li) => li.textContent)).toEqual([
+      'Fair-housing flag - Qualifications: flagged as a requirement fair housing does not allow. Edit this text to clear the flag.',
+      'Fair-housing flag - Notes (from the landlord): flagged as a requirement fair housing does not allow. Edit this text to clear the flag.',
+    ]);
+    // Read-only: no Dismiss or any other control (B4 builds the admin Dismiss).
+    expect(within(region!).queryByRole('button')).not.toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /Edit/ })).toHaveLength(5);
+    expect(useUnitFlags).toHaveBeenCalledWith('u1', 0, true);
+  });
+
+  it.each([
+    ['no flag is open', { status: 'ready', flags: [] }],
+    ['the check is still in flight', { status: 'loading' }],
+  ])('shows nothing when %s', (_name, flagState) => {
+    useUnitFlags.mockReturnValue(flagState);
+    useListing.mockReturnValue(READY);
+    renderAt();
+    expect(notice()).toBeNull();
+    expect(screen.queryByText(/fair-housing/i)).not.toBeInTheDocument();
+  });
+
+  it('a failed check shows a short plain note and the page still works', () => {
+    useUnitFlags.mockReturnValue({ status: 'error' });
+    useListing.mockReturnValue(READY);
+    renderAt();
+    expect(screen.getByText('Could not check fair-housing flags.')).toBeInTheDocument();
+    expect(notice()).toBeNull();
+    // Never an alert: the page itself is fine.
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /^Property details/ })).toBeInTheDocument();
+  });
+
+  it('re-checks after the property is saved, so the edited field notice goes without a reload', async () => {
+    const user = userEvent.setup();
+    // The first check finds the flag; the re-check after the save does not.
+    useUnitFlags.mockImplementation((_id: string, check: number) =>
+      check === 0 ? { status: 'ready', flags: [QUALIFICATIONS] } : { status: 'ready', flags: [] },
+    );
+    useListing.mockReturnValue({ ...READY, setUnit: vi.fn() });
+    updateUnit.mockResolvedValue({ ...READY.unit, qualifications: 'Two years of rental history.' });
+    renderAt();
+    expect(notice()).not.toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'Edit property details' }));
+    const dialog = screen.getByRole('dialog', { name: /Edit property/i });
+    const qualifications = within(dialog).getByRole('textbox', { name: 'Qualifications' });
+    await user.type(qualifications, 'Two years of rental history.');
+    await user.click(within(dialog).getByRole('button', { name: /^Save$/i }));
+
+    expect(updateUnit).toHaveBeenCalledWith('u1', { qualifications: 'Two years of rental history.' });
+    await waitFor(() => expect(notice()).toBeNull());
+    expect(useUnitFlags).toHaveBeenLastCalledWith('u1', 1, true);
+  });
+
+  it('a deleted property shows no notice and asks for no check', () => {
+    useUnitFlags.mockReturnValue({ status: 'ready', flags: [QUALIFICATIONS] });
+    useListing.mockReturnValue({ ...READY, unit: { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' } });
+    renderAt();
+    expect(notice()).toBeNull();
+    expect(useUnitFlags).toHaveBeenLastCalledWith('u1', 0, false);
   });
 });

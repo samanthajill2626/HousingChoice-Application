@@ -685,6 +685,20 @@ export interface RankingRunDetailResponse {
   flagsUnavailable?: true;
 }
 
+/** One OPEN unlawful flag on the property page's read-only notice (spec D10
+ *  rev 7, charter item 16): the field, its staff label (a landlord default
+ *  reads "<label> (from the landlord)") and the fixed reason. */
+export interface UnitFairHousingFlag {
+  field: string;
+  label: string;
+  reason: string;
+}
+
+/** GET /api/rankings/unit/:unitId/flags - admin AND va. */
+export interface UnitFairHousingFlagsResponse {
+  flags: UnitFairHousingFlag[];
+}
+
 export interface RankingCostWeek {
   /** ISO week, e.g. 2026-W44. */
   week: string;

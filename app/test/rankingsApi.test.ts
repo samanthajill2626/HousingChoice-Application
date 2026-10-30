@@ -10,6 +10,8 @@ import { buildApp } from '../src/app.js';
 import { isValidTraceparent } from '../src/lib/context.js';
 import { loadConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
+import type { ContactItem } from '../src/repos/contactsRepo.js';
+import type { UnitItem } from '../src/repos/unitsRepo.js';
 import type { RankingsRouterDeps } from '../src/routes/rankings.js';
 import type { AssembleResult } from '../src/services/ranking/assemble.js';
 import { DEFAULT_FLAG_REASON, textHashOf } from '../src/services/ranking/flags.js';
@@ -272,5 +274,136 @@ describe('GET /api/rankings/:anchorKind/:anchorId/job', () => {
   it('job: null when the anchor has never been ranked', async () => {
     const h = makeApp({ getJob: async () => undefined });
     expect((await get(h.app, '/api/rankings/unit/u1/job')).body).toEqual({ job: null });
+  });
+});
+
+// The property page's read-only fair-housing notice (spec D10 rev 7, charter
+// item 16; PFW1-3): one property's OPEN unlawful flags for admin AND va,
+// through the real wiring - the consistent unit read, the landlord-card
+// switch and the landlord defaults (assemble.ts propertyFactsOf) and the ONE
+// open rule (flags.ts openFlags). Each flag carries its field's human label
+// and the fixed reason.
+describe('GET /api/rankings/unit/:unitId/flags', () => {
+  const UNIT_ID = 'unit-flags-1';
+  const LANDLORD_ID = 'contact-landlord-1';
+  const record = (field: string, text: string, unitId = UNIT_ID) =>
+    flagRecord({ unitId, field, textHash: textHashOf(text), reason: DEFAULT_FLAG_REASON, runId: 'run-1', raisedAt: T0 });
+
+  function flagsApp(opts: {
+    units: UnitItem[];
+    landlords?: ContactItem[];
+    records: ReturnType<typeof record>[];
+    landlordCard?: boolean;
+    failFlags?: boolean;
+  }) {
+    const unitReads: Array<{ unitId: string; consistentRead: boolean }> = [];
+    const flagReads: string[] = [];
+    const contacts = new Map((opts.landlords ?? []).map((c) => [c.contactId, c]));
+    const rankings: Partial<Omit<RankingsRouterDeps, 'config' | 'logger'>> = {
+      unitsRepo: {
+        getById: async (unitId, o) => {
+          unitReads.push({ unitId, consistentRead: o?.consistentRead === true });
+          const unit = opts.units.find((u) => u.unitId === unitId);
+          return unit === undefined ? undefined : structuredClone(unit);
+        },
+      },
+      contactsRepo: {
+        getById: async (contactId) => contacts.get(contactId),
+        getManyByIds: async (ids) => new Map(ids.flatMap((id) => (contacts.has(id) ? [[id, contacts.get(id)!] as const] : []))),
+      },
+      flagsRepo: {
+        getOpenCandidateFlags: async (unitId) => {
+          flagReads.push(unitId);
+          if (opts.failFlags === true) throw new Error('throttled');
+          return opts.records.filter((r) => r.unitId === unitId);
+        },
+      },
+    };
+    const app = buildApp({
+      config: loadConfig({
+        NODE_ENV: 'test',
+        CF_ORIGIN_SECRET: SECRET,
+        RANKING_LANDLORD_CARD: opts.landlordCard === true ? 'true' : 'false',
+      }),
+      logger: createLogger({ destination: createLogCapture().stream }),
+      auth: { usersRepo: makeFakeUsersRepo([testUserItem(), adminUserItem()]).repo },
+      api: { rankings },
+    });
+    return { app, unitReads, flagReads };
+  }
+  const unit = (over: Partial<UnitItem> = {}): UnitItem =>
+    ({ unitId: UNIT_ID, landlordId: LANDLORD_ID, status: 'available', ...over }) as UnitItem;
+
+  it('a VA (and an admin) reads the OPEN flags only, each with its label and the fixed reason, from a consistent unit read', async () => {
+    const h = flagsApp({
+      units: [unit({ qualifications: 'No kids under 12.', notes: 'Edited since.' } as Partial<UnitItem>)],
+      records: [record('qualifications', 'No kids under 12.'), record('notes', 'Adults only.')],
+    });
+    const res = await get(h.app, `/api/rankings/unit/${UNIT_ID}/flags`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      flags: [{ field: 'qualifications', label: 'Qualifications', reason: 'flagged as a requirement fair housing does not allow' }],
+    });
+    expect(h.unitReads).toEqual([{ unitId: UNIT_ID, consistentRead: true }]);
+    expect((await get(h.app, `/api/rankings/unit/${UNIT_ID}/flags`, TEST_ADMIN_COOKIE)).body.flags).toHaveLength(1);
+  });
+
+  it('an edit to the flagged text closes the flag on the next read: no notice', async () => {
+    const stored = unit({ qualifications: 'No kids under 12.' } as Partial<UnitItem>);
+    const h = flagsApp({ units: [stored], records: [record('qualifications', 'No kids under 12.')] });
+    expect((await get(h.app, `/api/rankings/unit/${UNIT_ID}/flags`)).body.flags).toHaveLength(1);
+    (stored as Record<string, unknown>)['qualifications'] = 'Two years of rental history.';
+    const res = await get(h.app, `/api/rankings/unit/${UNIT_ID}/flags`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ flags: [] });
+  });
+
+  it('a landlord: flag is open while the landlord default is on the card, named in plain copy, and closes when it leaves', async () => {
+    const landlord = { contactId: LANDLORD_ID, type: 'landlord', req_qualifications: 'No kids.' } as unknown as ContactItem;
+    const records = [record('landlord:qualifications', 'No kids.')];
+    const on = flagsApp({ units: [unit()], landlords: [landlord], records, landlordCard: true });
+    expect((await get(on.app, `/api/rankings/unit/${UNIT_ID}/flags`)).body).toEqual({
+      flags: [
+        { field: 'landlord:qualifications', label: 'Qualifications (from the landlord)', reason: 'flagged as a requirement fair housing does not allow' },
+      ],
+    });
+    // The switch off: the landlord default is not on the card.
+    const off = flagsApp({ units: [unit()], landlords: [landlord], records, landlordCard: false });
+    expect((await get(off.app, `/api/rankings/unit/${UNIT_ID}/flags`)).body).toEqual({ flags: [] });
+    // The property now records its own value: the property's own wins.
+    const own = flagsApp({
+      units: [unit({ qualifications: 'Two years of rental history.' } as Partial<UnitItem>)],
+      landlords: [landlord],
+      records,
+      landlordCard: true,
+    });
+    expect((await get(own.app, `/api/rankings/unit/${UNIT_ID}/flags`)).body).toEqual({ flags: [] });
+  });
+
+  it('400 for a tenant kind; 404 for a missing or soft-deleted property, reading no flags', async () => {
+    const h = flagsApp({
+      units: [unit({ unitId: 'unit-gone', deleted_at: '2026-10-01T00:00:00.000Z' } as Partial<UnitItem>)],
+      records: [record('qualifications', 'No kids.', 'unit-gone')],
+    });
+    const tenant = await get(h.app, '/api/rankings/tenant/t-1/flags');
+    expect(tenant.status).toBe(400);
+    expect(tenant.body).toEqual({ error: 'invalid_anchor_kind' });
+    const missing = await get(h.app, '/api/rankings/unit/nope/flags');
+    expect(missing.status).toBe(404);
+    expect(missing.body).toEqual({ error: 'anchor_not_found' });
+    expect((await get(h.app, '/api/rankings/unit/unit-gone/flags')).status).toBe(404);
+    expect(h.flagReads).toEqual([]);
+  });
+
+  it('a failed read answers 503 flags_unavailable', async () => {
+    const h = flagsApp({ units: [unit({ qualifications: 'No kids.' } as Partial<UnitItem>)], records: [], failFlags: true });
+    const res = await get(h.app, `/api/rankings/unit/${UNIT_ID}/flags`);
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: 'flags_unavailable' });
+  });
+
+  it('401 without a session', async () => {
+    const h = flagsApp({ units: [unit()], records: [] });
+    expect((await request(h.app).get(`/api/rankings/unit/${UNIT_ID}/flags`).set('x-origin-verify', SECRET)).status).toBe(401);
   });
 });

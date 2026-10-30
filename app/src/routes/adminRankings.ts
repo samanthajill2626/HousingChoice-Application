@@ -27,6 +27,10 @@
 // match's run (`currentRunId`); `sinceRescored` is that run being another
 // one: the matches store holds one row per pair that any later press, from
 // either anchor, rewrites.
+//
+// Open unlawful flags (spec D10 rev 7, charter item 16) show only on a
+// PROPERTY anchor's runs, that property's own; a tenant-anchor run's detail
+// reads no flag record.
 import { Router } from 'express';
 import type { AppConfig } from '../lib/config.js';
 import { contactDisplayName } from '../lib/contactName.js';
@@ -46,7 +50,6 @@ import { createAssembleDeps, loadPropertyFacts } from '../services/ranking/assem
 import { bandOf } from '../services/ranking/bands.js';
 import type { PropertyFacts } from '../services/ranking/cards.js';
 import { openFlags } from '../services/ranking/flags.js';
-import { mapWithConcurrency } from '../services/ranking/pool.js';
 import type { RankingReadFlag } from '../services/ranking/readRanking.js';
 
 export interface AdminRankingsRouterDeps {
@@ -262,25 +265,24 @@ export function createAdminRankingsRouter(deps: AdminRankingsRouterDeps): Router
       current = undefined;
     }
 
-    const unitIds = [...new Set(run.anchorKind === 'unit' ? [run.anchorId] : run.results.map((r) => r.candidateId))];
+    // Spec D10 rev 7: only a property-anchor run reads its property's open
+    // flags; a tenant-anchor run reads none (no `flags` entries, never
+    // `flagsUnavailable`).
     let flags: RankingReadFlag[] = [];
     let flagsUnavailable = false;
-    try {
-      const factsByUnit = await propertyFacts(unitIds);
-      // One flag query per property, at most RANKING_READ_CONCURRENCY in
-      // flight (as the read does), concatenated in unitIds order so `flags`
-      // stays deterministic. Any failed read fails the whole list below.
-      const perUnit = await mapWithConcurrency(unitIds, deps.config.rankingReadConcurrency, async (unitId) => {
-        const unitFacts = factsByUnit.get(unitId);
-        if (unitFacts === undefined) return [];
-        const open = openFlags(await runs.getOpenCandidateFlags(unitId), unitFacts.freeTextByField);
-        return open.map((r) => ({ unitId: r.unitId, field: r.field, reason: r.reason, runId: r.runId, raisedAt: r.raisedAt }));
-      });
-      flags = perUnit.flat();
-    } catch (err) {
-      log.warn({ runId, err }, 'rankings admin: open flag read failed');
-      flagsUnavailable = true;
-      flags = [];
+    if (run.anchorKind === 'unit') {
+      const unitId = run.anchorId;
+      try {
+        const unitFacts = (await propertyFacts([unitId])).get(unitId);
+        if (unitFacts !== undefined) {
+          const open = openFlags(await runs.getOpenCandidateFlags(unitId), unitFacts.freeTextByField);
+          flags = open.map((r) => ({ unitId: r.unitId, field: r.field, reason: r.reason, runId: r.runId, raisedAt: r.raisedAt }));
+        }
+      } catch (err) {
+        log.warn({ runId, err }, 'rankings admin: open flag read failed');
+        flagsUnavailable = true;
+        flags = [];
+      }
     }
 
     const pairs = run.results.map((result) => {

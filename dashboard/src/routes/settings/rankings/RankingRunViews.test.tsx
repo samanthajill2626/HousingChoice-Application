@@ -346,6 +346,25 @@ describe('RankingRunDetail', () => {
     expect(screen.getByRole('region', { name: 'Open fair-housing flags' })).toHaveTextContent('qualifications: says no kids');
   });
 
+  // Spec D10 rev 7 (charter item 16): a tenant anchor's runs carry no flag
+  // list; the server sends none, and the page shows none whatever it is sent.
+  it('a tenant-anchor run shows no open-flags section and no flag-read note', () => {
+    render(
+      <RankingRunDetail
+        detail={{
+          ...DETAIL,
+          run: { ...DETAIL.run, anchorKind: 'tenant', anchorId: 'contact-1', direction: 'properties_for_tenant' },
+          flagsUnavailable: true,
+        }}
+        status="ready"
+        onRetry={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole('table', { name: 'Run pairs' })).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Open fair-housing flags' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Could not read the open fair-housing flags.')).not.toBeInTheDocument();
+  });
+
   it('keeps the raw output and the decompressed input collapsed', () => {
     render(<RankingRunDetail detail={DETAIL} status="ready" onRetry={vi.fn()} />);
     const raw = screen.getByText('Raw model output').closest('details');

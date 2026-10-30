@@ -48,7 +48,12 @@ export function RankingRunDetail({
     );
   }
   if (status === 'idle' || detail === undefined) return <p className={styles.empty}>Select a run to see its pairs.</p>;
-  const { run, anchorDisplay, input, pairs, flags, currentUnavailable, flagsUnavailable } = detail;
+  const { run, anchorDisplay, input, pairs, currentUnavailable } = detail;
+  // Spec D10 rev 7 (charter item 16): the property's open flags show only on
+  // a PROPERTY anchor's runs; a tenant anchor's run has no such section.
+  const propertyRun = run.anchorKind === 'unit';
+  const flags = propertyRun ? detail.flags : [];
+  const flagsUnavailable = propertyRun && detail.flagsUnavailable === true;
   const dropped = run.droppedUnlawfulFlags ?? 0;
   // `usage` may be absent on a stored run (plan IR35).
   const usage = run.usage;
@@ -149,7 +154,7 @@ export function RankingRunDetail({
       {currentUnavailable === true ? (
         <p className={styles.note}>Could not check the current matches; the Current match column may be wrong.</p>
       ) : null}
-      {flagsUnavailable === true ? <p className={styles.note}>Could not read the open fair-housing flags.</p> : null}
+      {flagsUnavailable ? <p className={styles.note}>Could not read the open fair-housing flags.</p> : null}
       {flags.length > 0 ? (
         <section className={styles.block} aria-label="Open fair-housing flags">
           <h4>Open fair-housing flags</h4>

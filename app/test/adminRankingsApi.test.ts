@@ -236,7 +236,9 @@ describe('GET /api/admin/rankings/runs/:runId', () => {
     expect(res.body.pairs.every((p: { currentRunId: unknown }) => p.currentRunId === null)).toBe(true);
   });
 
-  // WORKLIST WL-S6-4: a tenant-anchor run's candidate properties.
+  // Spec D10 rev 7 (charter item 16, PFW1-2): open flags show only for a
+  // PROPERTY anchor's runs; a tenant-anchor run's candidate properties are
+  // never read for flags.
   const tenantRun = (unitIds: string[]): RankingRunRecord =>
     rankingRun({
       anchorKind: 'tenant',
@@ -247,35 +249,29 @@ describe('GET /api/admin/rankings/runs/:runId', () => {
   const openFlagOf = (unitId: string) =>
     flagRecord({ unitId, field: 'qualifications', textHash: textHashOf('No kids.'), reason: 'no kids', runId: 'run-1', raisedAt: T0 });
 
-  it("WL-S6-4: reads the properties' flags at most RANKING_READ_CONCURRENCY at a time, listed in result order", async () => {
-    const unitIds = ['u-1', 'u-2', 'u-3', 'u-4', 'u-5'];
-    let inFlight = 0;
-    let maxInFlight = 0;
+  it('a tenant-anchor run reads no flag record: flags [] and no flagsUnavailable, even when a read would fail', async () => {
+    const reads: string[] = [];
     const { app } = makeApp({
-      runs: [tenantRun(unitIds)],
-      configEnv: { RANKING_READ_CONCURRENCY: '2' },
+      runs: [tenantRun(['u-1', 'u-2', 'u-3'])],
       flagsFor: async (unitId) => {
-        inFlight += 1;
-        maxInFlight = Math.max(maxInFlight, inFlight);
-        // The first property answers last: the list still follows result order.
-        await new Promise((resolve) => setTimeout(resolve, unitId === 'u-1' ? 30 : 5));
-        inFlight -= 1;
+        reads.push(unitId);
+        if (unitId === 'u-2') throw new Error('throttled');
         return [openFlagOf(unitId)];
       },
     });
     const res = await admin(app, '/api/admin/rankings/runs/run-1');
     expect(res.status).toBe(200);
-    expect(maxInFlight).toBe(2);
-    expect(res.body.flags.map((f: { unitId: string }) => f.unitId)).toEqual(unitIds);
+    expect(reads).toEqual([]);
+    expect(res.body.flags).toEqual([]);
     expect('flagsUnavailable' in res.body).toBe(false);
+    // The run's own pairs are untouched.
+    expect(res.body.pairs.map((p: { candidateId: string }) => p.candidateId)).toEqual(['u-1', 'u-2', 'u-3']);
   });
 
-  it('(PIN) a property flag read that fails says flagsUnavailable and lists no flag', async () => {
+  it("(PIN) a property-anchor run whose property's flag read fails says flagsUnavailable and lists no flag", async () => {
     const { app } = makeApp({
-      runs: [tenantRun(['u-1', 'u-2', 'u-3'])],
-      flagsFor: async (unitId) => {
-        if (unitId === 'u-2') throw new Error('throttled');
-        return [openFlagOf(unitId)];
+      flagsFor: async () => {
+        throw new Error('throttled');
       },
     });
     const res = await admin(app, '/api/admin/rankings/runs/run-1');

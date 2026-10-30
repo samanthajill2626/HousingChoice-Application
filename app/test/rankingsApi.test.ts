@@ -11,8 +11,10 @@ import { isValidTraceparent } from '../src/lib/context.js';
 import { loadConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import type { RankingsRouterDeps } from '../src/routes/rankings.js';
+import type { AssembleResult } from '../src/services/ranking/assemble.js';
+import { DEFAULT_FLAG_REASON, textHashOf } from '../src/services/ranking/flags.js';
 import type { ClaimResult, RankingPress } from '../src/services/ranking/job.js';
-import type { RankingRead } from '../src/services/ranking/readRanking.js';
+import { readRanking, type RankingRead, type RankingReadDeps } from '../src/services/ranking/readRanking.js';
 import type { AnchorRef } from '../src/services/ranking/types.js';
 import {
   adminUserItem,
@@ -24,7 +26,20 @@ import {
   testUserItem,
 } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
-import { ANCHOR_UNIT, isoAt, PRESS_TRACEPARENT, queuedJob, T0 } from './helpers/rankingJobFixtures.js';
+import {
+  ANCHOR_UNIT,
+  assembled,
+  facts,
+  flagRecord,
+  isoAt,
+  PRESS_TRACEPARENT,
+  propertyCandidate,
+  queuedJob,
+  T0,
+  tenantAnchor,
+  unitAnchor,
+} from './helpers/rankingJobFixtures.js';
+import { createMatchesFake, createRankingRunsFake } from './helpers/rankingRunsFake.js';
 
 const SECRET = 'test-origin-secret';
 const ANCHOR_BLOCK = { kind: 'unit' as const, id: ANCHOR_UNIT, display: '12 Oak St, Atlanta', anchorNotes: [], missing: [], cardChanged: false };
@@ -187,6 +202,52 @@ describe('GET /api/rankings/:anchorKind/:anchorId', () => {
     const res = await get(h.app, '/api/rankings/unit/u1');
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ anchor: ANCHOR_BLOCK, job: null, rows: [], flags: [], poolWindowDays: 90, poolTooLarge: { size: 412, message: 'Pool too large to rank (412 candidates)' } });
+  });
+
+  // Spec D10 rev 7 (charter item 16, PFW1-2), through the REAL read: open
+  // unlawful flags appear only for a property anchor. A tenant anchor still
+  // reads each candidate property's flags (they suppress the cap) but its
+  // answer carries flags: [].
+  function readThrough(result: AssembleResult) {
+    const runs = createRankingRunsFake();
+    for (const unitId of [ANCHOR_UNIT, 'u-1']) {
+      const flag = flagRecord({ unitId, field: 'qualifications', textHash: textHashOf('No kids.'), reason: DEFAULT_FLAG_REASON, runId: 'run-1', raisedAt: T0 });
+      runs.flags.set(flag.itemId, flag);
+    }
+    const deps: RankingReadDeps = {
+      assemble: async () => result,
+      poolTooLargeMissing: async () => [],
+      jobs: runs.repo,
+      matches: createMatchesFake([]).repo,
+      config: {
+        rankingMaxAgeDays: 7,
+        rankingPriorityStrength: 'within_band',
+        rankingDriver: 'fake',
+        aiRankingModel: 'claude-sonnet-5-5',
+        rankingReadConcurrency: 4,
+        rankingPoolWindowDays: 90,
+      },
+      logger: createLogger({ destination: createLogCapture().stream }),
+    };
+    return makeApp({ read: (anchor, opts) => readRanking(anchor, opts, deps) });
+  }
+  const noKids = facts({ freeTextByField: { qualifications: 'No kids.' } });
+
+  it("a tenant anchor answers flags: [] although a candidate property's flag is open", async () => {
+    const h = readThrough(assembled(tenantAnchor(), [propertyCandidate('u-1', { propertyFacts: noKids })]));
+    const res = await get(h.app, '/api/rankings/tenant/tenant-anchor');
+    expect(res.status).toBe(200);
+    expect(res.body.rows.map((r: { candidateId: string }) => r.candidateId)).toEqual(['u-1']);
+    expect(res.body.flags).toEqual([]);
+  });
+
+  it("a property anchor answers its own open flags with the fixed reason", async () => {
+    const h = readThrough(assembled(unitAnchor({ propertyFacts: noKids }), []));
+    const res = await get(h.app, `/api/rankings/unit/${ANCHOR_UNIT}`);
+    expect(res.status).toBe(200);
+    expect(res.body.flags).toEqual([
+      { unitId: ANCHOR_UNIT, field: 'qualifications', reason: DEFAULT_FLAG_REASON, runId: 'run-1', raisedAt: T0 },
+    ]);
   });
 
   it('404 when the anchor is not found; 503 ranking_unavailable when the ranking cannot be read', async () => {

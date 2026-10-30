@@ -110,6 +110,7 @@ export type RankingRead =
       anchor: RankingReadAnchor;
       job: RankingJobView | null;
       rows: RankingReadRow[];
+      /** A property anchor's own OPEN unlawful flags; always [] for a tenant anchor (spec D10 rev 7). */
       flags: RankingReadFlag[];
       /** RANKING_POOL_WINDOW_DAYS, for the include-older copy (PR26). */
       poolWindowDays: number;
@@ -473,13 +474,19 @@ export async function readRanking(
     const storedAnchorSide = anchor.kind === 'unit' ? stored.fingerprints.unitCard : stored.fingerprints.tenantCard;
     return storedAnchorSide !== result.anchor.fingerprint;
   });
-  const flags: RankingReadFlag[] = [...openByUnit.values()].flat().map((record) => ({
-    unitId: record.unitId,
-    field: record.field,
-    reason: record.reason,
-    runId: record.runId,
-    raisedAt: record.raisedAt,
-  }));
+  // Spec D10 rev 7 (charter item 16): open flags are LISTED only for a
+  // property anchor - its own. A tenant anchor's candidate properties were
+  // read above for the cap alone; its answer carries flags: [].
+  const flags: RankingReadFlag[] =
+    anchor.kind !== 'unit'
+      ? []
+      : [...openByUnit.values()].flat().map((record) => ({
+          unitId: record.unitId,
+          field: record.field,
+          reason: record.reason,
+          runId: record.runId,
+          raisedAt: record.raisedAt,
+        }));
 
   return {
     kind: 'ok',

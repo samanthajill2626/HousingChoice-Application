@@ -164,7 +164,7 @@ describe('readRanking', () => {
     expect(spy.mock.calls.map((c) => c[0])).toEqual(['u-2']);
   });
 
-  it("PR17: a candidate property's failed flag read marks only its row unverified and lists no flag for it", async () => {
+  it("PR17: a candidate property's failed flag read marks only its row unverified (a tenant anchor lists no flag at all)", async () => {
     const stored = matchRow({
       tenantId: ANCHOR_TENANT, unitId: 'u-1', score: 88, failedRequirements: ['qualifications'],
       fingerprints: { tenantCard: 'tc-anchor', unitCard: 'uc-u-1', pairHistory: 'ph-u-1' },
@@ -180,7 +180,8 @@ describe('readRanking', () => {
     const read = okOf(await readRanking(TENANT, OPTS, h.deps));
     expect(read.rows.find((r) => r.candidateId === 'u-1')?.match).toMatchObject({ capped: true, outOfDate: ['unverified'] });
     expect(read.rows.find((r) => r.candidateId === 'u-2')?.notRankedYet).toBe(true);
-    expect(read.flags.map((f) => f.unitId)).toEqual(['u-2']);
+    // Spec D10 rev 7 (PFW1-2): u-2's open flag is read, never listed.
+    expect(read.flags).toEqual([]);
   });
 
   it("PR17: the property anchor's own flag read failing answers unavailable", async () => {
@@ -211,20 +212,29 @@ describe('readRanking', () => {
     expect(okOf(await readRanking(UNIT, OPTS, h.deps)).flags.map((f) => f.field)).toEqual(['qualifications']);
   });
 
-  it("flags: a tenant anchor reads each candidate property's flags", async () => {
+  it("flags (spec D10 rev 7, PFW1-2): a tenant anchor reads each candidate property's flags for the cap, and lists none", async () => {
+    const text = { qualifications: 'No kids.' };
     const h = harness(
       assembled(tenantAnchor(), [
-        propertyCandidate('u-1', { propertyFacts: facts({ freeTextByField: { notes: 'Adults only.' } }) }),
+        propertyCandidate('u-1', { propertyFacts: facts({ freeTextByField: text }) }),
         propertyCandidate('u-2'),
       ]),
-      [],
+      [
+        matchRow({
+          tenantId: ANCHOR_TENANT, unitId: 'u-1', score: 90, failedRequirements: ['qualifications'],
+          fingerprints: { tenantCard: 'tc-anchor', unitCard: 'uc-u-1', pairHistory: 'ph-u-1' },
+        }),
+      ],
     );
     const spy = vi.spyOn(h.runs.repo, 'getOpenCandidateFlags');
-    const flag = flagRecord({ unitId: 'u-1', field: 'notes', textHash: textHashOf('Adults only.'), reason: 'r', runId: 'run-1', raisedAt: T0 });
+    const flag = flagRecord({ unitId: 'u-1', field: 'qualifications', textHash: textHashOf('No kids.'), reason: 'r', runId: 'run-1', raisedAt: T0 });
     h.runs.flags.set(flag.itemId, flag);
     const read = okOf(await readRanking(TENANT, OPTS, h.deps));
     expect(spy.mock.calls.map((c) => c[0]).sort()).toEqual(['u-1', 'u-2']);
-    expect(read.flags.map((f) => `${f.unitId}:${f.field}`)).toEqual(['u-1:notes']);
+    // The cap is unchanged: the open flag on qualifications keeps u-1's failed
+    // qualifications from capping the pair.
+    expect(read.rows.find((r) => r.candidateId === 'u-1')?.match).toMatchObject({ capped: false, band: 'strong' });
+    expect(read.flags).toEqual([]);
   });
 
   const overCeiling = (): AssembleResult => {

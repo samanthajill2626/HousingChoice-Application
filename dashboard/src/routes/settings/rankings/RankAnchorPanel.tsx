@@ -31,13 +31,16 @@ function AnchorRead({ read, anchorKind }: { read: RankingReadResponse; anchorKin
     unitId === read.anchor.id
       ? read.anchor.display
       : read.rows.find((row) => row.candidateId === unitId)?.display ?? unitId;
+  // Spec D10 rev 7 (charter item 16): open flags show only on a PROPERTY
+  // anchor's ranking (its own); a tenant anchor's carries none.
+  const flags = read.anchor.kind === 'unit' ? read.flags : [];
   const facts: string[] = [
     ...read.anchor.anchorNotes.map((note) => ANCHOR_NOTE_TEXT[note]),
     ...(read.anchor.missing.length > 0
       ? [`Missing on this record: ${read.anchor.missing.map((flag) => flag.label).join(', ')}`]
       : []),
     ...(read.anchor.cardChanged ? ['This record changed since it was last ranked.'] : []),
-    ...read.flags.map((flag) => `Fair-housing flag on ${placeOf(flag.unitId)}, ${flag.field}: ${flag.reason}`),
+    ...flags.map((flag) => `Fair-housing flag on ${placeOf(flag.unitId)}, ${flag.field}: ${flag.reason}`),
   ];
   return (
     <>

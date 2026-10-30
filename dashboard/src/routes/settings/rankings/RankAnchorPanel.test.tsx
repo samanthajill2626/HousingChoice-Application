@@ -186,6 +186,23 @@ describe('RankAnchorPanel', () => {
     expect(screen.getByRole('table', { name: 'Ranking' })).toHaveTextContent('not ranked yet');
   });
 
+  // Spec D10 rev 7 (charter item 16): a tenant anchor's ranking carries no
+  // flag list - the server sends flags: [], and the panel shows none whatever
+  // it is sent.
+  it("a tenant anchor's ranking shows no fair-housing flag line", () => {
+    const tenantRead: RankingReadResponse = {
+      ...READ,
+      anchor: { kind: 'tenant', id: 'contact-1', display: 'Ada Ranked', anchorNotes: [], missing: [], cardChanged: true },
+      rows: [{ candidateId: 'unit-1', display: '12 Oak St, Atlanta', notScored: false, match: null }],
+    };
+    useAnchorRanking.mockReturnValue(state({ readStatus: 'ready', read: tenantRead }));
+    render(<RankAnchorPanel {...props({ anchor: { kind: 'tenant', id: 'contact-1' } })} />);
+    const facts = screen.getByRole('list', { name: 'About this anchor' });
+    expect(facts).toHaveTextContent('This record changed since it was last ranked.');
+    expect(facts).not.toHaveTextContent('Fair-housing flag');
+    expect(screen.queryByText(/Fair-housing flag/)).not.toBeInTheDocument();
+  });
+
   it('a pool over the ceiling shows the message instead of a table, the anchor block still read (plan PR16)', () => {
     useAnchorRanking.mockReturnValue(
       state({

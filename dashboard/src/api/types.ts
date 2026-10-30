@@ -542,7 +542,9 @@ export interface RankingRowView {
   notRankedYet?: boolean;
 }
 
-/** An OPEN unlawful flag on a property in view (spec D10). */
+/** An OPEN unlawful flag of a PROPERTY anchor (spec D10 rev 7): a tenant
+ *  anchor's ranking and runs carry none. `reason` is always the fixed
+ *  sentence "flagged as a requirement fair housing does not allow". */
 export interface RankingUnlawfulFlagView {
   unitId: string;
   field: string;
@@ -572,6 +574,7 @@ export interface RankingReadResponse {
    *  own text, which S6 sends (plan review BA3). */
   poolTooLarge?: { size: number; message: string };
   rows: RankingRowView[];
+  /** A property anchor's own open flags; always [] for a tenant anchor. */
   flags: RankingUnlawfulFlagView[];
 }
 
@@ -674,10 +677,11 @@ export interface RankingRunDetailResponse {
   anchorDisplay: string;
   input: string | null;
   pairs: RankingRunPair[];
+  /** A property-anchor run's property's open flags; always [] for a tenant-anchor run. */
   flags: RankingUnlawfulFlagView[];
   /** The current-match read was incomplete: every currentRunId is null. */
   currentUnavailable?: true;
-  /** The property's open-flag read failed: `flags` is empty for that reason. */
+  /** The property's open-flag read failed: `flags` is empty for that reason. Never on a tenant-anchor run. */
   flagsUnavailable?: true;
 }
 

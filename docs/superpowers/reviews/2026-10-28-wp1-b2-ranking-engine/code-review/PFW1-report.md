@@ -301,3 +301,68 @@ runs it.
 ## Questions
 
 None. Nothing in PFW1 contradicted spec rev 7 or a ruling.
+
+## PFW1-6 - a tenant-anchor run's pairs name no unlawful flag (2026-10-29)
+
+The planner's answer to open point 1 above, with Cameron's ruling "flags
+show against just the property, not the tenants" (spec rev 7 D10 "Shown": a
+tenant anchor's ranking and its runs carry no flag list). On a TENANT-anchor
+run's detail each pair's `unlawful` entries are dropped and its
+`accommodation` entries kept (those are about the pair). A PROPERTY-anchor
+run is unchanged. Done on both sides so the API and the page agree.
+
+Commit: 7a17a29f (4 files, +91 -9).
+
+Changes:
+- Server, app/src/routes/adminRankings.ts:272 - `propertyRun =
+  run.anchorKind === 'unit'`, now also the open-flag read's guard (:275, was
+  the same test inline); :309-311 - each pair's `fairHousingFlags` is the
+  run's own list filtered to `propertyRun || flag.kind !== 'unlawful'`.
+  Header :31-34 names the rule.
+- Dashboard, dashboard/src/routes/settings/rankings/RankingRunDetail.tsx:24-29
+  - `flagsText(flags, propertyRun)` drops `unlawful` entries when the run is
+  not a property anchor's, so the page is right even against a server that
+  still sends them; :135 passes the detail's existing `propertyRun`
+  (`run.anchorKind === 'unit'`, :58, the PFW1-2 guard). Header :8-10 names
+  the rule. A property-anchor run renders exactly as before.
+
+Tests (RED for the stated reason, then GREEN):
+- app/test/adminRankingsApi.test.ts:284-321 (header line :5-6 too). A
+  tenant-anchor run whose one returned pair carries
+  `[unlawful on qualifications, accommodation on no_pets]` answers only the
+  accommodation entry (:293). RED: 1 failed | 42 passed (43), "expected [
+  { kind: 'unlawful', ...(1) }, ...(1) ] to deeply equal [ { kind:
+  'accommodation', ...(1) } ]" at :310. (PIN) a property-anchor run's pair
+  answers both, its other pair `[]` (:314) - green before and after. GREEN:
+  1 file, 43 passed.
+- dashboard/src/routes/settings/rankings/RankingRunViews.test.tsx:368-400. A
+  tenant-anchor detail whose pair carries both kinds shows the Flags cell
+  "accommodation on no_pets" and no "unlawful on" anywhere in the pairs
+  table (:379). RED: 1 failed | 28 passed (29), "expected 'unlawful on
+  qualifications, accommoda...' to be 'accommodation on no_pets'" at :393.
+  (PIN) a property-anchor detail shows "unlawful on qualifications,
+  accommodation on no_pets" (:397) - green before and after. GREEN: 29
+  passed.
+
+Verification (at 7a17a29f):
+
+| Check | Result |
+|---|---|
+| app: `npx vitest run test/adminRankingsApi.test.ts` | 1 file, 43 passed |
+| dashboard: `npx vitest run src/routes/settings/rankings` | 8 files, 130 passed (an act() warning prints from a file not touched here; RankingRunViews.test.tsx emits none) |
+| root `npm run typecheck` | exit 0 |
+| `npx eslint` on the 4 touched files | exit 0 |
+| ASCII: added lines in the diff | 0 non-ASCII |
+| e2e | not run, by the dispatch: rankings.spec.ts reads only a property-anchor run's Score and Cap cells (:172-177), never the Flags column |
+
+Deviations: none. No one-value test fixes.
+
+Open points for the planner (not changed; outside this row):
+- A tenant-anchor run's collapsed "Raw model output" (RankingRunDetail.tsx
+  "Raw model output" details) is the model's raw text and still holds any
+  `"kind":"unlawful"` flag it returned; its header still says "N unlawful
+  flag(s) dropped" (parse drops, a count, no field named).
+- GET /api/rankings answers each match's `fairHousingFlags` as stored
+  (readRanking.ts:211) on both anchors, unlawful entries included; nothing
+  on the page renders them (the ranking table shows no per-pair flags), so
+  this is wire-only.

@@ -62,3 +62,17 @@ an apply
 test whose first update throws ConditionalCheckFailedException and whose
 re-read returns the staff save; the second write holds the staff line plus
 the new line.
+
+**Update (2026-10-29, WP1 B2a planner review, finding PA-11).** The
+planner's plan-blind reviewer re-found the Notes-box race above
+independently (LOW, CONFIRMED; services/extraction/apply.ts:968-995 writes
+the pre-model-call snapshot plus the new lines, stamping
+`notes_updated_at`): a staff save that lands while the model runs is lost
+with no 409 anywhere. Same fix as the Notes-box paragraph above - condition
+the append on the snapshot's `notes_updated_at` and retry once on conflict
+(re-read, re-filter, re-append). The reviewer's point: B2a's stamp is what
+makes this guard one `expect`, so it is cheap to take with the next
+extraction change.
+
+Source (PA-11): docs/superpowers/reviews/2026-10-28-wp1-b2-ranking-engine/
+code-review/planner-adversarial.md and planner-adjudications.md.

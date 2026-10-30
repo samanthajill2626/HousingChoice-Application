@@ -130,3 +130,27 @@ above, neither loses a stored score.
 
 Source (items 5 and 6): docs/superpowers/reviews/2026-10-28-wp1-b2-ranking-engine/
 code-review/R2-server.md and R2-adjudications.md.
+
+**Update (2026-10-29, WP1 B2a planner review, findings PA-6 and PA-7).** The
+planner's plan-blind reviewer found items 1 and 3 again independently; both
+stay as written above, with these details added.
+
+- **PA-6 = item 1** (LOW, CONFIRMED). A single thrown renewal
+  (job.ts:511-523) sets `stopped` with no retry, while the guard read retries
+  once (job.ts:476-508); every in-flight batch's paid result is then dropped
+  at its next guard (runBatch.ts:230-248, logged only), the record stays
+  `running` until the lease lapses, and the takeover re-pays every batch -
+  and a second stop on the takeover run fails the job. The reviewer's fix
+  direction matches item 1: retry a failed renewal once, as the guard does,
+  and stop only when the lease is actually close to lapsing.
+- **PA-7 = item 3** (LOW, PLAUSIBLE). A DynamoDB call inside assemble or a
+  batch that never settles keeps its slot while renewals (separate requests)
+  keep succeeding. Added consequence: with the default
+  RANKING_MAX_CONCURRENT_JOBS=2, two such jobs leave no slot, and every later
+  press waits queued until it expires and reads "The ranking was not picked
+  up. Press Rank again." (after RANKING_QUEUE_EXPIRY_MS, 10 minutes) until
+  the worker restarts. Fix direction: an overall wall-clock deadline per job
+  (stop renewing past it and finish failed), as item 3 suggests.
+
+Source (PA-6, PA-7): docs/superpowers/reviews/2026-10-28-wp1-b2-ranking-engine/
+code-review/planner-adversarial.md and planner-adjudications.md.

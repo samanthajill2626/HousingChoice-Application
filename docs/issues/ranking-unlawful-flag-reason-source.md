@@ -3,9 +3,10 @@ id: ranking-unlawful-flag-reason-source
 title: An unlawful flag's stored reason is one pair's own text, kept on the property with no TTL and shown on every ranking of it
 type: decision
 severity: med
-status: open
+status: resolved
 area: app/ranking
 created: 2026-10-29
+resolved: 2026-10-29
 refs: app/src/services/ranking/flags.ts:75, app/src/services/ranking/flags.ts:109, app/src/services/ranking/runBatch.ts:329, app/src/repos/rankingRunsRepo.ts:891, app/src/services/ranking/readRanking.ts:476, app/src/routes/adminRankings.ts:276, dashboard/src/routes/settings/rankings/RankAnchorPanel.tsx:40, dashboard/src/routes/settings/rankings/RankingRunDetail.tsx:159, app/test/rankingFlags.test.ts:67
 ---
 
@@ -85,3 +86,20 @@ another tenant shows none.
 Source: docs/superpowers/reviews/2026-10-28-wp1-b2-ranking-engine/code-review/
 R2-server.md (R2-server-1, and its challenge to A1-12) and R2-adjudications.md
 (Q1).
+
+**Resolution (2026-10-29).** Cameron took option (a) at the B2a handback
+review (charter section 20 item 15; spec D10 rev 7): the record's `reason`
+is ALWAYS the fixed sentence "flagged as a requirement fair housing does not
+allow". Done in the planner's fix wave PFW1, row PFW1-1 (commit 1a590afb on
+feat/wp1-b2-ranking-engine): `flagReason` and its pair-text lookup are
+removed from app/src/services/ranking/flags.ts, and `mergeRaisedFlags`
+writes `DEFAULT_FLAG_REASON`; the record type's doc comment says so
+(app/src/repos/rankingRunsRepo.ts). The pair's own against-reasons and
+unknowns stay on its match and run (180-day TTL). Pinned by
+app/test/rankingFlags.test.ts (no against or unknowns text reaches the
+record: an accessibility wheelchair case, a pets case, a landlord: flag) and
+app/test/rankingRunBatch.test.ts (the stored record holds the fixed sentence
+while the run keeps the pair's text). The same wave (PFW1-2, PFW1-3, charter
+item 16) also narrowed where a flag shows: the property page's read-only
+notice and the property's own ranking and runs only, never a tenant's
+ranking - so the record no longer appears on any tenant's page.

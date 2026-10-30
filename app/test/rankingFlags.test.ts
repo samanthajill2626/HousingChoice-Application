@@ -107,7 +107,7 @@ describe('the flag record reason is always the fixed sentence', () => {
       'landlord:qualifications',
       'No kids.',
       parsed({
-        against: [{ text: 'qualifications: no kids, tenant has a son', source: 'qualifications' }],
+        against: [{ text: 'qualifications: no kids, tenant has a son', source: 'requirements' }],
         fairHousingFlags: [{ kind: 'unlawful', field: 'landlord:qualifications' }],
       }),
     );

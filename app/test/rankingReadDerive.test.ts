@@ -34,6 +34,7 @@ import {
 
 function ctx(over: Partial<RowContext> = {}): RowContext {
   return {
+    anchorKind: 'unit',
     now: new Date(T0),
     maxAgeDays: 7,
     model: 'fake',

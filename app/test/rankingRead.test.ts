@@ -237,6 +237,35 @@ describe('readRanking', () => {
     expect(read.flags).toEqual([]);
   });
 
+  // Spec D10 rev 7 (PFW1-6; Cameron: flags show against just the property,
+  // not the tenants): a tenant anchor's rows answer no `unlawful` entry of the
+  // stored match's fairHousingFlags; an `accommodation` entry is the pair's
+  // and stays. The cap reads the stored list as before.
+  const BOTH_KINDS: ReturnType<typeof matchRow>['fairHousingFlags'] = [
+    { kind: 'unlawful', field: 'qualifications' },
+    { kind: 'accommodation', field: 'no_pets' },
+  ];
+
+  it("flags (spec D10 rev 7, PFW1-6): a tenant anchor's row answers the stored accommodation flag, never the unlawful one, and the accommodation still lifts the cap", async () => {
+    const stored = matchRow({
+      tenantId: ANCHOR_TENANT, unitId: 'u-1', score: 90, failedRequirements: ['no_pets'], fairHousingFlags: BOTH_KINDS,
+      fingerprints: { tenantCard: 'tc-anchor', unitCard: 'uc-u-1', pairHistory: 'ph-u-1' },
+    });
+    const h = harness(assembled(tenantAnchor(), [propertyCandidate('u-1')]), [stored]);
+    const match = okOf(await readRanking(TENANT, OPTS, h.deps)).rows[0]?.match;
+    expect(match?.fairHousingFlags).toEqual([{ kind: 'accommodation', field: 'no_pets' }]);
+    // The cap is unchanged: the accommodation on no_pets keeps the recorded,
+    // failed no_pets from capping the pair.
+    expect(match).toMatchObject({ capped: false, capReason: null, band: 'strong' });
+  });
+
+  it("flags (PFW1-6, a pin): a property anchor's row answers the stored match's flags of both kinds", async () => {
+    const h = harness(assembled(unitAnchor(), [tenantCandidate('t-1')]), [
+      matchRow({ tenantId: 't-1', unitId: ANCHOR_UNIT, fairHousingFlags: BOTH_KINDS }),
+    ]);
+    expect(okOf(await readRanking(UNIT, OPTS, h.deps)).rows[0]?.match?.fairHousingFlags).toEqual(BOTH_KINDS);
+  });
+
   const overCeiling = (): AssembleResult => {
     const record = unitRecord(ANCHOR_UNIT, { address: { line1: '12 Oak St', city: 'Atlanta' } });
     return {

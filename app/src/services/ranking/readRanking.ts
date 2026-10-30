@@ -64,6 +64,7 @@ export interface RankingReadMatch {
   against: MatchRow['against'];
   missing: MatchRow['missing'];
   failedRequirements: string[];
+  /** The stored match's flags; a tenant anchor's rows drop the `unlawful` entries (spec D10 rev 7, PFW1-6). */
   fairHousingFlags: MatchRow['fairHousingFlags'];
   computedAt: string;
   model: string;
@@ -121,6 +122,8 @@ export type RankingRead =
   | { kind: 'unavailable'; message: string };
 
 export interface RowContext {
+  /** The read's anchor kind: a tenant anchor's rows name no unlawful flag (spec D10 rev 7, PFW1-6). */
+  anchorKind: AnchorKind;
   now: Date;
   maxAgeDays: number;
   /** The model a NEW match would carry (currentRankingModel). */
@@ -208,7 +211,10 @@ function deriveMatch(candidate: AssembledCandidate, row: MatchRow, ctx: RowConte
     against: row.against,
     missing: row.missing,
     failedRequirements: row.failedRequirements,
-    fairHousingFlags: row.fairHousingFlags,
+    // Spec D10 rev 7 (PFW1-6): a tenant anchor's rows carry no unlawful flag
+    // (the property's); an accommodation flag is the pair's and stays. The
+    // cap above reads the stored list as is.
+    fairHousingFlags: row.fairHousingFlags.filter((flag) => ctx.anchorKind === 'unit' || flag.kind !== 'unlawful'),
     computedAt: row.computedAt,
     model: row.model,
     runId: row.runId,
@@ -456,6 +462,7 @@ export async function readRanking(
   );
 
   const ctx: RowContext = {
+    anchorKind: anchor.kind,
     now: opts.now,
     maxAgeDays: deps.config.rankingMaxAgeDays,
     model: currentRankingModel(deps.config),

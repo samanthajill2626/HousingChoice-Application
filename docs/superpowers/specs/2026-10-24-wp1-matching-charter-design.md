@@ -492,7 +492,9 @@ pair); that mixed provenance is accepted.
 Fair housing: the rubric states that protected characteristics (race,
 color, religion, sex including sexual orientation and gender identity,
 national origin, familial status, disability) never
-lower a score. Disability enters only for the tenant's benefit: their own
+move a score, up or down; nor do a name, an address, a housing authority
+or voucher program, or a credit or income fact (AMENDED 2026-10-30,
+section 20 item 17; was "never lower a score"). Disability enters only for the tenant's benefit: their own
 stated accessibility need matched to the property, and an accommodation
 (below) that lifts a requirement. A requirement about the tenant's credit or
 income, in ANY field (qualifications, notes, deposit notes, application
@@ -1303,3 +1305,20 @@ date; this list is the index.
      composer never shows them; B4 keeps only the admin Dismiss. The
      close-on-edit rule is unchanged (it already drops the flag on the
      next read) (sections 7.2, 15.1 B4).
+- 2026-10-30, after Cameron's first counterfactual run of B2a FAILED
+  (records: docs/superpowers/reviews/2026-10-28-wp1-b2-ranking-engine/
+  counterfactual-check.md and intent.md):
+  17. The fair-housing rules are two-way. Protected characteristics, a
+     name, an address, a housing authority or voucher program, and a
+     credit or income fact never move a score UP OR DOWN (was "never
+     lower a score"). The run showed why: a credit and income Notes line
+     RAISED scores by 7 and 14 points and an equivalent address by 6.6,
+     which "never lower" allowed, while the counterfactual check (this
+     section) fails any move over its tolerance; a DBHDD authority swap
+     LOWERED a rent-gap pair by 7-9. Affordability is judged only from
+     rent, the payment standard, tenant-paid utilities and the tenant's
+     maximum portion; an income fact never adjusts or stands in for the
+     maximum portion. Landlords' own income and credit requirements stay
+     on the property record for staff (A1: "staff see those as notes
+     only"). Proposed by the planner; Cameron: "Ok fine. Go ahead and
+     make the other fixes you were talking about" (section 7.2).

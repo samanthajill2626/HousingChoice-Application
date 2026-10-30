@@ -295,3 +295,19 @@ Cameron, verbatim (on the read-only property-page notice in B2a now):
   derived on read from the text hash).
 - Taste: flags should be visible where the property is managed, not
   spread across every ranking.
+
+## After the first counterfactual run (2026-10-30)
+
+Cameron ran the gate sheet; the compile check passed (5/5, key ...SgAA, the
+testing key) and the counterfactual check FAILED (6 swaps beyond the
+tolerance; record committed 2d004c9b). B2a was ALREADY MERGED to main
+(002e4363) before the run, so the check is now the DEPLOY gate: do not
+deploy B2a until it passes. Cameron asked whether landlords can still
+require income for utilities and deposits; answered: yes on the record and
+at application, the ranker weighs affordability only through rent, payment
+standard, tenant-paid utilities and Maximum tenant portion (A1 scope). He
+then said, verbatim: "Ok fine. Go ahead and make the other fixes you were
+talking about" - the rubric r2 fix (two-way rules, authority adds nothing
+to fit beyond the unmapped case, one rent-gap worked example; examples e2),
+charter item 17. Open for Sam: does a payment standard depend on the
+issuing authority (DBHDD)?

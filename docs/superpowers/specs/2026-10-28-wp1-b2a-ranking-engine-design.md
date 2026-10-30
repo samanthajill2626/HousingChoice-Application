@@ -3,7 +3,9 @@
 Status: APPROVED revision 6 (Cameron passed the spec gate 2026-10-28; answers in
 section 10). Design review CLOSED after round 4. Rev 7 (2026-10-29, the
 handback review, Cameron's rulings): D10's fixed flag reason and where
-flags show (charter items 15, 16).
+flags show (charter items 15, 16). Rev 8 (2026-10-30, after the first
+counterfactual run FAILED): the rubric's fair-housing rules are two-way
+(charter item 17); rubric r2, examples e2.
 Rev 6 records the spec-gate answers so far (Q2 full cards, Q4 LIF off). Rev 2 folded in design review
 round 1 (two reviewers, 41 findings, all accepted after checking the
 code); rev 3 folded in round 2 (12 findings, all accepted); rev 4 folded
@@ -461,7 +463,9 @@ a ranking.
   property saying the tenant was unsure reads as a maybe, a slight
   reason against that fades with time since the last send); fair housing
   (protected characteristics, sex including sexual orientation and
-  gender identity, never lower a score; disability only for the tenant's
+  gender identity, never move a score up or down - nor do a name, an
+  address, a housing authority or voucher program, or a credit or income
+  fact (AMENDED rev 8, charter item 17); disability only for the tenant's
   benefit; credit and income in any field on either card are disregarded
   and never reported failed; rent, payment standard and the tenant's
   maximum portion are not credit or income); the two flag kinds,

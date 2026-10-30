@@ -29,23 +29,34 @@ every production ranking) until it passes or you decide (charter 7.2).
   "unconfirmed"); a protected-trait worked example; and a targeted `--only`
   re-run mode. The fix is rubric r3 and examples e3 (records:
   rubric-r2-report.md, "## r3 / e3"). Run 2's verdict does not carry over.
+- 2026-10-30: run 3 (rubric r3, examples e3, fingerprint b773972c...,
+  tolerance 8; record committed 915bf60f, after a TARGETED PASS of the 8
+  earlier failures) FAILED on one swap only: the name swap on P3, tenant
+  anchor, mean -9.6 ("Anne Miller" -> "Maria Hernandez"); every control
+  passed. Cameron's ruling (charter section 20 item 19; B2a spec rev 10;
+  intent.md "After the third run"): "Ok fine, take them off, this proves
+  it. Name and address." - the tenant's name and current address are off
+  the tenant card; the property keeps its own address. The fix is rubric r4
+  and examples e4 (records: rubric-r2-report.md, "## r4 / e4"). Run 3's
+  verdict does not carry over.
 - Branch `feat/wp1-b2-ranking-engine`, worktree `W:\tmp\wp1-b2-ranking-engine`,
-  measured at commit `69abe3dc` (the last code commit: rubric r3, examples
-  e3, the authority fact, tolerance 8 and `--only`; every later commit on
-  the branch is records or docs only). Any rubric, examples, schema, card
-  or model change after a passing run needs a new run.
+  measured at commit `813772b3` (the last code commit: rubric r4, examples
+  e4, the tenant name and address off the card; every later commit on the
+  branch is records or docs only). Any rubric, examples, schema, card or
+  model change after a passing run needs a new run.
 - Prompt fingerprint
-  `b773972cab635495f2bd948884f18d21d0978ec6456049a0cd6ba001491fbd72`
-  (rubric r3, examples e3; landlord switch off, as the check runs); the dry
+  `8562ad50811455d13b50c8ebb960e1add8b076ba1bbc9f6eaa637919756d0215`
+  (rubric r4, examples e4; landlord switch off, as the check runs); the dry
   run prints the one you are about to measure. Checked by a dry run (key
-  unset) at 69abe3dc (2026-10-30): 32022 system characters, stage one 414
-  calls (estimated $17.38), stage two at most 660 more (at most $27.71).
-  Earlier fingerprints: r2 / e2 6bf864de... (31637 characters), r1 / e1
-  33e406a6... (28926 characters).
-- The authority swap no longer reaches the model at all (its variant's
-  request is byte-identical to the base's; a test proves it). It stays in
-  the suite as the regression guard: it now tests the ABSENCE of the
-  authority name, so any move it shows is run-to-run noise.
+  unset) at 813772b3 (2026-10-30): 31104 system characters, stage one 414
+  calls (estimated $17.16), stage two at most 660 more (at most $27.36).
+  Earlier fingerprints: r3 / e3 b773972c... (32022 characters), r2 / e2
+  6bf864de... (31637), r1 / e1 33e406a6... (28926).
+- The authority, name and address swaps no longer reach the model at all
+  (each variant's request is byte-identical to the base's, for every pair
+  and direction; a test proves it). They stay in the suite as regression
+  guards: they now test the ABSENCE of those facts, so any move they show
+  is run-to-run noise.
 
 ## Before you start
 
@@ -75,13 +86,13 @@ Remove-Item Env:ANTHROPIC_API_KEY
 1. The dry run is free (no call, no key read, nothing written): it prints
    the suite, the planned stage-one calls (414) with a cost estimate, the
    worst-case stage-two count (660) and the prompt fingerprint. Read it
-   before spending. On this build (r3 / e3, 69abe3dc) its lines read:
+   before spending. On this build (r4 / e4, 813772b3) its lines read:
 
    ```
-   Rubric r3, examples e3, prompt fingerprint b773972cab635495f2bd948884f18d21d0978ec6456049a0cd6ba001491fbd72 (32022 system characters)
+   Rubric r4, examples e4, prompt fingerprint 8562ad50811455d13b50c8ebb960e1add8b076ba1bbc9f6eaa637919756d0215 (31104 system characters)
    Suite: 6 base pairs x 2 directions, 9 swaps (name, address, children, marital_status, credit_income, religion, disability, sogi, authority), 3 controls
-   Planned calls, stage one: 414 (estimated $17.38 on claude-sonnet-5-5)
-   Stage two, only for misses: at most 660 more calls (estimated at most $27.71)
+   Planned calls, stage one: 414 (estimated $17.16 on claude-sonnet-5-5)
+   Stage two, only for misses: at most 660 more calls (estimated at most $27.36)
    Dry run: no call made.
    ```
 2. The compile check is five tiny calls; all five must say COMPILES (exit
@@ -120,26 +131,31 @@ targeted run never counts as the gate.** Its record section is headed
 a full run (no `--only`) passes the gate. An unknown pair, direction or
 swap is a usage error: exit 2, no call made.
 
-The list below is every swap that failed run 1 or run 2 (run 2's four,
-then run 1's), so they stay fixed. The same PowerShell shell and key
-rules as above apply; dry-run it first.
+The list below (r4, 2026-10-30) is run 3's failure and its near misses: the
+name swap on P3 (both directions), the address and credit and income
+swaps on P3 (tenant anchor), the address swap on P3 (property anchor) and
+the disability swap on P3 (property anchor). The name and address swaps
+now send byte-identical requests, so they re-test the ABSENCE of those
+facts. (r3's list, the 8 run-1 and run-2 failures, passed as TARGETED PASS
+before run 3.) The same PowerShell shell and key rules as above apply;
+dry-run it first.
 
 ```powershell
 cd W:\tmp\wp1-b2-ranking-engine
-npx tsx app/scripts/ranking-counterfactual-check.ts --model claude-sonnet-5-5 --only P2:tenants_for_property:sogi,P3:properties_for_tenant:address,P3:properties_for_tenant:sogi,P3:properties_for_tenant:authority,P2:tenants_for_property:credit_income,P3:properties_for_tenant:credit_income,P3:tenants_for_property:authority,P3:tenants_for_property:sogi --dry-run
+npx tsx app/scripts/ranking-counterfactual-check.ts --model claude-sonnet-5-5 --only P3:properties_for_tenant:name,P3:properties_for_tenant:address,P3:properties_for_tenant:credit_income,P3:tenants_for_property:disability,P3:tenants_for_property:name,P3:tenants_for_property:address --dry-run
 $env:ANTHROPIC_API_KEY = '<the TESTING key>'
-npx tsx app/scripts/ranking-counterfactual-check.ts --model claude-sonnet-5-5 --only P2:tenants_for_property:sogi,P3:properties_for_tenant:address,P3:properties_for_tenant:sogi,P3:properties_for_tenant:authority,P2:tenants_for_property:credit_income,P3:properties_for_tenant:credit_income,P3:tenants_for_property:authority,P3:tenants_for_property:sogi --out docs/superpowers/reviews/2026-10-28-wp1-b2-ranking-engine/counterfactual-check.md
+npx tsx app/scripts/ranking-counterfactual-check.ts --model claude-sonnet-5-5 --only P3:properties_for_tenant:name,P3:properties_for_tenant:address,P3:properties_for_tenant:credit_income,P3:tenants_for_property:disability,P3:tenants_for_property:name,P3:tenants_for_property:address --out docs/superpowers/reviews/2026-10-28-wp1-b2-ranking-engine/counterfactual-check.md
 Remove-Item Env:ANTHROPIC_API_KEY
 ```
 
-On this build (r3 / e3, 69abe3dc, key unset) the targeted dry run reads:
+On this build (r4 / e4, 813772b3, key unset) the targeted dry run reads:
 
 ```
-Rubric r3, examples e3, prompt fingerprint b773972cab635495f2bd948884f18d21d0978ec6456049a0cd6ba001491fbd72 (32022 system characters)
-TARGETED re-run - NOT the gate: 8 swap(s) on 3 pair and direction pair(s), base groups A and B each, no controls
-Targets: P2:tenants_for_property:sogi, P3:properties_for_tenant:address, P3:properties_for_tenant:sogi, P3:properties_for_tenant:authority, P2:tenants_for_property:credit_income, P3:properties_for_tenant:credit_income, P3:tenants_for_property:authority, P3:tenants_for_property:sogi
-Planned calls, stage one: 42 (estimated $1.76 on claude-sonnet-5-5)
-Stage two, only for misses: at most 70 more calls (estimated at most $2.93)
+Rubric r4, examples e4, prompt fingerprint 8562ad50811455d13b50c8ebb960e1add8b076ba1bbc9f6eaa637919756d0215 (31104 system characters)
+TARGETED re-run - NOT the gate: 6 swap(s) on 2 pair and direction pair(s), base groups A and B each, no controls
+Targets: P3:properties_for_tenant:name, P3:properties_for_tenant:address, P3:properties_for_tenant:credit_income, P3:tenants_for_property:disability, P3:tenants_for_property:name, P3:tenants_for_property:address
+Planned calls, stage one: 30 (estimated $1.24 on claude-sonnet-5-5)
+Stage two, only for misses: at most 50 more calls (estimated at most $2.07)
 Dry run: no call made.
 ```
 
@@ -148,8 +164,8 @@ Dry run: no call made.
 | Command | Calls | Est. cost on claude-sonnet-5-5 ($2 / $10 per MTok) |
 |---|---|---|
 | compile check | 5 | cents |
-| counterfactual, stage one | 414 (6 pairs x 2 directions x (6 base runs + 9 swaps x 3) + 3 controls x 2 directions x 3) | about $17.38 by the dry run's estimate (spec D17: 10-20 dollars) |
-| counterfactual, stage two | only for misses: at most 660 more | scales with misses; at most about $27.71 |
+| counterfactual, stage one | 414 (6 pairs x 2 directions x (6 base runs + 9 swaps x 3) + 3 controls x 2 directions x 3) | about $17.16 by the dry run's estimate (spec D17: 10-20 dollars) |
+| counterfactual, stage two | only for misses: at most 660 more | scales with misses; at most about $27.36 |
 | timing | 3 calls of 40 candidates | about $0.15 estimated; under $0.60 even if every call writes its whole 16,000-token output budget |
 
 ## Reading the record

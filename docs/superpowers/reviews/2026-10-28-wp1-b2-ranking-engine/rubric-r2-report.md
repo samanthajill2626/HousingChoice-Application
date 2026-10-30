@@ -389,3 +389,182 @@ read "endpoint default".)
   estimate, says the authority swap tests the absence, and names `--only`
   as never the gate. GLOSSARY: no domain noun added (the authority fact is
   internal).
+
+## r4 / e4 (2026-10-30, after run 3 FAILED)
+
+Why: the targeted re-run of the 8 earlier failures passed (TARGETED PASS);
+full run 3 (r3 / e3, fingerprint b773972c..., tolerance 8; record committed
+915bf60f) FAILED on one swap only: the name swap on P3, tenant anchor, mean
+-9.6 ("Anne Miller" -> "Maria Hernandez"). Every control passed. Cameron:
+"Ok fine, take them off, this proves it. Name and address." - charter
+section 20 item 19, B2a spec rev 10, intent.md "After the third run"
+(committed 3618e879).
+
+Code commit: `813772b3` (the measured commit). No real model was run; no key
+was read, printed or set; both dry runs ran with ANTHROPIC_API_KEY and
+ANTHROPIC_AUTH_TOKEN unset.
+
+### 1. The tenant card loses the name and current address
+
+- `cardFields.ts`: tenant `firstName`, `lastName` and `address` are EXCLUDE
+  with a new reason, "the tenant's name and current address are off the
+  card: a candidate is named by its handle and area fit comes from Area
+  preference (charter 20 item 19)". Their provenance siblings
+  `firstName_source`, `lastName_source` and `address_source` (already
+  excluded as provenance) now carry the same item-19 reason. No other
+  tenant attribute carries a name (`display_name` was already excluded as
+  import bookkeeping). The PROPERTY registry keeps `address` (location
+  fit); `tenure` ("Time at current address") stays on the tenant card - it
+  is a duration, not the address.
+- `cards.ts` needed no change: tenantCard copies only included keys.
+- How a tenant is identified to the model: by its handle only (c1..cn, or
+  the anchor). How staff see a candidate: unchanged, from the RECORDS -
+  `assemble.ts` `tenantDisplay` / `propertyDisplay` give each candidate's
+  and anchor's `display`; the run log stores `prompt.handles[].display`
+  (runLog.ts) for the run detail; the read (readRanking.ts) sorts and shows
+  `display`. None of those reach the wire.
+- The request builders, read for every string that could carry a tenant
+  name or address: `buildRankingBatch` maps each candidate to { handle,
+  card, missing, authority, pairHistory } and the anchor to { card,
+  missing } - never `display`, `candidateId` or `tenantId`;
+  `renderUserContent` writes the direction line, the instruction line,
+  "INPUT:" and the JSON of that wire only; `homesSeen` and
+  `homeLabelByHandle` carry PROPERTY labels (a seen home's address, which
+  is fine); `snapshotOf` copies the wire's anchor, candidate and homes;
+  `buildRankingPrompt` keeps `display` on `handles` (for the run log) and
+  out of `batchInput`. A name or address a person typed into Notes free
+  text is not scrubbed (charter item 19 says so).
+- New test (`rankingAssemble.test.ts`, "the request carries no tenant name
+  or address"): a tenant "Zelda Quixote" at "77 Hidden Lane" goes through
+  the production path (assembleRanking, then buildRankingPrompt as
+  runBatch calls it). For a property anchor, the user text, the system
+  text, the wire and the pair snapshot hold none of "Zelda", "Quixote" or
+  "77 Hidden Lane", while the candidate's `display` and the prompt handle's
+  `display` are still "Zelda Quixote". For a tenant anchor, the user text
+  and the wire hold none of them, the anchor's `display` is still "Zelda
+  Quixote", and the property's own address ("u1 Main St") is in the user
+  text.
+- Card tests: the classification test drops the three keys from the
+  included tenant list and pins all six keys as EXCLUDE with the item-19
+  reason (and the property `address` as include); the tenantCard test's
+  expected card loses the name and address, and it asserts the record
+  holds them while the card JSON holds neither.
+
+### 2. Rubric r4 (`RUBRIC_VERSION` 'r4')
+
+- THE INPUT, tenant card line: "the tenant's name, current address, " is
+  removed, so it opens "- A tenant card can hold: voucherSize (bedrooms),
+  porting, tenure, ...".
+- HOW INPUTS BEAR ON FIT, Area: ", never from the tenant's current address"
+  is removed; the line keeps "Area fit comes from "Area preference" against
+  the property's location."
+- FAIR HOUSING stand-in sentence: unchanged ("Never use a name, an address
+  (the tenant's current address included), a housing authority or a voucher
+  program as a stand-in ..."), since it still covers a name or address a
+  person writes into notes.
+- Tests pin the tenant card line (no "name", no "address"), the Area line
+  (no "current address") and the unchanged stand-in sentence.
+
+### 3. Examples e4 (`EXAMPLES_VERSION` 'e4')
+
+All 28 tenant-card name and address values (firstName, lastName, and the
+address where present, on each example's tenant card: the candidates for a
+property anchor, the anchor for a tenant anchor) moved to the
+never-rendered `offCard`, as in r3. Property cards keep their addresses.
+The PR31 shape test rebuilds the stored record from card + offCard, so the
+missing lists are still what production computes. A new test pins that no
+example tenant card carries `firstName`, `lastName` or `address`, that the
+rendered examples contain no tenant's full name, first name (as a word) or
+address line, and that every property card still has its address; the
+synthetic-data test now checks the offCard surnames and streets too. No
+output reason named a tenant, so no output changed.
+
+### 4. Counterfactual: name and address are now absence guards
+
+- The r3 identical-input test (`rankingCounterfactualPlan.test.ts`) now
+  covers `name`, `address` and `authority`: for every base pair and both
+  directions, the swap still changes the stored record (firstName /
+  lastName, address, housingAuthority), while the variant's system text,
+  user text, fingerprint and wire equal the base's, and the user text holds
+  neither the base nor the swapped value (a name as a whole word, an
+  address as its JSON and as its line1). The "differs only through the
+  swapped fact" test skips those three. All three swaps stay in the suite
+  as absence guards: any move they show in a real run is run-to-run noise.
+- The CLI test suite's two synthetic swaps marked their variants with a
+  first name, which the model no longer sees; they now mark them with a
+  staff note (`staff_notes`, still on the card), and the stub reads that.
+  No expected count or verdict changed.
+
+### 5. Fingerprints
+
+The tenant card fingerprint covers the card's own fields, so every tenant
+fingerprint changes once (the name and address left the card), and every
+stored match reads out of date (card) once. That is expected; r4 / e4 marks
+every stored match out of date (version) anyway. The unit card and pair
+history fingerprints are unchanged by this round.
+
+### Pins (`app/test/rankingVersionPins.test.ts`; r1-r3 / e1-e3 kept)
+
+```
+              r3 / e3                                                            r4 / e4 (new)
+rubric      d9c9b9c4611c7d64cbe6c6ed7754f05f68586746990feca6c051875429c7e312   1acf934343aed7a285c45b96e203426f01f5318c970a4b213760e19e944d1230
+framing     1f4690fb12bfceb3f15a61b831b16325648d546b3281b33a2f7c674ee88749ef   1f4690fb12bfceb3f15a61b831b16325648d546b3281b33a2f7c674ee88749ef (unchanged)
+schema off  14169f30e27245c76a3f5ee50807a73ff359999ac429b471d657694f0d5758eb   14169f30e27245c76a3f5ee50807a73ff359999ac429b471d657694f0d5758eb (unchanged)
+schema on   587274585ffcac596cc1e1305c459ee9d4597c9f7523e9b5dca51bc5129022ba   587274585ffcac596cc1e1305c459ee9d4597c9f7523e9b5dca51bc5129022ba (unchanged)
+examples    edd7985db17c7bd2550660dceabd4f207b1d3a42c71d9f794c3e89902d0dc673   1d9634ee5aaa7052c2c2e8c7d465b601edbcf6fcfd9673a0f9142ad5869b13d1
+system      392b6664a596e0eb6f1af28bdbe291ca19fc3a82438cfe90356a55aa79bcd8f9   1c08b675bc829e4b8046a52a7b6b2c7635c21af25f249a1c1855fa232bb4b08a
+fp off      b773972cab635495f2bd948884f18d21d0978ec6456049a0cd6ba001491fbd72   8562ad50811455d13b50c8ebb960e1add8b076ba1bbc9f6eaa637919756d0215
+fp on       78b5f2d80ec94e6dcfa076a033ae38ff309e676bf33dd5677ca0d812647d52f9   a0e47646c7fb472a5bdd5d18a1d151b487af62bc94537c659dd60bde8e0394a4
+system chars 32022                                                             31104
+```
+
+### Dry runs (key unset, at 813772b3, both exit 0)
+
+Full:
+
+```
+Rubric r4, examples e4, prompt fingerprint 8562ad50811455d13b50c8ebb960e1add8b076ba1bbc9f6eaa637919756d0215 (31104 system characters)
+Suite: 6 base pairs x 2 directions, 9 swaps (name, address, children, marital_status, credit_income, religion, disability, sogi, authority), 3 controls
+Planned calls, stage one: 414 (estimated $17.16 on claude-sonnet-5-5)
+Stage two, only for misses: at most 660 more calls (estimated at most $27.36)
+Dry run: no call made.
+```
+
+Targeted (the r4 list):
+
+```
+Rubric r4, examples e4, prompt fingerprint 8562ad50811455d13b50c8ebb960e1add8b076ba1bbc9f6eaa637919756d0215 (31104 system characters)
+TARGETED re-run - NOT the gate: 6 swap(s) on 2 pair and direction pair(s), base groups A and B each, no controls
+Targets: P3:properties_for_tenant:name, P3:properties_for_tenant:address, P3:properties_for_tenant:credit_income, P3:tenants_for_property:disability, P3:tenants_for_property:name, P3:tenants_for_property:address
+Planned calls, stage one: 30 (estimated $1.24 on claude-sonnet-5-5)
+Stage two, only for misses: at most 50 more calls (estimated at most $2.07)
+Dry run: no call made.
+```
+
+(The agent shell's endpoint line again read "api.anthropic.com (from
+ANTHROPIC_BASE_URL)" because the harness sets it; Cameron's must read
+"endpoint default".)
+
+### Tests
+
+- Every ranking, counterfactual, matchesRepo, adminRankings, devRanking and
+  configRanking test file (integration included) plus the B1 reader tests
+  tenantMatchingInputsReaders and seedNoLegacyMatch, one vitest invocation
+  from app/, DynamoDB Local up, no AWS_ variables exported: 51 files, 914
+  passed. The touched files: rankingVersionPins 5, rankingCounterfactual 41,
+  rankingAssemble 25, rankingExamples 23, rankingCounterfactualPlan 21,
+  rankingCardFields 25, rankingTenantCard 10, rankingRubric 20;
+  tenantMatchingInputsReaders 3, seedNoLegacyMatch 2.
+- `npm run typecheck` (worktree root): exit 0. `npm run smoke`: exit 0
+  (1896 specifiers, 339 files). `npx eslint` on the 11 touched .ts files:
+  exit 0. Added lines: 0 non-ASCII.
+- Not run (the planner runs them): full `npm test` and `npm run e2e`.
+
+### Docs
+
+- gate-run-commands.md: the dated run-3 failure and ruling, measured
+  commit 813772b3, fingerprint 8562ad50..., the full dry-run lines, the
+  cost table, and the targeted command with the r4 list and its dry-run
+  lines; the authority, name and address swaps named as absence guards.
+- RUNBOOK.md "AI ranking (WP1 B2a)": the authority-swap sentence now names
+  the name and address swaps too, and the estimate is r4's ($17.16).

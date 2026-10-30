@@ -12,7 +12,12 @@ cut from main @404e039d.
 
 ## STATE
 
-UPDATE 2026-10-29 23:40Z - Phase: HANDBACK REVIEW (planner). Orchestrator
+UPDATE 2026-10-30 - Phase: VERDICT DELIVERED. MERGE-READY at bb7a4819 PENDING
+Cameron's real-model runs (planner-verdict.md; planner gates all 0, e2e 392
+passed). Nothing in flight. NEXT: Cameron runs gate-run-commands.md, then
+merges; on merge, unregister compact-resume (--off). Never merge.
+
+Earlier: UPDATE 2026-10-29 23:40Z - Phase: HANDBACK REVIEW (planner). Orchestrator
 DONE: handback.md at ba234628, MERGE-READY @542e6874 (final gates all 0,
 e2e 391 passed) PENDING Cameron's real-model runs and his answer to Q1
 (the unlawful-flag reason source, spec D10; options 1 = fixed sentence

@@ -48,3 +48,22 @@ NOTE (no action; handback), REJECT (with the reason).
 Loop: PFW1 is one fix wave; after it, the five gates bare on a quiet tree,
 then a narrow re-review of the PFW1 diff by the adversarial reviewer
 (continued with SendMessage).
+
+## PFW1 result and the re-review (2026-10-30)
+
+PFW1-1..PFW1-5 (1a590afb..2c4894ad) and PFW1-6 (7a17a29f, e499a0d9;
+planner-added from the PFW1 report's open point 1: a tenant anchor's run
+detail, per-pair column and ranking read carry no `unlawful` entries;
+accommodation entries stay). Report: code-review/PFW1-report.md.
+
+Re-review (the plan-blind reviewer continued; planner-adversarial.md
+"Re-review of PFW1"): 0 CRITICAL, 0 HIGH, 1 MEDIUM, 2 LOW, 2 INFO. PA-1
+closed. No further fix wave: no finding changes a decision.
+
+| Id | Sev | Class | Ruling |
+|---|---|---|---|
+| PA-18 | MED | NOTE | The rubric's unknowns note ("qualifications: ... not applied (fair housing)") reaches a tenant anchor's Missing column. Kept: it is the pair's own explanation of why the field did not cap (the answer to PA-22), carries no tenant facts, and removing it means a rubric change and a text filter. For Cameron at the verdict; a rubric bump later if he wants it gone. |
+| PA-19 | LOW | NOTE | Raw model output and the dropped-flag count on a tenant-anchor run: admin-only audit copy, kept by the planner's PFW1-6 ruling. |
+| PA-20 | LOW | FILE | Property-page notice: a failed re-check replaces shown flags with the failure note; landlord-of-record roster changes do not re-check (accepted at PFW1-6). Append to `rankings-page-hook-edges`. |
+| PA-21 | INFO | NOTE | Pre-fix records with pair text exist only in hermetic/local tables (the branch was never deployed); no action. |
+| PA-22 | INFO | NOTE | "not capped" with no cause on a tenant anchor - B3's row wording; the PA-18 note is the cause today. |

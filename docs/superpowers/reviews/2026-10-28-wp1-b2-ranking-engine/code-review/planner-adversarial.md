@@ -288,3 +288,137 @@ and both processes. A safe failure, but a surprising one for operators.
 
 Fix direction: name the rule in the refusal message (it partly does) and in
 RUNBOOK's operator-script section.
+
+---
+
+## Re-review of PFW1 (486e726c..bb7a4819)
+
+Counts: 5 new findings - 0 critical, 0 high, 1 medium, 2 low, 2 info.
+
+Scope: `git diff 486e726c..bb7a4819 -- app dashboard e2e scripts` (code
+commits 1a590afb, de8c1f2c, d6ef89d8, 2a131b18, 45fc3326, 7a17a29f, e499a0d9),
+read only - no test run, no file added, DynamoDB Local untouched (the
+planner's gate battery was running in this worktree).
+
+PA-1 is closed: mergeRaisedFlags now always stores DEFAULT_FLAG_REASON
+(flags.ts:95) and flagReason is gone.
+
+Checked with NO finding:
+- **Auth:** the new GET /api/rankings/unit/:unitId/flags sits inside the
+  /api mount's requireAuth, admin and va, as intended.
+- **Anchor checks:** a tenant kind answers 400. A tenant contactId sent to the
+  unit route, or a soft-deleted unit, answers 404 through readRankingAnchor.
+- **Consistent read:** the unit is read consistently
+  (propertyFlags.ts:51, and UnitsRepo.getById takes consistentRead), so the
+  re-check after an edit-form save sees the saved text.
+- **Tenant-anchor flags:** a tenant anchor's read answers `flags: []`, and its
+  rows drop the `unlawful` fairHousingFlags entries (readRanking.ts:217). A
+  tenant-anchor run detail reads no flag record and filters its pairs
+  (adminRankings.ts:272-311).
+- **Cap unchanged:** the cap still reads the stored, unfiltered list and the
+  candidate properties' open flags, as ruled (readRanking.ts:199-205).
+- **Dashboard notice states:** useUnitFlags keys its state by unitId, aborts
+  a superseded read, maps 404 to "no notice", re-reads on restore through
+  `enabled`, and keeps the old answer up while a re-check runs.
+- **Perf registry:** the perf registry, template and ledger entries are
+  consistent with the new mount read.
+
+## PA-18 - medium - PLAUSIBLE - unlawful-flag content still reaches a tenant anchor's read through `missing`
+
+Location:
+- app/src/services/ranking/rubric.ts:74: every pair of a flagged property
+  gets "add one unknowns note that names the field, for example
+  'qualifications: no-kids rule not applied (fair housing)'" and "Raise the
+  flag on every pair of that property".
+- runLog.ts:50-52 (pairMissing merges result.unknowns into `missing`).
+- runBatch.ts:132 (stored on the match).
+- readRanking.ts:212 (`missing: row.missing`, unfiltered, returned to admin
+  AND va by GET /api/rankings/tenant/:id).
+- dashboard RankingTable.tsx:38 (the Missing column, shown for either anchor).
+- adminRankings.ts:306-307 (a tenant-anchor run detail's `missing` and
+  `unknowns`).
+
+Scenario: a tenant anchor's candidate property has qualifications "No kids".
+The model follows the rubric and writes the prescribed unknowns note on that
+pair. PFW1 removed the `unlawful` flag entry from the tenant read, but the
+pair's Missing cell still reads "qualifications: no-kids rule not applied
+(fair housing)". The same text appears in the run detail's unknowns and
+missing.
+- The ruling says unlawful flags show only for a property anchor.
+- The rubric mandates this back channel on every such pair, so it is near
+  certain, not occasional.
+- Any va can read it through the API.
+
+Fix direction: either keep the fair-housing note out of `unknowns` (a
+separate field that only a property anchor shows), or, on a tenant anchor,
+drop the unknowns and missing entries the flag's note produced (for example,
+those naming a field that holds an unlawful flag on that pair).
+
+## PA-19 - low - CONFIRMED - a tenant-anchor run detail still shows unlawful flags in its raw output and dropped count
+
+Location:
+- adminRankings.ts:326: `run` is the stored record minus inputGzip,
+  itemId, handles and results, so `rawText` and `droppedUnlawfulFlags` stay.
+- dashboard RankingRunDetail.tsx:90 (the "N unlawful flags dropped" line, for
+  any anchor) and :174 (the raw output block).
+
+Scenario: an admin opens a tenant-anchor run. The pairs' Flags cells no longer
+name an unlawful flag, but the collapsed raw output lists every
+`{"kind":"unlawful",...}` entry the model returned. The summary line still
+counts the dropped ones. Admin only, so this is no va exposure.
+
+Fix direction: either accept the raw output as admin forensics and say so in
+the ruling's scope, or redact the unlawful entries and hide the dropped count
+on a tenant-anchor run.
+
+## PA-20 - low - CONFIRMED - the notice can hide open flags, and two edits skip the re-check
+
+Location:
+- dashboard/src/routes/listing/useUnitFlags.ts:38-43: a failed re-check
+  REPLACES a ready answer with `error`.
+- FairHousingFlagNotice.tsx:13: the error state renders only the "Could not
+  check" note.
+- ListingDetail.tsx:1636: only the edit form's onSaved bumps `check`.
+- ListingDetail.tsx:581-584 (applyRosterUnit): no re-check.
+
+Scenario A: the notice shows "Qualifications: flagged ...". The user saves an
+unrelated field, the re-check gets a transient 503, and the open flag
+disappears behind "Could not check fair-housing flags." until a reload.
+
+Scenario B: with RANKING_LANDLORD_CARD on, a roster change that moves the
+landlord of record opens or closes `landlord:` flags. The notice is not
+re-checked. The switch is off by default, so this is low.
+
+Fix direction: keep the last good flags on a failed re-check (with the note
+beside them), and bump `check` in applyRosterUnit too.
+
+## PA-21 - info - CONFIRMED - the stored reason is still echoed as stored
+
+Location:
+- propertyFlags.ts:59 (`reason: record.reason`).
+- readRanking.ts:493 and adminRankings.ts:281 likewise.
+- rankingRunsRepo.ts:907: an OPEN record is never rewritten, by the
+  textHash condition.
+
+Scenario: a uflag# record written by the pre-1a590afb code can still hold
+pair text, and keeps it while the field text stands. That applies to any
+local, e2e or hosted-dev table that ran the earlier branch head; the branch
+is not on prod. The new notice and the property read would show that text
+to admin and va.
+
+Fix direction: render DEFAULT_FLAG_REASON at read in these three places,
+whatever the record holds.
+
+## PA-22 - info - CONFIRMED - on a tenant anchor, the cap's flag suppression is now unexplained
+
+Location: readRanking.ts:199-205 (the cap reads the candidate's open flags)
+vs :484-496 (a tenant anchor lists none).
+
+Scenario: a pair fails `qualifications` on a property whose qualifications
+field holds an open unlawful flag. The tenant anchor's row reads "not capped",
+with no flag in its row or flag list to say why. A property anchor's view of
+the same pair does explain it. This follows from the ruling; noted for B3's
+row copy.
+
+Fix direction: none required now; give B3 a neutral "cap not applied (fair
+housing)" marker that names no rule.
